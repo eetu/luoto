@@ -1,0 +1,15 @@
+description = "Google Gemini API (OpenCode, …)"
+host = "generativelanguage.googleapis.com"
+suggested = "api_key"
+
+[[deny]]
+paths = ["/upload/**", "/v1beta/files", "/v1beta/files/**", "/v1beta/cachedContents/**", "/v1beta/batches/**"]
+reason = "file upload, cache and batch endpoints of the Gemini API are not reachable from the sandbox"
+
+[auth.api_key]
+label = "Gemini API key (Google AI Studio)"
+how = "aistudio.google.com/apikey > Create API key (it starts with AIza). On the free tier Google may use prompts to improve its products."
+header = "x-goog-api-key"
+format = "{secret}"
+query = "key"
+env = { GEMINI_API_KEY = "AIzaSyLuotoPlaceholder0000000000000000000" }

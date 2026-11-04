@@ -1,0 +1,41 @@
+[package]
+name = "luoto-vault"
+description = "Per-VM credential broker: holds root secrets in memory, issues scoped short-lived credentials to gates"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "luoto-vault"
+path = "src/main.rs"
+
+[features]
+# Lets integration tests point GitHub API calls at a local test server over plain HTTP.
+test-hooks = []
+
+[dependencies]
+luoto-shared.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+http.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+rustls-pki-types.workspace = true
+jsonwebtoken.workspace = true
+sha2.workspace = true
+hex.workspace = true
+subtle.workspace = true
+rand.workspace = true
+libc.workspace = true
+base64.workspace = true
+ssh-key.workspace = true
+rsa.workspace = true

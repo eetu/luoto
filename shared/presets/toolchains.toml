@@ -1,0 +1,111 @@
+description = "Language runtimes and tools that mise installs: its metadata and the vendors' download servers (read-only)"
+tools = ["*"]
+
+[[rule]]
+host = "mise.jdx.dev"
+
+[[rule]]
+host = "mise-versions.jdx.dev"
+
+[[rule]]
+host = "mise-java.jdx.dev"
+
+[[rule]]
+host = "mise.run"
+
+[[rule]]
+host = "github.com"
+paths = ["/*/*/releases", "/*/*/releases/**", "/*/*/info/refs", "/*/*.git/info/refs"]
+note = "release downloads (Python, Bun, pnpm, JDKs, aqua/ubi tools) and plugin clones"
+
+[[rule]]
+host = "github.com"
+access = ["POST"]
+paths = ["/*/*/git-upload-pack", "/*/*.git/git-upload-pack"]
+max_body = 16777216
+note = "cloning a tool plugin negotiates with a POST"
+
+[[rule]]
+host = "api.github.com"
+paths = ["/repos/*/*/releases", "/repos/*/*/releases/**", "/repos/*/*/tags"]
+
+[[rule]]
+host = "objects.githubusercontent.com"
+
+[[rule]]
+host = "release-assets.githubusercontent.com"
+
+[[rule]]
+host = "nodejs.org"
+paths = ["/dist/**", "/download/**"]
+
+[[rule]]
+host = "go.dev"
+paths = ["/dl/**"]
+
+[[rule]]
+host = "dl.google.com"
+paths = ["/go/**"]
+
+[[rule]]
+host = "static.rust-lang.org"
+
+[[rule]]
+host = "sh.rustup.rs"
+
+[[rule]]
+host = "api.adoptium.net"
+
+[[rule]]
+host = "download.java.net"
+
+[[rule]]
+host = "corretto.aws"
+
+[[rule]]
+host = "cdn.azul.com"
+
+[[rule]]
+host = "cache.ruby-lang.org"
+
+[[rule]]
+host = "www.php.net"
+paths = ["/distributions/**"]
+
+[[rule]]
+host = "dl.deno.land"
+
+[[rule]]
+host = "repo.yarnpkg.com"
+
+[[rule]]
+host = "classic.yarnpkg.com"
+paths = ["/downloads/**"]
+note = "Yarn 1 releases"
+
+[[rule]]
+host = "install.python-poetry.org"
+note = "the installer mise runs for Poetry, which then installs it from PyPI"
+
+[[rule]]
+host = "ziglang.org"
+paths = ["/download/**", "/builds/**"]
+
+[[rule]]
+host = "releases.hashicorp.com"
+
+[[rule]]
+host = "builds.dotnet.microsoft.com"
+
+[[rule]]
+host = "builds.hex.pm"
+
+[[rule]]
+host = "download.swift.org"
+
+[[rule]]
+host = "tuf-repo-cdn.sigstore.dev"
+note = "Sigstore trust root, so mise verifies GitHub attestations"
+
+[[rule]]
+host = "tuf-repo.github.com"

@@ -1,0 +1,18 @@
+description = "crates.io and rustup (read-only)"
+detect = ["Cargo.toml", "rust-toolchain.toml"]
+tools = ["rust", "cargo:*"]
+
+[[rule]]
+host = "crates.io"
+
+[[rule]]
+host = "index.crates.io"
+
+[[rule]]
+host = "static.crates.io"
+
+[[rule]]
+host = "static.rust-lang.org"
+
+[[rule]]
+host = "sh.rustup.rs"

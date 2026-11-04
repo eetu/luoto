@@ -1,0 +1,17 @@
+description = "Go module proxy, checksum DB and toolchains (read-only)"
+detect = ["go.mod"]
+tools = ["go", "go:*"]
+
+[[rule]]
+host = "proxy.golang.org"
+
+[[rule]]
+host = "sum.golang.org"
+
+[[rule]]
+host = "storage.googleapis.com"
+paths = ["/proxy-golang-org-prod/**"]
+
+[[rule]]
+host = "dl.google.com"
+paths = ["/go/**"]

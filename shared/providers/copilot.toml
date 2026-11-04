@@ -1,0 +1,19 @@
+description = "GitHub Copilot (Copilot CLI; untested, report what the egress view shows)"
+host = "api.githubcopilot.com"
+# The plan's API host, and GitHub's own endpoints the CLI asks for the user and their plan.
+also = [
+  { host = "api.individual.githubcopilot.com" },
+  { host = "api.business.githubcopilot.com" },
+  { host = "api.enterprise.githubcopilot.com" },
+  { host = "api.github.com", paths = ["/copilot_internal/**"] },
+  { host = "api.github.com", paths = ["/user"], access = "read" },
+]
+suggested = "token"
+
+[auth.token]
+label = "GitHub fine-grained personal access token"
+how = "github.com/settings/personal-access-tokens > Generate new token, with the Copilot Requests account permission and no repository access."
+header = "authorization"
+format = "Bearer {secret}"
+# Copilot CLI reads COPILOT_GITHUB_TOKEN before GH_TOKEN, which a GitHub credential sets.
+env = { COPILOT_GITHUB_TOKEN = "github_pat_11LUOTOPLACEHOLDER0000_luotoplaceholderluotoplaceholderluotoplaceholderluotoplaceh" }

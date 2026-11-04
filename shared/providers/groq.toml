@@ -1,0 +1,9 @@
+description = "Groq API"
+host = "api.groq.com"
+
+[auth.api_key]
+label = "Groq API key"
+how = "console.groq.com/keys > Create API key."
+header = "authorization"
+format = "Bearer {secret}"
+env = { GROQ_API_KEY = "gsk_luotoplaceholder00000000000000000000000000000000000000" }

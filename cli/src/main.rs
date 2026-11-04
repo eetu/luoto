@@ -1,0 +1,475 @@
+//! luoto — supply-chain-safe dev sandboxes. Every dev tool runs in a container whose only
+//! way out is a policy gate you control; secrets stay in a vault outside the sandbox.
+
+mod agents;
+mod azure;
+mod ca;
+mod commands;
+mod compile;
+mod complete;
+mod config;
+mod connect;
+mod ctl;
+mod deps;
+mod detect;
+mod env;
+mod events;
+mod idle;
+mod machine;
+mod names;
+mod paths;
+mod personal;
+mod ports;
+mod project;
+mod release;
+mod runtime;
+mod secrets;
+mod setup;
+mod ssh;
+mod text;
+mod ui;
+mod upgrade;
+mod watch;
+mod wizard;
+mod workspace;
+
+use std::io::IsTerminal;
+use std::process::ExitCode;
+
+use anyhow::Result;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::CompleteEnv;
+use clap_complete::engine::ArgValueCandidates;
+
+#[derive(Parser)]
+#[command(
+    name = "luoto",
+    version,
+    about = "Supply-chain-safe dev sandboxes: every tool inside, egress only through a policy you control",
+    after_help = "Start with `luoto setup`, then run `luoto init` in a project folder; `luoto ui` opens the web UI.\n\
+                  Commands act on the env of the current folder; `-e NAME` picks another."
+)]
+struct Cli {
+    /// Env to act on (default: the env of the current folder).
+    #[arg(short = 'e', long = "env", global = true, value_name = "ENV",
+          add = ArgValueCandidates::new(complete::envs))]
+    env: Option<String>,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Detect the host, recommend/install a container runtime, prepare images.
+    Setup {
+        /// Install the recommended runtime with the platform package manager.
+        #[arg(long)]
+        install: bool,
+        /// Build luoto's images from this source tree instead of pulling them.
+        #[arg(long)]
+        build: bool,
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Check the runtime, images, vault and every env's isolation.
+    Doctor,
+    /// Update luoto to the latest release.
+    Upgrade,
+    /// Start the local web UI.
+    Ui {
+        /// Outside the ports envs forward to this machine (1024–32767), so no env can serve
+        /// a page on the UI's origin.
+        #[arg(long, default_value_t = 47878)]
+        port: u16,
+        #[arg(long)]
+        no_open: bool,
+    },
+    /// Create an env for a folder (default: the current one) and start it.
+    Init {
+        /// The project folder, copied into the env (default: `.`); created when missing.
+        dir: Option<String>,
+        /// Env name (default: the folder's name).
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        image: Option<String>,
+        /// Egress presets (repeatable), replacing the defaults and the detected ones:
+        /// debian, github, toolchains, npm, pypi, crates, go, maven, gradle, vscode, docs, …
+        #[arg(long = "preset", add = ArgValueCandidates::new(complete::presets))]
+        presets: Vec<String>,
+        /// Default toolchain (repeatable), e.g. `--tool node=24`; the project's own version
+        /// files still win.
+        #[arg(long = "tool", value_name = "TOOL=VERSION")]
+        tools: Vec<String>,
+        /// Coding agents to set up (repeatable): claude, opencode, codex, copilot, agy.
+        #[arg(long = "agent", add = ArgValueCandidates::new(complete::agents))]
+        agents: Vec<String>,
+        /// Dev-server ports to publish on 127.0.0.1 (repeatable).
+        #[arg(long = "port")]
+        ports: Vec<u16>,
+        /// `gvisor` (default once `luoto setup` installed it): the env gets its own user-space
+        /// kernel. `container`: it shares the VM's kernel, with builds about 1.6× faster.
+        #[arg(long, value_enum)]
+        isolation: Option<config::Isolation>,
+        /// Only write the config.
+        #[arg(long)]
+        no_up: bool,
+        /// Create without asking; accepts the folder's luoto.toml (`--no-project` ignores it).
+        #[arg(long, short)]
+        yes: bool,
+        /// Ignore the folder's luoto.toml.
+        #[arg(long)]
+        no_project: bool,
+    },
+    /// Create or update the env's containers from its config and start it.
+    Up {
+        #[arg(long)]
+        no_selftest: bool,
+        /// Recreate the dev container (the workspace and home volumes are kept).
+        #[arg(long)]
+        recreate: bool,
+    },
+    /// Stop the env (volumes and config are kept).
+    Down,
+    /// Delete the env: containers, workspace and home volumes, config (your folder stays).
+    Rm {
+        /// Don't ask first.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// List envs.
+    #[command(visible_alias = "list")]
+    Ls,
+    /// Show the env's state, workspace, credentials and rules.
+    Status {
+        /// The compiled policy as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open the env's config in $EDITOR, validate and apply it.
+    Edit,
+    /// Show the project's luoto.toml (team settings in the repository), or apply or ignore it.
+    Project {
+        #[command(subcommand)]
+        action: Option<ProjectCmd>,
+    },
+    /// Open a shell in the env, or run a command: `luoto shell -- cmd args`.
+    Shell {
+        #[arg(last = true)]
+        cmd: Vec<String>,
+    },
+    /// Open the env in your editor over SSH (zed, code, cursor; `ssh` prints how to connect).
+    Open {
+        /// Editor to use (default: `editor` in config.toml, else the first one installed).
+        #[arg(long = "with", value_name = "EDITOR", add = ArgValueCandidates::new(complete::editors))]
+        with: Option<String>,
+    },
+    /// Reach a port in the env on another local port: `luoto forward 8080:5173`. Ports an env
+    /// listens on are forwarded to the same port here on their own.
+    Forward {
+        /// The env's port, or `LOCAL:ENV` to use another port here (`8080:5173`).
+        port: String,
+        /// Open it in your browser.
+        #[arg(long)]
+        open: bool,
+    },
+    /// Run, add or list coding agents.
+    Agent {
+        #[command(subcommand)]
+        action: AgentCmd,
+    },
+    /// Copy changed files from the env back to its folder (reviewed first).
+    Pull {
+        /// Write here instead of the env's folder.
+        #[arg(long)]
+        to: Option<String>,
+        /// Also write files host tools act on (git hooks/config, .envrc, .vscode, …).
+        #[arg(long)]
+        include_risky: bool,
+        /// Include .git (its hooks and config count as risky).
+        #[arg(long)]
+        include_git: bool,
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Allow egress to a host.
+    Allow {
+        host: String,
+        /// Any method (default: read-only GET/HEAD/OPTIONS).
+        #[arg(long)]
+        write: bool,
+        /// Specific methods instead of read/write (repeatable).
+        #[arg(long = "method")]
+        methods: Vec<String>,
+        /// Path globs (repeatable), e.g. `/serde/**`.
+        #[arg(long = "path")]
+        paths: Vec<String>,
+        /// Expire after a duration: 30m, 1h, 2d.
+        #[arg(long)]
+        ttl: Option<String>,
+        /// Opaque tunnel (no inspection) for certificate-pinning clients.
+        #[arg(long)]
+        tunnel: bool,
+        /// Allow websocket upgrades.
+        #[arg(long)]
+        ws: bool,
+        /// Allow private/host addresses (e.g. a service on your machine).
+        #[arg(long)]
+        private: bool,
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long)]
+        note: Option<String>,
+        /// Accept risky rules (wildcards over shared domains, `*`, write) without asking.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove rules by id or host.
+    Revoke { rule: String },
+    /// List access requests filed from inside envs (all envs unless one is picked).
+    Requests,
+    /// Approve an access request (adds a rule).
+    Approve {
+        id: u64,
+        #[arg(long)]
+        ttl: Option<String>,
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Reject an access request.
+    Reject {
+        id: u64,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// What the env tried to reach, per host; `--follow` streams each attempt.
+    Egress {
+        #[arg(long)]
+        denied: bool,
+        /// Only attempts newer than this (e.g. 10m, 2h).
+        #[arg(long)]
+        since: Option<String>,
+        /// Stream attempts as they happen.
+        #[arg(short, long)]
+        follow: bool,
+        /// One line per attempt instead of the per-host summary.
+        #[arg(long)]
+        raw: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The vault that holds secrets for every env: status, unlock, lock.
+    Vault {
+        #[command(subcommand)]
+        action: Option<VaultCmd>,
+    },
+    /// Internal: stdio transport for SSH (`ProxyCommand luoto ssh-proxy <env>`).
+    #[command(hide = true)]
+    SshProxy { env: String },
+    /// Internal: the background watcher that forwards ports and stops idle envs.
+    #[command(hide = true)]
+    Watch,
+}
+
+#[derive(Subcommand)]
+enum AgentCmd {
+    /// Run an agent in the env's workspace (installs it on first use).
+    Run {
+        #[arg(add = ArgValueCandidates::new(complete::agents))]
+        agent: String,
+        /// Skip the agent's own permission prompts (the sandbox is the boundary).
+        #[arg(long)]
+        yolo: bool,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    /// Install an agent in the env and add it to the config.
+    Add {
+        #[arg(add = ArgValueCandidates::new(complete::agents))]
+        agent: String,
+    },
+    /// List known agents and providers.
+    #[command(visible_alias = "ls")]
+    List,
+}
+
+#[derive(Subcommand)]
+enum ProjectCmd {
+    /// Apply the current luoto.toml after reviewing it.
+    Apply {
+        /// Don't ask.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Stop applying it (this version is not offered again).
+    Ignore,
+}
+
+#[derive(Subcommand)]
+enum VaultCmd {
+    /// Locked or not, and each env's credentials.
+    Status,
+    /// Load secrets into the vault (after a reboot) and re-register every env.
+    Unlock,
+    /// Wipe secrets from the vault and every gate.
+    Lock,
+}
+
+fn main() -> ExitCode {
+    // `COMPLETE=<shell> luoto` prints the shell hook; the hook calls back here to complete.
+    // The hook calls `luoto` from PATH, not argv[0], which in Homebrew is a versioned path.
+    CompleteEnv::with_factory(Cli::command)
+        .completer("luoto")
+        .complete();
+    let cli = Cli::parse();
+    match run(cli.env, cli.cmd) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("luoto: {}", text::lines(&format!("{e:#}")));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
+    use commands as c;
+    let paths = paths::Paths::get()?;
+    let env = || workspace::resolve(&paths, env_arg.as_deref());
+    match cmd {
+        Cmd::Setup {
+            install,
+            build,
+            yes,
+        } => setup::setup(setup::SetupOpts {
+            install,
+            build,
+            yes,
+        }),
+        Cmd::Doctor => setup::doctor(),
+        Cmd::Upgrade => upgrade::upgrade(),
+        Cmd::Ui { port, no_open } => ui::serve(port, !no_open),
+        Cmd::Init {
+            dir,
+            name,
+            image,
+            presets,
+            tools,
+            agents,
+            ports,
+            isolation,
+            no_up,
+            yes,
+            no_project,
+        } => {
+            if env_arg.is_some() {
+                anyhow::bail!("`init` names the env with --name, not -e");
+            }
+            c::init(c::InitOpts {
+                dir,
+                name,
+                image,
+                presets,
+                tools,
+                agents,
+                ports,
+                isolation,
+                no_up,
+                yes,
+                no_project,
+            })
+        }
+        Cmd::Up {
+            no_selftest,
+            recreate,
+        } => match env() {
+            Ok(name) => c::up(&name, !no_selftest, recreate),
+            // A folder without an env: offer to set one up (init shows it and asks first).
+            Err(_) if env_arg.is_none() && std::io::stdin().is_terminal() => {
+                println!("No env for this folder yet.\n");
+                c::init(c::InitOpts::default())
+            }
+            Err(e) => Err(e),
+        },
+        Cmd::Down => c::down(&env()?),
+        Cmd::Rm { yes } => c::rm(&env()?, yes),
+        Cmd::Ls => c::ls(),
+        Cmd::Status { json } => c::status(&env()?, json),
+        Cmd::Edit => c::edit(&env()?),
+        Cmd::Project { action } => match action {
+            None => c::project(&env()?, false, false, false),
+            Some(ProjectCmd::Apply { yes }) => c::project(&env()?, true, false, yes),
+            Some(ProjectCmd::Ignore) => c::project(&env()?, false, true, false),
+        },
+        Cmd::Shell { cmd } => connect::shell(&env()?, &cmd),
+        Cmd::Open { with } => connect::open(&env()?, with.as_deref()),
+        Cmd::Forward { port, open } => connect::forward(&env()?, &port, open),
+        Cmd::Agent { action } => match action {
+            AgentCmd::Run { agent, yolo, args } => agents::run(&env()?, &agent, yolo, &args),
+            AgentCmd::Add { agent } => agents::add(&env()?, &agent),
+            AgentCmd::List => agents::list(),
+        },
+        Cmd::Pull {
+            to,
+            include_risky,
+            include_git,
+            yes,
+        } => c::pull(&env()?, to.as_deref(), include_risky, include_git, yes),
+        Cmd::Allow {
+            host,
+            write,
+            methods,
+            paths: path_globs,
+            ttl,
+            tunnel,
+            ws,
+            private,
+            port,
+            note,
+            force,
+        } => c::allow(c::AllowOpts {
+            name: env()?,
+            host,
+            write,
+            methods,
+            paths: path_globs,
+            ttl,
+            tunnel,
+            ws,
+            private,
+            port,
+            note,
+            force,
+        }),
+        Cmd::Revoke { rule } => c::revoke(&env()?, &rule),
+        Cmd::Requests => {
+            // No env picked and none here: every env's requests.
+            let picked = match env_arg.as_deref() {
+                Some(_) => Some(env()?),
+                None => env().ok(),
+            };
+            c::requests(picked.as_deref())
+        }
+        Cmd::Approve { id, ttl, yes } => c::approve(&env()?, id, ttl.as_deref(), yes),
+        Cmd::Reject { id, note } => c::reject(&env()?, id, note),
+        Cmd::Egress {
+            denied,
+            since,
+            follow,
+            raw,
+            json,
+        } => {
+            if follow || raw {
+                c::logs(&env()?, follow, denied, since.as_deref())
+            } else {
+                c::egress(&env()?, denied, since.as_deref(), json)
+            }
+        }
+        Cmd::Vault { action } => match action.unwrap_or(VaultCmd::Status) {
+            VaultCmd::Status => c::vault_status(),
+            VaultCmd::Unlock => c::unlock(),
+            VaultCmd::Lock => c::lock(),
+        },
+        Cmd::SshProxy { env: e } => connect::ssh_proxy(&e),
+        Cmd::Watch => watch::watch(),
+    }
+}

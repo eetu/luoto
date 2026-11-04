@@ -1,0 +1,45 @@
+[package]
+name = "luoto-gate"
+description = "Per-env egress gate: policy-enforcing, TLS-intercepting proxy, DNS and transparent catch-all"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "luoto-gate"
+path = "src/main.rs"
+
+[features]
+# Lets integration tests map hostnames to local test servers. Never built into images.
+test-hooks = []
+
+[dependencies]
+luoto-shared.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+http.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+rustls-pki-types.workspace = true
+rcgen = { workspace = true, features = ["x509-parser"] }
+lru.workspace = true
+hickory-proto.workspace = true
+graphql-parser.workspace = true
+base64.workspace = true
+rand.workspace = true
+hex.workspace = true
+libc.workspace = true
+ipnet.workspace = true
+time.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,61 @@
+# luoto-base: the default dev image. A plain Debian toolbox; agents and language toolchains
+# are added per env (`luoto agent add`, `[deps]`) through the gate. Built unsandboxed on the
+# host, so everything fetched here is trusted at build time — keep it to signed distro
+# packages and pinned installers.
+FROM docker.io/library/debian:trixie-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl wget gnupg git git-lfs openssh-client openssh-server sudo \
+      build-essential pkg-config libssl-dev \
+      python3 python3-venv python3-pip pipx \
+      jq ripgrep fd-find fzf less vim-tiny nano tmux unzip zip xz-utils file \
+      procps psmisc iproute2 iputils-ping dnsutils netcat-openbsd \
+      bash-completion zsh zsh-autosuggestions zsh-syntax-highlighting fish \
+      locales tzdata libnss3-tools man-db \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen && locale-gen \
+    && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI from its signed apt repository.
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# mise installs toolchains (node, python, java, go, rust, php, …) into the user's home volume
+# at the versions the project pins (.tool-versions, mise.toml, .node-version, package.json,
+# …); luoto configures it on `up`. No language runtime is baked in: the project chooses.
+# Shims serve scripts and non-interactive shells; interactive shells activate mise in their
+# rc defaults below. Debian's /etc/profile resets PATH, so profile.d puts these dirs back.
+# A pinned release, checked against its SHASUMS256.txt for each image architecture.
+RUN v=2026.10.15 \
+    && case "$(dpkg --print-architecture)" in \
+      amd64) arch=x64 sum=e3b186d4c70627f27037be615becaf4acfb30e41fb6a1819486717dc94e4e2a9 ;; \
+      arm64) arch=arm64 sum=3abbaac305a465ef038eb4ea07b961c037a8b639108005e43f8e2c00a8f67c11 ;; \
+      *) echo "no pinned mise for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /usr/local/bin/mise \
+      "https://github.com/jdx/mise/releases/download/v$v/mise-v$v-linux-$arch" \
+    && echo "$sum  /usr/local/bin/mise" | sha256sum -c - \
+    && chmod 755 /usr/local/bin/mise \
+    && echo 'PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"; export PATH' \
+      > /etc/profile.d/mise.sh
+# User-level installs (`npm i -g`, pipx, …) land in ~/.local/bin and survive runtime upgrades.
+ENV PATH=/home/dev/.local/bin:/home/dev/.local/share/mise/shims:$PATH \
+    NPM_CONFIG_PREFIX=/home/dev/.local
+
+# System-wide interactive defaults for zsh, bash and fish (fzf bindings: ctrl-r history,
+# ctrl-t files, alt-c cd). The user's own rc files load after these and override them.
+COPY shell/ /tmp/shell/
+RUN cat /tmp/shell/zshrc >> /etc/zsh/zshrc \
+    && cat /tmp/shell/bashrc >> /etc/bash.bashrc \
+    && install -D -m 644 /tmp/shell/defaults.fish /etc/fish/conf.d/luoto-defaults.fish \
+    && rm -r /tmp/shell
+
+# fish is the image default; `luoto up` switches to the configured shell (default: the host's).
+ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+RUN useradd -u 1000 -U -m -s /usr/bin/fish dev && mkdir -p /workspace && chown dev:dev /workspace
+WORKDIR /workspace

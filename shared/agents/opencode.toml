@@ -1,0 +1,19 @@
+description = "OpenCode"
+command = "opencode"
+providers = ["anthropic", "openai", "openrouter", "gemini"]
+# The installer puts the binary in ~/.opencode/bin and only edits shell rc files.
+install = [
+  "curl -fsSL https://opencode.ai/install | bash",
+  "mkdir -p ~/.local/bin && ln -sf ~/.opencode/bin/opencode ~/.local/bin/opencode",
+]
+install_hosts = ["opencode.ai", "github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]
+env = { OPENCODE_DISABLE_AUTOUPDATE = "1", OPENCODE_DISABLE_SHARE = "1" }
+briefing = ["~/.config/opencode/AGENTS.md"]
+mcp = "opencode"
+
+# Model catalogue.
+[[rule]]
+host = "models.dev"
+
+[[rule]]
+host = "models.opencode.ai"

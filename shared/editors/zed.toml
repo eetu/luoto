@@ -1,0 +1,18 @@
+description = "Zed, remote development over SSH"
+launch = ["zed", "ssh://{user}@{host}{path}"]
+hint = "Language servers, tasks and terminals run in the sandbox; Zed's window runs on your machine."
+
+[setting]
+file = "{home}/.config/zed/settings.json"
+windows_file = "{config}/Zed/settings.json"
+contains = "\"{host}\""
+why = "so Zed uploads its remote server instead of the sandbox downloading it"
+snippet = """
+"ssh_connections": [
+  {
+    "host": "{host}",
+    "username": "{user}",
+    "upload_binary_over_ssh": true,
+    "projects": [{ "paths": ["{path}"] }]
+  }
+]"""

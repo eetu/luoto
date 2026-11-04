@@ -1,0 +1,155 @@
+# Agents and model providers
+
+What luoto knows about each coding agent it sets up: how it installs, which credential it
+takes and where to get one, which hosts it reaches, what it is denied on purpose, and what is
+still unverified. The profiles themselves are TOML files in
+[`shared/agents`](../shared/agents) and [`shared/providers`](../shared/providers).
+
+## How an agent is set up
+
+`luoto agent add <agent>` (or the first `luoto agent run <agent>`) installs the agent inside
+the env, never on your machine. The install gets its download hosts only for that run, as
+expiring rules; `luoto egress` shows them. Then luoto:
+
+- links its user-level instructions to the luoto briefing (`/opt/luoto/AGENTS.md`), which
+  tells it that egress is filtered and how to ask you for access;
+- registers the sandbox MCP server (`sandbox mcp`), so it can read the policy and file access
+  requests;
+- sets the variables that turn off its auto-update and telemetry where it has them.
+
+`--yolo` maps to the agent's own flag for skipping permission prompts, where it has one. The
+sandbox is the boundary, so the prompts guard nothing luoto doesn't.
+
+## Credentials
+
+A provider credential lives outside the sandbox. luoto reads it on your machine, the vault
+keeps it in memory, and the gate adds it to the agent's requests to that provider. The agent
+sees a placeholder of the right format. Without one, `agent add`, `agent run` and `init`'s
+walk-through ask which kind you have, say where to get it, and keep it where you choose: your
+OS keychain (`keyring:luoto/<provider>.<kind>`, reused by later envs), a new 1Password item
+(the secret reaches `op` on stdin), or a reference to where it already is (`op://`,
+`vault://`, `keyring:`, `env:`, `file:`).
+
+`login_inside = true` is the exception: the agent signs in itself and keeps the session in
+the env's home, where any code in the sandbox can read it. Providers that allow it open their
+sign-in hosts for it; luoto warns about it at `up`.
+
+| provider | hosts the credential goes to | kinds | where to get one | kept out of reach |
+| --- | --- | --- | --- | --- |
+| `anthropic` | `api.anthropic.com` | `oauth_token`, `api_key`, login inside | `claude setup-token` on your machine (Claude plan); console.anthropic.com (API billing) | files, message batches, organization admin, skills |
+| `openai` | `api.openai.com` (also over WebSocket) | `api_key`, login inside | platform.openai.com/api-keys; a ChatGPT plan only through login inside | files, uploads, batches, organization, fine-tuning, vector stores |
+| `openrouter` | `openrouter.ai` `/api/**` | `api_key` | openrouter.ai/keys | |
+| `gemini` | `generativelanguage.googleapis.com` | `api_key` | aistudio.google.com/apikey | uploads, files, cached contents, batches |
+| `mistral` | `api.mistral.ai` | `api_key` | console.mistral.ai/api-keys | |
+| `groq` | `api.groq.com` | `api_key` | console.groq.com/keys | |
+| `copilot` | `api.githubcopilot.com` and its `individual`, `business`, `enterprise` hosts; `api.github.com` `/copilot_internal/**`, `/user` | `token` | github.com/settings/personal-access-tokens (fine-grained, Copilot Requests) | |
+| `antigravity` | none: sign-in only | login inside | your Google account | |
+
+A Google AI Pro plan doesn't pay for a Gemini API key: a key is free tier, where Google may
+use prompts to improve its products, until its Google Cloud project has billing.
+
+## Claude Code
+
+`claude`, run with a real account for 0.1.0.
+
+- Installs with Anthropic's installer (`claude.ai`, `downloads.claude.ai`,
+  `storage.googleapis.com`). Runs with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and
+  `DISABLE_AUTOUPDATER=1`.
+- Also reaches `platform.claude.com` `/v1/oauth/hello`, which first-run onboarding checks
+  whatever the credential.
+- `oauth_token` from `claude setup-token` uses your Claude subscription; `api_key` is billed
+  as API usage and can have its own spend limit.
+- A setup token carries only the `user:inference` scope, so Claude in the env can't see your
+  plan: `/usage` shows a cost estimate instead of session and weekly limits, and the default
+  model is Sonnet (`/model opus`, or `luoto agent run claude -- --model opus`). The limits are
+  shared with your other Claude sessions; `/usage` on the host shows them.
+- The env has its own `~/.claude` in its home volume. Give it a portable subset of yours
+  through `~/.config/luoto/home/.claude/`: a short `settings.json` of its own (`luoto setup`
+  starts one; your host's usually has hooks and `env` entries that point at your machine), and
+  `CLAUDE.md`, `rules/` or `skills/` (symlinks are followed). Leave out `~/.claude.json` and
+  your history: code in the sandbox can read everything there.
+- `login_inside = true` under `[credentials.anthropic]` logs in with full scopes instead, and
+  keeps a refresh token in the env.
+- The briefing goes in as managed instructions (`/etc/claude-code/CLAUDE.md`).
+
+## OpenCode
+
+`opencode`, installed but not run with a real account for 0.1.0.
+
+- Installs with OpenCode's installer from its GitHub releases, and runs with auto-update and
+  session sharing off (`OPENCODE_DISABLE_AUTOUPDATE`, `OPENCODE_DISABLE_SHARE`).
+- Takes any of `anthropic`, `openai`, `openrouter` or `gemini`.
+- Reads its model catalogue from `models.dev` and `models.opencode.ai`.
+- `--yolo` passes nothing: its profile has no `yolo` flags.
+
+## Codex
+
+`codex`, installed but not run with a real account for 0.1.0.
+
+- Installs from npm (`@openai/codex`); mise brings Node LTS for it.
+- `openai` `api_key`, or `login_inside = true` to sign in with ChatGPT (opens
+  `auth.openai.com` and `chatgpt.com`).
+- Streams over `wss://api.openai.com/v1/responses` before falling back to HTTPS; the provider
+  allows the WebSocket upgrade.
+
+## GitHub Copilot CLI
+
+`copilot`, untested: no run with a Copilot licence yet.
+
+- Installs from npm (`@github/copilot`) and runs with `COPILOT_AUTO_UPDATE=false`.
+- Takes a fine-grained personal access token with the Copilot Requests account permission
+  and no repository access. Its placeholder is `COPILOT_GITHUB_TOKEN`, which the CLI reads
+  before `GH_TOKEN` (set by a GitHub credential).
+- The gate adds the token on the Copilot API hosts and on GitHub's `/copilot_internal/**` and
+  `/user`, apart from a GitHub credential's repository paths.
+- The briefing goes to `~/.copilot/instructions/luoto.instructions.md`, without `applyTo`
+  frontmatter; whether Copilot loads it is part of what a first run settles.
+- Trying it: `luoto agent run copilot`, then `luoto egress --denied --since 15m`. Hosts or
+  paths it needs and doesn't get show there; telemetry hosts are left denied.
+
+## Antigravity CLI
+
+`agy`, run with a Google AI Pro account for 0.1.0.
+
+- Installs with Google's installer: `antigravity.google` for the script, a Cloud Run updater
+  (`antigravity-cli-auto-updater-974169037036.us-central1.run.app`) for the manifest, and
+  `storage.googleapis.com` for the binary, which it checks against the manifest's SHA-512.
+  The installer appends a `PATH` line to `.bashrc`, `.zshrc`, `.profile` and fish's
+  `config.fish` (luoto already has `~/.local/bin` on `PATH`), and logs
+  `ERROR: logging before google.Init` lines that are only its own logging.
+- Signs in with your Google account inside the env (`[credentials.antigravity] login_inside
+  = true`, which `agent add` sets): run `agy` in `luoto shell`, open the URL it prints in your
+  browser and paste the code back. Its backend is `cloudcode-pa.googleapis.com` and
+  `daily-cloudcode-pa.googleapis.com`; the token comes from `oauth2.googleapis.com`.
+- Also reads the signed-in profile (`www.googleapis.com` `/oauth2/v2/userinfo` and
+  `/oauth2/v3/userinfo` only, since that host serves many Google APIs) and its remote
+  configuration (`aicode.googleapis.com` `/v1alpha:fetchConfig`).
+- Runs with `AGY_CLI_DISABLE_AUTO_UPDATE=1`. MCP servers live in
+  `~/.gemini/config/mcp_config.json`, the briefing in `~/.gemini/GEMINI.md`.
+- Denied on purpose, and it works without them:
+
+  | host | what it is | why it stays closed |
+  | --- | --- | --- |
+  | `play.googleapis.com` | usage statistics | telemetry |
+  | `lh3.googleusercontent.com` | your profile picture | it also serves files people upload to Google Photos, Blogger and Sites: a download route for anything |
+  | `www.gstatic.com` | static images and fonts | nothing a terminal needs |
+  | the updater manifest | an update check it makes even with auto-update off | the binary stays the version luoto installed |
+
+- With an API key instead of a sign-in (the `gemini` provider and `modelProvider: "gemini"`
+  in its settings) is on the [roadmap](../ROADMAP.md).
+
+## Not built in
+
+- **Gemini CLI.** Its Google sign-in finds no Code Assist project for a personal Google AI
+  Pro account and falls back to asking for an API key; Antigravity CLI signs in with the same
+  account. A Gemini API key works through OpenCode.
+- **Antigravity (the desktop IDE)** runs on your machine and is not an agent luoto installs.
+
+## Adding an agent
+
+An agent is a file in `shared/agents/`: `command`, the `yolo` flags, `providers`, the
+`install` commands and their `install_hosts`, `tools` it needs from mise, `env`, `briefing`
+paths, the `mcp` registration kind, and `[[rule]]`s for hosts it reads besides its provider.
+A provider is a file in `shared/providers/`: its `host` (and `also` hosts with their paths),
+the credential kinds and how each is placed, `[[deny]]`d endpoints, and `login_hosts` for a
+login inside. Presets and rules use exact hosts; the profile tests reject risky wildcards.

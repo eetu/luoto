@@ -1,0 +1,20 @@
+description = "Antigravity CLI (Google)"
+command = "agy"
+yolo = ["--dangerously-skip-permissions"]
+providers = ["antigravity"]
+# The installer reads a manifest from Google's updater, then fetches and checksums the binary.
+install = ["curl -fsSL https://antigravity.google/cli/install.sh | bash"]
+install_hosts = ["antigravity.google", "antigravity-cli-auto-updater-974169037036.us-central1.run.app", "storage.googleapis.com"]
+env = { AGY_CLI_DISABLE_AUTO_UPDATE = "1" }
+briefing = ["~/.gemini/GEMINI.md"]
+mcp = "agy"
+
+# The signed-in account's profile. The host serves many Google APIs, so only this path.
+[[rule]]
+host = "www.googleapis.com"
+paths = ["/oauth2/v2/userinfo", "/oauth2/v3/userinfo"]
+
+# Its remote configuration, fetched at start.
+[[rule]]
+host = "aicode.googleapis.com"
+paths = ["/v1alpha:fetchConfig"]

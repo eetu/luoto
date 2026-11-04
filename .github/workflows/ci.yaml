@@ -1,0 +1,269 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request supersedes a run still going.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Which areas a push or pull request touches; each job below runs only for its own.
+  # Docs (README, docs/, other markdown), LICENSE and packaging/ run nothing but ci-gate.
+  changes:
+    name: Changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+      rust: ${{ steps.filter.outputs.rust }}
+      integration: ${{ steps.filter.outputs.integration }}
+      e2e: ${{ steps.filter.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            workflow: &workflow
+              - .github/workflows/ci.yaml
+            cargo: &cargo
+              - Cargo.toml
+              - Cargo.lock
+            boundary: &boundary
+              - shared/**
+              - gate/**
+              - vault/**
+            frontend:
+              - *workflow
+              - frontend/**
+            rust:
+              - *workflow
+              - *cargo
+              - *boundary
+              - cli/**
+              - tools/**
+              - integration/**
+            integration:
+              - *workflow
+              - *cargo
+              - *boundary
+              - integration/**
+            e2e:
+              - *workflow
+              - *cargo
+              - *boundary
+              - cli/**
+              - tools/**
+              - image/**
+              - Containerfile
+
+  frontend:
+    name: Frontend
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: frontend/.node-version
+      - name: Frontend checks
+        working-directory: frontend
+        run: |
+          yarn() { node .yarn/releases/yarn-*.cjs "$@"; }
+          yarn install --immutable
+          yarn lint
+          yarn format
+          yarn typecheck
+          yarn build
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The gate, vault and sandbox helper are Linux container binaries; on macOS and
+      # Windows only the host CLI and the shared crate are built and tested.
+      - if: runner.os == 'Linux'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - if: runner.os != 'Linux'
+        run: cargo clippy -p luoto -p luoto-shared --all-targets -- -D warnings
+      - run: cargo fmt --all -- --check
+      - if: runner.os == 'Linux'
+        run: cargo test --workspace
+      - if: runner.os != 'Linux'
+        run: cargo test -p luoto -p luoto-shared
+
+  # GitHub's macOS runners are often not available at all ("job was not acquired"), and luoto
+  # is developed and tested on macOS, so this job reports without holding back E2E or failing
+  # the gate.
+  rust-macos:
+    name: Rust (macos-latest)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    continue-on-error: true
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo clippy -p luoto -p luoto-shared --all-targets -- -D warnings
+      - run: cargo test -p luoto -p luoto-shared
+
+  integration:
+    name: Integration (gate + vault)
+    needs: changes
+    if: needs.changes.outputs.integration == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo test -p luoto-integration -- --ignored --test-threads=1
+
+  e2e:
+    name: E2E (${{ matrix.runtime }})
+    needs: [changes, rust]
+    # After the Rust jobs pass, or when only the images changed and they didn't run.
+    if: >-
+      always() && needs.changes.outputs.e2e == 'true'
+      && (needs.rust.result == 'success' || needs.rust.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [podman, docker]
+    runs-on: ubuntu-latest
+    env:
+      LUOTO_HOME: ${{ github.workspace }}/.luoto-ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo build -p luoto
+      # The images, built by buildx with their layers in GitHub's cache (cargo-chef's dependency
+      # layer among them), so `luoto setup` finds them instead of building from scratch. Only
+      # main writes the cache, from one leg; other refs read main's.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Image gate
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          target: gate
+          load: true
+          tags: localhost/luoto-gate:dev
+          cache-from: type=gha,scope=gate
+          cache-to: ${{ github.ref == 'refs/heads/main' && matrix.runtime == 'docker' && 'type=gha,mode=max,scope=gate' || '' }}
+      - name: Image vault
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          target: vault
+          load: true
+          tags: localhost/luoto-vault:dev
+          cache-from: type=gha,scope=vault
+          cache-to: ${{ github.ref == 'refs/heads/main' && matrix.runtime == 'docker' && 'type=gha,mode=max,scope=vault' || '' }}
+      - name: Image tools
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          target: tools
+          load: true
+          tags: localhost/luoto-tools:dev
+          cache-from: type=gha,scope=tools
+          cache-to: ${{ github.ref == 'refs/heads/main' && matrix.runtime == 'docker' && 'type=gha,mode=max,scope=tools' || '' }}
+      - name: Image base
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: image
+          file: image/Containerfile
+          load: true
+          tags: localhost/luoto-base:dev
+          cache-from: type=gha,scope=base
+          cache-to: ${{ github.ref == 'refs/heads/main' && matrix.runtime == 'docker' && 'type=gha,mode=max,scope=base' || '' }}
+      - name: Images into podman
+        if: matrix.runtime == 'podman'
+        run: |
+          docker save localhost/luoto-gate:dev localhost/luoto-vault:dev \
+            localhost/luoto-tools:dev localhost/luoto-base:dev | podman load
+      - name: Configure runtime
+        run: |
+          mkdir -p "$LUOTO_HOME/config"
+          printf 'runtime = "%s"\nimages = "dev"\n' "${{ matrix.runtime }}" \
+            > "$LUOTO_HOME/config/config.toml"
+      - run: ./target/debug/luoto setup
+      # A new, empty folder: init creates it, and with --yes starts the env.
+      - run: >-
+          ./target/debug/luoto init "$RUNNER_TEMP/ci" --name ci
+          --preset debian --preset npm --yes
+      - run: ./target/debug/luoto doctor
+      - name: Boundary checks from inside
+        run: |
+          L=./target/debug/luoto
+          fail=0
+          check() { # expected status, curl arguments; prints what it got, and why
+            want=$1; shift
+            out=$($L shell -e ci -- curl -s -w '\n%{http_code}' "$@" || true)
+            got=$(printf '%s' "$out" | tail -n 1)
+            echo "want $want got $got: curl $*"
+            if [ "$got" != "$want" ]; then
+              printf '%s\n' "$out" | head -n 5
+              fail=1
+            fi
+          }
+          check 200 https://registry.npmjs.org/react
+          check 403 -X PUT https://registry.npmjs.org/react
+          check 403 https://example.com/
+          check 403 --noproxy '*' https://example.com/
+          $L egress -e ci
+          exit $fail
+      - name: Gate networking, when a check failed
+        if: failure()
+        run: |
+          rt=${{ matrix.runtime }}
+          $rt exec luoto-ci-gate sh -c 'cat /etc/resolv.conf; ip addr; ip route; ip -6 route; nslookup registry.npmjs.org' || true
+          $rt network inspect luoto-ci-out || true
+          $rt info 2>/dev/null | grep -i -E 'networkbackend|pasta|slirp|rootless' || true
+
+  # The one check to require: skipped jobs never report, and a skipped required check would
+  # hold a pull request forever.
+  ci-gate:
+    name: CI gate
+    if: always()
+    needs: [changes, frontend, rust, rust-macos, integration, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job that ran passed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - run: echo "every job that ran passed"

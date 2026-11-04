@@ -1,0 +1,14 @@
+description = "Gradle distributions and plugin portal (read-only)"
+detect = ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"]
+
+[[rule]]
+host = "services.gradle.org"
+
+[[rule]]
+host = "downloads.gradle.org"
+
+[[rule]]
+host = "plugins.gradle.org"
+
+[[rule]]
+host = "plugins-artifacts.gradle.org"

@@ -1,0 +1,8 @@
+description = "Packagist for Composer (read-only; package archives come from the github preset)"
+detect = ["composer.json"]
+
+[[rule]]
+host = "repo.packagist.org"
+
+[[rule]]
+host = "packagist.org"

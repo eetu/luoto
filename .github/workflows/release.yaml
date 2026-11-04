@@ -1,0 +1,311 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  # Lowercase; the workflow's GITHUB_TOKEN can only push packages owned by the repo owner.
+  IMAGE_OWNER: eetu
+  TAP_REPO: eetu/homebrew-luoto
+  BUCKET_REPO: eetu/scoop-luoto
+
+jobs:
+  ui:
+    name: UI
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: v
+        name: Tag must match the workspace version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          crate=$(awk -F'"' '/^version *=/{print $2; exit}' Cargo.toml)
+          test "$version" = "$crate" || { echo "tag $version != Cargo.toml $crate"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: frontend/.node-version
+      - name: Build UI
+        working-directory: frontend
+        run: |
+          yarn() { node .yarn/releases/yarn-*.cjs "$@"; }
+          yarn install --immutable
+          yarn build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+
+  # Binaries are built after the images: each one carries the digests of the images it runs
+  # (images.json via LUOTO_IMAGES), so `luoto setup` pulls exactly those.
+  binaries:
+    name: Binary (${{ matrix.target }})
+    needs: [ui, images-merge]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          # Oldest available Ubuntu: the glibc floor of the released binary.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: frontend-dist
+          path: frontend/dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: images-json
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: |
+          LUOTO_IMAGES="$(cat images.json)" \
+            cargo build --release --locked -p luoto --target ${{ matrix.target }}
+      - name: Package
+        env:
+          VERSION: ${{ needs.ui.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="luoto-$VERSION-$TARGET"
+          mkdir -p "dist/$name"
+          bin=luoto; [ "$RUNNER_OS" = Windows ] && bin=luoto.exe
+          cp "target/$TARGET/release/$bin" README.md LICENSE "dist/$name/"
+          cd dist
+          if [ "$RUNNER_OS" = Windows ]; then 7z a "$name.zip" "$name" >/dev/null
+          else tar -czf "$name.tar.gz" "$name"; fi
+          rm -r "$name"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: archive-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: [ui, binaries, images-merge]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: archive-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: images-json
+          path: dist
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum luoto-* > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/images.json
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.ui.outputs.version }}
+        run: |
+          pre=""; case "$VERSION" in *-*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" \
+            --generate-notes $pre
+
+  images:
+    name: Images (${{ matrix.arch }})
+    needs: ui
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners: the in-image Rust build (musl, release, LTO-sized) is far too
+          # slow under QEMU, and the Containerfile needs no cross toolchain this way.
+          - { arch: amd64, os: ubuntu-latest }
+          - { arch: arm64, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      packages: write
+    env:
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      # Pushed by digest only; the merge job assembles the multi-arch tag. Provenance and
+      # SBOM are off so each push is a plain image manifest the merge can combine.
+      # Cache: this release's own scopes (a re-run of it reuses them), then the ones CI writes
+      # on main (gate, vault, tools, base; amd64), which a tag made from main can read.
+      - id: gate
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          target: gate
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          outputs: type=image,name=ghcr.io/${{ env.IMAGE_OWNER }}/luoto-gate,push-by-digest=true,name-canonical=true,push=true
+          cache-from: |
+            type=gha,scope=${{ matrix.arch }}
+            type=gha,scope=gate
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+      - id: vault
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          target: vault
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          outputs: type=image,name=ghcr.io/${{ env.IMAGE_OWNER }}/luoto-vault,push-by-digest=true,name-canonical=true,push=true
+          cache-from: |
+            type=gha,scope=${{ matrix.arch }}
+            type=gha,scope=vault
+      - id: tools
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          target: tools
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          outputs: type=image,name=ghcr.io/${{ env.IMAGE_OWNER }}/luoto-tools,push-by-digest=true,name-canonical=true,push=true
+          cache-from: |
+            type=gha,scope=${{ matrix.arch }}
+            type=gha,scope=tools
+      - id: base
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: image
+          file: image/Containerfile
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          outputs: type=image,name=ghcr.io/${{ env.IMAGE_OWNER }}/luoto-base,push-by-digest=true,name-canonical=true,push=true
+          cache-from: |
+            type=gha,scope=base-${{ matrix.arch }}
+            type=gha,scope=base
+          cache-to: type=gha,mode=max,scope=base-${{ matrix.arch }}
+      - name: Record digests
+        run: |
+          mkdir digests
+          echo "${{ steps.gate.outputs.digest }}" > "digests/gate-$ARCH"
+          echo "${{ steps.vault.outputs.digest }}" > "digests/vault-$ARCH"
+          echo "${{ steps.tools.outputs.digest }}" > "digests/tools-$ARCH"
+          echo "${{ steps.base.outputs.digest }}" > "digests/base-$ARCH"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digests-${{ matrix.arch }}
+          path: digests/*
+          if-no-files-found: error
+
+  images-merge:
+    name: Image manifests
+    needs: [ui, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digests-*
+          path: digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Merge, sign, record
+        env:
+          VERSION: ${{ needs.ui.outputs.version }}
+        run: |
+          jq -n --arg v "$VERSION" '{version: $v, images: {}}' > images.json
+          for c in gate vault tools base; do
+            repo="ghcr.io/$IMAGE_OWNER/luoto-$c"
+            docker buildx imagetools create -t "$repo:$VERSION" \
+              "$repo@$(cat "digests/$c-amd64")" "$repo@$(cat "digests/$c-arm64")"
+            digest=$(docker buildx imagetools inspect "$repo:$VERSION" \
+              --format '{{.Manifest.Digest}}')
+            cosign sign --yes "$repo@$digest"
+            jq --arg c "$c" --arg r "$repo@$digest" '.images[$c] = $r' images.json \
+              > images.tmp && mv images.tmp images.json
+          done
+          cat images.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: images-json
+          path: images.json
+          if-no-files-found: error
+
+  # Disabled unless the repository variable PUBLISH_PACKAGES is "true", so a first
+  # manual release can skip it. Needs the TAP_TOKEN secret (see packaging/README.md).
+  publish:
+    name: Publish Homebrew and Scoop
+    needs: [ui, release]
+    if: vars.PUBLISH_PACKAGES == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Render
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.ui.outputs.version }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS
+          packaging/render.sh "$VERSION" SHA256SUMS out "$GITHUB_REPOSITORY"
+      - name: Push to tap and bucket
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          VERSION: ${{ needs.ui.outputs.version }}
+        run: |
+          push() { # repo, rendered file, destination path in repo
+            git clone --depth 1 "https://x-access-token:$TAP_TOKEN@github.com/$1.git" "repo-$$"
+            mkdir -p "repo-$$/$(dirname "$3")"
+            cp "$2" "repo-$$/$3"
+            git -C "repo-$$" add -A
+            git -C "repo-$$" -c user.name=github-actions -c user.email=actions@github.com \
+              commit -m "luoto $VERSION" || { rm -rf "repo-$$"; return 0; }
+            git -C "repo-$$" push
+            rm -rf "repo-$$"
+          }
+          push "$TAP_REPO" out/luoto.rb Formula/luoto.rb
+          push "$BUCKET_REPO" out/luoto.json bucket/luoto.json

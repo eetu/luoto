@@ -1,0 +1,10 @@
+description = "Ubuntu apt mirrors (read-only)"
+
+[[rule]]
+host = "archive.ubuntu.com"
+
+[[rule]]
+host = "security.ubuntu.com"
+
+[[rule]]
+host = "ports.ubuntu.com"

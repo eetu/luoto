@@ -1,0 +1,41 @@
+{
+  "name": "luoto-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "svelte-kit sync && vite build",
+    "preview": "vite preview",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --check src",
+    "format:fix": "prettier --write src",
+    "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "validate": "yarn typecheck && yarn lint && yarn format",
+    "prepare": "svelte-kit sync || echo ''",
+    "test:ui": "playwright test --project ui",
+    "shots": "playwright test --project showcase"
+  },
+  "devDependencies": {
+    "@anarkisti/eslint-config": "^1.1.0",
+    "@playwright/test": "^1.64.1",
+    "@sveltejs/adapter-static": "^3.0.10",
+    "@sveltejs/kit": "^2.63.0",
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "eslint": "^10.4.0",
+    "prettier": "^3.8.3",
+    "prettier-plugin-svelte": "^4.0.1",
+    "svelte": "^5.56.3",
+    "svelte-check": "^4.6.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.60.1",
+    "vite": "^8.0.16",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "@lucide/svelte": "^1.17.0"
+  },
+  "packageManager": "yarn@4.16.0"
+}

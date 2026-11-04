@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Pre-commit gate: runs only the checks relevant to what's staged. Installed by
+# ./install-hooks.sh. Must stay mode 755 — git silently skips a non-executable hook.
+set -euo pipefail
+
+staged="$(git diff --cached --name-only --diff-filter=ACMR)"
+[ -n "$staged" ] || exit 0
+
+run_front=0
+run_rust=0
+while IFS= read -r f; do
+	case "$f" in
+		frontend/*) run_front=1 ;;
+		shared/* | gate/* | vault/* | tools/* | cli/* | integration/* | Cargo.toml | Cargo.lock) run_rust=1 ;;
+	esac
+done <<<"$staged"
+
+if [ "$run_front" = 1 ]; then
+	echo "pre-commit: frontend (lint + format)"
+	(cd frontend && node .yarn/releases/yarn-*.cjs lint && node .yarn/releases/yarn-*.cjs format)
+fi
+
+if [ "$run_rust" = 1 ]; then
+	echo "pre-commit: rust (clippy + fmt)"
+	cargo clippy --workspace --all-targets -- -D warnings
+	cargo fmt --all -- --check
+fi

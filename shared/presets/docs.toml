@@ -1,0 +1,41 @@
+description = "Common documentation sites (read-only) for agents reading API docs"
+
+[[rule]]
+host = "docs.rs"
+
+[[rule]]
+host = "doc.rust-lang.org"
+
+[[rule]]
+host = "developer.mozilla.org"
+
+[[rule]]
+host = "docs.python.org"
+
+[[rule]]
+host = "pkg.go.dev"
+
+[[rule]]
+host = "learn.microsoft.com"
+
+[[rule]]
+host = "docs.github.com"
+
+[[rule]]
+host = "code.claude.com"
+
+[[rule]]
+host = "docs.anthropic.com"
+
+[[rule]]
+host = "platform.claude.com"
+
+[[rule]]
+host = "svelte.dev"
+
+[[rule]]
+host = "react.dev"
+
+[[rule]]
+host = "nodejs.org"
+paths = ["/api/**", "/docs/**", "/en/**"]

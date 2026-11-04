@@ -1,0 +1,15 @@
+# luoto defaults for interactive bash (appended to /etc/bash.bashrc; ~/.bashrc runs after).
+case $- in *i*) ;; *) return ;; esac
+
+HISTSIZE=100000
+HISTFILESIZE=100000
+HISTCONTROL=ignoreboth:erasedups
+shopt -s histappend checkwinsize globstar 2>/dev/null
+
+[ -r /usr/share/bash-completion/bash_completion ] && . /usr/share/bash-completion/bash_completion
+command -v fzf >/dev/null && eval "$(fzf --bash)"
+command -v mise >/dev/null && eval "$(mise activate bash)"
+
+alias ls='ls --color=auto'
+alias ll='ls -lah'
+alias grep='grep --color=auto'

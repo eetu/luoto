@@ -1,0 +1,12 @@
+description = "Cursor, over Remote - SSH"
+launch = ["cursor", "--remote", "ssh-remote+{host}", "{path}"]
+windows_program = "cursor.cmd"
+hint = "Install extensions in the remote window: they run in the sandbox. Keep host-side ones to themes and keymaps."
+
+[setting]
+file = "{config}/Cursor/User/settings.json"
+contains = "localServerDownload"
+why = "so Cursor installs its server and extensions from your machine instead of the sandbox downloading them"
+snippet = """
+"remote.SSH.localServerDownload": "always",
+"remote.downloadExtensionsLocally": true"""

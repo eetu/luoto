@@ -1,0 +1,4 @@
+description = "Alpine package mirror (read-only)"
+
+[[rule]]
+host = "dl-cdn.alpinelinux.org"

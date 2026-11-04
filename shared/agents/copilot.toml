@@ -1,0 +1,10 @@
+description = "GitHub Copilot CLI (untested)"
+command = "copilot"
+yolo = ["--yolo"]
+providers = ["copilot"]
+install = ["mkdir -p ~/.local && npm install -g --prefix ~/.local @github/copilot"]
+install_hosts = ["registry.npmjs.org"]
+tools = { node = "lts" }
+env = { COPILOT_AUTO_UPDATE = "false" }
+briefing = ["~/.copilot/instructions/luoto.instructions.md"]
+mcp = "copilot"

@@ -1,0 +1,9 @@
+description = "PyPI (read-only)"
+detect = ["pyproject.toml", ".python-version", "requirements.txt", "Pipfile", "setup.py", "uv.lock", "poetry.lock"]
+tools = ["pipx:*", "poetry"]
+
+[[rule]]
+host = "pypi.org"
+
+[[rule]]
+host = "files.pythonhosted.org"

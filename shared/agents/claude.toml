@@ -1,0 +1,14 @@
+description = "Claude Code"
+command = "claude"
+yolo = ["--dangerously-skip-permissions"]
+providers = ["anthropic"]
+install = ["curl -fsSL https://claude.ai/install.sh | bash"]
+install_hosts = ["claude.ai", "downloads.claude.ai", "storage.googleapis.com"]
+env = { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", DISABLE_AUTOUPDATER = "1" }
+briefing = []
+mcp = "claude"
+
+# First-run onboarding checks that the OAuth host answers, whatever the auth kind.
+[[rule]]
+host = "platform.claude.com"
+paths = ["/v1/oauth/hello"]

@@ -1,0 +1,17 @@
+description = "OpenAI API (Codex, OpenCode, …)"
+host = "api.openai.com"
+login_hosts = ["auth.openai.com", "chatgpt.com"]
+login_how = "In `luoto shell`, run `codex` and sign in with ChatGPT. The session stays in the env's home, where its code can read it."
+# Codex streams responses over wss://api.openai.com/v1/responses before falling back to HTTPS.
+ws = true
+
+[[deny]]
+paths = ["/v1/files", "/v1/files/**", "/v1/uploads/**", "/v1/batches", "/v1/batches/**", "/v1/organization/**", "/v1/fine_tuning/**", "/v1/vector_stores/**"]
+reason = "file storage, batches, fine-tuning and admin endpoints of the OpenAI API are not reachable from the sandbox"
+
+[auth.api_key]
+label = "OpenAI API key"
+how = "platform.openai.com/api-keys > Create new secret key. A ChatGPT plan instead needs a login inside the sandbox."
+header = "authorization"
+format = "Bearer {secret}"
+env = { OPENAI_API_KEY = "sk-proj-luotoplaceholder000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" }

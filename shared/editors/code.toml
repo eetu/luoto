@@ -1,0 +1,12 @@
+description = "VS Code, with the Remote - SSH extension"
+launch = ["code", "--remote", "ssh-remote+{host}", "{path}"]
+windows_program = "code.cmd"
+hint = "Install extensions in the remote window: they run in the sandbox. Keep host-side ones to themes and keymaps."
+
+[setting]
+file = "{config}/Code/User/settings.json"
+contains = "localServerDownload"
+why = "so VS Code installs its server and extensions from your machine instead of the sandbox downloading them"
+snippet = """
+"remote.SSH.localServerDownload": "always",
+"remote.downloadExtensionsLocally": true"""

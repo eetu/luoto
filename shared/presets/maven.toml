@@ -1,0 +1,8 @@
+description = "Maven Central (read-only)"
+detect = ["pom.xml", "build.gradle", "build.gradle.kts"]
+
+[[rule]]
+host = "repo.maven.apache.org"
+
+[[rule]]
+host = "repo1.maven.org"

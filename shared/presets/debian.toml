@@ -1,0 +1,7 @@
+description = "Debian apt mirrors (read-only)"
+
+[[rule]]
+host = "deb.debian.org"
+
+[[rule]]
+host = "security.debian.org"

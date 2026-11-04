@@ -1,0 +1,9 @@
+description = "OpenAI Codex CLI"
+command = "codex"
+yolo = ["--dangerously-bypass-approvals-and-sandbox"]
+providers = ["openai"]
+install = ["mkdir -p ~/.local && npm install -g --prefix ~/.local @openai/codex"]
+install_hosts = ["registry.npmjs.org"]
+tools = { node = "lts" }
+briefing = ["~/.codex/AGENTS.md"]
+mcp = "codex"

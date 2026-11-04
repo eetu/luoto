@@ -1,0 +1,10 @@
+description = "OpenRouter (many models behind one API)"
+host = "openrouter.ai"
+paths = ["/api/**"]
+
+[auth.api_key]
+label = "OpenRouter API key"
+how = "openrouter.ai/keys > Create key."
+header = "authorization"
+format = "Bearer {secret}"
+env = { OPENROUTER_API_KEY = "sk-or-v1-luotoplaceholder000000000000000000000000000000000000000000000000000" }

@@ -1,0 +1,305 @@
+/* ----------------------------------------------------------------------
+ * halo-design — canonical design tokens for the homebrew app family
+ *
+ * Shared visual identity across the homebrew web app family and any new
+ * personal web app. Copy this file verbatim into a new project (static
+ * HTML: <link> it; React: mirror it into frontend/src/themes.ts; Svelte:
+ * import globally and use the vars in scoped <style> blocks).
+ *
+ * Prefix: --halo-* is canonical (halo is the family origin). Some older repos
+ * still carry a legacy --hcc-* prefix (hcc = halo's former name) in production
+ * code — migrate them to --halo-* when next touched. New apps: use --halo-*.
+ * -------------------------------------------------------------------- */
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600&display=swap");
+
+:root {
+  /* Colors — light theme */
+  --halo-body: #f0f0f0;
+  --halo-bg-main: #ffffff;
+  --halo-bg-light: #fbfbfb;
+  --halo-text-main: #525252;
+  --halo-text-muted: #767676; /* AA on white (~4.5:1); was #a0a0a0 (~2.6:1, failed) */
+  --halo-text-light: #e9e9e9;
+  --halo-border: lightgray;
+  --halo-accent: #f78f08; /* the only saturated brand color */
+  /* Text/icon color to place ON an accent fill. #f78f08 is too light for white
+     text (~2.4:1, fails AA); near-black on the accent is ~8.9:1. Identical in
+     light + dark (the accent doesn't change), so it's defined once here. */
+  --halo-on-accent: #1a1a1a;
+  --halo-accent-bg: linear-gradient(153deg, rgba(255, 237, 207, 1) 0%, rgba(255, 239, 171, 1) 56%);
+  --halo-accent-soft: rgba(247, 143, 8, 0.1);
+  --halo-off-bg: #d9d9d9;
+  --halo-error: tomato;
+  --halo-connected: #4caf50;
+  --halo-disconnected: #f44336;
+
+  /* Typography */
+  --halo-font-body: "Inter", system-ui, sans-serif;
+  --halo-font-heading: "Space Grotesk", "Inter", sans-serif;
+
+  /* Geometry */
+  --halo-radius: 6px;
+  --halo-radius-pill: 4px;
+  --halo-card-padding: 1.5em;
+
+  /* Shadow (light only) */
+  --halo-shadow: rgba(60, 64, 67, 0.3) 0 1px 2px 0, rgba(60, 64, 67, 0.15) 0 2px 6px 2px;
+
+  /* Motion */
+  --halo-d-fast: 0.15s;
+  --halo-d-med: 0.5s;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --halo-body: #0f0f0f;
+    --halo-bg-main: #252525;
+    --halo-bg-light: #1c1c1c;
+    --halo-text-main: #ededed;
+    --halo-text-muted: #9c9c9c;
+    --halo-text-light: #6f6f6f;
+    /* Visible hairline. The former #1f1f1f sat between the body (#0f0f0f) and the
+       surfaces (#1c1c1c/#252525) with almost no separation, so internal dividers,
+       input/button edges, and outlined controls vanished into the dark field.
+       #3a3a3a reads as a quiet line without becoming a heavy border. */
+    --halo-border: #3a3a3a;
+    --halo-accent-bg: rgba(247, 143, 8, 0.2);
+    --halo-accent-soft: rgba(247, 143, 8, 0.2);
+    --halo-off-bg: #4a4a4a;
+    /* A cleaner error tint than `pink`, brighter on the near-black body. */
+    --halo-error: #ff8a8a;
+    --halo-shadow: none;
+  }
+}
+
+/* ----------------------------------------------------------------------
+ * Wordmark primitive — same across every app, only the riff and glyph differ.
+ *
+ * The markup is exactly this, and the spacing in it is not a free choice:
+ *
+ *   <span class="halo-wordmark">
+ *     <svg class="glyph" …></svg><span class="riff">mightier than the&nbsp;</span
+ *     >nib<span class="accent">.</span>
+ *   </span>
+ *
+ * Plain inline flow. Do NOT wrap it in a flex row to position the glyph: a
+ * `gap` falls between EVERY flex child, so it lands between the name and its
+ * accent dot too and the mark reads `nib .`. The glyph carries its own margin
+ * below, which is why none is needed.
+ *
+ * The riff ends in `&nbsp;` because Svelte (and JSX) trim whitespace at an
+ * element boundary — an ordinary trailing space there is dropped and the words
+ * run together as `theNib`. A margin is the wrong substitute: it outlives
+ * `display: none` when the riff collapses on narrow screens.
+ * -------------------------------------------------------------------- */
+
+.halo-wordmark {
+  font-family: var(--halo-font-body);
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  color: var(--halo-text-main);
+  text-transform: lowercase;
+  white-space: nowrap;
+}
+
+.halo-wordmark .accent {
+  color: var(--halo-accent);
+}
+
+/* The muted lead-in. Apps collapse it below their own breakpoint with
+   `display: none`. (Some repos still call this `.prefix` — migrate on next
+   touch.) */
+.halo-wordmark .riff {
+  font-weight: 400;
+  color: var(--halo-text-muted);
+}
+
+/* Sized in em so it tracks the wordmark rather than drifting from it, and set
+   on the text baseline rather than laid out beside it. */
+.halo-wordmark .glyph {
+  width: 1.2em;
+  height: 1.2em;
+  vertical-align: -0.28em;
+  margin-right: 0.4em;
+  color: var(--halo-text-main);
+}
+
+/* ----------------------------------------------------------------------
+ * Card primitive — 6px radius + soft shadow (shadow auto-off in dark).
+ *
+ * Elevation is the SHADOW, not a border. Do NOT add `border: … --halo-border`
+ * to a card: in light mode the border competes with the shadow and muddies the
+ * float (a regression we hit when a sibling app added one). Dark mode sets
+ * --halo-shadow: none on purpose — cards there read via bg-main-vs-body
+ * contrast (#252525 on #0f0f0f), still no border. Borders are for internal
+ * hairlines/dividers, not the card edge.
+ * -------------------------------------------------------------------- */
+
+.halo-card {
+  background: var(--halo-bg-main);
+  border-radius: var(--halo-radius);
+  box-shadow: var(--halo-shadow);
+  padding: var(--halo-card-padding);
+}
+
+/* ----------------------------------------------------------------------
+ * Dialog primitive — a veil, and a panel in three regions.
+ *
+ *   <div class="halo-veil"></div>
+ *   <section class="halo-dialog halo-card" role="dialog" aria-modal="true">
+ *     <header>…title… <button>×</button></header>
+ *     <div data-body>…the only thing that scrolls…</div>
+ *     <footer>…buttons, if any…</footer>
+ *   </section>
+ *
+ * **The panel never scrolls; `[data-body]` does.** Putting `overflow-y: auto`
+ * on the panel is the whole bug this primitive exists to prevent: the header
+ * scrolls away with the content, taking the close button with it, and a long
+ * dialog becomes one you cannot dismiss without finding Escape. Header and
+ * footer are `flex: none` so they hold their ground; the body takes the rest and
+ * `min-height: 0` is what lets it actually shrink inside the flex column.
+ *
+ * A footer is optional — a dialog that only reports needs none — but when there
+ * are buttons they belong in it, not at the end of the scrolling content, for
+ * the same reason.
+ *
+ * Width comes from `--halo-dialog-width` so one panel can be wider than another
+ * without a second geometry. Both axes leave a gutter, so a phone never gets a
+ * panel flush to the edge.
+ * -------------------------------------------------------------------- */
+
+.halo-veil {
+  position: fixed;
+  inset: 0;
+  border: none;
+  background: rgb(0 0 0 / 35%);
+}
+
+.halo-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  width: min(var(--halo-dialog-width, 34rem), calc(100vw - 2rem));
+  /* `100dvh` tracks the address bar on a phone. An installed iOS PWA reports it
+     stale at cold start and resolves short, so an app that ships standalone
+     overrides this to `100vh` the same way it does for its shell. */
+  max-height: calc(100dvh - 2rem);
+  padding: 0;
+}
+
+.halo-dialog > header,
+.halo-dialog > footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: var(--halo-card-padding);
+}
+
+.halo-dialog > header {
+  padding-bottom: 0.75rem;
+}
+
+.halo-dialog > footer {
+  padding-top: 0.75rem;
+  /* Clears the home indicator when the panel reaches the bottom of a phone. */
+  padding-bottom: calc(var(--halo-card-padding) + env(safe-area-inset-bottom));
+}
+
+.halo-dialog > [data-body] {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--halo-card-padding);
+}
+
+/* A dialog with no footer still needs the bottom gutter its body would have. */
+.halo-dialog > [data-body]:last-child {
+  padding-bottom: calc(var(--halo-card-padding) + env(safe-area-inset-bottom));
+}
+
+/* ----------------------------------------------------------------------
+ * Panes primitive — a side-by-side layout on a desktop that becomes one
+ * screen at a time on a phone.
+ *
+ *   <main class="halo-panes" data-showing="list">
+ *     <aside data-pane="nav">…</aside>
+ *     <section data-pane="list">…</section>
+ *     <article data-pane="detail">…</article>
+ *   </main>
+ *
+ * The app owns one string — which pane is showing — and nothing else; the rest
+ * is here. Attribute rather than class so it is a single assignment, and
+ * framework-neutral.
+ *
+ * Two failures this exists to prevent, both of which only appear on a phone:
+ *
+ * 1. A pane laid out BESIDE the content at every width. A 15rem sidebar on a
+ *    390px screen leaves ~150px for the thing you came to read.
+ * 2. Hiding a pane with no route back to it. Opening a detail view that hides
+ *    the list, with nothing to restore it, is a dead end — the app needs a
+ *    control that sets `data-showing` back.
+ *
+ * The nav pane scrolls as a whole. Only its inner list scrolling works on a
+ * desktop, where everything above that list is short; as a full screen the
+ * fixed parts can fill it and squeeze the one scrolling region to nothing.
+ * -------------------------------------------------------------------- */
+
+.halo-panes {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 800px) {
+  .halo-panes > [data-pane] {
+    display: none;
+  }
+
+  .halo-panes[data-showing="nav"] > [data-pane="nav"],
+  .halo-panes[data-showing="list"] > [data-pane="list"],
+  .halo-panes[data-showing="detail"] > [data-pane="detail"] {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .halo-panes > [data-pane="nav"] {
+    width: 100%;
+    overflow-y: auto;
+    padding-bottom: calc(var(--halo-card-padding) + env(safe-area-inset-bottom));
+  }
+}
+
+/* ----------------------------------------------------------------------
+ * Base — the rules every app in the family needs and none should restate.
+ * Still not a full reset: apps own their own base styles beyond these.
+ *
+ * `border-box` because the default breaks layouts silently rather than
+ * visibly: with `content-box` a declared width sizes the CONTENT and padding
+ * is added outside it, so `width: 100%` plus any padding overflows its parent
+ * by exactly that padding. It surfaces first on a phone, where a full-width
+ * pane runs off the right edge.
+ *
+ * `touch-action` disables iOS double-tap-to-zoom, which misfires on quick
+ * repeated taps (dice, counters, +− steppers), while leaving pinch-zoom and
+ * scrolling intact. Scoped to tap targets on purpose.
+ * -------------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+button,
+[role="button"],
+summary,
+label {
+  touch-action: manipulation;
+}

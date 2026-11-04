@@ -1,0 +1,25 @@
+description = "npm, Yarn and JSR registries (read-only, plus npm audit)"
+detect = ["package.json"]
+tools = ["npm", "npm:*", "yarn", "pnpm"]
+
+[[rule]]
+host = "registry.npmjs.org"
+
+[[rule]]
+host = "registry.npmjs.org"
+access = ["POST"]
+paths = ["/-/npm/v1/security/**"]
+max_body = 4194304
+note = "npm audit posts the dependency tree"
+
+[[rule]]
+host = "registry.yarnpkg.com"
+
+[[rule]]
+host = "repo.yarnpkg.com"
+
+[[rule]]
+host = "npm.jsr.io"
+
+[[rule]]
+host = "jsr.io"

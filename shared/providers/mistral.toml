@@ -1,0 +1,9 @@
+description = "Mistral API"
+host = "api.mistral.ai"
+
+[auth.api_key]
+label = "Mistral API key"
+how = "console.mistral.ai/api-keys > Create new key."
+header = "authorization"
+format = "Bearer {secret}"
+env = { MISTRAL_API_KEY = "luotoplaceholder00000000000000000" }

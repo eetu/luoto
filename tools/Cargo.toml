@@ -1,0 +1,22 @@
+[package]
+name = "luoto-tools"
+description = "In-sandbox helper (`sandbox`): policy status, access requests, MCP server, self-test"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "sandbox"
+path = "src/main.rs"
+
+[dependencies]
+luoto-shared.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+clap.workspace = true
+rand.workspace = true
+hex.workspace = true
+base64.workspace = true

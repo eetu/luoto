@@ -1,0 +1,29 @@
+description = "VS Code server download and extension marketplace"
+
+[[rule]]
+host = "update.code.visualstudio.com"
+
+[[rule]]
+host = "vscode.download.prss.microsoft.com"
+
+[[rule]]
+host = "marketplace.visualstudio.com"
+
+[[rule]]
+host = "marketplace.visualstudio.com"
+access = ["POST"]
+paths = ["/_apis/public/gallery/extensionquery"]
+max_body = 65536
+note = "extension search/lookup is a POST"
+
+[[rule]]
+host = "*.gallerycdn.vsassets.io"
+
+[[rule]]
+host = "*.gallery.vsassets.io"
+
+[[rule]]
+host = "*.vscode-cdn.net"
+
+[[rule]]
+host = "vscode.blob.core.windows.net"

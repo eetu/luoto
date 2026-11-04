@@ -1,0 +1,9 @@
+description = "RubyGems (read-only)"
+detect = ["Gemfile", ".ruby-version"]
+tools = ["gem:*"]
+
+[[rule]]
+host = "rubygems.org"
+
+[[rule]]
+host = "index.rubygems.org"

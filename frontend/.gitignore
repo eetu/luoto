@@ -1,0 +1,35 @@
+node_modules
+
+# Output
+.output
+.vercel
+.netlify
+.wrangler
+/.svelte-kit
+/build
+/dist
+
+# Yarn (berry) — keep the vendored release, drop caches
+.yarn/*
+!.yarn/releases
+.pnp.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Playwright
+/test-results
+/playwright-report
+/blob-report
+/.playwright

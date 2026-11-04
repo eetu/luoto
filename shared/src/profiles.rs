@@ -1,0 +1,263 @@
+//! Agent, model-provider and editor profiles, shipped as TOML data: supporting another coding
+//! agent, model API or editor is a new file, not code.
+
+use std::collections::BTreeMap;
+
+use serde::Deserialize;
+
+use crate::policy::Rule;
+
+/// How a model API credential is injected by the gate.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Provider {
+    #[serde(skip)]
+    pub name: String,
+    pub description: String,
+    pub host: String,
+    /// Paths the credential may be used on (empty = every path not denied).
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// Extra hosts needed only when the user logs in inside the sandbox.
+    #[serde(default)]
+    pub login_hosts: Vec<String>,
+    /// How to log in inside the sandbox, and what that leaves there.
+    #[serde(default)]
+    pub login_how: Option<String>,
+    #[serde(default)]
+    pub deny: Vec<ProviderDeny>,
+    /// Credential kinds (`api_key`, `oauth_token`) → how each is placed. Empty for a provider
+    /// whose only way in is a login inside the sandbox (`login_hosts`).
+    #[serde(default)]
+    pub auth: BTreeMap<String, ProviderAuth>,
+    /// The kind most users have, suggested first.
+    #[serde(default)]
+    pub suggested: Option<String>,
+    /// WebSocket upgrades on the API host (clients that stream over `wss://`).
+    #[serde(default)]
+    pub ws: bool,
+    /// More hosts the same credential goes to, each with its own paths.
+    #[serde(default)]
+    pub also: Vec<ProviderHost>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderHost {
+    pub host: String,
+    /// Paths the credential may be used on (empty = every path).
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// What the env may do there (default: write, as on `host`).
+    #[serde(default)]
+    pub access: Option<crate::policy::AccessLevel>,
+}
+
+impl Provider {
+    /// Every host the credential goes to, with its paths and access: `host` first, then
+    /// `also`.
+    pub fn hosts(&self) -> Vec<(&str, &[String], crate::policy::AccessLevel)> {
+        use crate::policy::AccessLevel::Write;
+        std::iter::once((self.host.as_str(), self.paths.as_slice(), Write))
+            .chain(self.also.iter().map(|h| {
+                (
+                    h.host.as_str(),
+                    h.paths.as_slice(),
+                    h.access.unwrap_or(Write),
+                )
+            }))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderDeny {
+    pub paths: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderAuth {
+    /// What the credential is, as the user knows it ("Claude subscription token").
+    pub label: String,
+    /// Where to get one, in a sentence or two.
+    pub how: String,
+    pub header: String,
+    pub format: String,
+    /// Also replace this query parameter (clients that pass keys in the URL).
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Format-valid placeholders exported in the sandbox so clients start up.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Agent {
+    #[serde(skip)]
+    pub name: String,
+    pub description: String,
+    pub command: String,
+    /// Arguments that turn off the agent's own permission prompts (the sandbox is the
+    /// boundary instead).
+    #[serde(default)]
+    pub yolo: Vec<String>,
+    /// Providers this agent can use; suggested when adding the agent.
+    #[serde(default)]
+    pub providers: Vec<String>,
+    /// Shell steps run inside the sandbox as the user to install the agent.
+    #[serde(default)]
+    pub install: Vec<String>,
+    /// Hosts granted read access only while installing.
+    #[serde(default)]
+    pub install_hosts: Vec<String>,
+    /// mise tools the agent runs on (`node = "lts"`); installed with the env's toolchains,
+    /// and overridden by the project's own versions.
+    #[serde(default)]
+    pub tools: BTreeMap<String, String>,
+    /// What the agent reaches at runtime besides its provider, as preset-style rules.
+    #[serde(default, rename = "rule")]
+    pub rules: Vec<Rule>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// User-level instruction files linked to the luoto briefing.
+    #[serde(default)]
+    pub briefing: Vec<String>,
+    /// How to register the sandbox MCP server (`claude`, `opencode`, `codex`, `copilot`, `agy`).
+    #[serde(default)]
+    pub mcp: Option<String>,
+}
+
+/// An editor `luoto open` connects to an env. Every editor reaches the env over SSH through
+/// luoto's `ProxyCommand`, so all of them get the same server-side restrictions.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Editor {
+    #[serde(skip)]
+    pub name: String,
+    pub description: String,
+    /// Program and arguments; `{host}` (the SSH host alias), `{user}` and `{path}` are filled
+    /// in. Empty: `luoto open` prints how to connect instead.
+    #[serde(default)]
+    pub launch: Vec<String>,
+    /// The program's name on Windows when it differs (`code.cmd`).
+    #[serde(default)]
+    pub windows_program: Option<String>,
+    /// One line shown when opening.
+    #[serde(default)]
+    pub hint: Option<String>,
+    /// A one-time setting the editor needs, shown until its settings file has it.
+    #[serde(default)]
+    pub setting: Option<EditorSetting>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditorSetting {
+    /// Settings file: `{home}` and `{config}` (the platform's config directory) are filled in.
+    pub file: String,
+    #[serde(default)]
+    pub windows_file: Option<String>,
+    /// Text whose presence in the file means the setting is there.
+    pub contains: String,
+    pub why: String,
+    pub snippet: String,
+}
+
+macro_rules! embed {
+    ($dir:literal; $($name:literal),* $(,)?) => {
+        &[$(($name, include_str!(concat!("../", $dir, "/", $name, ".toml")))),*]
+    };
+}
+
+const PROVIDERS: &[(&str, &str)] = embed!("providers"; "anthropic", "openai", "openrouter", "gemini", "mistral", "groq", "copilot", "antigravity");
+const AGENTS: &[(&str, &str)] = embed!("agents"; "claude", "opencode", "codex", "copilot", "agy");
+const EDITORS: &[(&str, &str)] = embed!("editors"; "zed", "code", "cursor", "ssh");
+
+/// Editors in the order `luoto open` tries them when none is configured.
+pub fn editor_names() -> impl Iterator<Item = &'static str> {
+    EDITORS.iter().map(|(n, _)| *n)
+}
+
+pub fn editor(name: &str) -> Option<Editor> {
+    let (n, src) = EDITORS.iter().find(|(n, _)| *n == name)?;
+    let mut e: Editor = toml::from_str(src).expect("built-in editor parses");
+    e.name = (*n).to_string();
+    Some(e)
+}
+
+pub fn provider_names() -> impl Iterator<Item = &'static str> {
+    PROVIDERS.iter().map(|(n, _)| *n)
+}
+
+pub fn agent_names() -> impl Iterator<Item = &'static str> {
+    AGENTS.iter().map(|(n, _)| *n)
+}
+
+pub fn provider(name: &str) -> Option<Provider> {
+    let (n, src) = PROVIDERS.iter().find(|(n, _)| *n == name)?;
+    let mut p: Provider = toml::from_str(src).expect("built-in provider parses");
+    p.name = (*n).to_string();
+    Some(p)
+}
+
+pub fn agent(name: &str) -> Option<Agent> {
+    let (n, src) = AGENTS.iter().find(|(n, _)| *n == name)?;
+    let mut a: Agent = toml::from_str(src).expect("built-in agent parses");
+    a.name = (*n).to_string();
+    Some(a)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::{WildcardRisk, normalize_host, wildcard_risk};
+
+    #[test]
+    fn editors_parse_and_use_known_placeholders() {
+        for name in editor_names() {
+            let e = editor(name).unwrap();
+            for a in &e.launch {
+                let rest = a
+                    .replace("{host}", "")
+                    .replace("{user}", "")
+                    .replace("{path}", "");
+                assert!(!rest.contains('{'), "{name}: unknown placeholder in {a}");
+            }
+        }
+        assert!(editor("ssh").unwrap().launch.is_empty());
+    }
+
+    #[test]
+    fn profiles_parse_and_reference_known_providers() {
+        for name in provider_names() {
+            let p = provider(name).unwrap();
+            for (h, _, _) in p.hosts() {
+                assert!(normalize_host(h).is_ok(), "{name}: {h}");
+                assert_eq!(wildcard_risk(h), WildcardRisk::None, "{name}: {h}");
+            }
+            assert!(
+                !p.auth.is_empty() || !p.login_hosts.is_empty(),
+                "{name} has auth kinds or a login"
+            );
+            for a in p.auth.values() {
+                assert!(a.format.contains("{secret}"), "{name}");
+            }
+        }
+        for name in agent_names() {
+            let a = agent(name).unwrap();
+            for p in &a.providers {
+                assert!(
+                    provider(p).is_some(),
+                    "agent {name} references unknown provider {p}"
+                );
+            }
+            for h in a.rules.iter().map(|r| &r.host).chain(&a.install_hosts) {
+                assert_eq!(wildcard_risk(h), WildcardRisk::None, "{name}: {h}");
+            }
+        }
+    }
+}
