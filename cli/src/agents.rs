@@ -125,6 +125,26 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
     Ok(())
 }
 
+/// For each of `agents` that has no credential in the env yet: ask for one on a terminal (as
+/// `agent add` does, "later" included), else, or when put off, say how to add it.
+pub fn credentials(ctx: &Ctx, env_name: &str, agents: &[String], interactive: bool) -> Result<()> {
+    for name in agents {
+        let Some(a) = profiles::agent(name) else {
+            continue;
+        };
+        let cfg = EnvFile::load(&ctx.paths, env_name)?.cfg;
+        if has_credential(&cfg, &a) {
+            continue;
+        }
+        if interactive && let Some((provider, entries)) = crate::wizard::credential(&cfg, &a)? {
+            EnvFile::load(&ctx.paths, env_name)?.set_provider_credential(&provider, &entries)?;
+            continue;
+        }
+        println!("\n{}", credential_help(&a, env_name));
+    }
+    Ok(())
+}
+
 /// Whether the env holds a credential (or a login-inside opt-in) for one of the agent's
 /// providers. Agents without providers (local models) need none.
 fn has_credential(cfg: &crate::config::EnvConfig, a: &profiles::Agent) -> bool {
@@ -166,6 +186,11 @@ fn credential_help(a: &profiles::Agent, env_name: &str) -> String {
     if let Some(p) = provider {
         for (k, auth) in &p.auth {
             out.push_str(&format!("\n\n{k}: the {}. {}", auth.label, auth.how));
+        }
+        if let Some(how) = p.login_how.as_deref().filter(|_| !p.login_hosts.is_empty()) {
+            out.push_str(&format!(
+                "\n\nlogin_inside = true: log in inside the sandbox instead. {how}"
+            ));
         }
     }
     out

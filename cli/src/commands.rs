@@ -439,6 +439,8 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
     {
         println!("{hint}");
     }
+    // Before `up`, so the env starts with them.
+    crate::agents::credentials(&ctx, &name, &agents, interactive)?;
     if !o.no_up {
         env::up(
             &ctx,

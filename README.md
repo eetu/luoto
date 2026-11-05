@@ -38,7 +38,7 @@ the attempt with a scoped allow next to it:
 | platform | |
 | --- | --- |
 | macOS, Linux | `curl -fsSL https://raw.githubusercontent.com/eetu/luoto/main/install.sh \| sh` |
-| macOS, Linux (Homebrew) | `brew tap eetu/luoto && brew install luoto` |
+| macOS, Linux (Homebrew) | `brew tap eetu/luoto`, `brew trust eetu/luoto`, then `brew install luoto` (Homebrew loads a third-party tap only once you trust it) |
 | Windows (Scoop; not yet verified end to end) | `scoop bucket add luoto https://github.com/eetu/scoop-luoto` then `scoop install luoto` |
 
 Then, once:
@@ -178,8 +178,8 @@ starts the agent in `/workspace`; `--yolo` turns off its own permission prompts 
 flag for it), since the sandbox is the boundary. After that first run the command (`claude`,
 `codex`, …) also works in any env terminal, including an editor's. Each agent needs a credential
 for one of its providers under `[credentials.<provider>]`; the gate adds it to every request and
-the sandbox sees only a placeholder. Without one, `agent add`, `agent run` and `init`'s
-walk-through ask which kind you have, say where to get one, and keep it where you choose: pasted
+the sandbox sees only a placeholder. Without one, `init`, `agent add` and `agent run` ask
+which kind you have, say where to get one, and keep it where you choose: pasted
 into your OS keychain (`keyring:luoto/<provider>.<kind>`, reused by later envs) or into a new
 1Password item, or a reference to where it already is. Providers that allow it also offer a
 login inside the sandbox. `luoto agent list` shows the agents and providers.

@@ -77,6 +77,11 @@ port 22. Left for later:
 - **Antigravity CLI with a Gemini API key** the gate holds: the `gemini` provider plus
   `modelProvider: "gemini"` in `~/.gemini/config/settings.json`, with no Google session in
   the env.
+- **Agent credentials on the command line:** `luoto agent add claude --credential
+  oauth_token=op://Private/claude/token` (and `init --agent … --credential …`) writes or
+  replaces `[credentials.<provider>]` without the prompt, for scripts and for pointing an env
+  at another secret later. On a terminal the prompt writes the same section, and `agent add`
+  adds the agent to `agents`.
 - **A Python default that follows wheels.** Unpinned projects get Python 3.14, moved up by
   hand once the newest minor's wheels have caught up.
 

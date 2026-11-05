@@ -49,7 +49,9 @@ luoto needs podman or Docker. Run `luoto setup` after installing.
 **macOS**
 
 ```sh
-brew tap eetu/luoto && brew install luoto
+brew tap eetu/luoto
+brew trust eetu/luoto   # Homebrew loads a third-party tap only once you trust it
+brew install luoto
 brew install podman   # or use Docker
 ```
 

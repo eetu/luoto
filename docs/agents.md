@@ -24,8 +24,8 @@ sandbox is the boundary, so the prompts guard nothing luoto doesn't.
 
 A provider credential lives outside the sandbox. luoto reads it on your machine, the vault
 keeps it in memory, and the gate adds it to the agent's requests to that provider. The agent
-sees a placeholder of the right format. Without one, `agent add`, `agent run` and `init`'s
-walk-through ask which kind you have, say where to get it, and keep it where you choose: your
+sees a placeholder of the right format. Without one, `init`, `agent add` and `agent run` ask
+which kind you have, say where to get it, and keep it where you choose: your
 OS keychain (`keyring:luoto/<provider>.<kind>`, reused by later envs), a new 1Password item
 (the secret reaches `op` on stdin), or a reference to where it already is (`op://`,
 `vault://`, `keyring:`, `env:`, `file:`).
