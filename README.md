@@ -1,6 +1,9 @@
-# luoto
-
-Run your dev tools where a compromised dependency can't take your keys with it.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo/luoto-dark.svg">
+    <img alt="luoto: no tool is an island, except on luoto." src="docs/logo/luoto-light.svg" width="540">
+  </picture>
+</p>
 
 ## Why
 
@@ -35,13 +38,13 @@ the attempt with a scoped allow next to it:
 
 ## Install
 
-| platform | install |
-| --- | --- |
-| macOS, Linux | `curl -fsSL https://raw.githubusercontent.com/eetu/luoto/main/install.sh \| sh` |
-| macOS, Linux (Homebrew) | `brew tap eetu/luoto`, `brew trust eetu/luoto`, then `brew install luoto` (Homebrew loads a third-party tap only once you trust it) |
-| Linux, no script | a `.tar.gz` from [Releases](https://github.com/eetu/luoto/releases), checked against `SHA256SUMS` |
-| from source | `just install-cli`, then `luoto setup --build` |
-| Windows (Scoop; not yet verified end to end) | `scoop bucket add luoto https://github.com/eetu/scoop-luoto` then `scoop install luoto` |
+| platform                                     | install                                                                                                                             |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| macOS, Linux                                 | `curl -fsSL https://raw.githubusercontent.com/eetu/luoto/main/install.sh \| sh`                                                     |
+| macOS, Linux (Homebrew)                      | `brew tap eetu/luoto`, `brew trust eetu/luoto`, then `brew install luoto` (Homebrew loads a third-party tap only once you trust it) |
+| Linux, no script                             | a `.tar.gz` from [Releases](https://github.com/eetu/luoto/releases), checked against `SHA256SUMS`                                   |
+| from source                                  | `just install-cli`, then `luoto setup --build`                                                                                      |
+| Windows (Scoop; not yet verified end to end) | `scoop bucket add luoto https://github.com/eetu/scoop-luoto` then `scoop install luoto`                                             |
 
 Then, once:
 
@@ -146,23 +149,23 @@ env has run for as long. `luoto up` brings it back in about 10 s and unlocks the
 
 Commands act on the env of the current folder; `-e NAME` picks another (`luoto status -e web`).
 
-| you want | run |
-| --- | --- |
-| an env for a folder (copied in) | `luoto init [DIR]` |
-| a new project (the folder is created) | `luoto init ~/dev/new-app` |
-| to review, apply or ignore the team's `luoto.toml` | `luoto project`<br>`luoto project apply`<br>`luoto project ignore` |
-| your editor, or a shell | `luoto open`<br>`luoto open --with code`<br>`luoto shell` |
-| to see what the sandbox tried to reach | `luoto egress --since 10m`<br>`luoto egress --denied`<br>`luoto egress --follow` |
-| to allow a host (read-only unless `--write`) | `luoto allow docs.rs --ttl 1h`<br>`luoto allow api.example.com --write --path '/v1/**'`<br>`luoto allow grpc.example.com --tunnel` |
-| to see or remove rules | `luoto status`<br>`luoto revoke <id-or-host>` |
-| to answer access requests from inside | `luoto requests`<br>`luoto approve 3 --ttl 1h`<br>`luoto reject 3` |
-| an agent (installed on first run) | `luoto agent run claude --yolo`<br>`luoto agent list` |
-| a dev server in your browser | run it: its port is forwarded to localhost here<br>`luoto forward 8080:5173` (to another local port) |
-| your work out: push from the env (with a GitHub, Azure DevOps or SSH credential), or copy files back | `git push`<br>`luoto pull` |
-| image or config changes applied (volumes are kept) | `luoto up --recreate` |
-| to stop an env, or delete it with its volumes and config (your folder stays) | `luoto down`<br>`luoto rm` |
-| the env back after a reboot or an idle stop (unlocks the vault if needed) | `luoto up`<br>`luoto vault unlock` |
-| to check isolation | `luoto doctor` |
+| you want                                                                                             | run                                                                                                                                |
+| ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| an env for a folder (copied in)                                                                      | `luoto init [DIR]`                                                                                                                 |
+| a new project (the folder is created)                                                                | `luoto init ~/dev/new-app`                                                                                                         |
+| to review, apply or ignore the team's `luoto.toml`                                                   | `luoto project`<br>`luoto project apply`<br>`luoto project ignore`                                                                 |
+| your editor, or a shell                                                                              | `luoto open`<br>`luoto open --with code`<br>`luoto shell`                                                                          |
+| to see what the sandbox tried to reach                                                               | `luoto egress --since 10m`<br>`luoto egress --denied`<br>`luoto egress --follow`                                                   |
+| to allow a host (read-only unless `--write`)                                                         | `luoto allow docs.rs --ttl 1h`<br>`luoto allow api.example.com --write --path '/v1/**'`<br>`luoto allow grpc.example.com --tunnel` |
+| to see or remove rules                                                                               | `luoto status`<br>`luoto revoke <id-or-host>`                                                                                      |
+| to answer access requests from inside                                                                | `luoto requests`<br>`luoto approve 3 --ttl 1h`<br>`luoto reject 3`                                                                 |
+| an agent (installed on first run)                                                                    | `luoto agent run claude --yolo`<br>`luoto agent list`                                                                              |
+| a dev server in your browser                                                                         | run it: its port is forwarded to localhost here<br>`luoto forward 8080:5173` (to another local port)                               |
+| your work out: push from the env (with a GitHub, Azure DevOps or SSH credential), or copy files back | `git push`<br>`luoto pull`                                                                                                         |
+| image or config changes applied (volumes are kept)                                                   | `luoto up --recreate`                                                                                                              |
+| to stop an env, or delete it with its volumes and config (your folder stays)                         | `luoto down`<br>`luoto rm`                                                                                                         |
+| the env back after a reboot or an idle stop (unlocks the vault if needed)                            | `luoto up`<br>`luoto vault unlock`                                                                                                 |
+| to check isolation                                                                                   | `luoto doctor`                                                                                                                     |
 
 Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host> --reason …`
 asks you for access; only you can approve, on the host.
@@ -178,13 +181,13 @@ the sandbox sees only a placeholder. [docs/agents.md](docs/agents.md#credentials
 to get one, how the prompt keeps it, and logins inside the sandbox, with the hosts and
 verification status of each agent. `luoto agent list` shows agents and providers.
 
-| agent | command | credential |
-| --- | --- | --- |
-| Claude Code | `claude` | Claude subscription token (`claude setup-token`) or API key |
-| OpenCode | `opencode` | Anthropic, OpenAI, OpenRouter or Gemini API key |
-| Codex | `codex` | OpenAI API key, or a ChatGPT login inside |
-| GitHub Copilot CLI (untested) | `copilot` | fine-grained token with Copilot Requests |
-| Antigravity CLI | `agy` | Google account, signed in inside the env |
+| agent                         | command    | credential                                                  |
+| ----------------------------- | ---------- | ----------------------------------------------------------- |
+| Claude Code                   | `claude`   | Claude subscription token (`claude setup-token`) or API key |
+| OpenCode                      | `opencode` | Anthropic, OpenAI, OpenRouter or Gemini API key             |
+| Codex                         | `codex`    | OpenAI API key, or a ChatGPT login inside                   |
+| GitHub Copilot CLI (untested) | `copilot`  | fine-grained token with Copilot Requests                    |
+| Antigravity CLI               | `agy`      | Google account, signed in inside the env                    |
 
 ## Configuration
 
@@ -455,21 +458,21 @@ flowchart TB
 
 ### Platforms
 
-| host | runtimes | boundary |
-| --- | --- | --- |
-| macOS | podman (recommended), Docker Desktop, OrbStack, Colima | podman: luoto's own VM, with none of your folders mounted, and gVisor. Docker: its VM, which shares your folders, and plain containers |
-| Windows (not yet verified end to end) | podman (Hyper-V or WSL2), Docker Desktop | as on macOS; a WSL2 VM can still see `C:\` (`luoto doctor` reports it), so prefer Hyper-V |
-| Linux | rootless podman (recommended), Docker | no VM. podman: gVisor when `runsc` is installed (`luoto setup` finds it). Docker: plain containers, or gVisor registered with Docker and `oci_runtime = "runsc"` under an env's `[resources]` |
+| host                                  | runtimes                                               | boundary                                                                                                                                                                                      |
+| ------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS                                 | podman (recommended), Docker Desktop, OrbStack, Colima | podman: luoto's own VM, with none of your folders mounted, and gVisor. Docker: its VM, which shares your folders, and plain containers                                                        |
+| Windows (not yet verified end to end) | podman (Hyper-V or WSL2), Docker Desktop               | as on macOS; a WSL2 VM can still see `C:\` (`luoto doctor` reports it), so prefer Hyper-V                                                                                                     |
+| Linux                                 | rootless podman (recommended), Docker                  | no VM. podman: gVisor when `runsc` is installed (`luoto setup` finds it). Docker: plain containers, or gVisor registered with Docker and `oci_runtime = "runsc"` under an env's `[resources]` |
 
 With podman, dev containers run on [gVisor](https://gvisor.dev), a user-space kernel (on Linux
 once `runsc` is installed). It costs time wherever a tool touches many files. A Rust + Vite
 monorepo in luoto's VM (6 CPUs):
 
-| step | gVisor | container |
-| --- | --- | --- |
-| `yarn install` | 4.6 s | 3.1 s |
-| `vite build` | 2.9 s | 2.0 s |
-| `cargo build` (debug, after `cargo clean`) | 36 s | 21 s |
+| step                                       | gVisor | container |
+| ------------------------------------------ | ------ | --------- |
+| `yarn install`                             | 4.6 s  | 3.1 s     |
+| `vite build`                               | 2.9 s  | 2.0 s     |
+| `cargo build` (debug, after `cargo clean`) | 36 s   | 21 s      |
 
 gVisor is the default, and the right choice for anything that runs code you haven't read:
 new dependencies, unfamiliar repos, agents in yolo mode. `isolation = "container"` in an env's
@@ -507,12 +510,12 @@ completion calls `luoto-dev`; `just link-dev` links that name to the checkout's 
 Tab completion covers commands, flags, env names, agents, editors and presets. Homebrew
 installs it; otherwise add one line to your shell's startup file:
 
-| shell | line | file |
-| --- | --- | --- |
-| fish | `COMPLETE=fish luoto \| source` | `~/.config/fish/completions/luoto.fish` |
-| zsh | `source <(COMPLETE=zsh luoto)` | `~/.zshrc` |
-| bash | `source <(COMPLETE=bash luoto)` | `~/.bashrc` |
-| PowerShell | `$env:COMPLETE = "powershell"; luoto \| Out-String \| Invoke-Expression; Remove-Item Env:\COMPLETE` | `$PROFILE` |
+| shell      | line                                                                                                | file                                    |
+| ---------- | --------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| fish       | `COMPLETE=fish luoto \| source`                                                                     | `~/.config/fish/completions/luoto.fish` |
+| zsh        | `source <(COMPLETE=zsh luoto)`                                                                      | `~/.zshrc`                              |
+| bash       | `source <(COMPLETE=bash luoto)`                                                                     | `~/.bashrc`                             |
+| PowerShell | `$env:COMPLETE = "powershell"; luoto \| Out-String \| Invoke-Expression; Remove-Item Env:\COMPLETE` | `$PROFILE`                              |
 
 ## Development
 

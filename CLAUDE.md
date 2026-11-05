@@ -18,7 +18,8 @@ tools/       `sandbox` helper (status/check/request/relay/mcp/selftest, internal
 cli/         `luoto` host binary: runtime driver, env lifecycle, commands, `luoto ui` (axum)
 frontend/    SvelteKit SPA embedded into `luoto` (rust-embed of frontend/dist)
 image/       luoto-base dev image
-docs/        agents.md (per-agent facts), screenshots/
+docs/        agents.md (per-agent facts), screenshots/, logo/ (README header; its Inter is a
+             subset of the letters it uses, so new text needs a new subset)
 packaging/   Homebrew/Scoop templates + render.sh (release steps in its README)
 install.sh   curl-pipe installer
 integration/ spawned gate + vault against wiremock (`just it`)
