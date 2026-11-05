@@ -401,7 +401,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     populate_tools(ctx, env, &state, &ids.tools, &env_ca.cert_pem)?;
 
     let gate = start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)?;
-    let dev = start_dev(ctx, env, &p, &state, &ids)?;
+    let dev = start_dev(ctx, env, &p, &state, &ids, gate != Launch::AlreadyRunning)?;
     // Containers that were already running passed the self-test when they started.
     let restarted = gate != Launch::AlreadyRunning || dev != Launch::AlreadyRunning;
     after_start(ctx, env, &p, &state, restarted && !opts.no_selftest)?;
@@ -419,12 +419,12 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         // The accepted settings reach the gate (policy, credentials, ports) and the runtime env.
         let image = p.image.clone();
         p = plan(ctx, env)?;
-        if start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)? != Launch::AlreadyRunning
-            && !opts.no_selftest
-        {
-            check_isolation(ctx, env)?;
+        if start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)? != Launch::AlreadyRunning {
+            start_dev(ctx, env, &p, &state, &ids, true)?;
+            after_start(ctx, env, &p, &state, !opts.no_selftest)?;
+        } else {
+            sync::write_runtime_env(ctx, env, &p.compiled)?;
         }
-        sync::write_runtime_env(ctx, env, &p.compiled)?;
         if p.image != image {
             eprintln!(
                 "note: luoto.toml names another image; `luoto up --recreate` applies it (volumes are kept)"
@@ -634,11 +634,28 @@ fn dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &str) ->
     })
 }
 
-/// Start the dev container and wait for its init.sh.
-fn start_dev(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, ids: &ImageIds) -> Result<Launch> {
+/// Start the dev container and wait for its init.sh. After a gate (re)start, a running dev
+/// container restarts too: until it does, its network stack keeps reaching for the gate it
+/// started with, at the same address, and gets nothing.
+fn start_dev(
+    ctx: &Ctx,
+    env: &str,
+    p: &Plan,
+    state: &EnvState,
+    ids: &ImageIds,
+    gate_started: bool,
+) -> Result<Launch> {
     let rt = &ctx.rt;
     let spec = dev_spec(ctx, env, p, state, &ids.tools)?;
-    let launch = start_or_create(ctx, &spec, &ids.dev, false)?;
+    let mut launch = start_or_create(ctx, &spec, &ids.dev, false)?;
+    if launch == Launch::AlreadyRunning && gate_started {
+        eprintln!("the gate restarted, so the dev container restarts too (what runs in it stops)");
+        // Not `restart`: podman gives up on it when the network teardown errs, as it does for
+        // a gVisor container whose addresses runsc already took over.
+        rt.stop(&names::dev(env))?;
+        rt.run(["start", &names::dev(env)])?;
+        launch = Launch::Started;
+    }
     if rt.flavor == Flavor::Docker && p.cfg.transparent.unwrap_or(true) {
         rt.run([
             "run",

@@ -34,6 +34,9 @@ beside a release.
 - **Fewer runtime calls:** `up` inspects images once, writes `/run/luoto` in one go and skips
   steps that changed nothing: 26 calls into the VM for an env that is already up. The UI polls
   with one `ps` per tick.
+- **A new gate restarts the dev container:** when `up` replaces an env's gate (a luoto
+  upgrade, new ports), a running dev container restarts with it; it couldn't reach the new
+  gate, so the self-test failed and stopped it. What runs in it stops.
 - **`sandbox check`** normalizes a request as the gate does (upper-case method).
 - **UI:** the overview says when the VM is stopped, rebuild starts it first, and the header
   names the instance.
