@@ -11,8 +11,8 @@ use luoto_shared::creds::{
     default_github_api,
 };
 use luoto_shared::policy::{
-    Access, AccessLevel, AzureGuard, CompiledRule, DenyRule, GithubGuard, InternalName, Mode,
-    Policy, Rule, RuleOrigin, rule_error,
+    Access, AccessLevel, AzureGuard, BodyDeny, CompiledRule, DenyRule, GithubGuard, InternalName,
+    Mode, Policy, Rule, RuleOrigin, rule_error,
 };
 use luoto_shared::{forges, presets, profiles};
 
@@ -52,6 +52,7 @@ const GH_PLACEHOLDER: &str = "ghs_luotoPlaceholder0000000000000000000";
 struct Builder {
     rules: Vec<CompiledRule>,
     denies: Vec<DenyRule>,
+    body_denies: Vec<BodyDeny>,
     injections: Vec<Injection>,
     bindings: BTreeMap<String, BindingSpec>,
     dev_env: BTreeMap<String, String>,
@@ -170,6 +171,7 @@ pub fn compile(
         env: env.to_string(),
         rules: b.rules,
         denies: b.denies,
+        body_denies: b.body_denies,
         injections: b.injections,
         github,
         azure_devops,
@@ -203,7 +205,8 @@ pub fn compile(
     })
 }
 
-/// A model provider: `[credentials.<provider>] <auth_kind> = "<ref>"` or `login_inside = true`.
+/// A model provider: `[credentials.<provider>] <auth_kind> = "<ref>"` or `login_inside = true`,
+/// and `server_tools = true` to let it reach the network for the sandbox's requests.
 fn compile_provider(
     b: &mut Builder,
     pname: &str,
@@ -215,7 +218,14 @@ fn compile_provider(
             profiles::provider_names().collect::<Vec<_>>().join(", ")
         );
     };
+    if let Some(k) = entries.iter().find_map(|(k, v)| {
+        (matches!(v, ProviderValue::Flag(_)) && k != "login_inside" && k != "server_tools")
+            .then_some(k)
+    }) {
+        bail!("credentials.{pname}: `{k}` is not a setting (login_inside, server_tools)");
+    }
     let login_inside = entries.get("login_inside") == Some(&ProviderValue::Flag(true));
+    let server_tools = entries.get("server_tools") == Some(&ProviderValue::Flag(true));
     if login_inside
         && let Some(kind) = entries
             .iter()
@@ -238,7 +248,8 @@ fn compile_provider(
                 host: host.to_string(),
                 access: Access::Level(access),
                 paths: paths.to_vec(),
-                ws: p.ws,
+                // The gate can't read WebSocket messages for server tools.
+                ws: p.ws && (server_tools || p.server_tools.is_empty()),
                 ..Default::default()
             },
         );
@@ -250,6 +261,26 @@ fn compile_provider(
             methods: vec![],
             reason: d.reason.clone(),
         });
+    }
+    if server_tools && !p.server_tools.is_empty() {
+        b.warnings.push(format!(
+            "{pname}: server_tools lets {pname} fetch URLs and call MCP servers for the sandbox"
+        ));
+    } else if !server_tools {
+        for t in &p.server_tools {
+            b.body_denies.push(BodyDeny {
+                host: p.host.clone(),
+                paths: t.paths.clone(),
+                keys: t.keys.clone(),
+                tool_types: t.tool_types.clone(),
+                tool_keys: t.tool_keys.clone(),
+                reason: format!(
+                    "{} has {pname} reach the network for the request; the env allows it with \
+                     `server_tools = true` under [credentials.{pname}]",
+                    t.what
+                ),
+            });
+        }
     }
     if login_inside {
         for (i, h) in p.login_hosts.iter().enumerate() {
@@ -1031,6 +1062,34 @@ oauth_token = "op://p/claude/token"
         assert_eq!(c.dev_env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1");
         assert!(c.dev_env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
         assert!(c.bindings.contains_key("anthropic.oauth_token"));
+        let fetch = r#"{"tools":[{"type":"web_fetch_20260209"}]}"#;
+        let json = luoto_shared::policy::JsonBody::parse(fetch.as_bytes()).unwrap();
+        assert!(
+            p.body_denies
+                .iter()
+                .any(|d| d.applies("api.anthropic.com", "/v1/messages") && d.asks(&json))
+        );
+    }
+
+    #[test]
+    fn server_tools_and_the_websocket_api_wait_for_the_opt_in() {
+        let openai = |extra: &str| {
+            let text = format!("[credentials.openai]\napi_key = \"op://p/oai/key\"\n{extra}");
+            compile("t", &cfg(&text), GATE, &[]).unwrap()
+        };
+        let ws = |c: &Compiled| c.policy.rules.iter().any(|r| r.rule.ws);
+        let off = openai("");
+        assert!(!off.policy.body_denies.is_empty() && !ws(&off));
+        let on = openai("server_tools = true");
+        assert!(on.policy.body_denies.is_empty() && ws(&on));
+        assert!(on.warnings.iter().any(|w| w.contains("server_tools")));
+        let err = compile(
+            "t",
+            &cfg("[credentials.openai]\nservertools = true"),
+            GATE,
+            &[],
+        );
+        assert!(err.err().unwrap().to_string().contains("not a setting"));
     }
 
     #[test]

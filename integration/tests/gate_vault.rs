@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 use luoto_shared::creds::{BindingSpec, Injection, Placement};
 use luoto_shared::ctl::{GateCtl, VaultCtl};
-use luoto_shared::policy::{Access, AccessLevel, CompiledRule, GithubGuard, Mode, Policy, Rule};
+use luoto_shared::policy::{
+    Access, AccessLevel, BodyDeny, CompiledRule, GithubGuard, Mode, Policy, Rule,
+};
 use sha2::{Digest, Sha256};
 use wiremock::matchers::{header, method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -732,6 +734,74 @@ async fn graphql_mutations_pass_only_from_the_allowlist() {
         assert!(r.status == 403 && r.denied("guard"), "{path}: {}", r.head);
         assert!(r.body.contains("mergePullRequest"), "{}", r.body);
     }
+    assert_eq!(upstream.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn model_apis_get_no_request_that_has_them_reach_the_network() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+    let env = Env::start(&[("api.model.test", *upstream.address())]);
+    env.apply(Policy {
+        rules: vec![rule(
+            "api",
+            "api.model.test",
+            Access::Level(AccessLevel::Write),
+            &[],
+        )],
+        body_denies: vec![BodyDeny {
+            host: "api.model.test".into(),
+            paths: vec!["/v1/messages".into()],
+            keys: vec!["mcp_servers".into()],
+            tool_types: vec!["web_fetch".into()],
+            reason: "server tools are off".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let post = |path: &str, headers: &[(&str, &str)], body: &str| {
+        let url = format!("http://api.model.test{path}");
+        env.request("POST", &url, headers, body.as_bytes())
+    };
+
+    let plain = r#"{"model":"m","tools":[{"type":"web_search_20250305"}]}"#;
+    let r = post("/v1/messages", &[], plain);
+    assert_eq!(r.status, 200, "{}", r.head);
+    assert_eq!(
+        upstream.received_requests().await.unwrap()[0].body,
+        plain.as_bytes()
+    );
+
+    let refused = [
+        (
+            &[][..],
+            r#"{"tools":[{"type":"web_fetch_20260209"}]}"#,
+            "server tools",
+        ),
+        (
+            &[][..],
+            r#"{"mcp_servers":[{"type":"url","url":"https://x"}]}"#,
+            "server tools",
+        ),
+        (
+            &[][..],
+            r#"{"tools":[],"tools":[{"type":"web_fetch"}]}"#,
+            "JSON object",
+        ),
+        (&[("content-encoding", "gzip")][..], plain, "compressed"),
+    ];
+    for (headers, body, why) in refused {
+        let r = post("/v1/messages", headers, body);
+        assert!(r.status == 403 && r.denied("guard"), "{body}: {}", r.head);
+        assert!(r.body.contains(why), "{}", r.body);
+    }
+    // Other paths aren't read.
+    let r = post("/v1/messages/count_tokens", &[], r#"{"mcp_servers":[]}"#);
+    assert_eq!(r.status, 200, "{}", r.head);
     assert_eq!(upstream.received_requests().await.unwrap().len(), 2);
 }
 

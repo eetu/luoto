@@ -21,3 +21,16 @@ how = "Run `claude setup-token` on your machine (not in the env) and copy the to
 header = "authorization"
 format = "Bearer {secret}"
 env = { CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-luoto-placeholder-000000000000000000000000000000000000000000000000000000000000000000-AAAAAAA" }
+
+# Server tools: the provider reaches the network for the request. Refused unless the env sets
+# `server_tools = true` under [credentials.anthropic].
+[[server_tool]]
+what = "web fetch"
+paths = ["/v1/messages"]
+tool_types = ["web_fetch"]
+
+[[server_tool]]
+what = "the MCP connector"
+paths = ["/v1/messages"]
+keys = ["mcp_servers"]
+tool_types = ["mcp_toolset"]

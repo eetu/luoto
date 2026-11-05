@@ -149,6 +149,74 @@ pub struct DenyRule {
     pub reason: String,
 }
 
+/// JSON request bodies a host refuses: ones that ask a model API to reach the network for the
+/// request (fetch a URL, call an MCP server). The gate reads such a body before forwarding it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct BodyDeny {
+    pub host: String,
+    /// POST paths whose bodies are read.
+    pub paths: Vec<String>,
+    /// Top-level keys that ask for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
+    /// `tools[].type` values that ask for it, each also with a version suffix (`web_fetch`
+    /// matches `web_fetch_20260209`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_types: Vec<String>,
+    /// Keys of a `tools[]` entry that ask for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_keys: Vec<String>,
+    pub reason: String,
+}
+
+impl BodyDeny {
+    pub fn applies(&self, host: &str, path: &str) -> bool {
+        self.host == host && glob::matches_any(&self.paths, false, path)
+    }
+
+    pub fn asks(&self, body: &JsonBody) -> bool {
+        let tool_type = |t: &str| {
+            self.tool_types.iter().any(|x| {
+                t.strip_prefix(x.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('_'))
+            })
+        };
+        self.keys.iter().any(|k| body.keys.contains(k))
+            || body.tools.iter().any(|t| {
+                t.get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(tool_type)
+                    || self.tool_keys.iter().any(|k| t.contains_key(k))
+            })
+    }
+}
+
+/// What [`BodyDeny`] looks at in a JSON request body: its top-level keys and `tools` entries.
+pub struct JsonBody {
+    keys: std::collections::HashSet<String>,
+    tools: Vec<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl JsonBody {
+    /// `None` unless the body is one JSON object whose `tools`, if any, is an array of
+    /// objects. The rest of the body is skipped unread, however large. A key given twice is
+    /// refused: the API might read the copy a check skipped.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        #[derive(Deserialize)]
+        struct Tools {
+            #[serde(default)]
+            tools: Option<Vec<serde_json::Map<String, serde_json::Value>>>,
+        }
+        let keys: std::collections::HashMap<String, serde::de::IgnoredAny> =
+            serde_json::from_slice(bytes).ok()?;
+        let Tools { tools } = serde_json::from_slice(bytes).ok()?;
+        Some(JsonBody {
+            keys: keys.into_keys().collect(),
+            tools: tools.unwrap_or_default(),
+        })
+    }
+}
+
 /// GitHub write guard-rails enforced by the gate on top of rules.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct GithubGuard {
@@ -183,6 +251,8 @@ pub struct Policy {
     pub rules: Vec<CompiledRule>,
     #[serde(default)]
     pub denies: Vec<DenyRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub body_denies: Vec<BodyDeny>,
     #[serde(default)]
     pub injections: Vec<Injection>,
     #[serde(default)]
@@ -775,5 +845,50 @@ mod tests {
         }
         assert!(p.tunnel_bypass("grpc.example.com").is_none());
         assert!(p.tunnel_bypass("*.githubusercontent.com").is_none());
+    }
+
+    #[test]
+    fn body_denies_match_server_tools_and_their_versions() {
+        let d = BodyDeny {
+            host: "api.example.com".into(),
+            paths: vec!["/v1/messages".into()],
+            keys: vec!["mcp_servers".into()],
+            tool_types: vec!["web_fetch".into()],
+            tool_keys: vec!["url_context".into()],
+            reason: "no".into(),
+        };
+        assert!(d.applies("api.example.com", "/v1/messages"));
+        assert!(!d.applies("api.example.com", "/v1/messages/count_tokens"));
+        let asks = |body: &str| d.asks(&JsonBody::parse(body.as_bytes()).unwrap());
+        assert!(asks(
+            r#"{"tools":[{"type":"web_fetch_20260209","name":"web_fetch"}]}"#
+        ));
+        assert!(asks(r#"{"tools":[{"type":"web_fetch"}]}"#));
+        assert!(asks(r#"{"mcp_servers":[],"model":"m"}"#));
+        assert!(asks(
+            r#"{"tools":[{"function_declarations":[]},{"url_context":{}}]}"#
+        ));
+        assert!(asks(r#"{"\u0074ools":[{"type":"web_fetch_1"}]}"#));
+        assert!(!asks(
+            r#"{"tools":[{"type":"web_fetcher"},{"type":"web_search_20250305"}]}"#
+        ));
+        assert!(!asks(
+            r#"{"model":"m","messages":[{"role":"user","content":"web_fetch"}]}"#
+        ));
+        assert!(!asks(r#"{"tools":null}"#));
+    }
+
+    #[test]
+    fn a_body_the_check_could_misread_does_not_parse() {
+        for body in [
+            r#"{"tools":[],"tools":[{"type":"web_fetch"}]}"#,
+            r#"[{"tools":[]}]"#,
+            r#"{"tools":{"type":"web_fetch"}}"#,
+            r#"{"tools":["web_fetch"]}"#,
+            "not json",
+            "",
+        ] {
+            assert!(JsonBody::parse(body.as_bytes()).is_none(), "{body}");
+        }
     }
 }

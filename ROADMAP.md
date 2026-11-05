@@ -8,8 +8,6 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   with its secrets and open network; push to a secrets-free fork and open pull requests across
   instead. Drop personal-access-token support: a token is long-lived, and the repositories it
   reaches are set at GitHub, where luoto can't check them (a classic token reaches all).
-- **Model APIs: block server-side fetch and MCP tools** (`mcp_servers`, `web_fetch`, OpenAI
-  `mcp`, Gemini `url_context`) by inspecting request bodies, unless the env opts in.
 - **Relay hosts as a class.** The Go module proxy fetches from any domain on request; allow it
   only during installs or limit it to the project's modules.
 - **Install windows bound to the installer.** A per-run proxy credential for installs, so other

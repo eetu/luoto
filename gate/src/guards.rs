@@ -1,7 +1,8 @@
-//! Forge write guard-rails: inspect the ref updates at the start of a git push (GitHub and
-//! Azure DevOps), and refuse GitHub GraphQL documents that mutate outside an allowlist.
-//! Server-side rulesets remain the real enforcement; these keep a compromised sandbox from
-//! the obvious moves.
+//! Guards that read a request body: forge write guard-rails (the ref updates at the start of
+//! a git push to GitHub or Azure DevOps, GitHub GraphQL documents that mutate outside an
+//! allowlist) and model API requests that ask the provider to reach the network. Server-side
+//! rulesets remain the real enforcement for forges; these keep a compromised sandbox from the
+//! obvious moves.
 
 use bytes::BytesMut;
 use graphql_parser::query::{Definition, OperationDefinition, Selection};
@@ -9,12 +10,14 @@ use http::HeaderMap;
 use http::header::CONTENT_ENCODING;
 use http_body_util::BodyExt;
 use luoto_shared::forges;
-use luoto_shared::policy::{AzureGuard, GithubGuard, Policy};
+use luoto_shared::policy::{AzureGuard, BodyDeny, GithubGuard, JsonBody, Policy};
 
 use crate::body::{Body, collect_limited, full, prefixed};
 
 /// The most of a body a guard reads before it decides.
 const MAX_READ: usize = 1 << 20;
+/// The most of a model API request the gate reads to check it: the most the APIs take.
+const MAX_JSON: usize = 32 << 20;
 
 /// Run the guards that apply to a request, and hand back the body to forward: what a guard
 /// read of it, then the rest.
@@ -28,6 +31,14 @@ pub async fn check(
 ) -> Result<Body, String> {
     if method != "POST" {
         return Ok(body);
+    }
+    let denies: Vec<&BodyDeny> = policy
+        .body_denies
+        .iter()
+        .filter(|d| d.applies(host, path))
+        .collect();
+    if !denies.is_empty() {
+        return check_json(&denies, headers, body).await;
     }
     // Git hosts route paths without regard to case, as their rules match them.
     if path.to_ascii_lowercase().ends_with("/git-receive-pack") {
@@ -63,6 +74,29 @@ pub async fn check(
         return Ok(full(bytes));
     }
     Ok(body)
+}
+
+/// A model API request whose body may ask the provider to reach the network: read whole
+/// (a body the check can't read is refused) and forwarded unless it asks.
+async fn check_json(denies: &[&BodyDeny], headers: &HeaderMap, body: Body) -> Result<Body, String> {
+    if headers
+        .get(CONTENT_ENCODING)
+        .is_some_and(|v| !v.as_bytes().eq_ignore_ascii_case(b"identity"))
+    {
+        return Err("a compressed request body to this API can't be checked".into());
+    }
+    let bytes = collect_limited(body, MAX_JSON).await.map_err(|_| {
+        format!(
+            "a request body over {} MiB to this API can't be checked",
+            MAX_JSON >> 20
+        )
+    })?;
+    let json = JsonBody::parse(&bytes)
+        .ok_or("the request body is not a JSON object the gate can check (each key once)")?;
+    if let Some(d) = denies.iter().find(|d| d.asks(&json)) {
+        return Err(d.reason.clone());
+    }
+    Ok(full(bytes))
 }
 
 /// A push to a guarded git host: only to the env's granted repositories, uncompressed, and

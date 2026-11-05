@@ -14,8 +14,9 @@ sockets, then drops to uid 65534 (`system.rs`).
   (`host::canonical_path`: dot and empty segments and backslashes refused, unreserved escapes
   decoded), matched and forwarded alike; upper-case methods only (`canonical_request`, which
   `/_sandbox/check` shares) → Host agreement → policy → `guards.rs`: push guard for GitHub
-  and Azure DevOps (granted repos, protected branches, tags, no deletes) and GitHub GraphQL
-  mutations, matched without case like the rules → credential strip/inject over TLS only
+  and Azure DevOps (granted repos, protected branches, tags, no deletes), GitHub GraphQL
+  mutations, matched without case like the rules, and model API bodies asking for server
+  tools (`body_denies`, read whole up to 32 MiB) → credential strip/inject over TLS only
   (`creds.rs`, vault client) → `upstream.rs` (resolve, vet every address, dial) → metered
   response + event. `body.rs` holds the body types (capped, metered, replayed prefix).
 - `ctl.rs` unix socket; `state.rs` persists policy/CA/vault settings in the state volume so a

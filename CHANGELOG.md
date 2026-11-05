@@ -15,6 +15,10 @@ beside a release.
 - **Self-test:** runs whenever `up` restarts a container, agent installs and project accepts
   included, unless `--no-selftest`.
 - **Vault:** refuses an ssh-agent binding before reading its key.
+- **Model API server tools:** the gate refuses requests asking Anthropic, OpenAI or Gemini to
+  fetch a URL or call an MCP server for the sandbox (web fetch, the MCP connector, URL
+  context, remote MCP), and OpenAI's WebSocket API, unless `server_tools = true` under
+  `[credentials.<provider>]`.
 
 ### Changes
 
@@ -33,6 +37,8 @@ beside a release.
 - **`sandbox check`** normalizes a request as the gate does (upper-case method).
 - **UI:** the overview says when the VM is stopped, rebuild starts it first, and the header
   names the instance.
+- **Config format:** config files may carry `version` (1 when missing); luoto refuses a file
+  from a newer luoto.
 - **luoto.toml:** agents it lists stay out of your env file. One declined under 0.1.0 is
   offered once more.
 

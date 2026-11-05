@@ -39,12 +39,19 @@ sign-in hosts for it; luoto warns about it at `up`. It is also the default when 
 credential (no terminal, "later", or a new env from the UI), so an agent you add can work at
 once; replacing it with a credential kind moves the credential outside.
 
+Server tools have the provider reach the network for a request: fetch a URL, call an MCP
+server. Code in the sandbox could use them to send data anywhere, so the gate reads requests
+to the endpoints that take them and refuses one that asks for them, along with the
+provider's WebSocket API, whose messages it can't read. The agents luoto sets up fetch and run
+MCP servers on their own side, through the gate. `server_tools = true` under
+`[credentials.<provider>]` allows them.
+
 | provider | hosts the credential goes to | kinds | where to get one | kept out of reach |
 | --- | --- | --- | --- | --- |
-| `anthropic` | `api.anthropic.com` | `oauth_token`, `api_key`, login inside | `claude setup-token` on your machine (Claude plan); console.anthropic.com (API billing) | files, message batches, organization admin, skills |
-| `openai` | `api.openai.com` (also over WebSocket) | `api_key`, login inside | platform.openai.com/api-keys; a ChatGPT plan only through login inside | files, uploads, batches, organization, fine-tuning, vector stores |
+| `anthropic` | `api.anthropic.com` | `oauth_token`, `api_key`, login inside | `claude setup-token` on your machine (Claude plan); console.anthropic.com (API billing) | files, message batches, organization admin, skills; server tools: web fetch, the MCP connector |
+| `openai` | `api.openai.com` (over WebSocket only with server tools) | `api_key`, login inside | platform.openai.com/api-keys; a ChatGPT plan only through login inside | files, uploads, batches, organization, fine-tuning, vector stores; server tools: remote MCP servers |
 | `openrouter` | `openrouter.ai` `/api/**` | `api_key` | openrouter.ai/keys | |
-| `gemini` | `generativelanguage.googleapis.com` | `api_key` | aistudio.google.com/apikey | uploads, files, cached contents, batches |
+| `gemini` | `generativelanguage.googleapis.com` | `api_key` | aistudio.google.com/apikey | uploads, files, cached contents, batches; server tools: URL context, remote MCP servers |
 | `mistral` | `api.mistral.ai` | `api_key` | console.mistral.ai/api-keys | |
 | `groq` | `api.groq.com` | `api_key` | console.groq.com/keys | |
 | `copilot` | `api.githubcopilot.com` and its `individual`, `business`, `enterprise` hosts; `api.github.com` `/copilot_internal/**`, `/user` | `token` | github.com/settings/personal-access-tokens (fine-grained, Copilot Requests) | |
@@ -88,8 +95,9 @@ use prompts to improve its products, until its Google Cloud project has billing.
 - Installs from npm (`@openai/codex`); mise brings Node LTS for it.
 - `openai` `api_key`, or `login_inside = true` to sign in with ChatGPT (opens
   `auth.openai.com` and `chatgpt.com`).
-- Streams over `wss://api.openai.com/v1/responses` before falling back to HTTPS; the provider
-  allows the WebSocket upgrade.
+- Streams over `wss://api.openai.com/v1/responses` before falling back to HTTPS. The gate
+  refuses the WebSocket upgrade unless `server_tools = true`; that Codex then falls back is
+  unverified.
 
 ## GitHub Copilot CLI
 

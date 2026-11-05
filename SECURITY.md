@@ -92,7 +92,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   turns every host into such a channel; luoto asks for confirmation and offers time limits.
 - **Model APIs.** Prompts to an allowed model API can carry data, and the API key can be
   spent by anything in the sandbox. Anthropic's, OpenAI's and Gemini's file and batch
-  endpoints are denied; the other providers' are not.
+  endpoints are denied, and so are requests asking them to fetch a URL or call an MCP server
+  (unless `server_tools = true`); the other providers' are not.
 - **Container or VM escape.** An exploit that escapes gVisor (or a plain container) lands in
   luoto's VM as the env's own unprivileged IDs; one more kernel exploit there reaches the other
   envs and the vault, which share the VM. On Linux there is no VM: gVisor is the boundary to
