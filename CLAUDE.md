@@ -58,6 +58,13 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   exact text the user accepted (kept in the env's state); changes need a fresh accept. Never
   let it carry secret refs or skip `RuleOrigin::Sandbox` validation, and print its strings
   through `text::display`.
+- Config files carry their format (`version`, 1 when missing); `format.rs` upgrades every
+  file in memory before it is parsed, and saving an env file writes the current format,
+  keeping the old file beside it. A config change that would break an existing file is a
+  step in `MIGRATIONS` instead: its notes name each key it drops or renames, and a test loads
+  a file in the old format. With the first step, `luoto doctor` reports files in an older
+  format and `--fix` rewrites them (a copy kept); a `luoto.toml` is only shown as a diff for
+  the team to commit. Unknown keys stay errors.
 - `personal.rs` data only flows host → sandbox, on every `up`.
 - `ssh.rs` owns `<config>/ssh_config`; never edit the user's `~/.ssh/config`.
 - Secret values never touch disk or argv: host resolves refs and pipes them over `exec -i`

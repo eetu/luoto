@@ -190,7 +190,9 @@ verification status of each agent. `luoto agent list` shows agents and providers
 
 `~/.config/luoto/envs/<name>.toml` (on Windows, `~/.config/luoto` is `%APPDATA%\luoto\config`
 throughout). `luoto edit -e <name>` opens it in `$EDITOR` and applies it when you save; edited
-any other way, it applies at the next `luoto up`. The UI adds and removes rules.
+any other way, it applies at the next `luoto up`. The UI adds and removes rules. `version` in
+a config file is its format (1 when missing): luoto reads older formats and refuses a file
+from a newer luoto.
 
 ```toml
 presets = ["debian", "github", "toolchains", "npm"]   # see shared/presets/

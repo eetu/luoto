@@ -15,6 +15,9 @@ use crate::paths::Paths;
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GlobalConfig {
+    /// The config format (`format.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
     /// `podman` or `docker` (or a path to either).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
@@ -240,6 +243,9 @@ pub enum ProviderValue {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EnvConfig {
+    /// The config format (`format.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     /// Login shell for this env; overrides `shell` in config.toml.
@@ -339,7 +345,8 @@ pub fn validate_name(name: &str) -> Result<()> {
 pub fn load_global(paths: &Paths) -> Result<GlobalConfig> {
     let p = paths.global_config();
     match std::fs::read_to_string(&p) {
-        Ok(s) => toml::from_str(&s).with_context(|| format!("parse {}", p.display())),
+        Ok(s) => toml::from_str(&crate::format::upgrade(&p, &s)?.text)
+            .with_context(|| format!("parse {}", p.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(GlobalConfig::default()),
         Err(e) => Err(e).with_context(|| format!("read {}", p.display())),
     }
@@ -348,7 +355,11 @@ pub fn load_global(paths: &Paths) -> Result<GlobalConfig> {
 pub fn save_global(paths: &Paths, cfg: &GlobalConfig) -> Result<()> {
     let p = paths.global_config();
     std::fs::create_dir_all(p.parent().unwrap_or(Path::new(".")))?;
-    std::fs::write(&p, toml::to_string_pretty(cfg)?)
+    let cfg = GlobalConfig {
+        version: Some(crate::format::CURRENT),
+        ..cfg.clone()
+    };
+    std::fs::write(&p, toml::to_string_pretty(&cfg)?)
         .with_context(|| format!("write {}", p.display()))
 }
 
@@ -374,6 +385,8 @@ pub struct EnvFile {
     pub path: PathBuf,
     pub doc: DocumentMut,
     pub cfg: EnvConfig,
+    /// The format the file is in on disk; `save` keeps a copy of an older one.
+    from: u32,
 }
 
 impl EnvFile {
@@ -386,12 +399,19 @@ impl EnvFile {
     }
 
     pub fn parse(path: PathBuf, text: &str) -> Result<Self> {
+        let up = crate::format::upgrade(&path, text)?;
         let cfg: EnvConfig =
-            toml::from_str(text).with_context(|| format!("parse {}", path.display()))?;
-        let doc: DocumentMut = text
+            toml::from_str(&up.text).with_context(|| format!("parse {}", path.display()))?;
+        let doc: DocumentMut = up
+            .text
             .parse()
             .with_context(|| format!("parse {}", path.display()))?;
-        Ok(EnvFile { path, doc, cfg })
+        Ok(EnvFile {
+            path,
+            doc,
+            cfg,
+            from: up.from,
+        })
     }
 
     pub fn create(paths: &Paths, name: &str, cfg: &EnvConfig) -> Result<Self> {
@@ -405,7 +425,11 @@ impl EnvFile {
              # Reference: presets {:?}\n\n",
             luoto_shared::presets::names().collect::<Vec<_>>()
         );
-        let text = format!("{header}{}", toml::to_string_pretty(cfg)?);
+        let cfg = EnvConfig {
+            version: Some(crate::format::CURRENT),
+            ..cfg.clone()
+        };
+        let text = format!("{header}{}", toml::to_string_pretty(&cfg)?);
         std::fs::create_dir_all(paths.envs_dir())?;
         std::fs::write(&path, &text)?;
         Self::parse(path, &text)
@@ -415,6 +439,19 @@ impl EnvFile {
         let text = self.doc.to_string();
         // Re-validate what we are about to write.
         self.cfg = toml::from_str(&text).context("edited env config no longer parses")?;
+        // Writing upgrades the file to the current format; the old one stays beside it.
+        if self.from < crate::format::CURRENT {
+            let old = self.path.with_extension(format!("toml.v{}", self.from));
+            std::fs::copy(&self.path, &old)
+                .with_context(|| format!("keep {} as {}", self.path.display(), old.display()))?;
+            eprintln!(
+                "{} is now config format {}; the old one is {}",
+                self.path.display(),
+                crate::format::CURRENT,
+                old.display()
+            );
+            self.from = crate::format::CURRENT;
+        }
         std::fs::write(&self.path, text).with_context(|| format!("write {}", self.path.display()))
     }
 
@@ -597,6 +634,19 @@ permissions = { contents = "write" }
 [credentials.anthropic]
 oauth_token = "op://Private/claude/token"
 "#;
+
+    #[test]
+    fn env_files_carry_their_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config: dir.path().join("config"),
+            data: dir.path().join("data"),
+        };
+        let f = EnvFile::create(&paths, "web", &EnvConfig::default()).unwrap();
+        assert_eq!(f.cfg.version, Some(crate::format::CURRENT));
+        let newer = format!("version = {}\n", crate::format::CURRENT + 1);
+        assert!(EnvFile::parse(f.path.clone(), &newer).is_err());
+    }
 
     #[test]
     fn parses_and_edits_preserving_comments() {

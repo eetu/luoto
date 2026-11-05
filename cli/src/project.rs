@@ -61,7 +61,10 @@ pub struct Needs {
 }
 
 pub fn parse(text: &str) -> Result<ProjectConfig> {
-    let table: toml::Table = text.parse().context("luoto.toml is not valid TOML")?;
+    let up = crate::format::upgrade(std::path::Path::new(FILE), text)
+        .context("luoto.toml is not valid TOML")?;
+    let mut table: toml::Table = up.text.parse().context("luoto.toml is not valid TOML")?;
+    table.remove("version");
     for k in ["credentials", "sandbox_secrets"] {
         if table.contains_key(k) {
             bail!(
@@ -620,6 +623,12 @@ mod tests {
         assert!(parse("presets = [\"nope\"]").is_err());
         assert!(parse("image = \"x; rm\"").is_err());
         assert!(parse("[needs]\ngithub = [\"no-slash\"]").is_err());
+    }
+
+    #[test]
+    fn the_format_is_not_project_content() {
+        assert_eq!(parse("version = 1\n").unwrap(), ProjectConfig::default());
+        assert!(parse("version = 99\n").is_err());
     }
 
     #[test]

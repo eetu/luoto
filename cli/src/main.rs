@@ -14,6 +14,7 @@ mod deps;
 mod detect;
 mod env;
 mod events;
+mod format;
 mod idle;
 mod init;
 mod machine;
