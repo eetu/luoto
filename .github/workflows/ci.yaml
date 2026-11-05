@@ -1,10 +1,14 @@
 name: CI
 
+# main changes only through squash-merged pull requests that are up to date with it, so a pull
+# request's run has checked main's next tree. The weekly run checks everything on main, keeps
+# the caches every pull request reads from main alive, and catches toolchain drift.
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,8 +19,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Which areas a push or pull request touches; each job below runs only for its own.
-  # Docs (README, docs/, other markdown), LICENSE and packaging/ run nothing but ci-gate.
+  # Which areas a pull request touches; each job below runs only for its own. Docs (README,
+  # docs/, other markdown), LICENSE and packaging/ run nothing but ci-gate. A scheduled or
+  # manual run runs every job.
   changes:
     name: Changes
     runs-on: ubuntu-latest
@@ -24,14 +29,15 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      frontend: ${{ steps.filter.outputs.frontend }}
-      rust: ${{ steps.filter.outputs.rust }}
-      integration: ${{ steps.filter.outputs.integration }}
-      e2e: ${{ steps.filter.outputs.e2e }}
+      frontend: ${{ github.event_name != 'pull_request' || steps.filter.outputs.frontend }}
+      rust: ${{ github.event_name != 'pull_request' || steps.filter.outputs.rust }}
+      integration: ${{ github.event_name != 'pull_request' || steps.filter.outputs.integration }}
+      e2e: ${{ github.event_name != 'pull_request' || steps.filter.outputs.e2e }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
+        if: github.event_name == 'pull_request'
         with:
           filters: |
             workflow: &workflow
@@ -251,8 +257,8 @@ jobs:
         if: failure()
         run: |
           rt=${{ matrix.runtime }}
-          $rt exec luoto-ci-gate sh -c 'cat /etc/resolv.conf; ip addr; ip route; ip -6 route; nslookup registry.npmjs.org' || true
-          $rt network inspect luoto-ci-out || true
+          $rt exec luoto-dev-ci-gate sh -c 'cat /etc/resolv.conf; ip addr; ip route; ip -6 route; nslookup registry.npmjs.org' || true
+          $rt network inspect luoto-dev-ci-out || true
           $rt info 2>/dev/null | grep -i -E 'networkbackend|pasta|slirp|rootless' || true
 
   # The one check to require: skipped jobs never report, and a skipped required check would

@@ -4,7 +4,8 @@ Dev sandboxes that contain supply-chain attacks: tools run in a container whose 
 a per-env policy gate; a per-VM vault holds secrets outside the sandbox. CLI + local web UI.
 User-facing docs: README.md. Threat model: SECURITY.md. A user-visible change gets an entry in
 CHANGELOG.md's top section (the release notes); ROADMAP.md holds only what isn't done.
-Releases are squash-merged from a branch named for the version (`packaging/README.md`).
+main is protected: it changes only by squash-merged pull request, from a branch named for the
+release (`packaging/README.md`). CI runs on pull requests (path-filtered) and weekly on main.
 
 ## Layout
 
