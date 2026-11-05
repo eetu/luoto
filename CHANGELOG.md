@@ -1,9 +1,9 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-11-05)
 
-Fixes from a security review, agents that work without a credential, and a dev build that runs
-beside a release.
+Fixes from a security review, model APIs kept from fetching for the sandbox, agents that work
+without a credential, and a dev build that runs beside a release.
 
 ### Security
 
