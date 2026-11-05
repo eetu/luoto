@@ -1,6 +1,6 @@
-# Packaging
+# Packaging (maintainers)
 
-Release assets come from `.github/workflows/release.yaml`; `render.sh` turns
+Maintainer-only. Release assets come from `.github/workflows/release.yaml`; `render.sh` turns
 `homebrew/luoto.rb.tmpl` and `scoop/luoto.json.tmpl` into the formula and manifest.
 
 ## One-time setup
@@ -12,7 +12,7 @@ Release assets come from `.github/workflows/release.yaml`; `render.sh` turns
    **Contents: read and write** (nothing else). Store it in the luoto repo as secret `TAP_TOKEN`.
 3. To enable the publish job, set the luoto repo variable `PUBLISH_PACKAGES` to `true`.
 4. Images publish to `ghcr.io/eetu/luoto-*`. After the first push, set each package's
-   visibility to public (GitHub: Packages > package settings) so friends can pull anonymously.
+   visibility to public (GitHub: Packages > package settings) so users can pull anonymously.
 
 ## Cutting a release
 
@@ -42,37 +42,11 @@ Inspect `out/luoto.rb` and `out/luoto.json`, copy them to `Formula/luoto.rb` in 
 `bucket/luoto.json` in the bucket, and push. Try `brew install --formula ./out/luoto.rb`
 before pushing.
 
-## Installing (friends)
+## Installing
 
-luoto needs podman or Docker. Run `luoto setup` after installing.
-
-**macOS**
-
-```sh
-brew tap eetu/luoto
-brew trust eetu/luoto   # Homebrew loads a third-party tap only once you trust it
-brew install luoto
-brew install podman   # or use Docker
-```
-
-**Linux**: Homebrew on Linux (same commands as macOS), or the tarball:
-
-```sh
-V=0.1.0 T=x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu
-B=https://github.com/eetu/luoto/releases/download/v$V
-curl -LO $B/luoto-$V-$T.tar.gz && curl -LO $B/SHA256SUMS
-sha256sum -c --ignore-missing SHA256SUMS
-tar xzf luoto-$V-$T.tar.gz && install luoto-$V-$T/luoto ~/.local/bin/
-```
-
-**Windows** (not yet verified end to end)
-
-```powershell
-scoop bucket add luoto https://github.com/eetu/scoop-luoto
-scoop install luoto
-```
+Users follow [Install](../README.md#install) in the README.
 
 ## Private repos
 
 The repos are public. If they ever go private, Homebrew downloads of release assets need a
-token, which is impractical for friends; keep the release repo public.
+token, which is impractical for users; keep the release repo public.

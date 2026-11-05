@@ -1,8 +1,7 @@
 # Security model
 
-luoto contains the dev tooling on a machine — dependencies, editor extensions, coding agents —
-so a compromised one cannot read the developer's files, steal their secrets, or send data
-anywhere the developer did not allow.
+luoto keeps dependencies, editor extensions and coding agents from reading your files, stealing
+your secrets or sending data anywhere you did not allow.
 
 ## Trust boundaries
 
@@ -26,10 +25,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   with fake addresses and never forwarded. Destinations are resolved by the gate only after a
   request is allowed, every resolved address is checked against private, loopback,
   link-local, CGNAT and host-gateway ranges (including IPv4 inside IPv6), and the gate
-  connects to exactly the vetted address. Host, SNI and CONNECT authority must agree. A path
-  is matched and forwarded in one canonical form: dot segments, empty segments and backslashes
-  are refused in any spelling, so a rule's path or a provider's denied endpoint can't be
-  reached by a path the server resolves differently.
+  connects to exactly the vetted address. Host, SNI and CONNECT authority must agree.
+- **Path matching.** A path is matched and forwarded in one canonical form; dot segments, empty
+  segments and backslashes are refused.
 - **Secrets.** Root secrets live only in the vault's memory, loaded from the host's secret
   store at unlock and wiped by `luoto vault lock` or a VM restart. Each gate authenticates to the
   vault with its own token and receives only its env's bindings, as short-lived values
@@ -43,8 +41,6 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   settings endpoints can't route around the push guard; GraphQL mutations outside an
   allowlist are refused. Workflows/Actions/Secrets/Administration permissions are refused at
   configuration time. Configure branch rulesets on GitHub as well; the gate is a guard-rail.
-  At GitHub, a fine-grained token can be limited to the env's repositories (a classic token
-  reaches all of yours); a GitHub App's tokens are minted per env and short-lived.
 - **Azure DevOps writes.** The PAT goes only on the granted repositories' git paths, and pushes
   pass the same guard as on GitHub. A PAT reaches its whole organization, so the gate's paths
   are the only repository boundary; its REST API is not reachable. Configure branch policies
@@ -66,7 +62,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   Windows; on Linux once `runsc` is installed): the sandbox's system calls reach gVisor's
   user-space kernel, not the VM's or the host's. In luoto's VM each env's dev container has its
   own user ID range, and none maps to the VM user that owns podman (and so the vault and the
-  other envs). `isolation = "container"` opts an env out of gVisor. With Docker, dev
+  other envs). `isolation = "container"` opts an env out of gVisor, leaving the VM's kernel as
+  the boundary. With Docker, dev
   containers are plain containers, in Docker's VM on macOS and Windows (which shares your
   folders) and on the host on Linux.
 - **Control plane.** Policy, CA and credentials reach the gate and vault through the
@@ -77,8 +74,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   exact version the user accepted, never carries credentials or secret refs, and its rules
   pass the sandbox's own request checks. luoto reads it as the unprivileged user, refuses
   symlinks and caps its size.
-- **Self-test.** `luoto up` verifies from inside that raw-IP TCP, UDP and DNS cannot leave
-  before any secret, dotfile or SSH key enters the env; an env that fails is stopped.
+- **Self-test.** `luoto up` verifies from inside, whenever a container restarts (skip with
+  `--no-selftest`), that raw-IP TCP, UDP and DNS cannot leave before any secret, dotfile or SSH
+  key enters the env; an env that fails is stopped.
   `luoto doctor` also checks that host services are unreachable. The test runs inside the
   container it checks, so it confirms the configuration rather than proving isolation.
 - **Sandbox output.** Values read back from the sandbox are checked against a strict format
@@ -97,10 +95,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   endpoints are denied; the other providers' are not.
 - **Container or VM escape.** An exploit that escapes gVisor (or a plain container) lands in
   luoto's VM as the env's own unprivileged IDs; one more kernel exploit there reaches the other
-  envs and the vault, which share the VM. Podman on macOS runs one VM at a time, so envs can't
-  have a VM each yet. On Linux there is no VM: gVisor is the boundary to the host, so install
-  `runsc`. With Docker, an escape lands in Docker's VM, which shares your folders (on Linux,
-  on the host).
+  envs and the vault, which share the VM. On Linux there is no VM: gVisor is the boundary to
+  the host, so install `runsc`. With Docker, an escape lands in Docker's VM, which shares your
+  folders (on Linux, on the host).
 - **Forwarded ports.** A server in the sandbox on ports 1024–32767 is reachable at localhost
   on your machine while it listens. Code in the sandbox can hold a port a host tool expects
   first (a local OAuth callback, say), and the tool's browser redirect then reaches the
@@ -119,7 +116,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   host, or one the same pull writes) that points elsewhere.
 - **Social engineering.** Access requests are written by code in the sandbox. Read the host
   and access, not the reason.
-- **Images.** Images are built or pulled outside the sandbox; pin by digest.
+- **Images.** Release images are pinned by digest in the binary; images from
+  `luoto setup --build` are as trustworthy as your source tree.
 - **Install windows.** The project's version files, which the sandbox controls, decide which
   toolchains `luoto up` installs, and so which presets it grants for the install (only from
   luoto's own preset data; other hosts need your yes). While a grant is open, any code in the

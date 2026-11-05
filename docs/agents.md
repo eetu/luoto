@@ -5,6 +5,9 @@ takes and where to get one, which hosts it reaches, what it is denied on purpose
 still unverified. The profiles themselves are TOML files in
 [`shared/agents`](../shared/agents) and [`shared/providers`](../shared/providers).
 
+Status: run with a real account for Claude Code and Antigravity CLI; installed only for
+OpenCode and Codex; untested for Copilot CLI ([ROADMAP.md](../ROADMAP.md)).
+
 ## How an agent is set up
 
 `luoto agent add <agent>` (or the first `luoto agent run <agent>`) installs the agent inside
@@ -50,8 +53,6 @@ use prompts to improve its products, until its Google Cloud project has billing.
 
 ## Claude Code
 
-`claude`, run with a real account for 0.1.0.
-
 - Installs with Anthropic's installer (`claude.ai`, `downloads.claude.ai`,
   `storage.googleapis.com`). Runs with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and
   `DISABLE_AUTOUPDATER=1`.
@@ -74,8 +75,6 @@ use prompts to improve its products, until its Google Cloud project has billing.
 
 ## OpenCode
 
-`opencode`, installed but not run with a real account for 0.1.0.
-
 - Installs with OpenCode's installer from its GitHub releases, and runs with auto-update and
   session sharing off (`OPENCODE_DISABLE_AUTOUPDATE`, `OPENCODE_DISABLE_SHARE`).
 - Takes any of `anthropic`, `openai`, `openrouter` or `gemini`.
@@ -83,8 +82,6 @@ use prompts to improve its products, until its Google Cloud project has billing.
 - `--yolo` passes nothing: its profile has no `yolo` flags.
 
 ## Codex
-
-`codex`, installed but not run with a real account for 0.1.0.
 
 - Installs from npm (`@openai/codex`); mise brings Node LTS for it.
 - `openai` `api_key`, or `login_inside = true` to sign in with ChatGPT (opens
@@ -94,8 +91,6 @@ use prompts to improve its products, until its Google Cloud project has billing.
 
 ## GitHub Copilot CLI
 
-`copilot`, untested: no run with a Copilot licence yet.
-
 - Installs from npm (`@github/copilot`) and runs with `COPILOT_AUTO_UPDATE=false`.
 - Takes a fine-grained personal access token with the Copilot Requests account permission
   and no repository access. Its placeholder is `COPILOT_GITHUB_TOKEN`, which the CLI reads
@@ -103,13 +98,10 @@ use prompts to improve its products, until its Google Cloud project has billing.
 - The gate adds the token on the Copilot API hosts and on GitHub's `/copilot_internal/**` and
   `/user`, apart from a GitHub credential's repository paths.
 - The briefing goes to `~/.copilot/instructions/luoto.instructions.md`, without `applyTo`
-  frontmatter; whether Copilot loads it is part of what a first run settles.
-- Trying it: `luoto agent run copilot`, then `luoto egress --denied --since 15m`. Hosts or
-  paths it needs and doesn't get show there; telemetry hosts are left denied.
+  frontmatter. Unverified: whether Copilot loads it, and which hosts and paths it needs
+  ([ROADMAP.md](../ROADMAP.md)); telemetry hosts are left denied.
 
 ## Antigravity CLI
-
-`agy`, run with a Google AI Pro account for 0.1.0.
 
 - Installs with Google's installer: `antigravity.google` for the script, a Cloud Run updater
   (`antigravity-cli-auto-updater-974169037036.us-central1.run.app`) for the manifest, and
@@ -134,9 +126,6 @@ use prompts to improve its products, until its Google Cloud project has billing.
   | `lh3.googleusercontent.com` | your profile picture | it also serves files people upload to Google Photos, Blogger and Sites: a download route for anything |
   | `www.gstatic.com` | static images and fonts | nothing a terminal needs |
   | the updater manifest | an update check it makes even with auto-update off | the binary stays the version luoto installed |
-
-- With an API key instead of a sign-in (the `gemini` provider and `modelProvider: "gemini"`
-  in its settings) is on the [roadmap](../ROADMAP.md).
 
 ## Not built in
 

@@ -1,7 +1,6 @@
 # Roadmap
 
-What is deliberately not in 0.1.0, roughly in order. luoto is a hobby project; this is intent,
-not a schedule.
+Not in 0.1.0, roughly in order; intent, not a schedule.
 
 ## Security
 
@@ -15,33 +14,37 @@ not a schedule.
   only during installs or limit it to the project's modules.
 - **Install windows bound to the installer.** A per-run proxy credential for installs, so other
   processes can't use the window or get their denied hosts offered for saving.
-- **Defaults for GitHub release downloads** (`toolchains`, `github` presets): public download
-  counters are a slow covert channel; consider install-only grants and narrower paths.
+- **Container hardening:** drop capabilities, `nosuid,nodev` mounts, user namespaces on Docker;
+  tunnel rules check the SNI inside the tunnel; strip client credentials on every host.
 - **A VM per env on macOS:** a runtime driver for Apple's `container` (a lightweight VM per
   container, any number at once). Re-verify first that its host-only networks can't be bypassed
   with raw-IP TCP.
-- **Container hardening:** drop capabilities, `nosuid,nodev` mounts, user namespaces on Docker;
-  tunnel rules check the SNI inside the tunnel; strip client credentials on every host.
+- **Defaults for GitHub release downloads** (`toolchains`, `github` presets): public download
+  counters are a slow covert channel; consider install-only grants and narrower paths.
 
 ## Workflow
 
 - **Git-based work transfer:** seed the workspace from a git bundle (CRLF and exec bits on
   Windows), `luoto fetch` the env's commits into `refs/remotes/luoto/<env>`, apply `pull`
   through git.
-- **Commands left out of 0.1.0:** `fork` (copy an env), `push` (a reviewed copy-in),
-  `reset-home`, `agent rm`.
 - **A folder shared live** (Linux, or a runtime whose VM shares folders), for host tools that
   need the files as they change. The sandbox can then write where host tools act on their own
   (`.git/config` and hooks, `.envrc`, editor and pre-commit configs), so it comes with an
   audit of those files.
 - **An env from a repository** (`luoto init --clone owner/repo`): cloned through the gate into
   the workspace, then detected inside the env.
+- **Commands left out of 0.1.0:** `fork` (copy an env), `push` (a reviewed copy-in),
+  `reset-home`, `agent rm`.
 - **Notifications** for access requests (UI and OS), `luoto requests --watch`; `sandbox request`
   for presets, packages and ports; `approve` that narrows a request.
-- **Azure DevOps beyond git:** pull requests through its REST API (`az repos pr`), with writes
-  allowlisted as for GitHub, and Git LFS objects, which it serves from blob storage.
 - **Editing envs in the UI:** presets, tools, `[deps]`, agents, ports and credentials (0.1.0
   shows them; changes go through `luoto edit`).
+- **Azure DevOps beyond git:** pull requests through its REST API (`az repos pr`), with writes
+  allowlisted as for GitHub, and Git LFS objects, which it serves from blob storage.
+- **Agent credentials on the command line:** `luoto agent add claude --credential
+  oauth_token=op://Private/claude/token` (and `init --agent … --credential …`) writes or
+  replaces `[credentials.<provider>]` without the prompt, for scripts and for pointing an env
+  at another secret later.
 
 ## Git over SSH
 
@@ -54,36 +57,27 @@ port 22. Left for later:
 - **SSH remotes of other forges (GitLab, Bitbucket) rewritten to HTTPS**, each with its own
   credential kind, where repo scoping and the push guard matter more than the key.
 - **An SSH proxy in the gate**, if repo scoping and the push guard over SSH prove necessary:
-  the gate ends the connection (its own host key in the env's `known_hosts`), checks the
-  forge's pinned key, logs in with the vault's key and allows only `git-upload-pack`,
-  `git-receive-pack` and `git-lfs-authenticate` on configured repos, with the push guard
-  reading `receive-pack` inside the session. No shell, pty, forwarding or subsystems.
+  the gate ends the session, logs in with the vault's key and allows only `git-upload-pack`,
+  `git-receive-pack` and `git-lfs-authenticate` on configured repos.
 
 ## Toolchains and agents
 
-- **Ecosystems verified beyond 0.1.0's set.** mise installs them from their version files and
-  presets exist for Maven, Gradle, RubyGems and Composer, but none has been run end to end:
-  Java builds (Maven, Gradle), Ruby (Bundler), PHP (Composer), bun, deno, pipenv, pdm, hatch,
-  conda, .NET. Each gets an end-to-end run, and detection where a file names its tool
-  (`bun.lock`, `deno.json`, `Pipfile`, `pdm.lock`, `.sdkmanrc`).
-- **A toolchain matrix in CI.** 0.1.0's toolchains were run by hand; a job per toolchain, from
-  `luoto init` to a build or test run in the env, keeps them working.
+- **More ecosystems verified.** mise installs them from their version files and presets exist
+  for Maven, Gradle, RubyGems and Composer, but none has been run end to end: Java builds
+  (Maven, Gradle), Ruby (Bundler), PHP (Composer), bun, deno, pipenv, pdm, hatch, conda, .NET.
+  Each gets an end-to-end run, and detection where a file names its tool (`bun.lock`,
+  `deno.json`, `Pipfile`, `pdm.lock`, `.sdkmanrc`).
+- **A toolchain matrix in CI.** The verified toolchains were run by hand; a job per toolchain,
+  from `luoto init` to a build or test run in the env, keeps them working.
 - **Runtimes a dependency needs.** A pyspark project needs Java and often says so only in its
   README. Suggest the runtime from known dependencies (pyspark → Java) at `init`.
-- **GitHub Copilot CLI, verified.** 0.1.0 ships it untested: the token goes to the
+- **GitHub Copilot CLI, verified.** It ships untested: the token goes to the
   `api.*.githubcopilot.com` hosts and GitHub's `/copilot_internal/**` and `/user`. A licence
   holder's run settles the hosts and paths it really needs, whether its briefing file loads
   without `applyTo` frontmatter, and its telemetry hosts (left denied).
 - **Antigravity CLI with a Gemini API key** the gate holds: the `gemini` provider plus
   `modelProvider: "gemini"` in `~/.gemini/config/settings.json`, with no Google session in
   the env.
-- **Agent credentials on the command line:** `luoto agent add claude --credential
-  oauth_token=op://Private/claude/token` (and `init --agent … --credential …`) writes or
-  replaces `[credentials.<provider>]` without the prompt, for scripts and for pointing an env
-  at another secret later. On a terminal the prompt writes the same section, and `agent add`
-  adds the agent to `agents`.
-- **A Python default that follows wheels.** Unpinned projects get Python 3.14, moved up by
-  hand once the newest minor's wheels have caught up.
 
 ## Configuration (lands with versioned configs)
 
@@ -95,9 +89,9 @@ port 22. Left for later:
 
 ## Internals
 
+- Windows: verified end to end, or documented as WSL2-only.
 - One core layer for the CLI and UI (prompts and progress through an interface the UI streams).
 - `sandbox provision`: one call into the env instead of ~45 runtime invocations per `up`.
 - Gate limits: connection cap, bounded event queue, log rotation, certificate expiry, response
   timeouts.
 - Generated frontend types; tests for the UI guard, the gate's CONNECT/TLS paths and the vault.
-- Windows: verified end to end, or documented as WSL2-only.
