@@ -285,11 +285,12 @@ jobs:
           if-no-files-found: error
 
   # Disabled unless the repository variable PUBLISH_PACKAGES is "true", so a first
-  # manual release can skip it. Needs the TAP_TOKEN secret (see packaging/README.md).
+  # manual release can skip it. Needs the TAP_TOKEN secret (see packaging/README.md). A
+  # prerelease (a tag with a `-` suffix) stays off the tap and bucket.
   publish:
     name: Publish Homebrew and Scoop
     needs: [ui, release]
-    if: vars.PUBLISH_PACKAGES == 'true'
+    if: vars.PUBLISH_PACKAGES == 'true' && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

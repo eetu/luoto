@@ -22,7 +22,7 @@ Maintainer-only. Release assets come from `.github/workflows/release.yaml`; `ren
    After the merge, `git tag vX.Y.Z` on main and `git push --tags`. The first job fails if the
    tag and `Cargo.toml` disagree or `CHANGELOG.md` has no section for the version; that
    section becomes the release notes. A tag with a `-` suffix (`v0.2.0-beta.1`) becomes a
-   GitHub prerelease, with its base version's notes.
+   GitHub prerelease, with its base version's notes, and isn't published to the tap or bucket.
 2. The workflow builds the UI, five binaries, four multi-arch images (native arm64 runner),
    and creates the release with archives, `SHA256SUMS` and `images.json`.
 3. Check:
