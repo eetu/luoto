@@ -38,13 +38,13 @@ the attempt with a scoped allow next to it:
 
 ## Install
 
-| platform                                     | install                                                                                                                             |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| macOS, Linux                                 | `curl -fsSL https://raw.githubusercontent.com/eetu/luoto/main/install.sh \| sh`                                                     |
-| macOS, Linux (Homebrew)                      | `brew tap eetu/luoto`, `brew trust eetu/luoto`, then `brew install luoto` (Homebrew loads a third-party tap only once you trust it) |
-| Linux, no script                             | a `.tar.gz` from [Releases](https://github.com/eetu/luoto/releases), checked against `SHA256SUMS`                                   |
-| from source                                  | `just install-cli`, then `luoto setup --build`                                                                                      |
-| Windows (Scoop; not yet verified end to end) | `scoop bucket add luoto https://github.com/eetu/scoop-luoto` then `scoop install luoto`                                             |
+| platform                                     | install                                                                                           |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| macOS, Linux                                 | `curl -fsSL https://raw.githubusercontent.com/eetu/luoto/main/install.sh \| sh`                   |
+| macOS, Linux (Homebrew)                      | `brew install eetu/tap/luoto` (a full name trusts that formula only)                              |
+| Linux, no script                             | a `.tar.gz` from [Releases](https://github.com/eetu/luoto/releases), checked against `SHA256SUMS` |
+| from source                                  | `just install-cli`, then `luoto setup --build`                                                    |
+| Windows (Scoop; not yet verified end to end) | `scoop bucket add luoto https://github.com/eetu/scoop-luoto` then `scoop install luoto`           |
 
 Then, once:
 

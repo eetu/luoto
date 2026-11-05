@@ -5,7 +5,7 @@ Maintainer-only. Release assets come from `.github/workflows/release.yaml`; `ren
 
 ## One-time setup
 
-1. Create public repos `eetu/homebrew-luoto` and `eetu/scoop-luoto`, each with a `main` branch
+1. Create public repos `eetu/homebrew-tap` and `eetu/scoop-luoto`, each with a `main` branch
    (an initial commit with a README is enough). The workflow writes `Formula/luoto.rb` and
    `bucket/luoto.json`.
 2. Create a fine-grained personal access token limited to those two repos with

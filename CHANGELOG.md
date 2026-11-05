@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 (2026-11-05)
+
+- **Homebrew tap:** luoto is in `eetu/tap` now. `brew install eetu/tap/luoto` installs it and
+  trusts that formula only. For an install from `eetu/luoto`, `brew update` names the steps:
+  Homebrew moves a formula only into a tap you trust.
+
 ## 0.2.0 (2026-11-05)
 
 Fixes from a security review, model APIs kept from fetching for the sandbox, agents that work

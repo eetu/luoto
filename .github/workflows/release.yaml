@@ -10,7 +10,7 @@ permissions:
 env:
   # Lowercase; the workflow's GITHUB_TOKEN can only push packages owned by the repo owner.
   IMAGE_OWNER: eetu
-  TAP_REPO: eetu/homebrew-luoto
+  TAP_REPO: eetu/homebrew-tap
   BUCKET_REPO: eetu/scoop-luoto
 
 jobs:
