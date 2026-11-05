@@ -102,8 +102,8 @@ export const api = {
       `${env(name)}/events?minutes=${minutes}&host=${encodeURIComponent(host)}`,
     ),
   requests: (name: string) => request<AccessRequest[]>("GET", `${env(name)}/requests`),
-  approve: (name: string, id: number, ttl?: string) =>
-    request<Rule>("POST", `${env(name)}/requests/${id}/approve`, { ttl }),
+  approve: (name: string, id: number, ttl?: string, force = false) =>
+    request<Rule>("POST", `${env(name)}/requests/${id}/approve`, { ttl, force }),
   reject: (name: string, id: number, note?: string) =>
     request<AccessRequest>("POST", `${env(name)}/requests/${id}/reject`, {
       note,

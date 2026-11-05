@@ -155,28 +155,9 @@ export type GateStatus = {
   last_seq: number;
 };
 
-export type EnvConfig = {
-  image?: string;
-  shell?: string;
-  workspace?: { dir?: string };
-  presets: string[];
-  agents?: string[];
-  ports?: number[];
-  allow?: Rule[];
-  credentials?: Record<string, unknown>;
-  sandbox_secrets?: Record<string, string>;
-  tools?: Record<string, unknown>;
-  deps?: {
-    system?: string[];
-    run?: string[];
-    hosts?: string[];
-  };
-};
-
 export type EnvDetail = {
   name: string;
   path: string;
-  config: EnvConfig;
   rules: CompiledRule[];
   injections: { host: string; binding: string }[];
   denies: number;

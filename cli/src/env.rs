@@ -338,6 +338,15 @@ pub struct Plan {
     pub image: String,
 }
 
+/// The env's config as `up` applies it: the user's file with the accepted luoto.toml layered in.
+pub fn layered(ctx: &Ctx, env: &str) -> Result<EnvConfig> {
+    let mut cfg = EnvFile::load(&ctx.paths, env)?.cfg;
+    if let Some((_, p)) = project::accepted(ctx, env) {
+        project::layer(&mut cfg, &p);
+    }
+    Ok(cfg)
+}
+
 pub fn plan(ctx: &Ctx, env: &str) -> Result<Plan> {
     let mut file = EnvFile::load(&ctx.paths, env)?;
     file.prune_expired()?;
@@ -528,6 +537,13 @@ fn populate_tools(ctx: &Ctx, env: &str, ca_pem: &str) -> Result<()> {
 pub struct UpOptions {
     pub selftest: bool,
     pub quiet: bool,
+}
+
+/// Remove the dev container so the next `up` makes a new one; workspace and home volumes stay.
+pub fn remove_dev(ctx: &Ctx, env: &str) -> Result<()> {
+    // The VM first: with it stopped there is no container to see, so none would go.
+    ensure_vm(ctx)?;
+    ctx.rt.remove_container(&names::dev(env))
 }
 
 /// On macOS and Windows, podman envs run only in luoto's own VM, started here if needed.
@@ -804,7 +820,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             ctx,
             env,
             &UpOptions {
-                selftest: false,
+                selftest: opts.selftest,
                 quiet: opts.quiet,
             },
         );

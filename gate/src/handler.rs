@@ -303,6 +303,27 @@ async fn handle_inner(
     let (mut parts, incoming) = req.into_parts();
     let mut body: Body = boxed(incoming);
 
+    // From here `parts` is what upstream gets: guards judge it, and credentials go in last, so
+    // neither a header the client lists in `Connection` nor its own query can displace them.
+    strip_hop_by_hop(&mut parts.headers, websocket);
+    parts.uri = match format!("{path}{query}").parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return denied(
+                &state,
+                ev,
+                &method,
+                &url,
+                &target.host,
+                DenyReason::InvalidHost,
+            );
+        }
+    };
+    parts.version = Version::HTTP_11;
+    if let Ok(v) = HeaderValue::from_str(&target.authority()) {
+        parts.headers.insert(HOST, v);
+    }
+
     // Git hosts route paths without regard to case, as their rules match them.
     let push = method == "POST" && path.to_ascii_lowercase().ends_with("/git-receive-pack");
     let guarded = if !push {
@@ -429,26 +450,6 @@ async fn handle_inner(
     let up_bytes = Arc::new(AtomicU64::new(0));
     let counter = up_bytes.clone();
     body = Metered::new(body, move |n| counter.store(n, Ordering::Relaxed)).boxed();
-
-    strip_hop_by_hop(&mut parts.headers, websocket);
-    let origin_form = format!("{path}{query}");
-    parts.uri = match origin_form.parse() {
-        Ok(u) => u,
-        Err(_) => {
-            return denied(
-                &state,
-                ev,
-                &method,
-                &url,
-                &target.host,
-                DenyReason::InvalidHost,
-            );
-        }
-    };
-    parts.version = Version::HTTP_11;
-    if let Ok(v) = HeaderValue::from_str(&target.authority()) {
-        parts.headers.insert(HOST, v);
-    }
 
     let mut sender = match ctx.sender(&state, &target, allow_private).await {
         Ok(s) => s,

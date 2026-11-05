@@ -48,8 +48,13 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
     let a = profiles::agent(agent)
         .with_context(|| format!("unknown agent `{agent}` (see `luoto agent list`)"))?;
     let dev = names::dev(env_name);
-    let mut f = EnvFile::load(&ctx.paths, env_name)?;
-    if !f.cfg.agents.iter().any(|x| x == agent) {
+    // An agent the accepted luoto.toml lists is the project's; only others join the user's file.
+    if !env::layered(ctx, env_name)?
+        .agents
+        .iter()
+        .any(|x| x == agent)
+    {
+        let mut f = EnvFile::load(&ctx.paths, env_name)?;
         let mut agents = f.cfg.agents.clone();
         agents.push(agent.to_string());
         f.set_list("agents", &agents)?;
@@ -58,7 +63,7 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
             ctx,
             env_name,
             &env::UpOptions {
-                selftest: false,
+                selftest: true,
                 quiet: true,
             },
         )?;

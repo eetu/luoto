@@ -120,6 +120,10 @@ impl Vault {
                 let Some(spec) = entry.bindings.get(binding).cloned() else {
                     return Issue::Forbidden;
                 };
+                // The key signs in the vault (`/v1/ssh-agent`); it is never handed out.
+                if let BindingSpec::SshAgent { .. } = spec {
+                    return Issue::Forbidden;
+                }
                 let refs = spec.refs();
                 let Some(secret) = refs.first().and_then(|r| inner.secrets.get(*r)).cloned() else {
                     return Issue::Locked;
@@ -143,7 +147,6 @@ impl Vault {
                         expires_at: None,
                     });
                 }
-                // The key signs in the vault (`/v1/ssh-agent`); it is never handed out.
                 BindingSpec::SshAgent { .. } => return Issue::Forbidden,
                 BindingSpec::GithubApp {
                     app_id,

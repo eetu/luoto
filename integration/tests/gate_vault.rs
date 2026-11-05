@@ -13,7 +13,7 @@ use luoto_shared::creds::{BindingSpec, Injection, Placement};
 use luoto_shared::ctl::{GateCtl, VaultCtl};
 use luoto_shared::policy::{Access, AccessLevel, CompiledRule, Policy, Rule};
 use sha2::{Digest, Sha256};
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn root() -> PathBuf {
@@ -179,6 +179,25 @@ async fn gate_enforces_policy_and_injects_credentials() {
         .respond_with(ResponseTemplate::new(401))
         .mount(&upstream)
         .await;
+    // The same for a key in the query: the sandbox's own `key` must never arrive.
+    Mock::given(method("GET"))
+        .and(path("/qsecret"))
+        .and(query_param("key", "attacker"))
+        .respond_with(ResponseTemplate::new(418))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/qsecret"))
+        .and(query_param("key", "real-secret"))
+        .and(query_param("alt", "json"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/qsecret"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&upstream)
+        .await;
 
     let dir = tempfile::tempdir().unwrap();
     let vault_sock = dir.path().join("v.sock");
@@ -270,16 +289,27 @@ async fn gate_enforces_policy_and_injects_credentials() {
                         &[],
                     ),
                 ],
-                injections: vec![Injection {
-                    binding: "t.key".into(),
-                    host: "api.test".into(),
-                    paths: vec!["/secret".into()],
-                    ignore_case: false,
-                    place: Placement::Header {
-                        name: "x-api-key".into(),
-                        format: "{secret}".into(),
+                injections: vec![
+                    Injection {
+                        binding: "t.key".into(),
+                        host: "api.test".into(),
+                        paths: vec!["/secret".into()],
+                        ignore_case: false,
+                        place: Placement::Header {
+                            name: "x-api-key".into(),
+                            format: "{secret}".into(),
+                        },
                     },
-                }],
+                    Injection {
+                        binding: "t.key".into(),
+                        host: "api.test".into(),
+                        paths: vec!["/qsecret".into()],
+                        ignore_case: false,
+                        place: Placement::Query {
+                            param: "key".into(),
+                        },
+                    },
+                ],
                 ..Default::default()
             }),
         },
@@ -319,6 +349,21 @@ async fn gate_enforces_policy_and_injects_credentials() {
             ("x-api-key", "attacker"),
             ("authorization", "Bearer attacker"),
         ],
+    );
+    assert_eq!(r.status, 200, "{}", r.head);
+    // Listing the credential's header in `Connection` doesn't strip the injected one.
+    let r = proxy(
+        p,
+        "GET",
+        "http://api.test/secret",
+        &[("connection", "x-api-key")],
+    );
+    assert_eq!(r.status, 200, "{}", r.head);
+    let r = proxy(
+        p,
+        "GET",
+        "http://api.test/qsecret?key=attacker&alt=json",
+        &[],
     );
     assert_eq!(r.status, 200, "{}", r.head);
 

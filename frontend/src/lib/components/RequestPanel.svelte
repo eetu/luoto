@@ -1,21 +1,33 @@
 <script lang="ts">
-  import { api } from "$lib/api";
-  import { act, ago, app } from "$lib/stores/app.svelte";
+  import { api, ApiError } from "$lib/api";
+  import { act, ago, app, refreshEnv, refreshOverview, say } from "$lib/stores/app.svelte";
 
   let { id }: { id: number } = $props();
 
   const req = $derived(app.requests.find((r) => r.id === id) ?? null);
   let ttl = $state("1h");
+  let risks = $state<string[]>([]);
 
-  async function approve() {
+  async function approve(force: boolean) {
     const env = app.env;
     if (!env || !req) return;
-    const ok = await act(
-      "approving…",
-      () => api.approve(env, id, ttl || undefined),
-      `approved #${id}: ${req.host}`,
-    );
-    if (ok) app.subject = { kind: "host", host: req.host };
+    const host = req.host;
+    app.busy = "approving…";
+    try {
+      await api.approve(env, id, ttl || undefined, force);
+      risks = [];
+      say(`approved #${id}: ${host}`);
+      app.subject = { kind: "host", host };
+      await Promise.all([refreshEnv(), refreshOverview()]);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        risks = (e.data.risks as string[]) ?? [];
+      } else {
+        say(e instanceof Error ? e.message : String(e), true);
+      }
+    } finally {
+      app.busy = null;
+    }
   }
 
   async function reject() {
@@ -59,8 +71,24 @@
           <option value="">until revoked</option>
         </select>
       </label>
+      {#if risks.length > 0}
+        <div class="risks">
+          <p>confirm:</p>
+          <ul>
+            {#each risks as r (r)}<li>{r}</li>{/each}
+          </ul>
+        </div>
+      {/if}
       <div class="actions">
-        <button class="btn primary" onclick={approve} disabled={!!app.busy}>approve</button>
+        {#if risks.length > 0}
+          <button class="btn danger" onclick={() => void approve(true)} disabled={!!app.busy}
+            >approve anyway</button
+          >
+        {:else}
+          <button class="btn primary" onclick={() => void approve(false)} disabled={!!app.busy}
+            >approve</button
+          >
+        {/if}
         <button class="btn" onclick={reject} disabled={!!app.busy}>reject</button>
       </div>
     {/if}
@@ -133,5 +161,21 @@
   .actions {
     display: flex;
     gap: 8px;
+  }
+
+  .risks {
+    padding: 8px 10px;
+    border-left: 2px solid var(--halo-error);
+    background: color-mix(in srgb, var(--halo-error) 8%, transparent);
+    font-size: 12px;
+  }
+
+  .risks p {
+    margin: 0;
+  }
+
+  .risks ul {
+    margin: 4px 0 0;
+    padding-left: 16px;
   }
 </style>

@@ -235,6 +235,9 @@ enum Cmd {
         ttl: Option<String>,
         #[arg(long, short)]
         yes: bool,
+        /// Accept the rule's risks without asking.
+        #[arg(long)]
+        force: bool,
     },
     /// Reject an access request.
     Reject {
@@ -449,7 +452,12 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             };
             c::requests(picked.as_deref())
         }
-        Cmd::Approve { id, ttl, yes } => c::approve(&env()?, id, ttl.as_deref(), yes),
+        Cmd::Approve {
+            id,
+            ttl,
+            yes,
+            force,
+        } => c::approve(&env()?, id, ttl.as_deref(), yes, force),
         Cmd::Reject { id, note } => c::reject(&env()?, id, note),
         Cmd::Egress {
             denied,

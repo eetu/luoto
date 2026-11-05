@@ -630,7 +630,7 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
             &ctx,
             name,
             &UpOptions {
-                selftest: false,
+                selftest: true,
                 quiet: true,
             },
         )?;
@@ -791,10 +791,7 @@ pub fn pull(
 pub fn up(name: &str, selftest: bool, recreate: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     if recreate {
-        // The VM first: with it stopped there is no container to see, so none would go.
-        env::ensure_vm(&ctx)?;
-        // Workspace and home volumes are kept; the container's own filesystem is not.
-        ctx.rt.remove_container(&names::dev(name))?;
+        env::remove_dev(&ctx, name)?;
     }
     env::up(
         &ctx,
@@ -1019,25 +1016,51 @@ pub fn check_tunnel(ctx: &Ctx, name: &str, rule: &Rule) -> Result<()> {
     Ok(())
 }
 
+/// Risks a rule carries that the user has yet to accept; the CLI asks, the UI answers 409.
+#[derive(Debug)]
+pub struct Risks(pub Vec<String>);
+
+impl std::fmt::Display for Risks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the rule has risks: {}", self.0.join("; "))
+    }
+}
+
+impl std::error::Error for Risks {}
+
+/// Add `rule` to the env, failing with [`Risks`] unless `force` accepts them.
 pub fn add_rule_checked(ctx: &Ctx, name: &str, rule: Rule, force: bool) -> Result<()> {
     let issues = validate_rule(&rule, RuleOrigin::Host);
     if let Some(e) = issues.iter().find(|i| i.severity == Severity::Error) {
         bail!("{}", e.message);
     }
     check_tunnel(ctx, name, &rule)?;
-    let risks: Vec<&str> = issues.iter().map(|i| i.message.as_str()).collect();
-    if !risks.is_empty() && !force {
-        for r in &risks {
-            eprintln!("risk: {r}");
-        }
-        if !confirm("Add this rule anyway?") {
-            bail!("not added (pass --force to accept these risks)");
-        }
+    if !issues.is_empty() && !force {
+        return Err(Risks(issues.into_iter().map(|i| i.message).collect()).into());
     }
     let mut f = EnvFile::load(&ctx.paths, name)?;
     f.add_rule(&rule)?;
     env::reapply(ctx, name)?;
     Ok(())
+}
+
+/// `add(force)`, asking on a terminal to accept the [`Risks`] it reports.
+fn accepting_risks<T>(force: bool, add: impl Fn(bool) -> Result<T>) -> Result<T> {
+    match add(force) {
+        Err(e) => match e.downcast::<Risks>() {
+            Ok(Risks(risks)) => {
+                for r in &risks {
+                    eprintln!("risk: {r}");
+                }
+                if !confirm("Accept these risks?") {
+                    bail!("not added (pass --force to accept these risks)");
+                }
+                add(true)
+            }
+            Err(e) => Err(e),
+        },
+        done => done,
+    }
 }
 
 pub fn allow(o: AllowOpts) -> Result<ExitCode> {
@@ -1057,7 +1080,9 @@ pub fn allow(o: AllowOpts) -> Result<ExitCode> {
             .unwrap_or_default()
     );
     let id = rule.id.clone().unwrap_or_default();
-    add_rule_checked(&ctx, &o.name, rule, o.force)?;
+    accepting_risks(o.force, |force| {
+        add_rule_checked(&ctx, &o.name, rule.clone(), force)
+    })?;
     println!(
         "allowed {summary} (rule {id}); revoke with `luoto revoke -e {} {id}`",
         o.name
@@ -1190,7 +1215,7 @@ pub fn approve_request(
     Ok(rule)
 }
 
-pub fn approve(name: &str, id: u64, ttl: Option<&str>, yes: bool) -> Result<ExitCode> {
+pub fn approve(name: &str, id: u64, ttl: Option<&str>, yes: bool, force: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let req = gate_requests(&ctx, name)?
         .into_iter()
@@ -1210,7 +1235,7 @@ pub fn approve(name: &str, id: u64, ttl: Option<&str>, yes: bool) -> Result<Exit
     if !yes && !confirm("Approve?") {
         bail!("not approved (use --yes to skip the prompt)");
     }
-    let rule = approve_request(&ctx, name, id, ttl, yes)?;
+    let rule = accepting_risks(force, |force| approve_request(&ctx, name, id, ttl, force))?;
     println!("approved: {} {}", rule.host, rule.access.describe());
     Ok(ExitCode::SUCCESS)
 }

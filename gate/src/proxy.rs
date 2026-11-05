@@ -202,16 +202,13 @@ pub async fn splice<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     let started = std::time::Instant::now();
     let mut upstream = upstream;
     let watch_state = state.clone();
-    let watch_rule = rule_id.clone();
+    let watch_host = host.clone();
+    // Open only while a tunnel rule still admits it: expired, revoked or edited away all close it.
     let watchdog = async move {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let policy = watch_state.policy();
-            let live = policy
-                .rules
-                .iter()
-                .any(|r| r.id == watch_rule && !r.rule.expired(Utc::now()));
-            if !live {
+            if policy.tunnel_rule(&watch_host, port, Utc::now()).is_none() {
                 return;
             }
         }

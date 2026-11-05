@@ -14,13 +14,13 @@ use futures_util::Stream;
 use luoto_shared::api::{AccessRequest, RequestStatus};
 use luoto_shared::ctl::{GateCtl, GateStatus, VaultStatus};
 use luoto_shared::events::Verdict;
-use luoto_shared::policy::{CompiledRule, Mode, Rule, RuleOrigin, Severity, validate_rule};
+use luoto_shared::policy::{CompiledRule, Rule};
 use luoto_shared::{presets, profiles};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::Ui;
-use crate::config::{self, EnvConfig, EnvFile, new_rule_id};
+use crate::config::{self, EnvFile, new_rule_id};
 use crate::env::{self, Ctx, UpOptions};
 use crate::{commands, ctl, events, names, project, setup, workspace};
 
@@ -34,10 +34,16 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        ApiError(
-            StatusCode::BAD_REQUEST,
-            json!({ "error": format!("{e:#}") }),
-        )
+        match e.downcast::<commands::Risks>() {
+            Ok(commands::Risks(risks)) => ApiError(
+                StatusCode::CONFLICT,
+                json!({ "error": "confirm risks", "risks": risks }),
+            ),
+            Err(e) => ApiError(
+                StatusCode::BAD_REQUEST,
+                json!({ "error": format!("{e:#}") }),
+            ),
+        }
     }
 }
 
@@ -382,7 +388,7 @@ async fn project_action(
                     &ctx,
                     &name,
                     &UpOptions {
-                        selftest: false,
+                        selftest: true,
                         quiet: true,
                     },
                 )?;
@@ -452,7 +458,6 @@ struct Injected {
 struct EnvDetail {
     name: String,
     path: String,
-    config: EnvConfig,
     rules: Vec<CompiledRule>,
     injections: Vec<Injected>,
     denies: usize,
@@ -489,7 +494,6 @@ async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
         injections.dedup_by(|a, b| a.host == b.host && a.binding == b.binding);
         Ok(EnvDetail {
             path: p.file.path.display().to_string(),
-            config: p.file.cfg.clone(),
             rules: p.compiled.policy.rules.clone(),
             denies: p.compiled.policy.denies.len(),
             warnings: p.compiled.warnings.clone(),
@@ -549,6 +553,8 @@ async fn requests(Path(name): Path<String>) -> ApiResult<Vec<AccessRequest>> {
 struct Decision {
     ttl: Option<String>,
     note: Option<String>,
+    #[serde(default)]
+    force: bool,
 }
 
 async fn approve(
@@ -557,7 +563,7 @@ async fn approve(
 ) -> ApiResult<Rule> {
     blocking(move || {
         let ctx = Ctx::load()?;
-        commands::approve_request(&ctx, &name, id, d.ttl.as_deref(), true)
+        commands::approve_request(&ctx, &name, id, d.ttl.as_deref(), d.force)
     })
     .await
     .map(Json)
@@ -595,32 +601,11 @@ async fn add_rule(
     Json(n): Json<NewRule>,
 ) -> Result<Json<Rule>, ApiError> {
     let mut rule = n.rule;
-    let issues = validate_rule(&rule, RuleOrigin::Host);
-    if let Some(e) = issues.iter().find(|i| i.severity == Severity::Error) {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            json!({ "error": e.message }),
-        ));
-    }
-    if rule.mode == Mode::Tunnel {
-        let (env, tunnel) = (name.clone(), rule.clone());
-        blocking(move || commands::check_tunnel(&Ctx::load()?, &env, &tunnel)).await?;
-    }
-    if !issues.is_empty() && !n.force {
-        let risks: Vec<&str> = issues.iter().map(|i| i.message.as_str()).collect();
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            json!({ "error": "confirm risks", "risks": risks }),
-        ));
-    }
     if rule.id.is_none() {
         rule.id = Some(new_rule_id());
     }
     blocking(move || {
-        let ctx = Ctx::load()?;
-        let mut f = EnvFile::load(&ctx.paths, &name)?;
-        f.add_rule(&rule)?;
-        env::reapply(&ctx, &name)?;
+        commands::add_rule_checked(&Ctx::load()?, &name, rule.clone(), n.force)?;
         Ok(rule)
     })
     .await
@@ -656,7 +641,7 @@ async fn env_action(Path((name, action)): Path<(String, String)>) -> ApiResult<V
             )?,
             "down" => env::down(&ctx, &name)?,
             "rebuild" => {
-                ctx.rt.remove_container(&names::dev(&name))?;
+                env::remove_dev(&ctx, &name)?;
                 env::up(
                     &ctx,
                     &name,
