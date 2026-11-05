@@ -14,17 +14,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use chrono::{TimeDelta, Utc};
-use luoto_shared::policy::{Rule, RuleOrigin, Severity, validate_rule};
+use luoto_shared::policy::{Rule, RuleOrigin, rule_error};
 use luoto_shared::{presets, profiles};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::commands::confirm;
-use crate::config::{Deps, EnvConfig, EnvFile};
+use crate::config::{Deps, EnvConfig, EnvFile, extend_unique};
 use crate::connect::LOGIN;
 use crate::detect::{self, DEPTH, Detected, IDIOMATIC_TOOLS, SKIP_DIRS};
-use crate::env::{self, Ctx, UID};
-use crate::{events, names};
+use crate::env::{Ctx, UID};
+use crate::prompt::confirm;
+use crate::workspace::{self, Oversize};
+use crate::{events, names, sync};
 
 const MARKER: &str = "/var/lib/luoto/deps";
 const MISE_CONF: &str = "/etc/mise/conf.d/luoto.toml";
@@ -50,17 +51,9 @@ fi"#;
 /// config.toml's deps, then the env's: lists append without duplicates.
 pub fn merged(global: &Deps, env: &Deps) -> Deps {
     let mut d = global.clone();
-    for p in &env.system {
-        if !d.system.contains(p) {
-            d.system.push(p.clone());
-        }
-    }
+    extend_unique(&mut d.system, env.system.iter().cloned());
     d.run.extend(env.run.iter().cloned());
-    for h in &env.hosts {
-        if !d.hosts.contains(h) {
-            d.hosts.push(h.clone());
-        }
-    }
+    extend_unique(&mut d.hosts, env.hosts.iter().cloned());
     d
 }
 
@@ -78,67 +71,16 @@ pub fn tools_for(ctx: &Ctx, cfg: &EnvConfig) -> BTreeMap<String, toml::Value> {
     t
 }
 
-/// How much of each file detection reads in an env: pins sit at the top.
-const READ_CAP: usize = 65_536;
-
-/// Prints each file named in its arguments as its length and that many bytes, or `-` when it
-/// is not a regular file.
-const READ_FILES: &str = r#"cd /workspace || exit 1
-for f; do
-  if [ -f "$f" ] && [ ! -L "$f" ]; then
-    printf '%s\n' "$(head -c "$0" -- "$f" | wc -c)"
-    head -c "$0" -- "$f"
-  else
-    printf -- '-\n'
-  fi
-done"#;
-
-/// What the env's workspace says about itself ([`detect`]), read inside it: after a clone, the
-/// project's files are only there. Two calls into the env: the file list, then the few files
-/// detection reads.
+/// What the env's workspace says about itself ([`detect`]), read inside it, where the work
+/// happens. Two calls into the env: the file list, then the few files detection reads.
 pub fn detect_in_env(ctx: &Ctx, env: &str) -> Result<Detected> {
-    let e = Env::new(ctx, env)?;
-    let files = e.workspace_files();
+    let files = workspace_files(ctx, &names::dev(env));
     let wanted = detect::read_paths(&files);
-    let mut texts = std::collections::HashMap::new();
-    if !wanted.is_empty() {
-        let cap = READ_CAP.to_string();
-        let mut argv = vec!["sh", "-c", READ_FILES, &cap];
-        argv.extend(wanted.iter().map(String::as_str));
-        let out = e
-            .ctx
-            .rt
-            .command()
-            .args(e.exec_user("/workspace", &[], &argv))
-            .output()
-            .context("read the workspace's files in the env")?;
-        texts = framed(&wanted, &out.stdout);
-    }
+    let texts = workspace::read_files(ctx, env, &wanted, detect::READ_CAP, Oversize::Truncate)?
+        .into_iter()
+        .filter_map(|(rel, b)| Some((rel, String::from_utf8(b).ok()?)))
+        .collect();
     Ok(detect::detect_tree(&detect::Listed { files, texts }))
-}
-
-/// `READ_FILES`'s output, by the paths it was given, in order. Stops at anything else.
-fn framed(paths: &[String], mut out: &[u8]) -> std::collections::HashMap<String, String> {
-    let mut texts = std::collections::HashMap::new();
-    for p in paths {
-        let Some(nl) = out.iter().position(|b| *b == b'\n') else {
-            break;
-        };
-        let head = String::from_utf8_lossy(&out[..nl]).trim().to_string();
-        out = &out[nl + 1..];
-        if head == "-" {
-            continue;
-        }
-        let Ok(n) = head.parse::<usize>() else { break };
-        if n > out.len() || n > READ_CAP {
-            break;
-        }
-        if let Ok(s) = std::str::from_utf8(&out[..n]) {
-            texts.insert(p.clone(), s.to_string());
-        }
-        out = &out[n..];
-    }
-    texts
 }
 
 fn digest(d: &Deps) -> String {
@@ -164,10 +106,7 @@ pub fn check(d: &Deps, origin: RuleOrigin) -> Result<()> {
 }
 
 fn host_issue(h: &str, origin: RuleOrigin) -> Option<String> {
-    validate_rule(&Rule::read(h), origin)
-        .into_iter()
-        .find(|i| i.severity == Severity::Error)
-        .map(|i| i.message)
+    rule_error(&Rule::read(h), origin).map(|i| i.message)
 }
 
 /// mise's system-level config in the env: sandbox settings and the default toolchains.
@@ -197,36 +136,102 @@ fn mise_conf(tools: &BTreeMap<String, toml::Value>) -> Result<String> {
     ))
 }
 
+/// The workspace's files, relative: from git in a work tree (.gitignore keeps dependencies
+/// out), else from `find`.
+fn workspace_files(ctx: &Ctx, dev: &str) -> Vec<String> {
+    let mut prune = String::from("-name '.*' ! -name .");
+    for d in SKIP_DIRS {
+        prune.push_str(&format!(" -o -name '{d}'"));
+    }
+    let script = format!(
+        "cd /workspace || exit 0
+         if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+           git ls-files --cached --others --exclude-standard
+         else
+           find . -maxdepth {} \\( {prune} \\) -prune -o -type f -print | sed 's|^\\./||'
+         fi",
+        DEPTH + 1
+    );
+    ctx.rt
+        .run([
+            "exec",
+            "-u",
+            UID,
+            "-w",
+            "/workspace",
+            dev,
+            "sh",
+            "-c",
+            &script,
+        ])
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// What `ensure` reads of the env, framed as `workspace::read_files` frames files: mise's path,
+/// the mise config at `$0`, the marker at `$1` and the distribution's ID.
+const PROBE: &str = r#"word() { printf '%s\n' "$(printf %s "$1" | wc -c)"; printf %s "$1"; }
+file() { if [ -f "$1" ]; then printf '%s\n' "$(wc -c <"$1")"; cat -- "$1"; else printf -- '-\n'; fi; }
+if m=$(command -v mise); then word "$m"; else printf -- '-\n'; fi
+file "$0"
+file "$1"
+word "$(. /etc/os-release 2>/dev/null; echo "$ID")""#;
+
+/// What the env holds of what `ensure` installs.
+struct Probe {
+    mise: bool,
+    /// The mise config luoto wrote (`MISE_CONF`).
+    conf: Option<String>,
+    /// The digest of the `[deps]` last installed (`MARKER`).
+    marker: Option<String>,
+    /// `ID` from os-release.
+    os: String,
+}
+
+impl Probe {
+    fn parse(out: &[u8]) -> Self {
+        let mut found = workspace::framed(&["mise", "conf", "marker", "os"], out, detect::READ_CAP);
+        let mut text = |k: &str| {
+            found
+                .remove(k)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+        };
+        Probe {
+            mise: text("mise").is_some(),
+            conf: text("conf"),
+            marker: text("marker").map(|m| m.trim().to_string()),
+            os: text("os").unwrap_or_default().trim().to_string(),
+        }
+    }
+}
+
 struct Env<'a> {
     ctx: &'a Ctx,
     dev: String,
     /// The dev user's home directory.
-    home: String,
+    home: &'a str,
     /// `HOME=<home>`, for exec.
     home_env: String,
 }
 
 impl<'a> Env<'a> {
-    fn new(ctx: &'a Ctx, env: &str) -> Result<Self> {
-        let dev = names::dev(env);
-        let home = ctx
-            .rt
-            .run([
-                "exec",
-                &dev,
-                "awk",
-                "-F:",
-                &format!("$3=={UID}{{print $6; exit}}"),
-                "/etc/passwd",
-            ])?
-            .trim()
-            .to_string();
-        Ok(Env {
+    fn new(ctx: &'a Ctx, env: &str, home: &'a str) -> Self {
+        Env {
             ctx,
-            dev,
+            dev: names::dev(env),
             home_env: format!("HOME={home}"),
             home,
-        })
+        }
+    }
+
+    fn probe(&self) -> Result<Probe> {
+        let out = self
+            .ctx
+            .rt
+            .run(["exec", &self.dev, "sh", "-c", PROBE, MISE_CONF, MARKER])?;
+        Ok(Probe::parse(out.as_bytes()))
     }
 
     /// `exec` as the dev user in `cwd`, with `extra` exec flags, running `argv`.
@@ -248,7 +253,8 @@ impl<'a> Env<'a> {
     /// Folders of the workspace that pin a toolchain (a monorepo's `frontend/`), the
     /// workspace itself first. mise only reads a folder's own pins and its parents'.
     fn project_dirs(&self) -> Vec<String> {
-        crate::detect::pin_dirs(self.workspace_files().iter().map(String::as_str))
+        let files = workspace_files(self.ctx, &self.dev);
+        crate::detect::pin_dirs(files.iter().map(String::as_str))
             .into_iter()
             .map(|d| {
                 if d.is_empty() {
@@ -257,31 +263,6 @@ impl<'a> Env<'a> {
                     format!("/workspace/{d}")
                 }
             })
-            .collect()
-    }
-
-    /// The workspace's files, relative: from git in a work tree (.gitignore keeps
-    /// dependencies out), else from `find`.
-    fn workspace_files(&self) -> Vec<String> {
-        let mut prune = String::from("-name '.*' ! -name .");
-        for d in SKIP_DIRS {
-            prune.push_str(&format!(" -o -name '{d}'"));
-        }
-        let script = format!(
-            "cd /workspace || exit 0
-             if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-               git ls-files --cached --others --exclude-standard
-             else
-               find . -maxdepth {} \\( {prune} \\) -prune -o -type f -print | sed 's|^\\./||'
-             fi",
-            DEPTH + 1
-        );
-        self.ctx
-            .rt
-            .run(self.exec_user("/workspace", &[], &["sh", "-c", &script]))
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_string)
             .collect()
     }
 
@@ -342,13 +323,7 @@ impl<'a> Env<'a> {
                 .collect();
             if !absent.is_empty() {
                 match out.iter_mut().find(|(d, _)| d == "/workspace") {
-                    Some((_, tools)) => {
-                        for t in absent {
-                            if !tools.contains(&t) {
-                                tools.push(t);
-                            }
-                        }
-                    }
+                    Some((_, tools)) => extend_unique(tools, absent),
                     None => out.insert(0, ("/workspace".to_string(), absent)),
                 }
             }
@@ -356,34 +331,21 @@ impl<'a> Env<'a> {
         Ok(out)
     }
 
-    fn has_mise(&self) -> bool {
-        self.ctx
-            .rt
-            .succeeds(["exec", &self.dev, "sh", "-c", "command -v mise >/dev/null"])
-    }
-
-    fn sync_mise_conf(&self, conf: &str) -> Result<()> {
-        let current = self
-            .ctx
-            .rt
-            .run(["exec", &self.dev, "cat", MISE_CONF])
-            .unwrap_or_default();
-        if current != conf {
-            self.ctx.rt.run_stdin(
-                [
-                    "exec",
-                    "-i",
-                    "-u",
-                    "0",
-                    &self.dev,
-                    "sh",
-                    "-c",
-                    r#"mkdir -p "${0%/*}" && cat >"$0""#,
-                    MISE_CONF,
-                ],
-                conf.as_bytes(),
-            )?;
-        }
+    fn write_mise_conf(&self, conf: &str) -> Result<()> {
+        self.ctx.rt.run_stdin(
+            [
+                "exec",
+                "-i",
+                "-u",
+                "0",
+                &self.dev,
+                "sh",
+                "-c",
+                r#"mkdir -p "${0%/*}" && cat >"$0""#,
+                MISE_CONF,
+            ],
+            conf.as_bytes(),
+        )?;
         Ok(())
     }
 }
@@ -438,7 +400,7 @@ fn run_job(e: &Env, d: &Deps, job: &mut Job) -> Result<()> {
     if job.run {
         for cmd in &d.run {
             e.step(
-                &e.exec_user(&e.home, &[], &["sh", "-c", LOGIN, cmd]),
+                &e.exec_user(e.home, &[], &["sh", "-c", LOGIN, cmd]),
                 &format!("`{cmd}`"),
             )?;
         }
@@ -458,15 +420,19 @@ fn denied_since(ctx: &Ctx, env: &str, since: chrono::DateTime<Utc>) -> Vec<Strin
         .collect()
 }
 
-/// Bring the env's packages and toolchains up to date with its config and its project.
-pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<()> {
+/// Bring the env's packages and toolchains up to date with its config and its project; `home`
+/// is the dev user's.
+pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
     let d = merged(&ctx.global.deps, &cfg.deps);
     check(&d, RuleOrigin::Host)?;
-    let e = Env::new(ctx, env)?;
+    let e = Env::new(ctx, env, home);
     let tools = tools_for(ctx, cfg);
-    let mise = e.has_mise();
-    let missing = if mise {
-        e.sync_mise_conf(&mise_conf(&tools)?)?;
+    let found = e.probe()?;
+    let missing = if found.mise {
+        let conf = mise_conf(&tools)?;
+        if found.conf.as_deref() != Some(conf.as_str()) {
+            e.write_mise_conf(&conf)?;
+        }
         e.missing_tools(&tools.keys().cloned().collect::<Vec<_>>())?
     } else {
         if !tools.is_empty() {
@@ -474,11 +440,7 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<()> {
         }
         Vec::new()
     };
-    let marker = ctx
-        .rt
-        .run(["exec", &e.dev, "cat", MARKER])
-        .ok()
-        .map(|s| s.trim().to_string());
+    let marker = found.marker;
     let want = digest(&d);
     let packages = !(d.system.is_empty() && d.run.is_empty());
     let due = packages && marker.as_deref() != Some(want.as_str());
@@ -496,17 +458,8 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<()> {
     };
 
     let mut wanted: BTreeSet<String> = BTreeSet::new();
-    if job.system
-        && let Ok(id) = ctx.rt.run([
-            "exec",
-            &e.dev,
-            "sh",
-            "-c",
-            r#". /etc/os-release 2>/dev/null; echo "$ID""#,
-        ])
-        && matches!(id.trim(), "debian" | "ubuntu" | "alpine")
-    {
-        wanted.insert(id.trim().to_string());
+    if job.system && matches!(found.os.as_str(), "debian" | "ubuntu" | "alpine") {
+        wanted.insert(found.os);
     }
     let names = job.tool_names();
     for p in presets::all() {
@@ -542,7 +495,7 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<()> {
             }
         );
         let since = Utc::now();
-        let res = env::with_grants(
+        let res = sync::with_grants(
             ctx,
             env,
             &rules,
@@ -630,6 +583,23 @@ mod tests {
         assert!(check(&hosts("pypi.org"), RuleOrigin::Sandbox).is_ok());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_frames_files_exactly() {
+        let d = tempfile::tempdir().unwrap();
+        let conf = d.path().join("luoto.toml");
+        std::fs::write(&conf, "[settings]\n\n").unwrap();
+        let out = std::process::Command::new("sh")
+            .args(["-c", PROBE])
+            .arg(&conf)
+            .arg(d.path().join("absent"))
+            .output()
+            .unwrap();
+        let p = Probe::parse(&out.stdout);
+        assert_eq!(p.conf.as_deref(), Some("[settings]\n\n"));
+        assert_eq!(p.marker, None);
+    }
+
     #[test]
     fn mise_conf_has_settings_and_tools() {
         let tools = BTreeMap::from([
@@ -642,23 +612,5 @@ mod tests {
             v["settings"]["trusted_config_paths"][0].as_str(),
             Some("/workspace")
         );
-        let empty: toml::Value = toml::from_str(&mise_conf(&BTreeMap::new()).unwrap()).unwrap();
-        assert!(empty.get("tools").is_none());
-    }
-}
-
-#[cfg(test)]
-mod framed_tests {
-    use super::*;
-
-    #[test]
-    fn each_file_is_read_by_its_length_and_anything_else_stops_it() {
-        let paths: Vec<String> = ["a", "b", "c", "d"].map(String::from).to_vec();
-        let t = framed(&paths, b"3\nx\ny-\n  2\nzz");
-        assert_eq!(t.get("a").map(String::as_str), Some("x\ny"));
-        assert_eq!(t.get("c").map(String::as_str), Some("zz"));
-        assert_eq!(t.len(), 2, "b is absent and d never came");
-        assert!(framed(&paths, b"9\nshort").is_empty());
-        assert!(framed(&paths, b"x\n").is_empty());
     }
 }

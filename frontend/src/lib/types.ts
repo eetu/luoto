@@ -10,7 +10,6 @@ export type ToolPin = { tool: string; version: string; source: string };
 
 /** What creating an env from these choices would produce (`POST /api/detect`). */
 export type Proposal = {
-  name: string;
   /** The folder is missing (created with the env) or empty: nothing to detect. */
   new_folder: boolean;
   presets: { name: string; reason: string | null }[];
@@ -25,7 +24,6 @@ export type Proposal = {
 /** An env's standing with its project's luoto.toml (`GET /api/envs/{name}/project`). */
 export type ProjectStatus = {
   state: "none" | "accepted" | "changed" | "new" | "declined" | "invalid" | "removed";
-  accepted: [string, string][];
   current: [string, string][];
   diff: string[];
   error: string | null;
@@ -35,11 +33,9 @@ export type ProjectStatus = {
 };
 
 export type LuotoEvent = {
-  seq: number;
-  run: string;
+  env: string;
   ts?: string;
   source?: "gate" | "vault";
-  env: string;
   kind?:
     | "dns"
     | "http"
@@ -50,21 +46,10 @@ export type LuotoEvent = {
     | "resolve"
     | "creds"
     | "lifecycle";
-  intake?: "proxy" | "transparent" | "dns";
   verdict?: Verdict;
   method?: string;
-  host?: string;
-  port?: number;
   path?: string;
-  rule?: string;
-  reason?: string;
-  message?: string;
   status?: number;
-  bytes_up?: number;
-  bytes_down?: number;
-  ms?: number;
-  request_id?: number;
-  binding?: string;
 };
 
 export type HostSummary = {
@@ -73,15 +58,12 @@ export type HostSummary = {
   denied: number;
   dns_only: boolean;
   methods: string[];
-  ports: number[];
   intakes: string[];
   top_paths: [string, number][];
-  last_reason?: string;
   last_message?: string;
   last_rule?: string;
   bytes_up: number;
   bytes_down: number;
-  first_seen?: string;
   last_seen?: string;
   wants_write: boolean;
   tls_rejected: boolean;
@@ -95,8 +77,6 @@ export type Rule = {
   paths?: string[];
   expires?: string;
   mode?: Mode;
-  ws?: boolean;
-  max_body?: number;
   allow_private?: boolean;
   note?: string;
 };
@@ -111,18 +91,12 @@ export type AccessRequest = {
   reason: string;
   status: "pending" | "approved" | "rejected";
   created: string;
-  resolved?: string;
-  note?: string;
 };
 
 export type EnvRow = {
   name: string;
   dev: string;
   gate: string;
-  image: string;
-  presets: string[];
-  agents: string[];
-  ports: number[];
   dir?: string | null;
   pending: number;
   denied_recent: number;
@@ -130,56 +104,28 @@ export type EnvRow = {
 };
 
 export type VaultStatus = {
-  version: string;
-  started: string;
   locked: boolean;
   loaded_refs: string[];
   envs: { env: string; bindings: string[]; missing: string[] }[];
 };
 
 export type Overview = {
+  /** `luoto`, or `luoto-dev` for a source build. */
+  instance: string;
   runtime: string;
   envs: EnvRow[];
   vault: VaultStatus | null;
 };
 
 export type GateStatus = {
-  env: string;
-  version: string;
-  run: string;
-  started: string;
   rules: number;
-  ca_installed: boolean;
-  vault_configured: boolean;
-  pending_requests: number;
-  last_seq: number;
-};
-
-export type EnvConfig = {
-  image?: string;
-  shell?: string;
-  workspace?: { dir?: string };
-  presets: string[];
-  agents?: string[];
-  ports?: number[];
-  allow?: Rule[];
-  credentials?: Record<string, unknown>;
-  sandbox_secrets?: Record<string, string>;
-  tools?: Record<string, unknown>;
-  deps?: {
-    system?: string[];
-    run?: string[];
-    hosts?: string[];
-  };
 };
 
 export type EnvDetail = {
   name: string;
   path: string;
-  config: EnvConfig;
   rules: CompiledRule[];
   injections: { host: string; binding: string }[];
-  denies: number;
   warnings: string[];
   dev: string;
   gate: string;
@@ -190,14 +136,8 @@ export type EnvDetail = {
 };
 
 export type Meta = {
-  presets: { name: string; description: string; hosts: string[] }[];
-  agents: { name: string; description: string; providers: string[] }[];
-  providers: {
-    name: string;
-    description: string;
-    host: string;
-    kinds: string[];
-  }[];
+  presets: { name: string; description: string }[];
+  agents: { name: string; description: string }[];
 };
 
 export type RuntimeInfo = {
@@ -215,9 +155,6 @@ export type SetupInfo = {
     distro: string | null;
     cpus: number;
     runtimes: RuntimeInfo[];
-    package_manager: string | null;
-    wsl: string | null;
-    companions: [string, boolean][];
   };
   recommendation: {
     summary: string;
@@ -233,11 +170,15 @@ export type PullPlan = {
   entries: {
     path: string;
     change: string;
-    size: number;
-    executable: boolean;
     risky: string | null;
   }[];
   unchanged: number;
   refused: [string, string][];
   digest: string;
+};
+
+/** What `sandbox selftest` found inside the env (`POST /api/envs/{name}/selftest`). */
+export type SelftestReport = {
+  ok: boolean;
+  checks: { name: string; ok: boolean; detail: string }[];
 };

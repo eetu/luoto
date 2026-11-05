@@ -21,16 +21,22 @@ pub fn parse_lines(text: &str) -> Vec<Event> {
         .collect()
 }
 
-pub fn read(rt: &Runtime, container: &str, since: Option<&str>) -> Result<Vec<Event>> {
-    let mut args = vec!["logs".to_string()];
-    if let Some(s) = since {
-        args.push("--since".into());
-        args.push(s.into());
+fn logs_args<'a>(container: &'a str, since: Option<&'a str>, follow: bool) -> Vec<&'a str> {
+    let mut args = vec!["logs"];
+    if follow {
+        args.push("-f");
     }
-    args.push(container.into());
+    if let Some(s) = since {
+        args.extend(["--since", s]);
+    }
+    args.push(container);
+    args
+}
+
+pub fn read(rt: &Runtime, container: &str, since: Option<&str>) -> Result<Vec<Event>> {
     let out = rt
         .command()
-        .args(&args)
+        .args(logs_args(container, since, false))
         .stdin(Stdio::null())
         .output()
         .context("read logs")?;
@@ -53,15 +59,9 @@ pub fn follow(
     since: Option<&str>,
     mut f: impl FnMut(Event) -> bool,
 ) -> Result<()> {
-    let mut args = vec!["logs".to_string(), "-f".into()];
-    if let Some(s) = since {
-        args.push("--since".into());
-        args.push(s.into());
-    }
-    args.push(container.into());
     let mut child = rt
         .command()
-        .args(&args)
+        .args(logs_args(container, since, true))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

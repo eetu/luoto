@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api } from "$lib/api";
-  import { act, say } from "$lib/stores/app.svelte";
+  import { act, errorText, say } from "$lib/stores/app.svelte";
   import type { SetupInfo } from "$lib/types";
 
   // First run: what this machine has, what luoto recommends, and the one confirmed step to
@@ -14,7 +14,7 @@
   $effect(() => {
     void api.setup().then(
       (s) => (info = s),
-      (e) => say(e instanceof Error ? e.message : String(e), true),
+      (e) => say(errorText(e), true),
     );
   });
 

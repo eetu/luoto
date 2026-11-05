@@ -6,7 +6,57 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::glob::{glob_match, glob_match_any_case};
+use crate::glob;
+
+/// The binding that holds the env's SSH key (`[credentials.ssh]`); the gate's ssh-agent route
+/// asks the vault to sign with it.
+pub const SSH_BINDING: &str = "ssh";
+
+/// The vault's route for one binding's value (gate → vault, bearer = the env's token).
+pub const VAULT_CREDENTIAL_PATH: &str = "/v1/credential";
+/// The vault's route for one ssh-agent message for the env's SSH key.
+pub const VAULT_AGENT_PATH: &str = "/v1/ssh-agent";
+
+/// Request body for [`VAULT_CREDENTIAL_PATH`].
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CredentialRequest {
+    pub binding: String,
+}
+
+/// Why the vault gave no value, and the HTTP status that carries it from the vault to the gate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CredentialError {
+    /// The binding's secret is not loaded: `luoto vault unlock`.
+    Locked,
+    /// The env has no such binding, or the vault doesn't know the env's token.
+    NotBound,
+    Failed(String),
+}
+
+impl CredentialError {
+    pub fn status(&self) -> u16 {
+        match self {
+            CredentialError::Locked => 423,
+            CredentialError::NotBound => 404,
+            CredentialError::Failed(_) => 502,
+        }
+    }
+
+    /// What a vault answer other than 200 means; 403 is the vault refusing the env's token.
+    pub fn from_status(status: u16, body: &[u8]) -> Self {
+        match status {
+            423 => CredentialError::Locked,
+            403 | 404 => CredentialError::NotBound,
+            _ => CredentialError::Failed(format!(
+                "vault returned {status}: {}",
+                String::from_utf8_lossy(body)
+                    .chars()
+                    .take(200)
+                    .collect::<String>()
+            )),
+        }
+    }
+}
 
 /// Headers removed from every client request on a credentialed host, so code in the
 /// sandbox can never smuggle its own (e.g. an attacker's) token through.
@@ -46,14 +96,7 @@ pub struct Injection {
 
 impl Injection {
     pub fn path_matches(&self, path: &str) -> bool {
-        self.paths.is_empty()
-            || self.paths.iter().any(|p| {
-                if self.ignore_case {
-                    glob_match_any_case(p, path)
-                } else {
-                    glob_match(p, path)
-                }
-            })
+        glob::matches_any(&self.paths, self.ignore_case, path)
     }
 }
 
@@ -97,16 +140,18 @@ pub fn default_github_api() -> String {
 }
 
 impl BindingSpec {
-    pub fn refs(&self) -> Vec<&str> {
+    /// The source ref of the secret the binding is made from.
+    pub fn secret_ref(&self) -> &str {
         match self {
-            BindingSpec::Static { secret_ref } => vec![secret_ref.as_str()],
-            BindingSpec::GithubApp { key_ref, .. } => vec![key_ref.as_str()],
-            BindingSpec::SshAgent { key_ref, .. } => vec![key_ref.as_str()],
+            BindingSpec::Static { secret_ref } => secret_ref,
+            BindingSpec::GithubApp { key_ref, .. } | BindingSpec::SshAgent { key_ref, .. } => {
+                key_ref
+            }
         }
     }
 }
 
-/// One ssh-agent message, as the gate passes it on to the vault for the env's `binding`.
+/// Request body for [`VAULT_AGENT_PATH`]: one ssh-agent message for the env's `binding`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AgentRequest {
     pub binding: String,

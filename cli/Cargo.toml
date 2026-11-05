@@ -39,8 +39,6 @@ base64.workspace = true
 subtle.workspace = true
 tar = "0.4"
 futures-util.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [build-dependencies]
 serde_json.workspace = true

@@ -15,6 +15,9 @@ use crate::paths::Paths;
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GlobalConfig {
+    /// The config format (`format.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
     /// `podman` or `docker` (or a path to either).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
@@ -240,6 +243,9 @@ pub enum ProviderValue {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EnvConfig {
+    /// The config format (`format.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     /// Login shell for this env; overrides `shell` in config.toml.
@@ -323,6 +329,12 @@ pub fn validate_name(name: &str) -> Result<()> {
     if name == "vault" {
         bail!("`vault` is reserved");
     }
+    // A source build names env x's containers `luoto-dev-x` in the same VM (names.rs).
+    if name == "dev" || name.starts_with("dev-") {
+        bail!(
+            "env names can't be `dev` or start with `dev-` (luoto's dev build names its envs so)"
+        );
+    }
     // `luoto-x-gate` is env x's gate and `luoto-x-out` its egress network (see names.rs).
     if let Some(suffix) = ["-gate", "-out"].iter().find(|s| name.ends_with(*s)) {
         bail!("env names can't end in `{suffix}` (luoto names another env's containers so)");
@@ -333,7 +345,8 @@ pub fn validate_name(name: &str) -> Result<()> {
 pub fn load_global(paths: &Paths) -> Result<GlobalConfig> {
     let p = paths.global_config();
     match std::fs::read_to_string(&p) {
-        Ok(s) => toml::from_str(&s).with_context(|| format!("parse {}", p.display())),
+        Ok(s) => toml::from_str(&crate::format::upgrade(&p, &s)?.text)
+            .with_context(|| format!("parse {}", p.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(GlobalConfig::default()),
         Err(e) => Err(e).with_context(|| format!("read {}", p.display())),
     }
@@ -342,7 +355,11 @@ pub fn load_global(paths: &Paths) -> Result<GlobalConfig> {
 pub fn save_global(paths: &Paths, cfg: &GlobalConfig) -> Result<()> {
     let p = paths.global_config();
     std::fs::create_dir_all(p.parent().unwrap_or(Path::new(".")))?;
-    std::fs::write(&p, toml::to_string_pretty(cfg)?)
+    let cfg = GlobalConfig {
+        version: Some(crate::format::CURRENT),
+        ..cfg.clone()
+    };
+    std::fs::write(&p, toml::to_string_pretty(&cfg)?)
         .with_context(|| format!("write {}", p.display()))
 }
 
@@ -368,6 +385,8 @@ pub struct EnvFile {
     pub path: PathBuf,
     pub doc: DocumentMut,
     pub cfg: EnvConfig,
+    /// The format the file is in on disk; `save` keeps a copy of an older one.
+    from: u32,
 }
 
 impl EnvFile {
@@ -380,12 +399,19 @@ impl EnvFile {
     }
 
     pub fn parse(path: PathBuf, text: &str) -> Result<Self> {
+        let up = crate::format::upgrade(&path, text)?;
         let cfg: EnvConfig =
-            toml::from_str(text).with_context(|| format!("parse {}", path.display()))?;
-        let doc: DocumentMut = text
+            toml::from_str(&up.text).with_context(|| format!("parse {}", path.display()))?;
+        let doc: DocumentMut = up
+            .text
             .parse()
             .with_context(|| format!("parse {}", path.display()))?;
-        Ok(EnvFile { path, doc, cfg })
+        Ok(EnvFile {
+            path,
+            doc,
+            cfg,
+            from: up.from,
+        })
     }
 
     pub fn create(paths: &Paths, name: &str, cfg: &EnvConfig) -> Result<Self> {
@@ -399,7 +425,11 @@ impl EnvFile {
              # Reference: presets {:?}\n\n",
             luoto_shared::presets::names().collect::<Vec<_>>()
         );
-        let text = format!("{header}{}", toml::to_string_pretty(cfg)?);
+        let cfg = EnvConfig {
+            version: Some(crate::format::CURRENT),
+            ..cfg.clone()
+        };
+        let text = format!("{header}{}", toml::to_string_pretty(&cfg)?);
         std::fs::create_dir_all(paths.envs_dir())?;
         std::fs::write(&path, &text)?;
         Self::parse(path, &text)
@@ -409,14 +439,24 @@ impl EnvFile {
         let text = self.doc.to_string();
         // Re-validate what we are about to write.
         self.cfg = toml::from_str(&text).context("edited env config no longer parses")?;
+        // Writing upgrades the file to the current format; the old one stays beside it.
+        if self.from < crate::format::CURRENT {
+            let old = self.path.with_extension(format!("toml.v{}", self.from));
+            std::fs::copy(&self.path, &old)
+                .with_context(|| format!("keep {} as {}", self.path.display(), old.display()))?;
+            eprintln!(
+                "{} is now config format {}; the old one is {}",
+                self.path.display(),
+                crate::format::CURRENT,
+                old.display()
+            );
+            self.from = crate::format::CURRENT;
+        }
         std::fs::write(&self.path, text).with_context(|| format!("write {}", self.path.display()))
     }
 
-    pub fn add_rule(&mut self, rule: &Rule) -> Result<()> {
-        let table = toml_edit::ser::to_document(rule)
-            .context("serialize rule")?
-            .as_table()
-            .clone();
+    /// `allow` as an array of tables, in the order of `cfg.allow`.
+    fn allow_tables(&mut self) -> Result<&mut toml_edit::ArrayOfTables> {
         // `allow = [...]` written inline (e.g. by a serializer) becomes an array of tables.
         if let Some(inline) = self.doc.get("allow").and_then(|i| i.as_array()) {
             let mut tables = toml_edit::ArrayOfTables::new();
@@ -427,18 +467,50 @@ impl EnvFile {
             }
             self.doc["allow"] = toml_edit::Item::ArrayOfTables(tables);
         }
-        let arr = self
-            .doc
+        let path = self.path.display().to_string();
+        self.doc
             .entry("allow")
-            .or_insert_with(|| toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
-        let Some(arr) = arr.as_array_of_tables_mut() else {
-            bail!(
-                "`allow` in {} is not an array of tables",
-                self.path.display()
-            );
-        };
-        arr.push(table);
+            .or_insert_with(|| toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
+            .as_array_of_tables_mut()
+            .with_context(|| format!("`allow` in {path} is not an array of tables"))
+    }
+
+    pub fn add_rule(&mut self, rule: &Rule) -> Result<()> {
+        self.add_rules(std::slice::from_ref(rule))
+    }
+
+    pub fn add_rules(&mut self, rules: &[Rule]) -> Result<()> {
+        let tables = rules
+            .iter()
+            .map(|r| {
+                Ok(toml_edit::ser::to_document(r)
+                    .context("serialize rule")?
+                    .as_table()
+                    .clone())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let arr = self.allow_tables()?;
+        for t in tables {
+            arr.push(t);
+        }
         self.save()
+    }
+
+    /// Keep the rules `keep` accepts. Returns how many were removed.
+    pub fn retain_rules(&mut self, keep: impl Fn(&Rule) -> bool) -> Result<usize> {
+        let kept: Vec<bool> = self.cfg.allow.iter().map(keep).collect();
+        let removed = kept.iter().filter(|k| !**k).count();
+        if removed == 0 {
+            return Ok(0);
+        }
+        let arr = self.allow_tables()?;
+        if arr.len() != kept.len() {
+            bail!("`allow` changed while it was being edited");
+        }
+        let mut kept = kept.into_iter();
+        arr.retain(|_| kept.next().unwrap_or(true));
+        self.save()?;
+        Ok(removed)
     }
 
     /// Write `[credentials.<provider>]`, replacing any entries it had.
@@ -502,63 +574,38 @@ impl EnvFile {
             .get_mut("hosts")
             .and_then(|i| i.as_array_mut())
             .context("`deps.hosts` is not an array")?;
-        for h in hosts {
-            if !arr.iter().any(|v| v.as_str() == Some(h)) {
-                arr.push(h.as_str());
-            }
+        let mut all = self.cfg.deps.hosts.clone();
+        let had = all.len();
+        extend_unique(&mut all, hosts.iter().cloned());
+        for h in &all[had..] {
+            arr.push(h.as_str());
         }
         self.save()
     }
 
     /// Remove rules by id or by exact host. Returns how many were removed.
     pub fn remove_rules(&mut self, id_or_host: &str) -> Result<usize> {
-        let Some(arr) = self
-            .doc
-            .get_mut("allow")
-            .and_then(|i| i.as_array_of_tables_mut())
-        else {
-            return Ok(0);
-        };
-        let before = arr.len();
-        arr.retain(|t| {
-            let id = t.get("id").and_then(|v| v.as_str());
-            let host = t.get("host").and_then(|v| v.as_str());
-            id != Some(id_or_host) && host != Some(id_or_host)
-        });
-        let removed = before - arr.len();
-        if removed > 0 {
-            self.save()?;
-        }
-        Ok(removed)
+        self.retain_rules(|r| r.id.as_deref() != Some(id_or_host) && r.host != id_or_host)
     }
 
     /// Drop expired rules (keeps the file from accumulating stale grants).
     pub fn prune_expired(&mut self) -> Result<usize> {
         let now = chrono::Utc::now();
-        let Some(arr) = self
-            .doc
-            .get_mut("allow")
-            .and_then(|i| i.as_array_of_tables_mut())
-        else {
-            return Ok(0);
-        };
-        let before = arr.len();
-        arr.retain(|t| {
-            t.get("expires")
-                .and_then(|v| v.as_str())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .is_none_or(|e| e.with_timezone(&chrono::Utc) > now)
-        });
-        let removed = before - arr.len();
-        if removed > 0 {
-            self.save()?;
-        }
-        Ok(removed)
+        self.retain_rules(|r| !r.expired(now))
     }
 }
 
 pub fn new_rule_id() -> String {
     format!("r{}", hex::encode(rand::random::<[u8; 3]>()))
+}
+
+/// Append the items of `add` that `base` lacks, in order.
+pub fn extend_unique<T: PartialEq>(base: &mut Vec<T>, add: impl IntoIterator<Item = T>) {
+    for x in add {
+        if !base.contains(&x) {
+            base.push(x);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -587,6 +634,19 @@ permissions = { contents = "write" }
 [credentials.anthropic]
 oauth_token = "op://Private/claude/token"
 "#;
+
+    #[test]
+    fn env_files_carry_their_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config: dir.path().join("config"),
+            data: dir.path().join("data"),
+        };
+        let f = EnvFile::create(&paths, "web", &EnvConfig::default()).unwrap();
+        assert_eq!(f.cfg.version, Some(crate::format::CURRENT));
+        let newer = format!("version = {}\n", crate::format::CURRENT + 1);
+        assert!(EnvFile::parse(f.path.clone(), &newer).is_err());
+    }
 
     #[test]
     fn parses_and_edits_preserving_comments() {
@@ -631,10 +691,30 @@ oauth_token = "op://Private/claude/token"
     }
 
     #[test]
+    fn rules_are_added_and_pruned_in_place() {
+        let text = "# my env\npresets = []\n\n[[allow]]\nid = \"old\"\nhost = \"a.example\"\nexpires = \"2000-01-01T00:00:00Z\"\n\n[[allow]]\nid = \"keep\"\nhost = \"b.example\"\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        std::fs::write(&path, text).unwrap();
+        let mut f = EnvFile::parse(path.clone(), text).unwrap();
+        f.add_rules(&[Rule::read("c.example"), Rule::read("d.example")])
+            .unwrap();
+        assert_eq!(f.prune_expired().unwrap(), 1);
+        assert_eq!(f.remove_rules("c.example").unwrap(), 1);
+        let hosts: Vec<&str> = f.cfg.allow.iter().map(|r| r.host.as_str()).collect();
+        assert_eq!(hosts, ["b.example", "d.example"]);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.starts_with("# my env") && !saved.contains("a.example"));
+    }
+
+    #[test]
     fn names_are_restricted() {
         assert!(validate_name("my-env-2").is_ok());
         assert!(validate_name("My_Env").is_err());
         assert!(validate_name("../x").is_err());
         assert!(validate_name("vault").is_err());
+        assert!(validate_name("dev").is_err());
+        assert!(validate_name("dev-web").is_err());
+        assert!(validate_name("devops").is_ok());
     }
 }

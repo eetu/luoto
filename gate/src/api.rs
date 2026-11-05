@@ -7,17 +7,23 @@ use chrono::Utc;
 use http::{Method, Request, Response, StatusCode};
 use hyper::body::Incoming;
 use luoto_shared::api::{
-    API_PREFIX, AgentMessage, CheckQuery, CheckResult, NewAccessRequest, RuleSummary,
-    SSH_AGENT_PATH, SandboxStatus,
+    API_PREFIX, AgentMessage, CheckQuery, CheckResult, MAX_AGENT_MESSAGE, NewAccessRequest,
+    RuleSummary, SSH_AGENT_PATH, SandboxStatus,
 };
+use luoto_shared::creds::{CredentialError, SSH_BINDING};
 use luoto_shared::events::{Event, EventKind};
 use luoto_shared::host::split_authority;
 use luoto_shared::policy::{Decision, RequestInfo};
 use serde::de::DeserializeOwned;
 
 use crate::body::{Body, collect_limited};
+use crate::handler::canonical_request;
 use crate::respond::{json, plain};
 use crate::state::State;
+
+/// Every body the API reads is small; the largest is an ssh-agent message, in base64 inside
+/// its JSON envelope.
+const MAX_BODY: usize = 2 * MAX_AGENT_MESSAGE;
 
 const HELP: &str = "luoto sandbox gate. Endpoints:\n\
   GET  /_sandbox/status          policy, credentials, recent denials, requests\n\
@@ -42,11 +48,7 @@ pub async fn handle(state: Arc<State>, req: Request<Incoming>) -> Response<Body>
         },
         (Method::POST, "/requests") => match read::<NewAccessRequest>(req).await {
             Ok(new) => {
-                let created = state
-                    .requests
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .create(new);
+                let created = state.requests().create(new);
                 match created {
                     Ok(r) => {
                         state.events.emit(Event {
@@ -69,7 +71,7 @@ pub async fn handle(state: Arc<State>, req: Request<Incoming>) -> Response<Body>
                 .trim_start_matches("/requests/")
                 .parse::<u64>()
                 .unwrap_or(0);
-            let reqs = state.requests.lock().unwrap_or_else(|e| e.into_inner());
+            let reqs = state.requests();
             match reqs.get(id) {
                 Some(r) => json(StatusCode::OK, r),
                 None => plain(StatusCode::NOT_FOUND, "no such request\n"),
@@ -79,16 +81,16 @@ pub async fn handle(state: Arc<State>, req: Request<Incoming>) -> Response<Body>
             // The vault answers: the env's SSH key never leaves it.
             Ok(msg) => match state.vault() {
                 None => plain(StatusCode::SERVICE_UNAVAILABLE, "no vault configured\n"),
-                Some(vault) => match vault.agent("ssh", msg).await {
+                Some(vault) => match vault.agent(SSH_BINDING, msg).await {
                     Ok(reply) => json(StatusCode::OK, &reply),
-                    Err(crate::creds::CredError::Unknown(_)) => {
+                    Err(CredentialError::NotBound) => {
                         plain(StatusCode::NOT_FOUND, "no SSH key: add [credentials.ssh]\n")
                     }
-                    Err(crate::creds::CredError::Locked) => plain(
+                    Err(CredentialError::Locked) => plain(
                         StatusCode::LOCKED,
                         "vault is locked: `luoto vault unlock`\n",
                     ),
-                    Err(crate::creds::CredError::Unavailable(e)) => {
+                    Err(CredentialError::Failed(e)) => {
                         plain(StatusCode::BAD_GATEWAY, format!("{e}\n"))
                     }
                 },
@@ -104,7 +106,7 @@ pub async fn handle(state: Arc<State>, req: Request<Incoming>) -> Response<Body>
 }
 
 async fn read<T: DeserializeOwned>(req: Request<Incoming>) -> Result<T, String> {
-    let bytes = collect_limited(crate::body::boxed(req.into_body()), 16 * 1024)
+    let bytes = collect_limited(crate::body::boxed(req.into_body()), MAX_BODY)
         .await
         .map_err(|e| format!("body: {e}\n"))?;
     serde_json::from_slice(&bytes).map_err(|e| format!("invalid JSON: {e}\n"))
@@ -137,12 +139,8 @@ fn status(state: &State) -> SandboxStatus {
         credentials_locked: state.vault().is_none() && !policy.injections.is_empty(),
         rules,
         credentialed_hosts,
-        recent_denials: state.events.recent_denials(20),
-        requests: state
-            .requests
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .list(),
+        recent_denials: state.events.recent_denials(),
+        requests: state.requests().list(),
     }
 }
 
@@ -165,18 +163,21 @@ fn check(state: &State, q: &CheckQuery) -> CheckResult {
         };
     };
     let port = port.unwrap_or(if tls { 443 } else { 80 });
-    let method = q.method.to_ascii_uppercase();
-    let decision = state.policy().decide(
-        &RequestInfo {
-            host: &host,
-            port,
-            method: &method,
-            path: uri.path(),
-            websocket: false,
-            content_length: None,
-        },
-        Utc::now(),
-    );
+    let method = &q.method;
+    let decision = match canonical_request(method, uri.path()) {
+        Ok(path) => state.policy().decide(
+            &RequestInfo {
+                host: &host,
+                port,
+                method,
+                path: &path,
+                websocket: false,
+                content_length: None,
+            },
+            Utc::now(),
+        ),
+        Err(reason) => Decision::Deny(reason),
+    };
     match decision {
         Decision::Allow { rule, .. } => CheckResult {
             allowed: true,

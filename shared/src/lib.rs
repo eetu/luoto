@@ -22,3 +22,25 @@ pub const TRANSPARENT_PORT: u16 = 15001;
 pub const VAULT_PORT: u16 = 8200;
 /// Hostname the sandbox uses for the gate.
 pub const GATE_HOST: &str = "gate";
+
+/// `(name, text)` of each built-in TOML file `<dir>/<name>.toml`.
+macro_rules! embed {
+    ($dir:literal; $($name:literal),* $(,)?) => {
+        &[$(($name, include_str!(concat!("../", $dir, "/", $name, ".toml")))),*]
+    };
+}
+pub(crate) use embed;
+
+/// The built-in file `name` among `files`, parsed, with `name_of` set to its name. The tests
+/// parse every one, so a built-in file that doesn't is a bug caught before release.
+pub(crate) fn load<T: serde::de::DeserializeOwned>(
+    files: &[(&str, &str)],
+    name: &str,
+    name_of: fn(&mut T) -> &mut String,
+) -> Option<T> {
+    let (n, src) = files.iter().find(|(n, _)| *n == name)?;
+    let mut item: T =
+        toml::from_str(src).unwrap_or_else(|e| panic!("built-in `{n}.toml` does not parse: {e}"));
+    *name_of(&mut item) = (*n).to_string();
+    Some(item)
+}

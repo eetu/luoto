@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use crate::policy::Rule;
+use crate::{embed, load};
 
 /// How a model API credential is injected by the gate.
 #[derive(Debug, Clone, Deserialize)]
@@ -39,6 +40,29 @@ pub struct Provider {
     /// More hosts the same credential goes to, each with its own paths.
     #[serde(default)]
     pub also: Vec<ProviderHost>,
+    /// Request fields that have the provider reach the network for the request. The gate
+    /// refuses requests that carry them, and the WebSocket API (whose messages it can't read),
+    /// unless the env sets `server_tools = true` for the provider.
+    #[serde(default, rename = "server_tool")]
+    pub server_tools: Vec<ServerTool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerTool {
+    /// What it is, as a refusal names it ("web fetch").
+    pub what: String,
+    /// POST paths on the provider's `host` whose JSON bodies are read.
+    pub paths: Vec<String>,
+    /// Top-level keys that ask for it (`mcp_servers`).
+    #[serde(default)]
+    pub keys: Vec<String>,
+    /// `tools[].type` values that ask for it, each also with a version suffix.
+    #[serde(default)]
+    pub tool_types: Vec<String>,
+    /// Keys of a `tools[]` entry that ask for it (`url_context`).
+    #[serde(default)]
+    pub tool_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -167,12 +191,6 @@ pub struct EditorSetting {
     pub snippet: String,
 }
 
-macro_rules! embed {
-    ($dir:literal; $($name:literal),* $(,)?) => {
-        &[$(($name, include_str!(concat!("../", $dir, "/", $name, ".toml")))),*]
-    };
-}
-
 const PROVIDERS: &[(&str, &str)] = embed!("providers"; "anthropic", "openai", "openrouter", "gemini", "mistral", "groq", "copilot", "antigravity");
 const AGENTS: &[(&str, &str)] = embed!("agents"; "claude", "opencode", "codex", "copilot", "agy");
 const EDITORS: &[(&str, &str)] = embed!("editors"; "zed", "code", "cursor", "ssh");
@@ -183,10 +201,7 @@ pub fn editor_names() -> impl Iterator<Item = &'static str> {
 }
 
 pub fn editor(name: &str) -> Option<Editor> {
-    let (n, src) = EDITORS.iter().find(|(n, _)| *n == name)?;
-    let mut e: Editor = toml::from_str(src).expect("built-in editor parses");
-    e.name = (*n).to_string();
-    Some(e)
+    load(EDITORS, name, |e: &mut Editor| &mut e.name)
 }
 
 pub fn provider_names() -> impl Iterator<Item = &'static str> {
@@ -198,17 +213,11 @@ pub fn agent_names() -> impl Iterator<Item = &'static str> {
 }
 
 pub fn provider(name: &str) -> Option<Provider> {
-    let (n, src) = PROVIDERS.iter().find(|(n, _)| *n == name)?;
-    let mut p: Provider = toml::from_str(src).expect("built-in provider parses");
-    p.name = (*n).to_string();
-    Some(p)
+    load(PROVIDERS, name, |p: &mut Provider| &mut p.name)
 }
 
 pub fn agent(name: &str) -> Option<Agent> {
-    let (n, src) = AGENTS.iter().find(|(n, _)| *n == name)?;
-    let mut a: Agent = toml::from_str(src).expect("built-in agent parses");
-    a.name = (*n).to_string();
-    Some(a)
+    load(AGENTS, name, |a: &mut Agent| &mut a.name)
 }
 
 #[cfg(test)]

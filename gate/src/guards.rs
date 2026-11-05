@@ -1,17 +1,155 @@
-//! Git write guard-rails: inspect the ref updates at the start of a git push (GitHub and
-//! Azure DevOps), and refuse GitHub GraphQL documents that mutate outside an allowlist.
-//! Server-side rulesets remain the real enforcement; these keep a compromised sandbox from
-//! the obvious moves.
+//! Guards that read a request body: forge write guard-rails (the ref updates at the start of
+//! a git push to GitHub or Azure DevOps, GitHub GraphQL documents that mutate outside an
+//! allowlist) and model API requests that ask the provider to reach the network. Server-side
+//! rulesets remain the real enforcement for forges; these keep a compromised sandbox from the
+//! obvious moves.
 
+use bytes::BytesMut;
 use graphql_parser::query::{Definition, OperationDefinition, Selection};
-use luoto_shared::policy::{AzureGuard, GithubGuard};
+use http::HeaderMap;
+use http::header::CONTENT_ENCODING;
+use http_body_util::BodyExt;
+use luoto_shared::forges;
+use luoto_shared::policy::{AzureGuard, BodyDeny, GithubGuard, JsonBody, Policy};
 
-/// What a push may update, from either host's guard.
+use crate::body::{Body, collect_limited, full, prefixed};
+
+/// The most of a body a guard reads before it decides.
+const MAX_READ: usize = 1 << 20;
+/// The most of a model API request the gate reads to check it: the most the APIs take.
+const MAX_JSON: usize = 32 << 20;
+
+/// Run the guards that apply to a request, and hand back the body to forward: what a guard
+/// read of it, then the rest.
+pub async fn check(
+    policy: &Policy,
+    host: &str,
+    method: &str,
+    path: &str,
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<Body, String> {
+    if method != "POST" {
+        return Ok(body);
+    }
+    let denies: Vec<&BodyDeny> = policy
+        .body_denies
+        .iter()
+        .filter(|d| d.applies(host, path))
+        .collect();
+    if !denies.is_empty() {
+        return check_json(&denies, headers, body).await;
+    }
+    // Git hosts route paths without regard to case, as their rules match them.
+    if path.to_ascii_lowercase().ends_with("/git-receive-pack") {
+        let push = if host == forges::GITHUB
+            && let Some(g) = &policy.github
+        {
+            Some((
+                repo_of(path).is_some_and(|r| g.repos.contains(&r)),
+                PushRules::from(g),
+            ))
+        } else if host == forges::AZURE_DEVOPS
+            && let Some(g) = &policy.azure_devops
+        {
+            Some((
+                azure_repo_of(path).is_some_and(|r| g.repos.contains(&r)),
+                PushRules::from(g),
+            ))
+        } else {
+            None
+        };
+        if let Some((granted, rules)) = push {
+            return guard_push(headers, body, granted, rules).await;
+        }
+    }
+    if host == forges::GITHUB_API
+        && path.eq_ignore_ascii_case("/graphql")
+        && let Some(g) = &policy.github
+    {
+        let bytes = collect_limited(body, MAX_READ)
+            .await
+            .map_err(|_| "GraphQL body too large".to_string())?;
+        check_graphql(g, &bytes)?;
+        return Ok(full(bytes));
+    }
+    Ok(body)
+}
+
+/// A model API request whose body may ask the provider to reach the network: read whole
+/// (a body the check can't read is refused) and forwarded unless it asks.
+async fn check_json(denies: &[&BodyDeny], headers: &HeaderMap, body: Body) -> Result<Body, String> {
+    if headers
+        .get(CONTENT_ENCODING)
+        .is_some_and(|v| !v.as_bytes().eq_ignore_ascii_case(b"identity"))
+    {
+        return Err("a compressed request body to this API can't be checked".into());
+    }
+    let bytes = collect_limited(body, MAX_JSON).await.map_err(|_| {
+        format!(
+            "a request body over {} MiB to this API can't be checked",
+            MAX_JSON >> 20
+        )
+    })?;
+    let json = JsonBody::parse(&bytes)
+        .ok_or("the request body is not a JSON object the gate can check (each key once)")?;
+    if let Some(d) = denies.iter().find(|d| d.asks(&json)) {
+        return Err(d.reason.clone());
+    }
+    Ok(full(bytes))
+}
+
+/// A push to a guarded git host: only to the env's granted repositories, uncompressed, and
+/// with every ref update allowed.
+async fn guard_push(
+    headers: &HeaderMap,
+    body: Body,
+    granted: bool,
+    rules: PushRules<'_>,
+) -> Result<Body, String> {
+    if !granted {
+        return Err("pushes are only allowed to the env's granted repositories".into());
+    }
+    if headers.contains_key(CONTENT_ENCODING) {
+        return Err("compressed pushes cannot be inspected".into());
+    }
+    inspect_push(body, rules).await
+}
+
+/// Read the ref-update commands at the front of a push, check them, and hand back a body
+/// that replays what was read followed by the rest of the stream.
+async fn inspect_push(mut body: Body, rules: PushRules<'_>) -> Result<Body, String> {
+    let mut buf = BytesMut::new();
+    loop {
+        match parse_ref_updates(&buf) {
+            Ok(updates) => {
+                check_updates(rules, &updates)?;
+                break;
+            }
+            Err(Parse::Invalid(e)) => return Err(e),
+            Err(Parse::NeedMore) => {}
+        }
+        if buf.len() > MAX_READ {
+            return Err("push command list too large".into());
+        }
+        match body.frame().await {
+            Some(Ok(frame)) => {
+                if let Ok(data) = frame.into_data() {
+                    buf.extend_from_slice(&data);
+                }
+            }
+            Some(Err(e)) => return Err(format!("reading push: {e}")),
+            None => return Err("truncated push".into()),
+        }
+    }
+    Ok(prefixed(buf.freeze(), body))
+}
+
+/// What a push may update, from either host's guard. Deleting a ref is never allowed.
 #[derive(Debug, Clone, Copy)]
-pub struct PushRules<'a> {
-    pub protected_branches: &'a [String],
-    pub allow_tags: bool,
-    pub allow_branch_delete: bool,
+struct PushRules<'a> {
+    protected_branches: &'a [String],
+    allow_tags: bool,
 }
 
 impl<'a> From<&'a GithubGuard> for PushRules<'a> {
@@ -19,7 +157,6 @@ impl<'a> From<&'a GithubGuard> for PushRules<'a> {
         PushRules {
             protected_branches: &g.protected_branches,
             allow_tags: g.allow_tags,
-            allow_branch_delete: g.allow_branch_delete,
         }
     }
 }
@@ -29,26 +166,25 @@ impl<'a> From<&'a AzureGuard> for PushRules<'a> {
         PushRules {
             protected_branches: &g.protected_branches,
             allow_tags: g.allow_tags,
-            allow_branch_delete: g.allow_branch_delete,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RefUpdate {
-    pub old: String,
-    pub new: String,
-    pub name: String,
+struct RefUpdate {
+    old: String,
+    new: String,
+    name: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Parse {
+enum Parse {
     NeedMore,
     Invalid(String),
 }
 
 /// `owner/repo` (lowercase, no `.git`) from a smart-HTTP path.
-pub fn repo_of(path: &str) -> Option<String> {
+fn repo_of(path: &str) -> Option<String> {
     let mut it = path.trim_start_matches('/').split('/');
     let owner = it.next()?;
     let repo = it.next()?;
@@ -65,7 +201,7 @@ pub fn repo_of(path: &str) -> Option<String> {
 
 /// `org/project/repo` (lowercase, no `.git`) from an Azure DevOps smart-HTTP path:
 /// `/org/project/_git/repo/…`, or `/org/_git/repo/…` for a project's repo of the same name.
-pub fn azure_repo_of(path: &str) -> Option<String> {
+fn azure_repo_of(path: &str) -> Option<String> {
     let seg: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let (org, project, repo) = match seg.as_slice() {
         [org, "_git", repo, ..] => (*org, *repo, *repo),
@@ -82,7 +218,7 @@ pub fn azure_repo_of(path: &str) -> Option<String> {
 
 /// Parse the pkt-line command list that opens a receive-pack request, up to the flush
 /// packet. Returns the updates once the flush has been seen.
-pub fn parse_ref_updates(buf: &[u8]) -> Result<Vec<RefUpdate>, Parse> {
+fn parse_ref_updates(buf: &[u8]) -> Result<Vec<RefUpdate>, Parse> {
     let mut updates = Vec::new();
     let mut pos = 0;
     loop {
@@ -132,9 +268,9 @@ fn is_zero(oid: &str) -> bool {
     !oid.is_empty() && oid.bytes().all(|b| b == b'0')
 }
 
-pub fn check_updates(guard: PushRules<'_>, updates: &[RefUpdate]) -> Result<(), String> {
+fn check_updates(guard: PushRules<'_>, updates: &[RefUpdate]) -> Result<(), String> {
     for u in updates {
-        if is_zero(&u.new) && !guard.allow_branch_delete {
+        if is_zero(&u.new) {
             return Err(format!(
                 "deleting `{}` is not allowed from the sandbox",
                 u.name
@@ -163,7 +299,7 @@ pub fn check_updates(guard: PushRules<'_>, updates: &[RefUpdate]) -> Result<(), 
     Ok(())
 }
 
-pub fn check_graphql(guard: &GithubGuard, body: &[u8]) -> Result<(), String> {
+fn check_graphql(guard: &GithubGuard, body: &[u8]) -> Result<(), String> {
     let value: serde_json::Value =
         serde_json::from_slice(body).map_err(|_| "GraphQL body is not JSON".to_string())?;
     if value.is_array() {

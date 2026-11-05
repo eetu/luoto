@@ -1,6 +1,7 @@
 //! Where luoto keeps things on the host. macOS and Linux use XDG-style dot directories
 //! (`~/.config/luoto`, `~/.local/share/luoto`) so they are easy to find and edit;
-//! Windows uses the platform's roaming/local app data. `LUOTO_HOME` overrides both (tests).
+//! Windows uses the platform's roaming/local app data. A source build uses `luoto-dev` for
+//! `luoto` (`names::instance`). `LUOTO_HOME` overrides both (tests).
 
 use std::path::PathBuf;
 
@@ -22,7 +23,7 @@ impl Paths {
         }
         #[cfg(windows)]
         {
-            let dirs = directories::ProjectDirs::from("", "", "luoto")
+            let dirs = directories::ProjectDirs::from("", "", crate::names::instance())
                 .context("cannot determine the user profile directory")?;
             Ok(Paths {
                 config: dirs.config_dir().to_path_buf(),
@@ -38,11 +39,11 @@ impl Paths {
             let config = std::env::var_os("XDG_CONFIG_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".config"))
-                .join("luoto");
+                .join(crate::names::instance());
             let data = std::env::var_os("XDG_DATA_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".local/share"))
-                .join("luoto");
+                .join(crate::names::instance());
             Ok(Paths { config, data })
         }
     }

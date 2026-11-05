@@ -84,12 +84,13 @@ pub fn watch() -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         let ctx = Ctx::load()?;
-        if machine::is_luoto(ctx.rt.connection.as_deref()) && !machine::running(&ctx.rt.bin) {
+        let states = ctx.rt.states().unwrap_or_default();
+        if states.vm_stopped {
             return Ok(ExitCode::SUCCESS);
         }
         let running: Vec<String> = config::list_envs(&ctx.paths)?
             .into_iter()
-            .filter(|e| ctx.rt.container_state(&names::dev(e)).as_deref() == Some("running"))
+            .filter(|e| states.running(&names::dev(e)))
             .collect();
         if running.is_empty() {
             forwards.clear();

@@ -81,6 +81,56 @@
     cursor: default;
   }
 
+  :global(.panel) {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  :global(.section) {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--halo-border);
+  }
+
+  :global(.actions) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  :global(.small) {
+    margin: 0;
+    font-size: 12px;
+    word-break: break-word;
+  }
+
+  :global(.warn) {
+    margin: 0;
+    color: var(--halo-error);
+    font-size: 12px;
+  }
+
+  /* Text written by code in the sandbox. */
+  :global(.untrusted) {
+    padding: 6px 8px;
+    border-left: 2px solid var(--halo-error);
+    background: var(--halo-bg-light);
+  }
+
+  :global(.field) {
+    display: grid;
+    grid-template-columns: 58px 1fr;
+    gap: 8px;
+    align-items: center;
+    font-size: 13px;
+  }
+
+  :global(.field > span:first-child) {
+    color: var(--halo-text-muted);
+  }
+
   :global(.label) {
     margin: 0 0 6px;
     color: var(--halo-text-muted);

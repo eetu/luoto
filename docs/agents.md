@@ -5,6 +5,9 @@ takes and where to get one, which hosts it reaches, what it is denied on purpose
 still unverified. The profiles themselves are TOML files in
 [`shared/agents`](../shared/agents) and [`shared/providers`](../shared/providers).
 
+Status: run with a real account for Claude Code and Antigravity CLI; installed only for
+OpenCode and Codex; untested for Copilot CLI ([ROADMAP.md](../ROADMAP.md)).
+
 ## How an agent is set up
 
 `luoto agent add <agent>` (or the first `luoto agent run <agent>`) installs the agent inside
@@ -24,22 +27,31 @@ sandbox is the boundary, so the prompts guard nothing luoto doesn't.
 
 A provider credential lives outside the sandbox. luoto reads it on your machine, the vault
 keeps it in memory, and the gate adds it to the agent's requests to that provider. The agent
-sees a placeholder of the right format. Without one, `agent add`, `agent run` and `init`'s
-walk-through ask which kind you have, say where to get it, and keep it where you choose: your
+sees a placeholder of the right format. Without one, `init`, `agent add` and `agent run` ask
+which kind you have, say where to get it, and keep it where you choose: your
 OS keychain (`keyring:luoto/<provider>.<kind>`, reused by later envs), a new 1Password item
 (the secret reaches `op` on stdin), or a reference to where it already is (`op://`,
 `vault://`, `keyring:`, `env:`, `file:`).
 
 `login_inside = true` is the exception: the agent signs in itself and keeps the session in
 the env's home, where any code in the sandbox can read it. Providers that allow it open their
-sign-in hosts for it; luoto warns about it at `up`.
+sign-in hosts for it; luoto warns about it at `up`. It is also the default when you choose no
+credential (no terminal, "later", or a new env from the UI), so an agent you add can work at
+once; replacing it with a credential kind moves the credential outside.
+
+Server tools have the provider reach the network for a request: fetch a URL, call an MCP
+server. Code in the sandbox could use them to send data anywhere, so the gate reads requests
+to the endpoints that take them and refuses one that asks for them, along with the
+provider's WebSocket API, whose messages it can't read. The agents luoto sets up fetch and run
+MCP servers on their own side, through the gate. `server_tools = true` under
+`[credentials.<provider>]` allows them.
 
 | provider | hosts the credential goes to | kinds | where to get one | kept out of reach |
 | --- | --- | --- | --- | --- |
-| `anthropic` | `api.anthropic.com` | `oauth_token`, `api_key`, login inside | `claude setup-token` on your machine (Claude plan); console.anthropic.com (API billing) | files, message batches, organization admin, skills |
-| `openai` | `api.openai.com` (also over WebSocket) | `api_key`, login inside | platform.openai.com/api-keys; a ChatGPT plan only through login inside | files, uploads, batches, organization, fine-tuning, vector stores |
+| `anthropic` | `api.anthropic.com` | `oauth_token`, `api_key`, login inside | `claude setup-token` on your machine (Claude plan); console.anthropic.com (API billing) | files, message batches, organization admin, skills; server tools: web fetch, the MCP connector |
+| `openai` | `api.openai.com` (over WebSocket only with server tools) | `api_key`, login inside | platform.openai.com/api-keys; a ChatGPT plan only through login inside | files, uploads, batches, organization, fine-tuning, vector stores; server tools: remote MCP servers |
 | `openrouter` | `openrouter.ai` `/api/**` | `api_key` | openrouter.ai/keys | |
-| `gemini` | `generativelanguage.googleapis.com` | `api_key` | aistudio.google.com/apikey | uploads, files, cached contents, batches |
+| `gemini` | `generativelanguage.googleapis.com` | `api_key` | aistudio.google.com/apikey | uploads, files, cached contents, batches; server tools: URL context, remote MCP servers |
 | `mistral` | `api.mistral.ai` | `api_key` | console.mistral.ai/api-keys | |
 | `groq` | `api.groq.com` | `api_key` | console.groq.com/keys | |
 | `copilot` | `api.githubcopilot.com` and its `individual`, `business`, `enterprise` hosts; `api.github.com` `/copilot_internal/**`, `/user` | `token` | github.com/settings/personal-access-tokens (fine-grained, Copilot Requests) | |
@@ -49,8 +61,6 @@ A Google AI Pro plan doesn't pay for a Gemini API key: a key is free tier, where
 use prompts to improve its products, until its Google Cloud project has billing.
 
 ## Claude Code
-
-`claude`, run with a real account for 0.1.0.
 
 - Installs with Anthropic's installer (`claude.ai`, `downloads.claude.ai`,
   `storage.googleapis.com`). Runs with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and
@@ -74,8 +84,6 @@ use prompts to improve its products, until its Google Cloud project has billing.
 
 ## OpenCode
 
-`opencode`, installed but not run with a real account for 0.1.0.
-
 - Installs with OpenCode's installer from its GitHub releases, and runs with auto-update and
   session sharing off (`OPENCODE_DISABLE_AUTOUPDATE`, `OPENCODE_DISABLE_SHARE`).
 - Takes any of `anthropic`, `openai`, `openrouter` or `gemini`.
@@ -84,17 +92,14 @@ use prompts to improve its products, until its Google Cloud project has billing.
 
 ## Codex
 
-`codex`, installed but not run with a real account for 0.1.0.
-
 - Installs from npm (`@openai/codex`); mise brings Node LTS for it.
 - `openai` `api_key`, or `login_inside = true` to sign in with ChatGPT (opens
   `auth.openai.com` and `chatgpt.com`).
-- Streams over `wss://api.openai.com/v1/responses` before falling back to HTTPS; the provider
-  allows the WebSocket upgrade.
+- Streams over `wss://api.openai.com/v1/responses` before falling back to HTTPS. The gate
+  refuses the WebSocket upgrade unless `server_tools = true`; that Codex then falls back is
+  unverified.
 
 ## GitHub Copilot CLI
-
-`copilot`, untested: no run with a Copilot licence yet.
 
 - Installs from npm (`@github/copilot`) and runs with `COPILOT_AUTO_UPDATE=false`.
 - Takes a fine-grained personal access token with the Copilot Requests account permission
@@ -103,13 +108,10 @@ use prompts to improve its products, until its Google Cloud project has billing.
 - The gate adds the token on the Copilot API hosts and on GitHub's `/copilot_internal/**` and
   `/user`, apart from a GitHub credential's repository paths.
 - The briefing goes to `~/.copilot/instructions/luoto.instructions.md`, without `applyTo`
-  frontmatter; whether Copilot loads it is part of what a first run settles.
-- Trying it: `luoto agent run copilot`, then `luoto egress --denied --since 15m`. Hosts or
-  paths it needs and doesn't get show there; telemetry hosts are left denied.
+  frontmatter. Unverified: whether Copilot loads it, and which hosts and paths it needs
+  ([ROADMAP.md](../ROADMAP.md)); telemetry hosts are left denied.
 
 ## Antigravity CLI
-
-`agy`, run with a Google AI Pro account for 0.1.0.
 
 - Installs with Google's installer: `antigravity.google` for the script, a Cloud Run updater
   (`antigravity-cli-auto-updater-974169037036.us-central1.run.app`) for the manifest, and
@@ -134,9 +136,6 @@ use prompts to improve its products, until its Google Cloud project has billing.
   | `lh3.googleusercontent.com` | your profile picture | it also serves files people upload to Google Photos, Blogger and Sites: a download route for anything |
   | `www.gstatic.com` | static images and fonts | nothing a terminal needs |
   | the updater manifest | an update check it makes even with auto-update off | the binary stays the version luoto installed |
-
-- With an API key instead of a sign-in (the `gemini` provider and `modelProvider: "gemini"`
-  in its settings) is on the [roadmap](../ROADMAP.md).
 
 ## Not built in
 

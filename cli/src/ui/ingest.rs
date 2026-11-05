@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use luoto_shared::events::Event;
+use luoto_shared::events::{Event, SELFTEST_DOMAIN};
 use rusqlite::{Connection, params};
 use tokio::sync::broadcast;
 
@@ -113,6 +113,24 @@ impl Store {
         out
     }
 
+    /// Denied attempts in `env` since `since`, the self-test's probes left out.
+    pub fn denied_since(&self, env: &str, since: DateTime<Utc>) -> usize {
+        self.lock()
+            .query_row(
+                "SELECT count(*) FROM events WHERE env = ?1 AND ts >= ?2
+                   AND json_extract(json, '$.verdict') = 'deny'
+                   AND (host IS NULL OR (host <> ?3 AND substr(host, -length(?4)) <> ?4))",
+                params![
+                    env,
+                    since.to_rfc3339(),
+                    SELFTEST_DOMAIN,
+                    format!(".{SELFTEST_DOMAIN}")
+                ],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_or(0, |n| usize::try_from(n).unwrap_or(0))
+    }
+
     fn prune(&self) {
         let cutoff = (Utc::now() - chrono::TimeDelta::days(RETAIN_DAYS)).to_rfc3339();
         let _ = self
@@ -129,37 +147,27 @@ pub fn spawn_supervisor(store: Store) {
         let mut ticks = 0u64;
         loop {
             if let Ok(ctx) = Ctx::load() {
+                let states = ctx.rt.states().unwrap_or_default();
                 let mut targets: Vec<(String, String, String)> = Vec::new();
                 for env in config::list_envs(&ctx.paths).unwrap_or_default() {
                     targets.push((names::gate(&env), env, "gate".into()));
                 }
-                targets.push((names::VAULT.into(), String::new(), "vault".into()));
+                targets.push((names::vault(), String::new(), "vault".into()));
                 for (container, env, source) in targets {
-                    if active
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .contains(&container)
+                    if !states.running(&container)
+                        || !active
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(container.clone())
                     {
                         continue;
                     }
-                    if ctx.rt.container_state(&container).as_deref() != Some("running") {
-                        continue;
-                    }
-                    active
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(container.clone());
                     let store = store.clone();
                     let rt = ctx.rt.clone();
                     let active = active.clone();
                     std::thread::spawn(move || {
-                        let key = if source == "vault" {
-                            String::new()
-                        } else {
-                            env.clone()
-                        };
                         let since = store
-                            .last_ts(&key, &source)
+                            .last_ts(&env, &source)
                             .map(|t| t.timestamp().to_string())
                             .unwrap_or_else(|| {
                                 (Utc::now() - chrono::TimeDelta::days(1))
@@ -186,4 +194,42 @@ pub fn spawn_supervisor(store: Store) {
             std::thread::sleep(Duration::from_secs(5));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeDelta;
+    use luoto_shared::events::Verdict;
+
+    use super::*;
+
+    #[test]
+    fn counts_recent_denials_without_the_selftest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("events.db")).unwrap();
+        let now = Utc::now();
+        let ev = |seq, host: Option<&str>, verdict, minutes_ago| Event {
+            seq,
+            run: "r".into(),
+            env: "e".into(),
+            ts: Some(now - TimeDelta::minutes(minutes_ago)),
+            host: host.map(str::to_string),
+            verdict: Some(verdict),
+            ..Default::default()
+        };
+        for e in [
+            ev(1, Some("evil.example"), Verdict::Deny, 1),
+            ev(2, None, Verdict::Deny, 1),
+            ev(3, Some("notselftest.luoto.invalid"), Verdict::Deny, 1),
+            ev(4, Some("ok.example"), Verdict::Allow, 1),
+            ev(5, Some("probe.selftest.luoto.invalid"), Verdict::Deny, 1),
+            ev(6, Some("selftest.luoto.invalid"), Verdict::Deny, 1),
+            ev(7, Some("old.example"), Verdict::Deny, 60),
+        ] {
+            assert!(store.insert(&e));
+        }
+        let since = now - TimeDelta::minutes(15);
+        assert_eq!(store.denied_since("e", since), 3);
+        assert_eq!(store.denied_since("other", since), 0);
+    }
 }

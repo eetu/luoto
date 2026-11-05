@@ -45,17 +45,14 @@ pub fn limit(global: &GlobalConfig, cfg: &EnvConfig) -> Option<Duration> {
     if matches!(s, "off" | "never" | "0") {
         return None;
     }
-    crate::commands::parse_ttl(s)
+    crate::rules::parse_ttl(s)
         .ok()
         .and_then(|d| d.to_std().ok())
 }
 
 /// What runs in the env's dev container besides its init; None if that can't be asked.
 pub fn activity(ctx: &Ctx, env: &str) -> Option<Vec<String>> {
-    let out = ctx
-        .rt
-        .run(["exec", "-u", "0", &names::dev(env), "sh", "-c", PROCESSES])
-        .ok()?;
+    let out = ctx.rt.pipe_sh(&names::dev(env), "0", PROCESSES, b"").ok()?;
     Some(
         out.lines()
             .map(str::trim)

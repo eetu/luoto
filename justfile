@@ -2,6 +2,7 @@
 
 yarn := "node " + (justfile_directory() / "frontend" / `awk '/^yarnPath:/{print $2}' frontend/.yarnrc.yml`)
 # macOS and Windows: luoto's own VM (`luoto setup` creates it).
+target := env_var_or_default("CARGO_TARGET_DIR", justfile_directory() / "target")
 runtime := env_var_or_default("LUOTO_RUNTIME", if os() == "linux" { "podman" } else { "podman --connection luoto" })
 
 default:
@@ -22,6 +23,14 @@ build: ui-build
 # Install the luoto CLI from this checkout.
 install-cli: ui-build
     cargo install --path cli --locked
+
+# A source build is the `luoto-dev` instance: its own config, vault and container names, beside
+# an installed release in the same VM. Debug builds read the UI from frontend/dist.
+# Link ~/.local/bin/luoto-dev to this checkout's debug build, so it runs the latest build.
+link-dev:
+    cargo build -p luoto
+    mkdir -p ~/.local/bin
+    ln -sfn "{{target}}/debug/luoto" ~/.local/bin/luoto-dev
 
 # Build the gate, vault, tools and base images where luoto runs them.
 images:
@@ -69,20 +78,22 @@ test-ui:
     cd frontend && {{yarn}} test:ui
 
 # README screenshots from a real env and `luoto ui` (needs the runtime; leaves nothing behind).
-# The env is `demo` in a throwaway LUOTO_HOME; it refuses to run if a `luoto-demo` exists, so its
-# cleanup can't touch an env of yours. The vault is shared: the vault shot is skipped unless it
-# holds only the demo's dummy credential, which stays in its memory until `luoto vault lock`.
+# The env is `demo` in a throwaway LUOTO_HOME, run by the debug build (the `luoto-dev` instance);
+# it refuses to run if a `luoto-dev-demo` exists, so its cleanup can't touch an env of yours. The
+# dev vault is shared with your other dev envs: the vault shot is skipped unless it holds only
+# the demo's dummy credential, which stays in its memory until `luoto-dev vault lock`.
 shots:
     #!/usr/bin/env bash
     set -euo pipefail
     rt="{{runtime}}"
-    if $rt container inspect luoto-demo >/dev/null 2>&1; then
-        echo "a luoto-demo container exists; remove that env first" >&2
+    if $rt container inspect luoto-dev-demo >/dev/null 2>&1; then
+        echo "a luoto-dev-demo container exists; remove that env first" >&2
         exit 1
     fi
     cargo build -p luoto
     luoto="$PWD/target/debug/luoto"
-    real_config="${LUOTO_HOME:-$HOME/.config/luoto}"
+    real_config="$HOME/.config/luoto-dev"
+    [ -f "$real_config/config.toml" ] || real_config="$HOME/.config/luoto"
     [ -n "${LUOTO_HOME:-}" ] && real_config="$LUOTO_HOME/config"
     export LUOTO_HOME="$(mktemp -d)"
     # The runtime settings (luoto's VM, gVisor) come from your setup; nothing else does.
@@ -91,7 +102,7 @@ shots:
     cleanup() {
         kill "${ui:-}" 2>/dev/null || true
         "$luoto" rm -e demo --yes >/dev/null 2>&1 || true
-        for v in $($rt volume ls -q | grep '^luoto-demo-' || true); do $rt volume rm "$v" >/dev/null; done
+        for v in $($rt volume ls -q | grep '^luoto-dev-demo-' || true); do $rt volume rm "$v" >/dev/null; done
         rm -rf "$LUOTO_HOME"
     }
     trap cleanup EXIT

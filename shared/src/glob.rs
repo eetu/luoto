@@ -29,12 +29,25 @@ fn tokenize(pattern: &str) -> Vec<Tok> {
     out
 }
 
-/// Whole-path match of `path` (no query string) against `pattern`.
-/// [`glob_match`] without regard to ASCII case, for hosts whose paths are case-insensitive.
+/// Does `path` match one of `patterns`? No patterns match every path. `ignore_case` is for
+/// hosts whose paths are case-insensitive.
+pub fn matches_any(patterns: &[String], ignore_case: bool, path: &str) -> bool {
+    patterns.is_empty()
+        || patterns.iter().any(|p| {
+            if ignore_case {
+                glob_match_any_case(p, path)
+            } else {
+                glob_match(p, path)
+            }
+        })
+}
+
+/// [`glob_match`] without regard to ASCII case.
 pub fn glob_match_any_case(pattern: &str, path: &str) -> bool {
     glob_match(&pattern.to_ascii_lowercase(), &path.to_ascii_lowercase())
 }
 
+/// Whole-path match of `path` (no query string) against `pattern`.
 pub fn glob_match(pattern: &str, path: &str) -> bool {
     let toks = tokenize(pattern);
     let s = path.as_bytes();

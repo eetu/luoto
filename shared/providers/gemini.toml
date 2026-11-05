@@ -13,3 +13,16 @@ header = "x-goog-api-key"
 format = "{secret}"
 query = "key"
 env = { GEMINI_API_KEY = "AIzaSyLuotoPlaceholder0000000000000000000" }
+
+# Server tools: the provider reaches the network for the request. Refused unless the env sets
+# `server_tools = true` under [credentials.gemini].
+[[server_tool]]
+what = "URL context"
+paths = ["/v1beta/models/*", "/v1/models/*", "/v1beta/tunedModels/*", "/v1beta/interactions"]
+tool_keys = ["url_context", "urlContext"]
+tool_types = ["url_context"]
+
+[[server_tool]]
+what = "a remote MCP server"
+paths = ["/v1beta/interactions"]
+tool_types = ["mcp_server"]

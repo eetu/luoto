@@ -48,7 +48,7 @@ pub fn gate<T: DeserializeOwned>(rt: &Runtime, env: &str, op: &GateCtl) -> Resul
 pub fn vault<T: DeserializeOwned>(rt: &Runtime, op: &VaultCtl) -> Result<T> {
     call(
         rt,
-        names::VAULT,
+        &names::vault(),
         &["/luoto-vault", "ctl"],
         serde_json::to_string(op)?,
     )

@@ -12,7 +12,7 @@ mod creds;
 mod ctl;
 mod dns;
 mod events;
-mod github;
+mod guards;
 mod handler;
 mod mitm;
 mod proxy;

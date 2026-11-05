@@ -12,6 +12,7 @@ import type {
   Proposal,
   PullPlan,
   Rule,
+  SelftestReport,
   SetupInfo,
 } from "./types";
 
@@ -75,12 +76,15 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 const env = (name: string) => `/envs/${encodeURIComponent(name)}`;
 
+/** The risks a 409 asks the user to confirm (resend with `force`), or null for any other error. */
+export const risksOf = (e: unknown): string[] | null =>
+  e instanceof ApiError && e.status === 409 ? ((e.data.risks as string[] | undefined) ?? []) : null;
+
 export const api = {
   overview: () => request<Overview>("GET", "/overview"),
   meta: () => request<Meta>("GET", "/meta"),
   setup: () => request<SetupInfo>("GET", "/setup"),
-  setupInstall: () =>
-    request<{ ok: boolean; command: string; output: string }>("POST", "/setup/install", {}),
+  setupInstall: () => request<{ output: string }>("POST", "/setup/install", {}),
   createEnv: (body: {
     name?: string;
     dir?: string;
@@ -88,7 +92,7 @@ export const api = {
     agents: string[];
     ports: number[];
     project_sha?: string;
-  }) => request<{ ok: boolean; name: string }>("POST", "/envs", body),
+  }) => request<{ name: string }>("POST", "/envs", body),
   detect: (body: { name?: string; dir?: string }) => request<Proposal>("POST", "/detect", body),
   env: (name: string) => request<EnvDetail>("GET", env(name)),
   projectStatus: (name: string) => request<ProjectStatus>("GET", `${env(name)}/project`),
@@ -102,26 +106,24 @@ export const api = {
       `${env(name)}/events?minutes=${minutes}&host=${encodeURIComponent(host)}`,
     ),
   requests: (name: string) => request<AccessRequest[]>("GET", `${env(name)}/requests`),
-  approve: (name: string, id: number, ttl?: string) =>
-    request<Rule>("POST", `${env(name)}/requests/${id}/approve`, { ttl }),
-  reject: (name: string, id: number, note?: string) =>
-    request<AccessRequest>("POST", `${env(name)}/requests/${id}/reject`, {
-      note,
-    }),
+  approve: (name: string, id: number, ttl?: string, force = false) =>
+    request<Rule>("POST", `${env(name)}/requests/${id}/approve`, { ttl, force }),
+  reject: (name: string, id: number) =>
+    request<AccessRequest>("POST", `${env(name)}/requests/${id}/reject`, {}),
   addRule: (name: string, rule: Rule, force = false) =>
     request<Rule>("POST", `${env(name)}/rules`, { rule, force }),
   deleteRule: (name: string, id: string) =>
     request<number>("DELETE", `${env(name)}/rules/${encodeURIComponent(id)}`),
-  action: (name: string, action: "up" | "down" | "rebuild" | "selftest") =>
-    request<Record<string, unknown>>("POST", `${env(name)}/${action}`, {}),
+  action: (name: string, action: "up" | "down" | "rebuild") =>
+    request<unknown>("POST", `${env(name)}/${action}`, {}),
+  selftest: (name: string) => request<SelftestReport>("POST", `${env(name)}/selftest`, {}),
   pullPlan: (name: string) => request<PullPlan>("GET", `${env(name)}/pull`),
   pull: (name: string, digest: string, includeRisky: boolean) =>
     request<{ written: number; skipped: number }>("POST", `${env(name)}/pull`, {
       digest,
       include_risky: includeRisky,
     }),
-  vault: (action: "unlock" | "lock") =>
-    request<Record<string, unknown>>("POST", `/vault/${action}`, {}),
+  vault: (action: "unlock" | "lock") => request<unknown>("POST", `/vault/${action}`, {}),
 };
 
 /** Follow the live event stream (fetch-based SSE, so the token can travel in a header). */

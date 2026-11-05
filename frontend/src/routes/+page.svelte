@@ -16,6 +16,10 @@
   let showNew = $state(false);
   const hasEnvs = $derived((app.overview?.envs.length ?? 0) > 0);
 
+  $effect(() => {
+    document.title = app.overview?.instance ?? "luoto";
+  });
+
   onMount(() => {
     bootToken();
     return startSync();
@@ -40,7 +44,7 @@
   </main>
 {:else}
   <header class="top">
-    <Wordmark />
+    <Wordmark name={app.overview?.instance} />
     <span class="spacer"></span>
     {#if app.busy}<span class="busy">{app.busy}</span>{/if}
   </header>

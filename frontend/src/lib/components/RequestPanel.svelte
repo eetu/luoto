@@ -1,21 +1,28 @@
 <script lang="ts">
   import { api } from "$lib/api";
-  import { act, ago, app } from "$lib/stores/app.svelte";
+  import Risks from "$lib/components/Risks.svelte";
+  import { act, ago, app, TTLS } from "$lib/stores/app.svelte";
 
   let { id }: { id: number } = $props();
 
   const req = $derived(app.requests.find((r) => r.id === id) ?? null);
-  let ttl = $state("1h");
+  let ttl = $state(60);
+  let risks = $state<string[]>([]);
 
-  async function approve() {
+  async function approve(force: boolean) {
     const env = app.env;
     if (!env || !req) return;
-    const ok = await act(
+    const host = req.host;
+    const rule = await act(
       "approving…",
-      () => api.approve(env, id, ttl || undefined),
-      `approved #${id}: ${req.host}`,
+      () => api.approve(env, id, ttl ? `${ttl}m` : undefined, force),
+      `approved #${id}: ${host}`,
+      (found) => (risks = found),
     );
-    if (ok) app.subject = { kind: "host", host: req.host };
+    if (rule) {
+      risks = [];
+      app.subject = { kind: "host", host };
+    }
   }
 
   async function reject() {
@@ -53,14 +60,18 @@
       <label class="field">
         <span>for</span>
         <select bind:value={ttl}>
-          <option value="15m">15 min</option>
-          <option value="1h">1 hour</option>
-          <option value="1d">1 day</option>
-          <option value="">until revoked</option>
+          {#each TTLS as t (t.minutes)}<option value={t.minutes}>{t.label}</option>{/each}
         </select>
       </label>
+      {#if risks.length > 0}
+        <Risks {risks} confirm="approve anyway" onconfirm={() => void approve(true)} />
+      {/if}
       <div class="actions">
-        <button class="btn primary" onclick={approve} disabled={!!app.busy}>approve</button>
+        {#if risks.length === 0}
+          <button class="btn primary" onclick={() => void approve(false)} disabled={!!app.busy}
+            >approve</button
+          >
+        {/if}
         <button class="btn" onclick={reject} disabled={!!app.busy}>reject</button>
       </div>
     {/if}
@@ -70,12 +81,6 @@
 </div>
 
 <style>
-  .panel {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
   h2 {
     margin: 0;
     font-size: 15px;
@@ -98,40 +103,11 @@
     margin: 0;
   }
 
-  .untrusted {
-    padding: 8px 10px;
-    border: 1px dashed var(--halo-border);
-    border-radius: var(--halo-radius);
-  }
-
   .reason {
     margin: 0;
     white-space: pre-wrap;
     word-break: break-word;
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
     font-size: 12px;
-  }
-
-  .warn {
-    margin: 0;
-    color: var(--halo-error);
-    font-size: 12px;
-  }
-
-  .field {
-    display: grid;
-    grid-template-columns: 58px 1fr;
-    gap: 8px;
-    align-items: center;
-    font-size: 13px;
-  }
-
-  .field span {
-    color: var(--halo-text-muted);
-  }
-
-  .actions {
-    display: flex;
-    gap: 8px;
   }
 </style>

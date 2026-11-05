@@ -33,13 +33,8 @@ impl Preset {
     }
 }
 
-macro_rules! presets {
-    ($($name:literal),* $(,)?) => {
-        &[$(($name, include_str!(concat!("../presets/", $name, ".toml")))),*]
-    };
-}
-
-const PRESETS: &[(&str, &str)] = presets!(
+const PRESETS: &[(&str, &str)] = crate::embed!(
+    "presets";
     "debian",
     "ubuntu",
     "alpine",
@@ -62,10 +57,7 @@ pub fn names() -> impl Iterator<Item = &'static str> {
 }
 
 pub fn get(name: &str) -> Option<Preset> {
-    let (n, src) = PRESETS.iter().find(|(n, _)| *n == name)?;
-    let mut p: Preset = toml::from_str(src).expect("built-in preset parses");
-    p.name = (*n).to_string();
-    Some(p)
+    crate::load(PRESETS, name, |p: &mut Preset| &mut p.name)
 }
 
 pub fn all() -> Vec<Preset> {

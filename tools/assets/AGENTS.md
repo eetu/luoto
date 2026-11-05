@@ -26,10 +26,8 @@ env's name and its current rules.
 ## Toolchains and packages
 
 - Language toolchains come from **mise** (asdf-compatible; `mise registry` lists tools). The
-  project's own files decide versions, and are trusted automatically here: `mise.toml`,
-  `.tool-versions`, `.node-version`/`.nvmrc`, `.python-version`, `.java-version`,
-  `.ruby-version`, `go.mod`, `rust-toolchain.toml`, and `packageManager` in `package.json`
-  (yarn, pnpm). Run `mise install` in `/workspace` after changing them.
+  project's version files decide versions and are trusted automatically here; run
+  `mise install` in `/workspace` after changing them.
 - To start a project or add a language, pin it in the project:
   `mise use node@24 python@3.13 java@temurin-21` in `/workspace` writes `mise.toml` and
   installs. Use the versions the user asked for, otherwise the current LTS or stable release,

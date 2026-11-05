@@ -1,5 +1,9 @@
 <!-- The luoto wordmark: a lit islet above the waves. Full riff on wide screens, `luoto.` on
-     narrow. -->
+     narrow. `name` is the instance: `luoto-dev` for a source build. -->
+<script lang="ts">
+  let { name = "luoto" }: { name?: string } = $props();
+</script>
+
 <span class="halo-wordmark luoto-wordmark">
   <svg class="glyph" viewBox="0 0 64 64" fill="none" aria-hidden="true">
     <path
@@ -16,7 +20,7 @@
       stroke-linecap="round"
       stroke-linejoin="round"
     />
-  </svg><span class="riff">no tool is an island, except on&nbsp;</span>luoto<span class="accent"
+  </svg><span class="riff">no tool is an island, except on&nbsp;</span>{name}<span class="accent"
     >.</span
   >
 </span>

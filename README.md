@@ -1,6 +1,9 @@
-# luoto
-
-Run your dev tools where a compromised dependency can't take your keys with it.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo/luoto-dark.svg">
+    <img alt="luoto: no tool is an island, except on luoto." src="docs/logo/luoto-light.svg" width="540">
+  </picture>
+</p>
 
 ## Why
 
@@ -35,11 +38,13 @@ the attempt with a scoped allow next to it:
 
 ## Install
 
-| platform | |
-| --- | --- |
-| macOS, Linux | `curl -fsSL https://raw.githubusercontent.com/eetu/luoto/main/install.sh \| sh` |
-| macOS, Linux (Homebrew) | `brew tap eetu/luoto && brew install luoto` |
-| Windows (Scoop; not yet verified end to end) | `scoop bucket add luoto https://github.com/eetu/scoop-luoto` then `scoop install luoto` |
+| platform                                     | install                                                                                                                             |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| macOS, Linux                                 | `curl -fsSL https://raw.githubusercontent.com/eetu/luoto/main/install.sh \| sh`                                                     |
+| macOS, Linux (Homebrew)                      | `brew tap eetu/luoto`, `brew trust eetu/luoto`, then `brew install luoto` (Homebrew loads a third-party tap only once you trust it) |
+| Linux, no script                             | a `.tar.gz` from [Releases](https://github.com/eetu/luoto/releases), checked against `SHA256SUMS`                                   |
+| from source                                  | `just install-cli`, then `luoto setup --build`                                                                                      |
+| Windows (Scoop; not yet verified end to end) | `scoop bucket add luoto https://github.com/eetu/scoop-luoto` then `scoop install luoto`                                             |
 
 Then, once:
 
@@ -109,25 +114,17 @@ luoto agent add claude          # installs Claude Code in the env
 luoto agent run claude --yolo   # no permission prompts: the sandbox is the boundary
 ```
 
-Ask it to fix something small, commit it on a branch and open a pull request. It runs the same
-commands you would, inside the env:
-
-```sh
-git switch -c fix-readme-typo
-git commit -am "Fix a typo in the README"
-git push -u origin fix-readme-typo
-gh pr create --fill
-```
-
-Or do it yourself: `luoto open` attaches Zed, VS Code or Cursor over SSH, and `luoto shell`
-opens a terminal.
+Ask it to fix something small and open a pull request. Or do it yourself: `luoto open`
+attaches Zed, VS Code or Cursor over SSH, and `luoto shell` opens a terminal.
 
 ### 4. Run it and open it
 
 Start the project as usual in the env's terminal: `yarn dev` prints
-`http://localhost:5173/`, and clicking it opens the app in your browser. luoto forwards each
-port a server in the env listens on to the same port on your machine, for as long as it
-listens.
+`http://localhost:5173/`, and clicking it opens the app in your browser. A background watcher
+(started by `up`, `shell` and editor sessions) forwards each port a server in the env listens
+on, 1024–32767, to the same port on your machine for as long as it listens. It goes through
+the runtime rather than a network path, so servers bound to the env's own localhost work too;
+a port already taken here is skipped (`luoto forward LOCAL:ENV` maps it elsewhere).
 
 ### 5. See what it reached
 
@@ -138,35 +135,37 @@ hour if you like:
 <img alt="luoto ui: example.com allowed for one hour after the earlier block" src="docs/screenshots/egress-allowed.png">
 
 An agent that needs a host asks with `sandbox request`; only you can approve it, on your
-machine (`luoto approve`).
+machine (`luoto approve`, which asks you to accept the rule's risks like `luoto allow` does;
+`--force` accepts them without asking).
 
-### 6. Done for now
+### 6. Bring files back and stop
 
 `luoto pull` brings files back to your folder when you need them there; it holds back git
 hooks and other files your own tools would run. `luoto down` stops the env, and it stops by
-itself after 30 minutes with nothing running in it. `luoto up` brings it back.
+itself after 30 minutes with nothing running in it (`idle_stop`); luoto's VM stops once no
+env has run for as long. `luoto up` brings it back in about 10 s and unlocks the vault anew.
 
 ## Day to day
 
 Commands act on the env of the current folder; `-e NAME` picks another (`luoto status -e web`).
 
-| you want | run |
-| --- | --- |
-| an env for a folder (copied in) | `luoto init [DIR]` |
-| a new project (the folder is created) | `luoto init ~/dev/new-app` |
-| to review, apply or ignore the team's `luoto.toml` | `luoto project`<br>`luoto project apply`<br>`luoto project ignore` |
-| your editor, or a shell | `luoto open`<br>`luoto open --with code`<br>`luoto shell` |
-| to see what the sandbox tried to reach | `luoto egress --since 10m`<br>`luoto egress --denied`<br>`luoto egress --follow` |
-| to allow a host (read-only unless `--write`) | `luoto allow docs.rs --ttl 1h`<br>`luoto allow api.example.com --write --path '/v1/**'`<br>`luoto allow grpc.example.com --tunnel` |
-| to see or remove rules | `luoto status`<br>`luoto revoke <id-or-host>` |
-| to answer access requests from inside | `luoto requests`<br>`luoto approve 3 --ttl 1h`<br>`luoto reject 3` |
-| an agent (installed on first run) | `luoto agent run claude --yolo`<br>`luoto agent list` |
-| a dev server in your browser | run it: its port is forwarded to localhost here<br>`luoto forward 8080:5173` (to another local port) |
-| your work out: push from the env (with a GitHub, Azure DevOps or SSH credential), or copy files back | `git push`<br>`luoto pull` |
-| image or config changes applied (volumes are kept) | `luoto up --recreate` |
-| to stop an env, or delete it with its volumes and config (your folder stays) | `luoto down`<br>`luoto rm` |
-| the env back after a reboot or an idle stop (unlocks the vault if needed) | `luoto up`<br>`luoto vault unlock` |
-| to check isolation | `luoto doctor` |
+| you want                                                                                             | run                                                                                                                                |
+| ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| an env for a folder (copied in)                                                                      | `luoto init [DIR]`                                                                                                                 |
+| a new project (the folder is created)                                                                | `luoto init ~/dev/new-app`                                                                                                         |
+| to review, apply or ignore the team's `luoto.toml`                                                   | `luoto project`<br>`luoto project apply`<br>`luoto project ignore`                                                                 |
+| your editor, or a shell                                                                              | `luoto open`<br>`luoto open --with code`<br>`luoto shell`                                                                          |
+| to see what the sandbox tried to reach                                                               | `luoto egress --since 10m`<br>`luoto egress --denied`<br>`luoto egress --follow`                                                   |
+| to allow a host (read-only unless `--write`)                                                         | `luoto allow docs.rs --ttl 1h`<br>`luoto allow api.example.com --write --path '/v1/**'`<br>`luoto allow grpc.example.com --tunnel` |
+| to see or remove rules                                                                               | `luoto status`<br>`luoto revoke <id-or-host>`                                                                                      |
+| to answer access requests from inside                                                                | `luoto requests`<br>`luoto approve 3 --ttl 1h`<br>`luoto reject 3`                                                                 |
+| an agent (installed on first run)                                                                    | `luoto agent run claude --yolo`<br>`luoto agent list`                                                                              |
+| a dev server in your browser                                                                         | run it: its port is forwarded to localhost here<br>`luoto forward 8080:5173` (to another local port)                               |
+| your work out: push from the env (with a GitHub, Azure DevOps or SSH credential), or copy files back | `git push`<br>`luoto pull`                                                                                                         |
+| image or config changes applied (volumes are kept)                                                   | `luoto up --recreate`                                                                                                              |
+| to stop an env, or delete it with its volumes and config (your folder stays)                         | `luoto down`<br>`luoto rm`                                                                                                         |
+| the env back after a reboot or an idle stop (unlocks the vault if needed)                            | `luoto up`<br>`luoto vault unlock`                                                                                                 |
+| to check isolation                                                                                   | `luoto doctor`                                                                                                                     |
 
 Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host> --reason …`
 asks you for access; only you can approve, on the host.
@@ -178,36 +177,33 @@ starts the agent in `/workspace`; `--yolo` turns off its own permission prompts 
 flag for it), since the sandbox is the boundary. After that first run the command (`claude`,
 `codex`, …) also works in any env terminal, including an editor's. Each agent needs a credential
 for one of its providers under `[credentials.<provider>]`; the gate adds it to every request and
-the sandbox sees only a placeholder. Without one, `agent add`, `agent run` and `init`'s
-walk-through ask which kind you have, say where to get one, and keep it where you choose: pasted
-into your OS keychain (`keyring:luoto/<provider>.<kind>`, reused by later envs) or into a new
-1Password item, or a reference to where it already is. Providers that allow it also offer a
-login inside the sandbox. `luoto agent list` shows the agents and providers.
+the sandbox sees only a placeholder. [docs/agents.md](docs/agents.md#credentials) covers where
+to get one, how the prompt keeps it, and logins inside the sandbox, with the hosts and
+verification status of each agent. `luoto agent list` shows agents and providers.
 
-| agent | command | credential |
-| --- | --- | --- |
-| Claude Code | `claude` | Claude subscription token (`claude setup-token`) or API key |
-| OpenCode | `opencode` | Anthropic, OpenAI, OpenRouter or Gemini API key |
-| Codex | `codex` | OpenAI API key, or a ChatGPT login inside |
-| GitHub Copilot CLI (untested) | `copilot` | fine-grained token with Copilot Requests |
-| Antigravity CLI | `agy` | Google account, signed in inside the env |
-
-[docs/agents.md](docs/agents.md) has the details for each: where to get the credential, the
-hosts it reaches, what it is denied on purpose, and what is still unverified.
+| agent                         | command    | credential                                                  |
+| ----------------------------- | ---------- | ----------------------------------------------------------- |
+| Claude Code                   | `claude`   | Claude subscription token (`claude setup-token`) or API key |
+| OpenCode                      | `opencode` | Anthropic, OpenAI, OpenRouter or Gemini API key             |
+| Codex                         | `codex`    | OpenAI API key, or a ChatGPT login inside                   |
+| GitHub Copilot CLI (untested) | `copilot`  | fine-grained token with Copilot Requests                    |
+| Antigravity CLI               | `agy`      | Google account, signed in inside the env                    |
 
 ## Configuration
 
 `~/.config/luoto/envs/<name>.toml` (on Windows, `~/.config/luoto` is `%APPDATA%\luoto\config`
 throughout). `luoto edit -e <name>` opens it in `$EDITOR` and applies it when you save; edited
-any other way, it applies at the next `luoto up`. The UI adds and removes rules.
+any other way, it applies at the next `luoto up`. The UI adds and removes rules. `version` in
+a config file is its format (1 when missing): luoto reads older formats and refuses a file
+from a newer luoto.
 
 ```toml
 presets = ["debian", "github", "toolchains", "npm"]   # see shared/presets/
 agents = ["claude"]
 ports = [5173]                # published by the gate itself (servers listening on all interfaces)
 # isolation = "container"     # default gVisor; this shares the VM's kernel, builds ~1.6× faster
-# idle_stop = "2h"            # stop after this long with nothing running (default 30m; "off")
-# auto_forward = false        # don't forward the ports the env listens on to localhost here
+# idle_stop = "2h"            # default 30m; "off" disables
+# auto_forward = false        # don't forward listening ports to localhost here
 
 [tools]                       # default toolchains; the project's own version files win
 node = "lts"
@@ -269,27 +265,19 @@ needs a token in an HTTP header belongs under `[credentials.custom.<name>]` inst
 sandbox never sees it.
 
 A GitHub App for luoto needs only repository permissions such as Contents and Pull requests;
-luoto refuses Workflows, Actions, Secrets, Administration and similar, because each would let
-the sandbox reach CI secrets.
+luoto refuses Workflows, Actions, Secrets and Administration ([why](SECURITY.md#what-holds-the-line)).
 
-An Azure DevOps credential lets the env fetch and push its repos over HTTPS: the gate adds the
-PAT on their git paths only and refuses pushes to protected branches and tags. Remotes keep
+An Azure DevOps credential lets the env fetch and push its repos over HTTPS. Remotes keep
 working as they are: SSH ones (`git@ssh.dev.azure.com:v3/…`, or a host alias from your
 `~/.ssh/config` that the folder's remotes use) and `*.visualstudio.com` ones are rewritten to
-`https://dev.azure.com` in the env. A PAT reaches a whole organization (or all of yours, for
-repos in several), so the gate's paths are what keep the env to `repos`. Pull requests are
-opened in Azure DevOps itself.
+`https://dev.azure.com` in the env. Pull requests are opened in Azure DevOps itself.
 
-An SSH credential lets git use SSH remotes as they are. The key stays in the vault, which is the
-env's ssh-agent: it signs a login only for a session the server bound with a host key luoto pins
-(GitHub's and Azure DevOps', or yours in `host_keys`), so the key logs in to those hosts and
-signs nothing else. The gate passes SSH through to `hosts` on port 22 only, and their remotes
-stay SSH (an Azure DevOps alias from your `~/.ssh/config` goes to `ssh.dev.azure.com`). GitHub
-SSH remotes go to HTTPS when github.com isn't in `hosts`, as do Azure DevOps ones with an Azure
-DevOps credential; other forges' SSH remotes work only through `hosts`. Inside an SSH session
-the gate can't see the repository or the branches pushed, so the key reaches whatever it reaches
-at the forge: use a deploy key, or an HTTPS credential where repo scoping matters. From
-1Password, the key's ref is `op://<vault>/<item>/private key?ssh-format=openssh`.
+An SSH credential lets git use SSH remotes as they are, to `hosts` on port 22 only. GitHub SSH
+remotes go to HTTPS when github.com isn't in `hosts`, as do Azure DevOps ones with an Azure
+DevOps credential; other forges' SSH remotes work only through `hosts`. SSH sessions are
+unscoped by repository, so use a deploy key where that matters
+([SECURITY.md](SECURITY.md#what-holds-the-line)). From 1Password, the key's ref is
+`op://<vault>/<item>/private key?ssh-format=openssh`.
 
 ## Toolchains
 
@@ -300,23 +288,16 @@ The project chooses its toolchains, as it would on your machine: luoto runs
 yarn and pnpm). Anything in mise's registry or an asdf/vfox plugin installs: node, python,
 java, go, rust, php, ruby, terraform, ….
 
-- `luoto init` reads the folder first and shows what it found — toolchains with the file that
-  pins each, presets for the registries it uses (`npm` for `package.json`, `maven` for
-  `pom.xml`, …) — before creating anything. It looks into subfolders too, three levels down (a
-  monorepo's `frontend/` and `backend/`), skipping what `.gitignore` ignores, dependency and
-  build folders, and hidden ones. A runtime the project needs but pins nowhere (a `Cargo.toml`
-  without `rust-toolchain.toml`) gets a default: Rust stable, node LTS or Python 3.14, which the
-  project's own files override. A `justfile` or `Taskfile.yml` brings `just` or `task`, and a
-  lockfile its package manager where nothing pins one: `uv.lock` (or `[tool.uv]` in
-  `pyproject.toml`) uv, `poetry.lock` (or `[tool.poetry]`) Poetry, `yarn.lock` Yarn (1 for a
-  v1 lockfile) and `pnpm-lock.yaml` pnpm, unless `package.json` names another. Answer
-  `c` to go through the settings one at a time (isolation, presets, toolchains, agents and
-  their credentials, ports); `--preset` and `--tool node=24` override what it detected. A new
-  or empty folder has nothing to detect, so `init` starts with those settings, and a runtime
-  picked there (`node=lts`) brings its registry's preset. `luoto up` in a folder without an
-  env offers the same. `luoto init` again in an env's folder offers what the project suggests
-  now and the env lacks (it only adds), read from the env's own copy while it runs, since that
-  is where the work happens.
+- `luoto init` reads the folder first and shows what it found (toolchains with the file that
+  pins each, presets for the registries it uses) before creating anything. It looks three
+  levels into subfolders (a monorepo's `frontend/` and `backend/`), skipping ignored,
+  dependency, build and hidden folders. A runtime the project needs but pins nowhere gets a
+  default: Rust stable, node LTS or Python 3.14. `c` goes through the settings one at a time
+  (isolation, presets, toolchains, agents and their credentials, ports); `--preset` and
+  `--tool node=24` override what it detected. A new or empty folder has nothing to detect, so
+  `init` starts with those settings; `luoto up` in a folder without an env offers the same.
+  `luoto init` again in an env's folder offers what the project suggests now and the env lacks
+  (it only adds).
 - `up` installs whatever the project now pins and the env lacks, in every folder that pins
   something (checked offline, so it is quick when nothing changed). `[tools]` in the env or
   `config.toml` gives defaults for tools the project doesn't pin; your own `~/.config/mise`
@@ -335,10 +316,9 @@ java, go, rust, php, ruby, terraform, ….
 No runtime is baked into luoto-base. `npm i -g` and `pipx` install into `~/.local/bin`, which
 persists with the home volume, as do mise's toolchains.
 
-For 0.1.0 these were run by hand, from `luoto init` to a build or test run in the env: npm,
-Yarn 1 and 4, pnpm, pip, uv, Poetry, Cargo, Go, Java (pyspark with `--tool java=21`) and a
-Rust + Yarn + uv monorepo. No test runs them automatically, and other toolchains mise installs
-are untested ([ROADMAP.md](ROADMAP.md)).
+Verified by hand, from `luoto init` to a build or test run in the env: npm, Yarn 1 and 4, pnpm,
+pip, uv, Poetry, Cargo, Go, Java (pyspark with `--tool java=21`) and a Rust + Yarn + uv
+monorepo. Other toolchains mise installs are untested ([ROADMAP.md](ROADMAP.md)).
 
 ## Team settings: `luoto.toml`
 
@@ -389,9 +369,6 @@ Azure DevOps). `luoto pull` brings files back when you need them on the host: it
 files, skips risky ones unless you pass `--include-risky`, refuses paths or symlinks that leave
 the folder, and never writes through host symlinks. `.git` and heavy directories
 (`node_modules`, `target`, …) are skipped.
-
-A new project starts from a folder too: `luoto init ~/dev/new-app` creates it, the env starts
-empty, and `luoto pull` fills the folder when you want the files on the host.
 
 ## Shell
 
@@ -467,18 +444,12 @@ flowchart TB
 ```
 
 - **Default deny.** The sandbox has no route out. HTTP(S) leaves only through the env's gate,
-  which inspects every request and applies per-host, per-method, per-path rules. Read-only is
-  enforced (a `PUT` to a registry you allowed for reads is refused). The other ways out pass
-  through uninspected: tunnels you grant (`luoto allow --tunnel`) and git over SSH to the hosts
-  an SSH credential names.
-- **Nothing slips past.** Tools that ignore `HTTPS_PROXY` are caught transparently, DNS is
-  answered locally with stand-in addresses and never forwarded (no DNS tunnelling), raw IPs
-  and UDP go nowhere, and private/host addresses are never dialed.
+  which applies per-host, per-method, per-path rules; read-only is enforced (a `PUT` to a
+  registry you allowed for reads is refused). The other ways out pass through uninspected:
+  tunnels you grant (`luoto allow --tunnel`) and git over SSH to the hosts an SSH credential
+  names.
 - **Every attempt is visible.** The UI and `luoto egress` show each host the sandbox tried to
-  reach — allowed, blocked, or only looked up — with a one-click scoped allow.
-- **Secrets stay out.** Code in the sandbox sees placeholders. The gate strips any credential
-  the sandbox sends and injects the real one for the hosts you granted. GitHub App tokens are
-  minted per env, and git credentials work only on the repositories you named.
+  reach (allowed, blocked, or only looked up) with a one-click scoped allow.
 - **Agents know where they are.** Claude Code, OpenCode, Codex, Copilot CLI and Antigravity
   CLI get a briefing and an MCP server: they can see the policy and ask you for access instead
   of guessing.
@@ -487,48 +458,39 @@ flowchart TB
 
 ### Platforms
 
-| host | runtimes | boundary |
-| --- | --- | --- |
-| macOS | podman (recommended), Docker Desktop, OrbStack, Colima | podman: luoto's own VM, with none of your folders mounted, and gVisor. Docker: its VM, which shares your folders, and plain containers |
-| Windows (not yet verified end to end) | podman (Hyper-V or WSL2), Docker Desktop | as on macOS; a WSL2 VM can still see `C:\` (`luoto doctor` reports it), so prefer Hyper-V |
-| Linux | rootless podman (recommended), Docker | no VM. podman: gVisor when `runsc` is installed (`luoto setup` finds it). Docker: plain containers, or gVisor registered with Docker and `oci_runtime = "runsc"` under an env's `[resources]` |
+| host                                  | runtimes                                               | boundary                                                                                                                                                                                      |
+| ------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS                                 | podman (recommended), Docker Desktop, OrbStack, Colima | podman: luoto's own VM, with none of your folders mounted, and gVisor. Docker: its VM, which shares your folders, and plain containers                                                        |
+| Windows (not yet verified end to end) | podman (Hyper-V or WSL2), Docker Desktop               | as on macOS; a WSL2 VM can still see `C:\` (`luoto doctor` reports it), so prefer Hyper-V                                                                                                     |
+| Linux                                 | rootless podman (recommended), Docker                  | no VM. podman: gVisor when `runsc` is installed (`luoto setup` finds it). Docker: plain containers, or gVisor registered with Docker and `oci_runtime = "runsc"` under an env's `[resources]` |
 
 With podman, dev containers run on [gVisor](https://gvisor.dev), a user-space kernel (on Linux
-once `runsc` is installed), so a kernel exploit in an env stays in it, and in luoto's VM each
-env's dev container gets its own user ID range. gVisor costs time wherever a tool touches many
-files. A Rust + Vite monorepo in luoto's VM (6 CPUs):
+once `runsc` is installed). It costs time wherever a tool touches many files. A Rust + Vite
+monorepo in luoto's VM (6 CPUs):
 
-| step | gVisor | container |
-| --- | --- | --- |
-| `yarn install` | 4.6 s | 3.1 s |
-| `vite build` | 2.9 s | 2.0 s |
-| `cargo build` (debug, after `cargo clean`) | 36 s | 21 s |
+| step                                       | gVisor | container |
+| ------------------------------------------ | ------ | --------- |
+| `yarn install`                             | 4.6 s  | 3.1 s     |
+| `vite build`                               | 2.9 s  | 2.0 s     |
+| `cargo build` (debug, after `cargo clean`) | 36 s   | 21 s      |
 
 gVisor is the default, and the right choice for anything that runs code you haven't read:
 new dependencies, unfamiliar repos, agents in yolo mode. `isolation = "container"` in an env's
 config (or `luoto init --isolation container`) suits an env whose day is spent in native
-builds. It keeps the gate, the vault, a VM without your folders and the env's own user IDs,
-and gives up only the second kernel: an exploit of the VM's kernel from inside that env reaches
-the VM, where the vault and the other envs run.
-
-A small watcher runs in the background while any env does (`up`, `shell` and editor sessions
-start it): it forwards the ports envs listen on, ports 1024–32767, to the same port on
-localhost here, through the runtime rather than a network path, so servers bound to the env's
-own localhost work too. A port already taken here is skipped (`luoto forward LOCAL:ENV` maps it
-elsewhere).
+builds; it shares the VM's kernel, so an exploit from inside reaches the VM
+([SECURITY.md](SECURITY.md#residual-risks)).
 
 Podman on macOS runs one VM at a time, so luoto's replaces your default podman machine while
-you use luoto: `luoto up` asks before switching. An env stops after 30 minutes with nothing
-running in it (no shell, editor session, agent or dev server; `idle_stop` in config.toml or the
-env's config changes that), and luoto's VM once no env has run for as long. Starting it again
-takes about 10 s and unlocks the vault anew.
+you use luoto: `luoto up` asks before switching.
+
+## Limits
+
+- Outside HTTP(S), only tunnel rules (`luoto allow --tunnel`) and git over SSH to
+  `[credentials.ssh]` hosts leave an env. Run databases inside the dev container.
+- No Docker-in-docker inside envs.
+- The gate speaks HTTP/1.1 to the sandbox, so gRPC needs a tunnel rule.
 
 ## Install details
-
-| platform | |
-| --- | --- |
-| Linux, other | a `.tar.gz` from [Releases](https://github.com/eetu/luoto/releases); check it against `SHA256SUMS` |
-| from source | `just install-cli`, then `luoto setup --build` |
 
 The script installs into `~/.local/bin` without root, checks the download against the
 release's checksums and, with the GitHub CLI logged in, its build provenance. Every release
@@ -538,21 +500,24 @@ container images are signed and pinned by digest in the binary.
 `luoto upgrade` updates a script or tarball install (Homebrew: `brew upgrade luoto`, Scoop:
 `scoop update luoto`); `luoto doctor` says when a newer release is out. After an update,
 `luoto setup` gets its images and `luoto up --recreate` moves an env onto them, keeping its
-volumes.
+volumes. What each release changed is in [CHANGELOG.md](CHANGELOG.md).
+
+A source build runs as `luoto-dev`, beside a release in the same VM: its config is in
+`~/.config/luoto-dev`, its envs' containers are `luoto-dev-<env>`, it has a vault of its own,
+keeps new keychain entries under `luoto-dev`, and serves `luoto ui` on port 47879. Its tab
+completion calls `luoto-dev`; `just link-dev` links that name to the checkout's debug build.
 
 Tab completion covers commands, flags, env names, agents, editors and presets. Homebrew
 installs it; otherwise add one line to your shell's startup file:
 
-| shell | line | file |
-| --- | --- | --- |
-| fish | `COMPLETE=fish luoto \| source` | `~/.config/fish/completions/luoto.fish` |
-| zsh | `source <(COMPLETE=zsh luoto)` | `~/.zshrc` |
-| bash | `source <(COMPLETE=bash luoto)` | `~/.bashrc` |
-| PowerShell | `$env:COMPLETE = "powershell"; luoto \| Out-String \| Invoke-Expression; Remove-Item Env:\COMPLETE` | `$PROFILE` |
+| shell      | line                                                                                                | file                                    |
+| ---------- | --------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| fish       | `COMPLETE=fish luoto \| source`                                                                     | `~/.config/fish/completions/luoto.fish` |
+| zsh        | `source <(COMPLETE=zsh luoto)`                                                                      | `~/.zshrc`                              |
+| bash       | `source <(COMPLETE=bash luoto)`                                                                     | `~/.bashrc`                             |
+| PowerShell | `$env:COMPLETE = "powershell"; luoto \| Out-String \| Invoke-Expression; Remove-Item Env:\COMPLETE` | `$PROFILE`                              |
 
 ## Development
 
-`just` lists recipes: `just images` builds the runtime images, `just dev` runs the UI with hot
-reload, `just test` and `just it` run unit and integration tests. `LUOTO_TRACE=1` prints every
-runtime call with its timing. See `CLAUDE.md` for the map and `SECURITY.md` for the threat
-model.
+`CLAUDE.md` has the map of the repo and the `just` recipes; `just test` runs the unit tests.
+`LUOTO_TRACE=1` prints every runtime call with its timing. `SECURITY.md` has the threat model.

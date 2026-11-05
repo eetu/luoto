@@ -1,307 +1,59 @@
 <script lang="ts">
-  import Copy from "@lucide/svelte/icons/copy";
-  import X from "@lucide/svelte/icons/x";
-
   import { api } from "$lib/api";
+  import ConnectSection from "$lib/components/ConnectSection.svelte";
+  import CredentialsSection from "$lib/components/CredentialsSection.svelte";
   import ProjectSection from "$lib/components/ProjectSection.svelte";
+  import RulesSection from "$lib/components/RulesSection.svelte";
+  import SelftestSection from "$lib/components/SelftestSection.svelte";
   import WorkspaceSection from "$lib/components/WorkspaceSection.svelte";
-  import { openMenu } from "$lib/menu.svelte";
-  import { accessText, act, app, say } from "$lib/stores/app.svelte";
-  import type { CompiledRule } from "$lib/types";
+  import { act, app } from "$lib/stores/app.svelte";
 
   const d = $derived(app.detail);
-  const userRules = $derived(d?.rules.filter((r) => r.origin === "user") ?? []);
-  const groups = $derived.by(() => {
-    const by: Record<string, CompiledRule[]> = {};
-    for (const r of d?.rules ?? []) {
-      if (r.origin !== "user") (by[r.origin] ??= []).push(r);
-    }
-    return Object.entries(by);
-  });
-  let open = $state<Record<string, boolean>>({});
-  let selftest = $state<{
-    ok: boolean;
-    checks: { name: string; ok: boolean; detail: string }[];
-  } | null>(null);
-
-  function copy(text: string) {
-    void navigator.clipboard.writeText(text).then(() => say(`copied: ${text}`));
-  }
-
-  function revoke(r: CompiledRule) {
-    const env = app.env;
-    if (!env) return;
-    void act("revoking…", () => api.deleteRule(env, r.id), `revoked ${r.host}`);
-  }
-
-  function ruleMenu(e: MouseEvent, r: CompiledRule) {
-    openMenu(e, r.host, [
-      {
-        label: "Revoke",
-        run: () => revoke(r),
-        danger: true,
-        disabled: r.origin !== "user",
-        hint: r.origin !== "user" ? `from ${r.origin}` : undefined,
-      },
-      {
-        label: "Show egress",
-        run: () => (app.subject = { kind: "host", host: r.host }),
-      },
-    ]);
-  }
-
-  async function runSelftest() {
-    const env = app.env;
-    if (!env) return;
-    app.busy = "self-test…";
-    try {
-      selftest = (await api.action(env, "selftest")) as unknown as typeof selftest;
-      say(
-        selftest?.ok ? "isolation self-test passed" : "isolation self-test FAILED",
-        !selftest?.ok,
-      );
-    } catch (e) {
-      say(e instanceof Error ? e.message : String(e), true);
-    } finally {
-      app.busy = null;
-    }
-  }
-
-  function expiry(r: CompiledRule): string {
-    if (!r.expires) return "";
-    const mins = Math.round((Date.parse(r.expires) - Date.now()) / 60_000);
-    return mins > 90 ? `${Math.round(mins / 60)} h left` : `${Math.max(mins, 0)} min left`;
-  }
 </script>
 
 {#if d}
-  <div class="panel">
-    <p class="label">env</p>
-    <h2>{d.name}</h2>
-    <p class="muted small">
-      dev {d.dev}, gate {d.gate}{d.gate_status ? `, ${d.gate_status.rules} rules` : ""}
-    </p>
-    <div class="actions">
-      {#if d.dev === "running"}
-        <button
-          class="btn"
-          onclick={() =>
-            void act("stopping…", () => api.action(d.name, "down"), `${d.name} stopped`)}
-          >stop</button
-        >
-      {:else}
-        <button
-          class="btn primary"
-          onclick={() => void act("starting…", () => api.action(d.name, "up"), `${d.name} is up`)}
-          >start</button
-        >
-      {/if}
-      <button class="btn" onclick={runSelftest} disabled={d.dev !== "running"}>self-test</button>
-    </div>
-    {#if selftest}
-      <ul class="checks">
-        {#each selftest.checks as c, n (n)}
-          <li class:fail={!c.ok}>
-            <b>{c.ok ? "ok" : "FAIL"}</b>
-            {c.name} <span class="muted">{c.detail}</span>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-
-    {#each d.warnings as w, n (n)}<p class="warn">{w}</p>{/each}
-
-    <WorkspaceSection />
-    <ProjectSection />
-
-    <div class="section">
-      <p class="label">connect</p>
-      {#each [`luoto shell -e ${d.name}`, `luoto open -e ${d.name}`, `luoto open -e ${d.name} --with code`] as cmd (cmd)}
-        <button class="cmd" onclick={() => copy(cmd)} title="copy"
-          ><code>{cmd}</code><Copy size={12} /></button
-        >
-      {/each}
-    </div>
-
-    <div class="section">
-      <p class="label">credentials</p>
-      {#if d.credentials.length === 0}
-        <p class="muted small">
-          none — the gate injects nothing. Add [credentials.*] to the config.
-        </p>
-      {:else}
-        {#each d.injections as i, n (n)}
-          <p class="small"><code>{i.binding}</code> → {i.host}</p>
-        {/each}
-        {#if d.missing_secrets.length}
-          <p class="warn">
-            vault is missing {d.missing_secrets.length} secret(s): unlock it
-          </p>
-        {/if}
-      {/if}
-      {#if d.sandbox_secrets.length}
-        <p class="warn small">
-          exposed to code in the sandbox: {d.sandbox_secrets.join(", ")}
-        </p>
-      {/if}
-    </div>
-
-    <div class="section">
-      <p class="label">your rules</p>
-      {#each userRules as r (r.id)}
-        <div class="rule" oncontextmenu={(e) => ruleMenu(e, r)} role="listitem">
-          <span class="host">{r.host}</span>
-          <span class="muted small"
-            >{accessText(r.access)}{r.mode === "tunnel" ? ", tunnel" : ""}{r.paths?.length
-              ? `, ${r.paths.join(" ")}`
-              : ""}</span
+  <!-- Sections hold per-env state (pull plan, self-test report): a new env starts them fresh. -->
+  {#key app.env}
+    <div class="panel">
+      <p class="label">env</p>
+      <h2>{d.name}</h2>
+      <p class="muted small">
+        dev {d.dev}, gate {d.gate}{d.gate_status ? `, ${d.gate_status.rules} rules` : ""}
+      </p>
+      <div class="actions">
+        {#if d.dev === "running"}
+          <button
+            class="btn"
+            onclick={() =>
+              void act("stopping…", () => api.action(d.name, "down"), `${d.name} stopped`)}
+            >stop</button
           >
-          <span class="muted small">{expiry(r)}</span>
-          <button class="icon" title="revoke" aria-label="revoke {r.host}" onclick={() => revoke(r)}
-            ><X size={13} /></button
+        {:else}
+          <button
+            class="btn primary"
+            onclick={() => void act("starting…", () => api.action(d.name, "up"), `${d.name} is up`)}
+            >start</button
           >
-        </div>
-      {:else}
-        <p class="muted small">none yet — allow hosts from the egress list</p>
-      {/each}
-    </div>
-
-    <div class="section">
-      <p class="label">from presets & profiles</p>
-      {#each groups as [origin, rules] (origin)}
-        <button class="group" onclick={() => (open[origin] = !open[origin])}>
-          <span>{origin}</span><span class="muted small">{rules.length}</span>
-        </button>
-        {#if open[origin]}
-          {#each rules as r (r.id)}
-            <p class="small sub">
-              {r.host}
-              <span class="muted"
-                >{accessText(r.access)}{r.paths?.length ? ` ${r.paths.join(",")}` : ""}</span
-              >
-            </p>
-          {/each}
         {/if}
-      {/each}
-      <p class="muted small cfg">config: <code>{d.path}</code></p>
+        <SelftestSection />
+      </div>
+
+      {#each d.warnings as w, n (n)}<p class="warn">{w}</p>{/each}
+
+      <WorkspaceSection />
+      <ProjectSection />
+      <ConnectSection />
+      <CredentialsSection />
+      <RulesSection />
     </div>
-  </div>
+  {/key}
 {:else}
   <p class="muted">select an env</p>
 {/if}
 
 <style>
-  .panel {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
   h2 {
     margin: 0;
     font-size: 15px;
-  }
-
-  .small {
-    margin: 0;
-    font-size: 12px;
-  }
-
-  .actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 4px;
-  }
-
-  .section {
-    margin-top: 12px;
-    padding-top: 10px;
-    border-top: 1px solid var(--halo-border);
-  }
-
-  .cmd {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    width: 100%;
-    margin-bottom: 4px;
-    padding: 4px 6px;
-    border: none;
-    border-radius: var(--halo-radius);
-    background: var(--halo-bg-light);
-    color: var(--halo-text-main);
-    text-align: left;
-  }
-
-  .cmd code {
-    flex: 1;
-  }
-
-  .rule {
-    display: grid;
-    grid-template-columns: 1fr auto 22px;
-    gap: 2px 8px;
-    align-items: center;
-    padding: 4px 0;
-  }
-
-  .rule .host {
-    grid-column: 1 / 2;
-    font-size: 13px;
-    word-break: break-all;
-  }
-
-  .rule .small:nth-of-type(2) {
-    grid-column: 1 / 2;
-  }
-
-  .icon {
-    grid-row: 1 / 3;
-    grid-column: 3;
-    padding: 2px;
-    border: none;
-    background: transparent;
-    color: var(--halo-text-muted);
-  }
-
-  .icon:hover {
-    color: var(--halo-error);
-  }
-
-  .group {
-    display: flex;
-    justify-content: space-between;
-    width: 100%;
-    padding: 4px 0;
-    border: none;
-    background: transparent;
-    color: var(--halo-text-main);
-    font-size: 13px;
-  }
-
-  .sub {
-    padding-left: 10px;
-  }
-
-  .warn {
-    margin: 4px 0 0;
-    color: var(--halo-error);
-    font-size: 12px;
-  }
-
-  .checks {
-    margin: 4px 0 0;
-    padding: 0;
-    list-style: none;
-    font-size: 12px;
-  }
-
-  .checks .fail {
-    color: var(--halo-error);
-  }
-
-  .cfg {
-    margin-top: 10px;
-    word-break: break-all;
   }
 </style>

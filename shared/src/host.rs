@@ -288,6 +288,17 @@ pub fn canonical_path(raw: &str) -> Result<String, &'static str> {
     Ok(out)
 }
 
+/// The host in what a user typed for one: a bare name, `host:port`, or a URL.
+pub fn host_of(target: &str) -> &str {
+    let t = target.trim();
+    let no_scheme = t.split_once("://").map_or(t, |(_, r)| r);
+    let authority = no_scheme.split(['/', '?', '#']).next().unwrap_or(no_scheme);
+    authority
+        .rsplit_once(':')
+        .filter(|(_, p)| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        .map_or(authority, |(h, _)| h)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -413,5 +424,14 @@ mod tests {
         ] {
             assert!(!is_private(ip.parse().unwrap()), "{ip} should be public");
         }
+    }
+
+    #[test]
+    fn host_of_takes_the_host_from_what_was_typed() {
+        assert_eq!(host_of("https://docs.rs/serde/latest"), "docs.rs");
+        assert_eq!(host_of("docs.rs"), "docs.rs");
+        assert_eq!(host_of("http://example.com:8080/x"), "example.com");
+        assert_eq!(host_of("*.example.com"), "*.example.com");
+        assert_eq!(host_of("example.com:"), "example.com:");
     }
 }

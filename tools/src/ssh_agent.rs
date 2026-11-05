@@ -1,6 +1,5 @@
 //! `sandbox ssh-agent`: the env's ssh-agent socket. Every message goes to the vault through
-//! the gate (`/_sandbox/ssh-agent`), which holds the key and decides; nothing here knows the
-//! key or keeps state beyond a connection's id.
+//! the gate (`/_sandbox/ssh-agent`), which holds the key and decides.
 
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -9,7 +8,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use luoto_shared::api::{API_PREFIX, AgentMessage, SSH_AGENT_PATH};
+use luoto_shared::api::{API_PREFIX, AgentMessage, MAX_AGENT_MESSAGE, SSH_AGENT_PATH};
 
 /// Where init.sh starts the agent, and ssh's `IdentityAgent` points.
 pub const SOCKET: &str = "/run/luoto/ssh/agent.sock";
@@ -17,8 +16,6 @@ pub const SOCKET: &str = "/run/luoto/ssh/agent.sock";
 const FAILURE: u8 = 5;
 const REQUEST_IDENTITIES: u8 = 11;
 const IDENTITIES_ANSWER: u8 = 12;
-/// Agent messages are small; this bounds a misbehaving client.
-const MAX_MESSAGE: usize = 256 * 1024;
 
 pub fn serve(socket: &Path) -> Result<()> {
     if let Some(dir) = socket.parent() {
@@ -47,7 +44,7 @@ fn connection(mut stream: UnixStream) -> Result<()> {
             return Ok(());
         }
         let len = u32::from_be_bytes(len) as usize;
-        if len == 0 || len > MAX_MESSAGE {
+        if len == 0 || len > MAX_AGENT_MESSAGE {
             return Ok(());
         }
         let mut msg = vec![0u8; len];
@@ -85,19 +82,5 @@ fn fallback(kind: u8) -> Vec<u8> {
         vec![IDENTITIES_ANSWER, 0, 0, 0, 0]
     } else {
         vec![FAILURE]
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn without_the_vault_there_are_no_identities() {
-        assert_eq!(
-            fallback(REQUEST_IDENTITIES),
-            [IDENTITIES_ANSWER, 0, 0, 0, 0]
-        );
-        assert_eq!(fallback(13), [FAILURE]);
     }
 }

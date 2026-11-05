@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-pub fn addr() -> String {
+fn addr() -> String {
     std::env::var("LUOTO_GATE")
         .unwrap_or_else(|_| format!("{}:{}", luoto_shared::GATE_HOST, luoto_shared::PROXY_PORT))
 }
@@ -83,17 +83,10 @@ pub fn get_json<T: DeserializeOwned>(path: &str) -> Result<T> {
     serde_json::from_str(&r.body).context("parse gate response")
 }
 
-pub fn post_json<B: Serialize, T: DeserializeOwned>(
-    path: &str,
-    body: &B,
-) -> Result<(u16, std::result::Result<T, String>)> {
+pub fn post_json<B: Serialize, T: DeserializeOwned>(path: &str, body: &B) -> Result<T> {
     let r = request("POST", path, Some(&serde_json::to_string(body)?))?;
-    if (200..300).contains(&r.status) {
-        Ok((
-            r.status,
-            Ok(serde_json::from_str(&r.body).context("parse gate response")?),
-        ))
-    } else {
-        Ok((r.status, Err(r.body.trim().to_string())))
+    if !(200..300).contains(&r.status) {
+        bail!("gate returned {}: {}", r.status, r.body.trim());
     }
+    serde_json::from_str(&r.body).context("parse gate response")
 }

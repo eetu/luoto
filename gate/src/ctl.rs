@@ -48,19 +48,10 @@ fn lifecycle(state: &State, msg: String) {
 fn dispatch(state: &State, op: GateCtl) -> CtlResponse {
     match op {
         GateCtl::Status => CtlResponse::ok(GateStatus {
-            env: state.cfg.env.clone(),
-            version: luoto_shared::VERSION.into(),
-            run: state.events.run.clone(),
-            started: state.started,
             rules: state.policy().rules.len(),
             ca_installed: state.ca().is_some(),
             vault_configured: state.vault().is_some(),
-            pending_requests: state
-                .requests
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .pending(),
-            last_seq: state.events.last_seq(),
+            pending_requests: state.requests().pending(),
         }),
         GateCtl::ApplyPolicy { policy } => {
             if !policy.env.is_empty() && policy.env != state.cfg.env {
@@ -92,19 +83,9 @@ fn dispatch(state: &State, op: GateCtl) -> CtlResponse {
             }
             Err(e) => CtlResponse::err(format!("{e:#}")),
         },
-        GateCtl::Requests => CtlResponse::ok(
-            state
-                .requests
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .list(),
-        ),
+        GateCtl::Requests => CtlResponse::ok(state.requests().list()),
         GateCtl::Resolve { id, approved, note } => {
-            let res = state
-                .requests
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .resolve(id, approved, note);
+            let res = state.requests().resolve(id, approved, note);
             match res {
                 Ok(r) => {
                     state.events.emit(Event {
@@ -119,7 +100,6 @@ fn dispatch(state: &State, op: GateCtl) -> CtlResponse {
                 Err(e) => CtlResponse::err(e),
             }
         }
-        GateCtl::Recent { limit } => CtlResponse::ok(state.events.recent(limit.min(1000))),
         GateCtl::FlushCredentials => {
             if let Some(v) = state.vault() {
                 v.flush();

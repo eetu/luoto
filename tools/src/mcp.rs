@@ -6,10 +6,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::Result;
-use luoto_shared::api::{CheckQuery, CheckResult, RequestStatus, SandboxStatus};
+use luoto_shared::api::SandboxStatus;
 use serde_json::{Value, json};
 
-use crate::{file_request, gate, render_status, wait_for};
+use crate::{check_url, describe, describe_check, gate, render_status, request_access};
 
 const INSTRUCTIONS: &str = "You are inside a luoto sandbox: network egress is filtered by a \
 policy only the user controls from the host, and real credentials never enter the sandbox. \
@@ -72,22 +72,11 @@ fn call(name: &str, args: &Value) -> Value {
             Ok(text(render_status(&s), false))
         }
         "sandbox_check" => {
-            let q = CheckQuery {
-                url: args["url"].as_str().unwrap_or_default().to_string(),
-                method: args["method"].as_str().unwrap_or("GET").to_string(),
-            };
-            let (_, r) = gate::post_json::<_, CheckResult>("/_sandbox/check", &q)?;
-            Ok(match r {
-                Ok(r) => text(
-                    format!(
-                        "{}: {}",
-                        if r.allowed { "allowed" } else { "blocked" },
-                        r.message
-                    ),
-                    false,
-                ),
-                Err(e) => text(e, true),
-            })
+            let r = check_url(
+                args["url"].as_str().unwrap_or_default(),
+                args["method"].as_str().unwrap_or("GET"),
+            )?;
+            Ok(text(describe_check(&r), false))
         }
         "sandbox_recent_denials" => {
             let s: SandboxStatus = gate::get_json("/_sandbox/status")?;
@@ -109,32 +98,11 @@ fn call(name: &str, args: &Value) -> Value {
                 })
                 .unwrap_or_default();
             let wait = args["wait_seconds"].as_u64().unwrap_or(0).min(900);
-            let r = match file_request(host, write, paths, reason) {
-                Ok(r) => r,
-                Err(e) => return Ok(text(format!("request refused: {e}"), true)),
-            };
-            let env = crate::env_name();
-            let mut msg = format!(
-                "Request #{} filed ({} access to {}). Tell the user to approve it on the host with \
-                 `luoto approve -e {env} {}` or in `luoto ui`.",
-                r.id,
-                if write { "write" } else { "read" },
-                r.host,
-                r.id
-            );
-            if wait > 0 {
-                let done = wait_for(r.id, Duration::from_secs(wait))?;
-                msg = match done.status {
-                    RequestStatus::Approved => {
-                        format!("Request #{} approved: {} is reachable now.", r.id, r.host)
-                    }
-                    RequestStatus::Rejected => {
-                        format!("Request #{} was rejected by the user.", r.id)
-                    }
-                    RequestStatus::Pending => format!("{msg} Still pending after {wait}s."),
-                };
-            }
-            Ok(text(msg, false))
+            let wait = (wait > 0).then(|| Duration::from_secs(wait));
+            Ok(match request_access(host, write, paths, reason, wait) {
+                Ok(o) => text(describe(&o), false),
+                Err(e) => text(format!("request refused: {e:#}"), true),
+            })
         }
         other => Ok(text(format!("unknown tool `{other}`"), true)),
     })();

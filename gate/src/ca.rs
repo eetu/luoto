@@ -11,6 +11,9 @@ use rcgen::{
 };
 use rustls::ServerConfig;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use time::{Duration, OffsetDateTime};
+
+use crate::state::lock;
 
 pub struct Ca {
     issuer: Issuer<'static, KeyPair>,
@@ -31,12 +34,7 @@ impl Ca {
 
     /// TLS server config presenting a leaf for `host` (DNS name or IP literal).
     pub fn server_config(&self, host: &str) -> Result<Arc<ServerConfig>> {
-        if let Some(cfg) = self
-            .cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(host)
-        {
+        if let Some(cfg) = lock(&self.cache).get(host) {
             return Ok(cfg.clone());
         }
         let mut params = CertificateParams::default();
@@ -47,9 +45,9 @@ impl Ca {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, host);
         params.distinguished_name = dn;
-        let now = time_now();
-        params.not_before = now - rcgen_duration(1);
-        params.not_after = now + rcgen_duration(30);
+        let now = OffsetDateTime::now_utc();
+        params.not_before = now - Duration::days(1);
+        params.not_after = now + Duration::days(30);
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         params.use_authority_key_identifier_extension = true;
@@ -59,28 +57,14 @@ impl Ca {
             .context("sign leaf")?;
 
         let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
-        let mut cfg =
-            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .context("tls versions")?
-                .with_no_client_auth()
-                .with_single_cert(vec![CertificateDer::from(leaf.der().to_vec())], key_der)
-                .context("server config")?;
+        let mut cfg = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![CertificateDer::from(leaf.der().to_vec())], key_der)
+            .context("server config")?;
         // HTTP/1.1 only towards the sandbox: one framing to parse and police.
         cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
         let cfg = Arc::new(cfg);
-        self.cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .put(host.to_string(), cfg.clone());
+        lock(&self.cache).put(host.to_string(), cfg.clone());
         Ok(cfg)
     }
-}
-
-fn time_now() -> time::OffsetDateTime {
-    time::OffsetDateTime::now_utc()
-}
-
-fn rcgen_duration(days: i64) -> time::Duration {
-    time::Duration::days(days)
 }

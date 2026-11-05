@@ -110,3 +110,42 @@ test("a TLS reject hints at a tunnel without choosing one", async ({ page }) => 
   expect(body.rule).toMatchObject({ host: "pinned.example", access: "read" });
   expect(body.rule.mode).toBeUndefined();
 });
+
+test("approving a request whose rule has risks shows them and resends with force", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const request = {
+    id: 7,
+    host: "*.example.com",
+    access: "write",
+    reason: "upload build artifacts",
+    status: "pending",
+    created: new Date().toISOString(),
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [request] }),
+  );
+  const risks = ["a wildcard covers every subdomain"];
+  const forced: boolean[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/7/approve",
+    (route, req) => {
+      const { force } = req.postDataJSON() as { force: boolean };
+      forced.push(force);
+      return force
+        ? route.fulfill({ json: { host: request.host, access: "write" } })
+        : route.fulfill({ status: 409, json: { error: "confirm risks", risks } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: /access to \*\.example\.com/ }).click();
+  await page.getByRole("button", { name: "approve", exact: true }).click();
+
+  await expect(page.getByText(risks[0])).toBeVisible();
+  await page.getByRole("button", { name: "approve anyway" }).click();
+
+  await expect.poll(() => forced).toEqual([false, true]);
+});

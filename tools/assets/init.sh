@@ -84,13 +84,13 @@ fi
 if [ -d /workspace ] && [ "$(stat -c %u /workspace 2>/dev/null)" = "0" ] && [ -z "$(ls -A /workspace 2>/dev/null)" ]; then
   chown "$USER_UID:$USER_UID" /workspace
 fi
+# The proxy and CA variables the gate sets: kept through sudo, written to the profile.
+VARS="HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy SSL_CERT_FILE NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE CURL_CA_BUNDLE PIP_CERT CARGO_HTTP_CAINFO GIT_SSL_CAINFO DENO_CERT NODE_USE_ENV_PROXY LUOTO_ENV"
 if [ -d /etc/sudoers.d ] || have sudo; then
   mkdir -p /etc/sudoers.d
   cat >/etc/sudoers.d/luoto <<EOF
 $USER_NAME ALL=(ALL) NOPASSWD:ALL
-Defaults env_keep += "HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy"
-Defaults env_keep += "SSL_CERT_FILE NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE CURL_CA_BUNDLE PIP_CERT"
-Defaults env_keep += "CARGO_HTTP_CAINFO GIT_SSL_CAINFO DENO_CERT NODE_USE_ENV_PROXY LUOTO_ENV"
+Defaults env_keep += "$VARS"
 EOF
   chmod 440 /etc/sudoers.d/luoto
 fi
@@ -100,7 +100,6 @@ if [ -d /etc/apt/apt.conf.d ]; then
   printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' "$PROXY" "$PROXY" \
     >/etc/apt/apt.conf.d/99luoto-proxy
 fi
-VARS="HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy SSL_CERT_FILE NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE CURL_CA_BUNDLE PIP_CERT CARGO_HTTP_CAINFO GIT_SSL_CAINFO DENO_CERT NODE_USE_ENV_PROXY LUOTO_ENV"
 : >/etc/profile.d/luoto.sh 2>/dev/null && {
   for v in $VARS; do
     eval "val=\${$v:-}"

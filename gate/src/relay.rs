@@ -2,7 +2,7 @@
 //! the gate relays to the dev container. Inbound only; connections from the sandbox side
 //! are refused so the relay is never a path back out.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use ipnet::IpNet;
@@ -23,7 +23,7 @@ pub async fn serve(state: Arc<State>, listener: TcpListener, port: u16) {
         let Ok((mut inbound, peer)) = listener.accept().await else {
             continue;
         };
-        if internal.is_some_and(|net| net.contains(&peer.ip())) || is_dev(peer.ip(), dev_ip) {
+        if internal.is_some_and(|net| net.contains(&peer.ip())) || peer.ip() == dev_ip {
             continue;
         }
         tokio::spawn(async move {
@@ -32,8 +32,4 @@ pub async fn serve(state: Arc<State>, listener: TcpListener, port: u16) {
             }
         });
     }
-}
-
-fn is_dev(peer: IpAddr, dev: IpAddr) -> bool {
-    peer == dev
 }

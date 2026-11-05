@@ -1,9 +1,10 @@
 <script lang="ts">
   import { api } from "$lib/api";
-  import { act, app, say } from "$lib/stores/app.svelte";
+  import { act, app, busyWhile, say } from "$lib/stores/app.svelte";
   import type { PullPlan } from "$lib/types";
 
-  // The env's folder, and a reviewed pull of what changed in the env's copy.
+  // The env's folder, and a reviewed pull of what changed in the env's copy. The plan belongs
+  // to one env: the parent keys this section on it.
   const d = $derived(app.detail);
   const row = $derived(app.overview?.envs.find((e) => e.name === app.env));
   const dir = $derived(row?.dir ?? null);
@@ -11,40 +12,25 @@
   let plan = $state<PullPlan | null>(null);
   let includeRisky = $state(false);
 
-  $effect(() => {
-    // A plan belongs to one env.
-    void app.env;
-    plan = null;
-  });
-
   async function review() {
     const env = app.env;
     if (!env) return;
-    app.busy = "reading the env's files…";
-    try {
-      plan = await api.pullPlan(env);
-      includeRisky = false;
-    } catch (e) {
-      say(e instanceof Error ? e.message : String(e), true);
-    } finally {
-      app.busy = null;
-    }
+    const next = await busyWhile("reading the env's files…", () => api.pullPlan(env));
+    if (!next) return;
+    plan = next;
+    includeRisky = false;
   }
 
   async function apply() {
     const env = app.env;
     if (!env || !plan) return;
     const digest = plan.digest;
-    let result = { written: 0, skipped: 0 };
-    const ok = await act("writing…", async () => {
-      result = await api.pull(env, digest, includeRisky);
-    });
-    if (ok) {
-      say(
-        `wrote ${result.written} file(s)${result.skipped ? `, skipped ${result.skipped} risky` : ""}`,
-      );
-      plan = null;
-    }
+    const result = await act("writing…", () => api.pull(env, digest, includeRisky));
+    if (!result) return;
+    say(
+      `wrote ${result.written} file(s)${result.skipped ? `, skipped ${result.skipped} risky` : ""}`,
+    );
+    plan = null;
   }
 
   const risky = $derived(plan?.entries.filter((e) => e.risky) ?? []);
@@ -69,7 +55,7 @@
         {/each}
         {#if safe.length > 20}<p class="small muted">… {safe.length - 20} more</p>{/if}
         {#if risky.length > 0}
-          <p class="small warn">risky — host tools act on these:</p>
+          <p class="warn">risky — host tools act on these:</p>
           {#each risky as e, n (n)}
             <p class="small mono">{e.change} {e.path} <span class="muted">— {e.risky}</span></p>
           {/each}
@@ -94,25 +80,8 @@
 </div>
 
 <style>
-  .section {
-    margin-top: 12px;
-    padding-top: 10px;
-    border-top: 1px solid var(--halo-border);
-  }
-
-  .small {
-    margin: 2px 0;
-    font-size: 12px;
-  }
-
   .path {
     word-break: break-all;
-  }
-
-  .warn {
-    margin: 4px 0;
-    color: var(--halo-error);
-    font-size: 12px;
   }
 
   .plan {
@@ -123,11 +92,5 @@
     display: flex;
     gap: 6px;
     align-items: center;
-  }
-
-  .actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 8px;
   }
 </style>

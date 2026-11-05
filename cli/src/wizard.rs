@@ -11,13 +11,10 @@ use inquire::validator::Validation;
 use inquire::{MultiSelect, Password, Select, Text};
 use luoto_shared::{presets, profiles};
 
-use crate::commands::Proposal;
-use crate::config::{EnvConfig, Isolation, ProviderValue};
+use crate::config::{EnvConfig, GlobalConfig, Isolation, ProviderValue};
 use crate::detect;
+use crate::init::Proposal;
 use crate::secrets;
-
-/// Where a pasted token or key is kept: the OS keychain, under this service.
-const KEYCHAIN_SERVICE: &str = "luoto";
 
 struct Choice<T> {
     value: T,
@@ -54,7 +51,7 @@ fn shorts<T>(opts: &[ListOption<&Choice<T>>]) -> String {
 }
 
 /// Walk the proposal's settings; a credential question follows each agent that needs one.
-pub fn customize(p: &mut Proposal) -> Result<()> {
+pub fn customize(p: &mut Proposal, global: &GlobalConfig) -> Result<()> {
     println!();
     isolation(p)?;
     pick_presets(p)?;
@@ -62,7 +59,7 @@ pub fn customize(p: &mut Proposal) -> Result<()> {
     pick_agents(&mut p.cfg)?;
     for name in p.cfg.agents.clone() {
         if let Some(a) = profiles::agent(&name)
-            && let Some((provider, entries)) = credential(&p.cfg, &a)?
+            && let Some((provider, entries)) = credential(&p.cfg, &a, global)?
         {
             p.cfg.credentials.providers.insert(provider, entries);
         }
@@ -261,6 +258,7 @@ enum Source {
 pub fn credential(
     cfg: &EnvConfig,
     a: &profiles::Agent,
+    global: &GlobalConfig,
 ) -> Result<Option<(String, BTreeMap<String, ProviderValue>)>> {
     let configured = |p: &String| cfg.credentials.providers.contains_key(p);
     if a.providers.is_empty() || a.providers.iter().any(configured) {
@@ -320,14 +318,17 @@ pub fn credential(
             "log in inside the sandbox: the session lives in the env, readable by its code",
         ));
     }
+    let later = if p.login_hosts.is_empty() {
+        "later: `luoto agent run` asks again"
+    } else {
+        "later: log in inside the sandbox until then"
+    };
     let auth = if options.len() == 1 {
         options.remove(0).value
     } else {
-        options.push(choice(
-            Auth::Later,
-            "later",
-            "later: `luoto agent run` asks again",
-        ));
+        if p.login_hosts.is_empty() {
+            options.push(choice(Auth::Later, "later", later));
+        }
         match Select::new("Authenticate with:", options)
             .with_formatter(&short)
             .prompt_skippable()?
@@ -349,13 +350,14 @@ pub fn credential(
     };
     let how = &p.auth[&kind];
     println!("  {}", how.how);
+    let svc = crate::names::instance();
     let acct = format!("{provider_name}.{kind}");
     let mut options = Vec::new();
     if keychain_has(&acct) {
         options.push(choice(
             Source::InKeychain,
             "the one in your keychain",
-            format!("the one already in your keychain ({KEYCHAIN_SERVICE}/{acct})"),
+            format!("the one already in your keychain ({svc}/{acct})"),
         ));
     }
     options.push(choice(
@@ -376,11 +378,7 @@ pub fn credential(
             "a secret reference",
             "a reference to where it already is: op://…, vault://…, keyring:…, env:…, file:…",
         ),
-        choice(
-            Source::Later,
-            "later",
-            "later: `luoto agent run` asks again",
-        ),
+        choice(Source::Later, "later", later),
     ]);
     let Some(source) = Select::new(&format!("The {}:", how.label), options)
         .with_formatter(&short)
@@ -390,32 +388,31 @@ pub fn credential(
     };
     let reference = match source.value {
         Source::Later => return Ok(None),
-        Source::InKeychain => format!("keyring:{KEYCHAIN_SERVICE}/{acct}"),
+        Source::InKeychain => format!("keyring:{svc}/{acct}"),
         Source::PasteKeychain => {
             let Some(secret) = paste(&how.label)? else {
                 return Ok(None);
             };
             let free = free_account(&acct, keychain_taken)?;
-            keyring::Entry::new(KEYCHAIN_SERVICE, &free)
+            keyring::Entry::new(svc, &free)
                 .and_then(|e| e.set_password(&secret))
                 .context("store the secret in the OS keychain")?;
             if free == acct {
-                println!("stored in your keychain as {KEYCHAIN_SERVICE}/{free}");
+                println!("stored in your keychain as {svc}/{free}");
             } else {
                 println!(
-                    "stored in your keychain as {KEYCHAIN_SERVICE}/{free} \
-                     ({KEYCHAIN_SERVICE}/{acct} holds another one, kept as it is)"
+                    "stored in your keychain as {svc}/{free} \
+                     ({svc}/{acct} holds another one, kept as it is)"
                 );
             }
-            format!("keyring:{KEYCHAIN_SERVICE}/{free}")
+            format!("keyring:{svc}/{free}")
         }
         Source::Paste1Password => {
             let Some(secret) = paste(&how.label)? else {
                 return Ok(None);
             };
-            let global = crate::config::load_global(&crate::paths::Paths::get()?)?;
             let Some(vault) =
-                Select::new("1Password vault:", secrets::op_vaults(&global)?).prompt_skippable()?
+                Select::new("1Password vault:", secrets::op_vaults(global)?).prompt_skippable()?
             else {
                 return Ok(None);
             };
@@ -425,7 +422,7 @@ pub fn credential(
                  sees it.",
                 how.label
             );
-            let r = secrets::op_save(&global, &vault, &title, &secret, &note)?;
+            let r = secrets::op_save(global, &vault, &title, &secret, &note)?;
             println!("saved in 1Password ({vault}) as \"{title}\": {r}");
             r
         }
@@ -468,7 +465,7 @@ fn paste(label: &str) -> Result<Option<String>> {
 }
 
 fn keychain_has(account: &str) -> bool {
-    keyring::Entry::new(KEYCHAIN_SERVICE, account)
+    keyring::Entry::new(crate::names::instance(), account)
         .and_then(|e| e.get_password())
         .is_ok()
 }
@@ -476,11 +473,11 @@ fn keychain_has(account: &str) -> bool {
 /// Whether the keychain holds anything under `account`. Only a definite "no entry" is free:
 /// an entry the keychain can't read may still be another env's secret.
 fn keychain_taken(account: &str) -> Result<bool> {
-    match keyring::Entry::new(KEYCHAIN_SERVICE, account).and_then(|e| e.get_password()) {
+    let svc = crate::names::instance();
+    match keyring::Entry::new(svc, account).and_then(|e| e.get_password()) {
         Err(keyring::Error::NoEntry) => Ok(false),
         Ok(_) | Err(keyring::Error::BadEncoding(_) | keyring::Error::Ambiguous(_)) => Ok(true),
-        Err(e) => Err(e)
-            .with_context(|| format!("read {KEYCHAIN_SERVICE}/{account} from the OS keychain")),
+        Err(e) => Err(e).with_context(|| format!("read {svc}/{account} from the OS keychain")),
     }
 }
 
@@ -496,7 +493,8 @@ fn free_account(base: &str, taken: impl Fn(&str) -> Result<bool>) -> Result<Stri
             return Ok(account);
         }
     }
-    bail!("{KEYCHAIN_SERVICE}/{base} through {base}-99 are all taken in your keychain")
+    let svc = crate::names::instance();
+    bail!("{svc}/{base} through {base}-99 are all taken in your keychain")
 }
 
 #[cfg(test)]

@@ -1,18 +1,19 @@
-//! What a project folder says about itself, read on the host at `luoto init`: the toolchains
-//! its version files pin, the package managers its lockfiles name and the package registries
-//! it uses (presets whose `detect` files are present), in the folder and its subfolders (a
-//! monorepo's `frontend/`, `backend/`).
+//! What a project says about itself, read from its folder at `luoto init` or from a running
+//! env's workspace: the toolchains its version files pin, the package managers its lockfiles
+//! name and the package registries it uses (presets whose `detect` files are present), in the
+//! folder and its subfolders (a monorepo's `frontend/`, `backend/`).
 //! Suggestions only: mise reads the same files again inside the env.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-
-/// The most of one file detection reads on the host.
-const READ_CAP: u64 = 256 * 1024;
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use luoto_shared::presets;
 use serde::Serialize;
+
+/// The most of one file detection reads: pins sit at the top.
+pub const READ_CAP: usize = 256 * 1024;
 
 /// Tools whose idiomatic version files mise reads in an env (mise has them off by default).
 pub const IDIOMATIC_TOOLS: &[&str] = &[
@@ -92,22 +93,10 @@ pub const SKIP_DIRS: &[&str] = &[
     "__pycache__",
 ];
 
-/// Files that can pin a toolchain for the folder they are in.
-pub const PIN_FILES: &[&str] = &[
-    ".node-version",
-    ".nvmrc",
-    ".python-version",
-    ".ruby-version",
-    ".java-version",
-    ".go-version",
-    ".bun-version",
-    ".deno-version",
-    ".terraform-version",
-    ".zig-version",
-    ".swift-version",
+/// Files besides `VERSION_FILES` and `MISE_CONFIGS` that can pin a toolchain for the folder
+/// they are in.
+const OTHER_PINS: &[&str] = &[
     ".tool-versions",
-    "mise.toml",
-    ".mise.toml",
     "package.json",
     "go.mod",
     "rust-toolchain.toml",
@@ -159,62 +148,12 @@ pub fn preset_for(tool: &str) -> Option<&'static str> {
     }
 }
 
-/// A project's files, wherever they are: a folder on the host, or an env's workspace.
-pub trait Tree {
-    /// Relative paths of its files; in a git work tree, those git doesn't ignore.
-    fn files(&self) -> Vec<String>;
-    /// A file's text, by its relative path.
-    fn read(&self, rel: &str) -> Option<String>;
-    /// Whether a file is there.
-    fn has(&self, rel: &str) -> bool;
-}
-
-/// A folder on the host.
-struct Host<'a>(&'a Path);
-
-impl Tree for Host<'_> {
-    fn files(&self) -> Vec<String> {
-        git_files(self.0).unwrap_or_else(|| walk_files(self.0))
-    }
-    /// A regular file's text, at most `READ_CAP` bytes. Never through a symlink: a repository
-    /// can commit one to `/dev/zero`, a FIFO or a file of yours.
-    fn read(&self, rel: &str) -> Option<String> {
-        use std::io::Read;
-        let path = self.0.join(rel);
-        if !std::fs::symlink_metadata(&path).ok()?.is_file() {
-            return None;
-        }
-        let mut text = String::new();
-        std::fs::File::open(&path)
-            .ok()?
-            .take(READ_CAP)
-            .read_to_string(&mut text)
-            .ok()?;
-        Some(text)
-    }
-    fn has(&self, rel: &str) -> bool {
-        std::fs::symlink_metadata(self.0.join(rel)).is_ok_and(|m| m.is_file())
-    }
-}
-
-/// Files listed elsewhere, such as an env's workspace after a clone, with the text of those
-/// detection reads ([`read_paths`]).
+/// A project's files: their relative paths (in a git work tree, those git doesn't ignore),
+/// and the text of those detection reads ([`read_paths`]).
 #[derive(Debug, Default)]
 pub struct Listed {
     pub files: Vec<String>,
     pub texts: HashMap<String, String>,
-}
-
-impl Tree for Listed {
-    fn files(&self) -> Vec<String> {
-        self.files.clone()
-    }
-    fn read(&self, rel: &str) -> Option<String> {
-        self.texts.get(rel).cloned()
-    }
-    fn has(&self, rel: &str) -> bool {
-        self.texts.contains_key(rel) || self.files.iter().any(|f| f == rel)
-    }
 }
 
 /// The files whose text detection reads, among `files` (relative paths): those that can pin
@@ -222,15 +161,9 @@ impl Tree for Listed {
 pub fn read_paths(files: &[String]) -> Vec<String> {
     let mut names: Vec<&str> = MISE_CONFIGS.to_vec();
     names.extend(VERSION_FILES.iter().map(|(f, _)| *f));
-    names.extend([
-        ".tool-versions",
-        "package.json",
-        "go.mod",
-        "rust-toolchain.toml",
-        "Gemfile",
-        "pyproject.toml",
-        "yarn.lock",
-    ]);
+    names.extend(OTHER_PINS);
+    // What `MANAGERS` reads: pyproject's `[tool.*]` tables and yarn.lock's version.
+    names.extend(["pyproject.toml", "yarn.lock"]);
     let listed: HashSet<&str> = files.iter().map(String::as_str).collect();
     pin_dirs(files.iter().map(String::as_str))
         .iter()
@@ -248,14 +181,36 @@ fn join(dir: &str, file: &str) -> String {
     }
 }
 
+/// What a folder on the host says about itself.
 pub fn detect(root: &Path) -> Detected {
-    detect_tree(&Host(root))
+    let files = git_files(root).unwrap_or_else(|| walk_files(root));
+    let texts = read_paths(&files)
+        .into_iter()
+        .filter_map(|rel| read_host(&root.join(&rel)).map(|text| (rel, text)))
+        .collect();
+    detect_tree(&Listed { files, texts })
 }
 
-pub fn detect_tree(tree: &dyn Tree) -> Detected {
+/// A regular file's text, at most `READ_CAP` bytes. Never through a symlink: a repository can
+/// commit one to `/dev/zero`, a FIFO or a file of yours.
+fn read_host(path: &Path) -> Option<String> {
+    if !std::fs::symlink_metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(READ_CAP as u64)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
+}
+
+pub fn detect_tree(tree: &Listed) -> Detected {
     let mut d = Detected::default();
-    for rel in pin_dirs(tree.files().iter().map(String::as_str)) {
-        detect_in(tree, &rel, &mut d);
+    let listed: HashSet<&str> = tree.files.iter().map(String::as_str).collect();
+    for rel in pin_dirs(tree.files.iter().map(String::as_str)) {
+        detect_in(tree, &listed, &rel, &mut d);
     }
     d.defaults
         .retain(|r| !d.tools.iter().any(|t| t.tool == r.tool));
@@ -278,7 +233,9 @@ pub fn detect_tree(tree: &dyn Tree) -> Detected {
 /// paths), down to `DEPTH`. On the host the list comes from git in a work tree (so
 /// .gitignore keeps dependencies and build output out), else from a walk.
 pub fn pin_dirs<'a>(files: impl Iterator<Item = &'a str>) -> BTreeSet<String> {
-    let mut names: HashSet<&str> = PIN_FILES.iter().copied().collect();
+    let mut names: HashSet<&str> = OTHER_PINS.iter().copied().collect();
+    names.extend(VERSION_FILES.iter().map(|(f, _)| *f));
+    names.extend(MISE_CONFIGS.iter().filter(|f| !f.contains('/')));
     names.extend(RUNNERS.iter().map(|(f, _)| *f));
     names.extend(MANAGERS.iter().map(|(f, _, _)| *f));
     let presets = presets::all();
@@ -339,11 +296,12 @@ fn git_files(root: &Path) -> Option<Vec<String>> {
     })
 }
 
-/// Files down to `DEPTH` folders, skipping symlinks, hidden folders and `SKIP_DIRS`.
+/// Files down to `DEPTH` folders, skipping symlinks, hidden folders and `SKIP_DIRS`. Paths
+/// are relative with `/`, as git lists them, on every platform.
 fn walk_files(root: &Path) -> Vec<String> {
     let mut files = Vec::new();
-    let mut dirs = vec![PathBuf::new()];
-    while let Some(rel) = dirs.pop() {
+    let mut dirs = vec![(String::new(), 0)];
+    while let Some((rel, depth)) = dirs.pop() {
         let Ok(entries) = std::fs::read_dir(root.join(&rel)) else {
             continue;
         };
@@ -353,20 +311,20 @@ fn walk_files(root: &Path) -> Vec<String> {
             };
             let Ok(kind) = e.file_type() else { continue };
             if kind.is_file() {
-                files.push(rel.join(&name).to_string_lossy().into_owned());
+                files.push(join(&rel, &name));
             } else if kind.is_dir()
-                && rel.components().count() < DEPTH
+                && depth < DEPTH
                 && !name.starts_with('.')
                 && !SKIP_DIRS.contains(&name.as_str())
             {
-                dirs.push(rel.join(&name));
+                dirs.push((join(&rel, &name), depth + 1));
             }
         }
     }
     files
 }
 
-fn detect_in(tree: &dyn Tree, rel: &str, d: &mut Detected) {
+fn detect_in(tree: &Listed, listed: &HashSet<&str>, rel: &str, d: &mut Detected) {
     let source = |f: &str| join(rel, f);
     let mut here: Vec<ToolPin> = Vec::new();
     let mut add = |tool: &str, version: &str, file: &str| {
@@ -396,8 +354,8 @@ fn detect_in(tree: &dyn Tree, rel: &str, d: &mut Detected) {
             });
         }
     };
-    let read = |f: &str| tree.read(&join(rel, f));
-    let has = |f: &str| tree.has(&join(rel, f));
+    let read = |f: &str| tree.texts.get(&join(rel, f)).map(String::as_str);
+    let has = |f: &str| listed.contains(join(rel, f).as_str());
 
     for f in MISE_CONFIGS {
         if let Some(t) = read(f).and_then(|s| s.parse::<toml::Table>().ok())
@@ -427,7 +385,7 @@ fn detect_in(tree: &dyn Tree, rel: &str, d: &mut Detected) {
         }
     }
     if let Some(pkg) =
-        read("package.json").and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        read("package.json").and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
     {
         let dev = &pkg["devEngines"];
         let first = |v: &serde_json::Value| {
@@ -540,6 +498,8 @@ fn mise_version(v: &toml::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[cfg(unix)]
     #[test]
     fn hostile_files_pin_nothing_and_are_never_followed() {
@@ -569,8 +529,6 @@ mod tests {
             .collect();
         assert_eq!(pinned, [("go", "1.23")], "{pinned:?}");
     }
-
-    use super::*;
 
     #[test]
     fn reads_version_files_in_mise_order() {
@@ -612,11 +570,6 @@ mod tests {
         let presets: Vec<&str> = r.presets.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(presets, ["npm", "pypi", "go"]);
     }
-}
-
-#[cfg(test)]
-mod monorepo_tests {
-    use super::*;
 
     #[test]
     fn subfolders_count_and_unpinned_runtimes_get_defaults() {
@@ -677,11 +630,6 @@ mod monorepo_tests {
             .collect();
         assert_eq!(defaults, [("just", "latest"), ("rust", "stable")]);
     }
-}
-
-#[cfg(test)]
-mod manager_tests {
-    use super::*;
 
     fn managers(files: &[(&str, &str)]) -> Vec<(String, String, String)> {
         let d = tempfile::tempdir().unwrap();
@@ -741,11 +689,6 @@ mod manager_tests {
             [pin("yarn", "latest", "yarn.lock")]
         );
     }
-}
-
-#[cfg(test)]
-mod listed_tests {
-    use super::*;
 
     #[test]
     fn a_listed_tree_reads_like_a_folder() {

@@ -7,22 +7,23 @@ use std::net::Ipv4Addr;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use luoto_shared::creds::{
-    BindingSpec, FORBIDDEN_GITHUB_PERMISSIONS, Injection, Placement, default_github_api,
+    BindingSpec, FORBIDDEN_GITHUB_PERMISSIONS, Injection, Placement, SSH_BINDING,
+    default_github_api,
 };
 use luoto_shared::policy::{
-    Access, AccessLevel, AzureGuard, CompiledRule, DenyRule, GithubGuard, InternalName, Mode,
-    Policy, Rule, RuleOrigin, Severity, validate_rule,
+    Access, AccessLevel, AzureGuard, BodyDeny, CompiledRule, DenyRule, GithubGuard, InternalName,
+    Mode, Policy, Rule, RuleOrigin, rule_error,
 };
-use luoto_shared::{presets, profiles};
+use luoto_shared::{forges, presets, profiles};
 
 use crate::azure;
-use crate::config::{AzureDevopsCred, EnvConfig, GithubCred, ProviderValue, SshCred};
+use crate::config::{
+    AzureDevopsCred, CustomCred, EnvConfig, GithubCred, ProviderValue, SshCred, extend_unique,
+};
 
 pub struct Compiled {
     pub policy: Policy,
     pub bindings: BTreeMap<String, BindingSpec>,
-    /// Refs the vault needs (bindings) — resolved at unlock.
-    pub vault_refs: BTreeSet<String>,
     /// Refs exposed to the sandbox as env vars (`sandbox_secrets`), resolved at `up`.
     pub sandbox_refs: BTreeMap<String, String>,
     /// Placeholder and agent env vars for processes in the sandbox.
@@ -35,12 +36,29 @@ pub struct Compiled {
     pub warnings: Vec<String>,
 }
 
+impl Compiled {
+    /// Refs the vault needs for the bindings, resolved at unlock.
+    pub fn vault_refs(&self) -> BTreeSet<String> {
+        self.bindings
+            .values()
+            .map(|b| b.secret_ref().to_string())
+            .collect()
+    }
+}
+
 const GH_PLACEHOLDER: &str = "ghs_luotoPlaceholder0000000000000000000";
 
+#[derive(Default)]
 struct Builder {
     rules: Vec<CompiledRule>,
     denies: Vec<DenyRule>,
+    body_denies: Vec<BodyDeny>,
     injections: Vec<Injection>,
+    bindings: BTreeMap<String, BindingSpec>,
+    dev_env: BTreeMap<String, String>,
+    warnings: Vec<String>,
+    /// `url.<base>.insteadOf` pairs, as (base, prefix it replaces).
+    rewrites: Vec<(String, String)>,
 }
 
 impl Builder {
@@ -60,16 +78,15 @@ impl Builder {
     }
 }
 
-pub fn compile(env: &str, cfg: &EnvConfig, gate_ip: Ipv4Addr) -> Result<Compiled> {
-    let mut b = Builder {
-        rules: Vec::new(),
-        denies: Vec::new(),
-        injections: Vec::new(),
-    };
-    let mut bindings = BTreeMap::new();
-    let mut vault_refs = BTreeSet::new();
-    let mut dev_env = BTreeMap::new();
-    let mut warnings = Vec::new();
+/// `gate_ip` is the env's gate once `up` has given the env its addresses; `aliases` are the SSH
+/// host aliases its folder's remotes use for Azure DevOps ([`azure::aliases`]).
+pub fn compile(
+    env: &str,
+    cfg: &EnvConfig,
+    gate_ip: Option<Ipv4Addr>,
+    aliases: &[(String, String)],
+) -> Result<Compiled> {
+    let mut b = Builder::default();
 
     for name in &cfg.presets {
         let Some(p) = presets::get(name) else {
@@ -93,224 +110,47 @@ pub fn compile(env: &str, cfg: &EnvConfig, gate_ip: Ipv4Addr) -> Result<Compiled
         for (i, r) in a.rules.into_iter().enumerate() {
             b.rule(format!("agent-{name}-{i}"), &format!("agent:{name}"), r);
         }
-        dev_env.extend(a.env.clone());
+        b.dev_env.extend(a.env.clone());
     }
 
-    // Model providers: `[credentials.<provider>] <auth_kind> = "<ref>"` or `login_inside = "true"`.
     for (pname, entries) in &cfg.credentials.providers {
-        let Some(p) = profiles::provider(pname) else {
-            bail!(
-                "unknown credential section `{pname}` (providers: {}; or use [credentials.custom.<name>])",
-                profiles::provider_names().collect::<Vec<_>>().join(", ")
-            );
-        };
-        let login_inside = entries.get("login_inside") == Some(&ProviderValue::Flag(true));
-        if login_inside
-            && let Some(kind) = entries
-                .iter()
-                .find_map(|(k, v)| matches!(v, ProviderValue::Ref(_)).then_some(k))
-        {
-            bail!(
-                "credentials.{pname}: `login_inside` and `{kind}` are both set; keep one (the \
-                 login keeps its session in the env, `{kind}` stays outside it)"
-            );
-        }
-        let origin = format!("provider:{pname}");
-        for (i, (host, paths, access)) in p.hosts().into_iter().enumerate() {
-            b.rule(
-                match i {
-                    0 => format!("provider-{pname}"),
-                    i => format!("provider-{pname}-{i}"),
-                },
-                &origin,
-                Rule {
-                    host: host.to_string(),
-                    access: Access::Level(access),
-                    paths: paths.to_vec(),
-                    ws: p.ws,
-                    ..Default::default()
-                },
-            );
-        }
-        for d in &p.deny {
-            b.denies.push(DenyRule {
-                host: p.host.clone(),
-                paths: d.paths.clone(),
-                methods: vec![],
-                reason: d.reason.clone(),
-            });
-        }
-        if login_inside {
-            for (i, h) in p.login_hosts.iter().enumerate() {
-                b.rule(
-                    format!("provider-{pname}-login-{i}"),
-                    &origin,
-                    Rule {
-                        host: h.clone(),
-                        access: Access::Level(AccessLevel::Write),
-                        ..Default::default()
-                    },
-                );
-            }
-            warnings.push(format!(
-                "{pname}: login_inside keeps the {pname} credential inside the sandbox (reduced assurance)"
-            ));
-            continue;
-        }
-        let mut configured = 0;
-        for (kind, value) in entries {
-            let ProviderValue::Ref(secret_ref) = value else {
-                continue;
-            };
-            let Some(auth) = p.auth.get(kind) else {
-                bail!(
-                    "credentials.{pname}: unknown kind `{kind}` (known: {})",
-                    p.auth.keys().cloned().collect::<Vec<_>>().join(", ")
-                );
-            };
-            let binding = format!("{pname}.{kind}");
-            bindings.insert(
-                binding.clone(),
-                BindingSpec::Static {
-                    secret_ref: secret_ref.clone(),
-                },
-            );
-            vault_refs.insert(secret_ref.clone());
-            for (host, paths, _) in p.hosts() {
-                b.injections.push(Injection {
-                    binding: binding.clone(),
-                    host: host.to_string(),
-                    paths: paths.to_vec(),
-                    place: Placement::Header {
-                        name: auth.header.clone(),
-                        format: auth.format.clone(),
-                    },
-                    ignore_case: false,
-                });
-                if let Some(q) = &auth.query {
-                    b.injections.push(Injection {
-                        binding: binding.clone(),
-                        host: host.to_string(),
-                        paths: paths.to_vec(),
-                        place: Placement::Query { param: q.clone() },
-                        ignore_case: false,
-                    });
-                }
-            }
-            dev_env.extend(auth.env.clone());
-            configured += 1;
-        }
-        if configured > 1 {
-            bail!("credentials.{pname}: configure one credential kind, not {configured}");
-        }
+        compile_provider(&mut b, pname, entries)?;
     }
-
     for (cname, c) in &cfg.credentials.custom {
-        // A credential goes to one exact host: a wildcard would hand it to every tenant there.
-        let host = luoto_shared::host::normalize_host(&c.host)
-            .ok()
-            .filter(|_| !c.host.contains(['*', '/']))
-            .with_context(|| {
-                format!(
-                    "credentials.custom.{cname}: host `{}` must be one exact host name",
-                    c.host
-                )
-            })?;
-        let binding = format!("custom.{cname}");
-        bindings.insert(
-            binding.clone(),
-            BindingSpec::Static {
-                secret_ref: c.secret.clone(),
-            },
-        );
-        vault_refs.insert(c.secret.clone());
-        b.injections.push(Injection {
-            binding,
-            host: host.clone(),
-            paths: c.paths.clone(),
-            place: Placement::Header {
-                name: c.header.to_ascii_lowercase(),
-                format: c.format.clone(),
-            },
-            ignore_case: false,
-        });
-        b.rule(
-            format!("custom-{cname}"),
-            &format!("credential:{cname}"),
-            Rule {
-                host,
-                access: if c.write {
-                    Access::Level(AccessLevel::Write)
-                } else {
-                    Access::Level(AccessLevel::Read)
-                },
-                paths: c.paths.clone(),
-                ..Default::default()
-            },
-        );
-        dev_env.extend(c.placeholder_env.clone());
+        compile_custom(&mut b, cname, c)?;
     }
+    let github = cfg
+        .credentials
+        .github
+        .as_ref()
+        .map(|gh| compile_github(&mut b, gh))
+        .transpose()?;
 
-    let github = match &cfg.credentials.github {
-        Some(gh) => Some(compile_github(
-            gh,
-            &mut b,
-            &mut bindings,
-            &mut vault_refs,
-            &mut dev_env,
-        )?),
-        None => None,
-    };
-
-    let (ssh_hosts, known_hosts) = compile_ssh(
-        cfg.credentials.ssh.as_ref(),
-        &mut b,
-        &mut bindings,
-        &mut vault_refs,
-    )?;
+    let (ssh_hosts, known_hosts) = compile_ssh(&mut b, cfg.credentials.ssh.as_ref())?;
     let over_ssh = |h: &str| ssh_hosts.iter().any(|s| s == h);
     // Only HTTP(S) leaves the env, so SSH remotes go to HTTPS unless the vault's key logs in
     // to their host.
-    let mut rewrites = Vec::new();
-    if !over_ssh("github.com") {
+    if !over_ssh(forges::GITHUB) {
         for from in ["git@github.com:", "ssh://git@github.com/"] {
-            rewrites.push(("https://github.com/".to_string(), from.to_string()));
+            b.rewrites
+                .push(("https://github.com/".to_string(), from.to_string()));
         }
     }
-    let aliases = azure::aliases(&cfg.workspace);
-    let azure_ssh = over_ssh(azure::SSH_HOST);
-    let azure_devops = compile_azure(
-        cfg.credentials.azure_devops.as_ref(),
-        &aliases,
-        azure_ssh,
-        &mut b,
-        &mut bindings,
-        &mut vault_refs,
-        &mut dev_env,
-        &mut rewrites,
-    )?;
-    if azure_ssh {
-        let mut orgs: Vec<String> = aliases.iter().map(|(o, _)| o.clone()).collect();
-        if let Some(c) = &cfg.credentials.azure_devops {
-            orgs.extend(
-                c.repos
-                    .iter()
-                    .filter_map(|r| azure::parse_repo(r).ok())
-                    .map(|r| r.org),
-            );
+    let (azure_devops, azure_repos) = match &cfg.credentials.azure_devops {
+        Some(c) => {
+            let (guard, repos) = compile_azure(&mut b, c)?;
+            (Some(guard), repos)
         }
-        orgs.sort_by_key(|o| o.to_ascii_lowercase());
-        orgs.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-        for org in &orgs {
-            rewrites.extend(azure::ssh_to_ssh(org, &aliases));
-        }
-    }
+        None => (None, Vec::new()),
+    };
+    b.rewrites.extend(azure::rewrites(
+        &azure_repos,
+        aliases,
+        over_ssh(azure::SSH_HOST),
+    ));
 
     for (i, r) in cfg.allow.iter().enumerate() {
-        if let Some(e) = validate_rule(r, RuleOrigin::Host)
-            .into_iter()
-            .find(|i| i.severity == Severity::Error)
-        {
+        if let Some(e) = rule_error(r, RuleOrigin::Host) {
             bail!("rule for `{}`: {}", r.host, e.message);
         }
         if r.expired(Utc::now()) {
@@ -325,27 +165,23 @@ pub fn compile(env: &str, cfg: &EnvConfig, gate_ip: Ipv4Addr) -> Result<Compiled
         };
         b.rule(id, origin, r.clone());
     }
-
-    let mut sandbox_refs = BTreeMap::new();
-    for (k, v) in &cfg.sandbox_secrets {
-        sandbox_refs.insert(k.clone(), v.clone());
-    }
-    for (k, v) in &cfg.env {
-        dev_env.insert(k.clone(), v.clone());
-    }
+    b.dev_env.extend(cfg.env.clone());
 
     let policy = Policy {
         env: env.to_string(),
-        generated_at: Some(Utc::now()),
         rules: b.rules,
         denies: b.denies,
+        body_denies: b.body_denies,
         injections: b.injections,
         github,
         azure_devops,
-        internal_names: vec![InternalName {
-            name: luoto_shared::GATE_HOST.into(),
-            ip: gate_ip,
-        }],
+        internal_names: gate_ip
+            .map(|ip| InternalName {
+                name: luoto_shared::GATE_HOST.into(),
+                ip,
+            })
+            .into_iter()
+            .collect(),
     };
     // A tunnel passes bytes unread: one you or a repository wrote can't cover a host whose
     // credentials, forge guards or denies the gate applies (`luoto allow` refuses it too).
@@ -360,14 +196,202 @@ pub fn compile(env: &str, cfg: &EnvConfig, gate_ip: Ipv4Addr) -> Result<Compiled
 
     Ok(Compiled {
         policy,
-        bindings,
-        vault_refs,
-        sandbox_refs,
-        dev_env,
-        git_config: git_config(&rewrites),
+        bindings: b.bindings,
+        sandbox_refs: cfg.sandbox_secrets.clone(),
+        dev_env: b.dev_env,
+        git_config: git_config(&b.rewrites),
         known_hosts,
-        warnings,
+        warnings: b.warnings,
     })
+}
+
+/// A model provider: `[credentials.<provider>] <auth_kind> = "<ref>"` or `login_inside = true`,
+/// and `server_tools = true` to let it reach the network for the sandbox's requests.
+fn compile_provider(
+    b: &mut Builder,
+    pname: &str,
+    entries: &BTreeMap<String, ProviderValue>,
+) -> Result<()> {
+    let Some(p) = profiles::provider(pname) else {
+        bail!(
+            "unknown credential section `{pname}` (providers: {}; or use [credentials.custom.<name>])",
+            profiles::provider_names().collect::<Vec<_>>().join(", ")
+        );
+    };
+    if let Some(k) = entries.iter().find_map(|(k, v)| {
+        (matches!(v, ProviderValue::Flag(_)) && k != "login_inside" && k != "server_tools")
+            .then_some(k)
+    }) {
+        bail!("credentials.{pname}: `{k}` is not a setting (login_inside, server_tools)");
+    }
+    let login_inside = entries.get("login_inside") == Some(&ProviderValue::Flag(true));
+    let server_tools = entries.get("server_tools") == Some(&ProviderValue::Flag(true));
+    if login_inside
+        && let Some(kind) = entries
+            .iter()
+            .find_map(|(k, v)| matches!(v, ProviderValue::Ref(_)).then_some(k))
+    {
+        bail!(
+            "credentials.{pname}: `login_inside` and `{kind}` are both set; keep one (the \
+             login keeps its session in the env, `{kind}` stays outside it)"
+        );
+    }
+    let origin = format!("provider:{pname}");
+    for (i, (host, paths, access)) in p.hosts().into_iter().enumerate() {
+        b.rule(
+            match i {
+                0 => format!("provider-{pname}"),
+                i => format!("provider-{pname}-{i}"),
+            },
+            &origin,
+            Rule {
+                host: host.to_string(),
+                access: Access::Level(access),
+                paths: paths.to_vec(),
+                // The gate can't read WebSocket messages for server tools.
+                ws: p.ws && (server_tools || p.server_tools.is_empty()),
+                ..Default::default()
+            },
+        );
+    }
+    for d in &p.deny {
+        b.denies.push(DenyRule {
+            host: p.host.clone(),
+            paths: d.paths.clone(),
+            methods: vec![],
+            reason: d.reason.clone(),
+        });
+    }
+    if server_tools && !p.server_tools.is_empty() {
+        b.warnings.push(format!(
+            "{pname}: server_tools lets {pname} fetch URLs and call MCP servers for the sandbox"
+        ));
+    } else if !server_tools {
+        for t in &p.server_tools {
+            b.body_denies.push(BodyDeny {
+                host: p.host.clone(),
+                paths: t.paths.clone(),
+                keys: t.keys.clone(),
+                tool_types: t.tool_types.clone(),
+                tool_keys: t.tool_keys.clone(),
+                reason: format!(
+                    "{} has {pname} reach the network for the request; the env allows it with \
+                     `server_tools = true` under [credentials.{pname}]",
+                    t.what
+                ),
+            });
+        }
+    }
+    if login_inside {
+        for (i, h) in p.login_hosts.iter().enumerate() {
+            b.rule(
+                format!("provider-{pname}-login-{i}"),
+                &origin,
+                Rule {
+                    host: h.clone(),
+                    access: Access::Level(AccessLevel::Write),
+                    ..Default::default()
+                },
+            );
+        }
+        b.warnings.push(format!(
+            "{pname}: login_inside keeps the {pname} credential inside the sandbox (reduced assurance)"
+        ));
+        return Ok(());
+    }
+    let mut configured = 0;
+    for (kind, value) in entries {
+        let ProviderValue::Ref(secret_ref) = value else {
+            continue;
+        };
+        let Some(auth) = p.auth.get(kind) else {
+            bail!(
+                "credentials.{pname}: unknown kind `{kind}` (known: {})",
+                p.auth.keys().cloned().collect::<Vec<_>>().join(", ")
+            );
+        };
+        let binding = format!("{pname}.{kind}");
+        b.bindings.insert(
+            binding.clone(),
+            BindingSpec::Static {
+                secret_ref: secret_ref.clone(),
+            },
+        );
+        for (host, paths, _) in p.hosts() {
+            b.injections.push(Injection {
+                binding: binding.clone(),
+                host: host.to_string(),
+                paths: paths.to_vec(),
+                place: Placement::Header {
+                    name: auth.header.clone(),
+                    format: auth.format.clone(),
+                },
+                ignore_case: false,
+            });
+            if let Some(q) = &auth.query {
+                b.injections.push(Injection {
+                    binding: binding.clone(),
+                    host: host.to_string(),
+                    paths: paths.to_vec(),
+                    place: Placement::Query { param: q.clone() },
+                    ignore_case: false,
+                });
+            }
+        }
+        b.dev_env.extend(auth.env.clone());
+        configured += 1;
+    }
+    if configured > 1 {
+        bail!("credentials.{pname}: configure one credential kind, not {configured}");
+    }
+    Ok(())
+}
+
+/// `[credentials.custom.<name>]`: a header credential for one exact host.
+fn compile_custom(b: &mut Builder, cname: &str, c: &CustomCred) -> Result<()> {
+    // A credential goes to one exact host: a wildcard would hand it to every tenant there.
+    let host = luoto_shared::host::normalize_host(&c.host)
+        .ok()
+        .filter(|_| !c.host.contains(['*', '/']))
+        .with_context(|| {
+            format!(
+                "credentials.custom.{cname}: host `{}` must be one exact host name",
+                c.host
+            )
+        })?;
+    let binding = format!("custom.{cname}");
+    b.bindings.insert(
+        binding.clone(),
+        BindingSpec::Static {
+            secret_ref: c.secret.clone(),
+        },
+    );
+    b.injections.push(Injection {
+        binding,
+        host: host.clone(),
+        paths: c.paths.clone(),
+        place: Placement::Header {
+            name: c.header.to_ascii_lowercase(),
+            format: c.format.clone(),
+        },
+        ignore_case: false,
+    });
+    b.rule(
+        format!("custom-{cname}"),
+        &format!("credential:{cname}"),
+        Rule {
+            host,
+            access: if c.write {
+                Access::Level(AccessLevel::Write)
+            } else {
+                Access::Level(AccessLevel::Read)
+            },
+            paths: c.paths.clone(),
+            ..Default::default()
+        },
+    );
+    b.dev_env.extend(c.placeholder_env.clone());
+    Ok(())
 }
 
 /// `url.<base>.insteadOf` pairs as a git config file, grouped by base.
@@ -375,11 +399,7 @@ fn git_config(pairs: &[(String, String)]) -> String {
     let quote = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let mut out = String::from("# Written by luoto at `up`: where this env's git remotes go.\n");
     let mut bases: Vec<&str> = Vec::new();
-    for (base, _) in pairs {
-        if !bases.contains(&base.as_str()) {
-            bases.push(base);
-        }
-    }
+    extend_unique(&mut bases, pairs.iter().map(|(b, _)| b.as_str()));
     for base in bases {
         out.push_str(&format!("[url \"{}\"]\n", quote(base)));
         for (_, from) in pairs.iter().filter(|(b, _)| b == base) {
@@ -391,26 +411,23 @@ fn git_config(pairs: &[(String, String)]) -> String {
 
 /// Git over SSH: the key as a vault binding the env's agent signs with, a tunnel rule on
 /// port 22 for each host, and the hosts' pinned keys. The hosts, and their `known_hosts`.
-fn compile_ssh(
-    c: Option<&SshCred>,
-    b: &mut Builder,
-    bindings: &mut BTreeMap<String, BindingSpec>,
-    vault_refs: &mut BTreeSet<String>,
-) -> Result<(Vec<String>, String)> {
+fn compile_ssh(b: &mut Builder, c: Option<&SshCred>) -> Result<(Vec<String>, String)> {
     let Some(c) = c else {
         return Ok((Vec::new(), String::new()));
     };
     if c.hosts.is_empty() {
         bail!("credentials.ssh: list the hosts the key logs in to (`hosts = [\"github.com\"]`)");
     }
+    let normalized: Vec<String> = c
+        .hosts
+        .iter()
+        .map(|h| {
+            luoto_shared::host::normalize_host(h)
+                .map_err(|e| anyhow::anyhow!("credentials.ssh: host `{h}`: {e}"))
+        })
+        .collect::<Result<_>>()?;
     let mut hosts = Vec::new();
-    for h in &c.hosts {
-        let host = luoto_shared::host::normalize_host(h)
-            .map_err(|e| anyhow::anyhow!("credentials.ssh: host `{h}`: {e}"))?;
-        if !hosts.contains(&host) {
-            hosts.push(host);
-        }
-    }
+    extend_unique(&mut hosts, normalized);
     for line in &c.host_keys {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 3 {
@@ -457,14 +474,13 @@ fn compile_ssh(
             },
         );
     }
-    bindings.insert(
-        "ssh".into(),
+    b.bindings.insert(
+        SSH_BINDING.into(),
         BindingSpec::SshAgent {
             key_ref: c.key.clone(),
             host_keys: lines.clone(),
         },
     );
-    vault_refs.insert(c.key.clone());
     Ok((hosts, lines.join("\n") + "\n"))
 }
 
@@ -481,13 +497,7 @@ fn split_repo(full: &str) -> Result<(String, String)> {
     }
 }
 
-fn compile_github(
-    gh: &GithubCred,
-    b: &mut Builder,
-    bindings: &mut BTreeMap<String, BindingSpec>,
-    vault_refs: &mut BTreeSet<String>,
-    dev_env: &mut BTreeMap<String, String>,
-) -> Result<GithubGuard> {
+fn compile_github(b: &mut Builder, gh: &GithubCred) -> Result<GithubGuard> {
     if gh.repos.is_empty() {
         bail!(
             "credentials.github: list the repos the env may write to (`repos = [\"owner/repo\"]`)"
@@ -518,7 +528,6 @@ fn compile_github(
             permissions
                 .entry("metadata".into())
                 .or_insert_with(|| "read".into());
-            vault_refs.insert(key.clone());
             BindingSpec::GithubApp {
                 app_id: app_id.clone(),
                 installation_id,
@@ -528,17 +537,14 @@ fn compile_github(
                 api_base: gh.api_base.clone().unwrap_or_else(default_github_api),
             }
         }
-        (None, None, Some(token)) => {
-            vault_refs.insert(token.clone());
-            BindingSpec::Static {
-                secret_ref: token.clone(),
-            }
-        }
+        (None, None, Some(token)) => BindingSpec::Static {
+            secret_ref: token.clone(),
+        },
         _ => {
             bail!("credentials.github: set either app_id + installation_id + private_key, or token")
         }
     };
-    bindings.insert("github".into(), spec);
+    b.bindings.insert("github".into(), spec);
 
     let mut git_paths = Vec::new();
     let mut api_paths = vec!["/graphql".to_string()];
@@ -555,7 +561,7 @@ fn compile_github(
     // GitHub reads owner and repo in any case, and a remote keeps the case it was cloned with.
     b.injections.push(Injection {
         binding: "github".into(),
-        host: "github.com".into(),
+        host: forges::GITHUB.into(),
         paths: git_paths.clone(),
         place: Placement::Basic {
             username: "x-access-token".into(),
@@ -564,30 +570,29 @@ fn compile_github(
     });
     b.injections.push(Injection {
         binding: "github".into(),
-        host: "api.github.com".into(),
-        paths: api_paths.clone(),
+        host: forges::GITHUB_API.into(),
+        paths: api_paths,
         place: Placement::Header {
             name: "authorization".into(),
             format: "Bearer {secret}".into(),
         },
         ignore_case: true,
     });
-
-    if !b.has_read("github.com") {
-        b.rule("github-read".into(), "github", Rule::read("github.com"));
+    if !b.has_read(forges::GITHUB) {
+        b.rule("github-read".into(), "github", Rule::read(forges::GITHUB));
     }
-    if !b.has_read("api.github.com") {
+    if !b.has_read(forges::GITHUB_API) {
         b.rule(
             "github-api-read".into(),
             "github",
-            Rule::read("api.github.com"),
+            Rule::read(forges::GITHUB_API),
         );
     }
     b.rule(
         "github-git".into(),
         "github",
         Rule {
-            host: "github.com".into(),
+            host: forges::GITHUB.into(),
             access: Access::Methods(vec!["GET".into(), "POST".into()]),
             paths: git_paths,
             ignore_case: true,
@@ -620,7 +625,7 @@ fn compile_github(
         "github-api-write".into(),
         "github",
         Rule {
-            host: "api.github.com".into(),
+            host: forges::GITHUB_API.into(),
             access: Access::Methods(vec!["POST".into(), "PATCH".into()]),
             paths: write_paths,
             ignore_case: true,
@@ -664,43 +669,29 @@ fn compile_github(
         ),
     ] {
         b.denies.push(DenyRule {
-            host: "api.github.com".into(),
+            host: forges::GITHUB_API.into(),
             paths: paths.into_iter().map(str::to_string).collect(),
             methods: write.clone(),
             reason: reason.into(),
         });
     }
-    dev_env.insert("GH_TOKEN".into(), GH_PLACEHOLDER.into());
-    dev_env.insert("GITHUB_TOKEN".into(), GH_PLACEHOLDER.into());
-    dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+    b.dev_env.insert("GH_TOKEN".into(), GH_PLACEHOLDER.into());
+    b.dev_env
+        .insert("GITHUB_TOKEN".into(), GH_PLACEHOLDER.into());
+    b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
 
     Ok(GithubGuard {
         repos: repos.iter().map(|(o, r)| format!("{o}/{r}")).collect(),
         protected_branches: gh.protected_branches.clone(),
         graphql_mutations: gh.graphql_mutations.clone(),
         allow_tags: gh.allow_tags,
-        allow_branch_delete: false,
     })
 }
 
 /// Azure DevOps: the PAT added as basic auth on the repos' git paths, those paths allowed
-/// (case-insensitively, as Azure DevOps reads them), the push guard, and the rewrites that send
-/// each organization's legacy URLs, and unless the vault's key logs in over SSH (`over_ssh`)
-/// its SSH remotes, `aliases` among them, to HTTPS.
-#[allow(clippy::too_many_arguments)]
-fn compile_azure(
-    c: Option<&AzureDevopsCred>,
-    aliases: &[(String, String)],
-    over_ssh: bool,
-    b: &mut Builder,
-    bindings: &mut BTreeMap<String, BindingSpec>,
-    vault_refs: &mut BTreeSet<String>,
-    dev_env: &mut BTreeMap<String, String>,
-    rewrites: &mut Vec<(String, String)>,
-) -> Result<Option<AzureGuard>> {
-    let Some(c) = c else {
-        return Ok(None);
-    };
+/// (case-insensitively, as Azure DevOps reads them) and the push guard. The guard, and the
+/// repos for the remote rewrites ([`azure::rewrites`]).
+fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Vec<azure::Repo>)> {
     if c.repos.is_empty() {
         bail!(
             "credentials.azure_devops: list the repos the env may use (`repos = [\"org/project/repo\"]`)"
@@ -711,13 +702,12 @@ fn compile_azure(
         .iter()
         .map(|r| azure::parse_repo(r))
         .collect::<Result<_>>()?;
-    bindings.insert(
+    b.bindings.insert(
         "azure_devops".into(),
         BindingSpec::Static {
             secret_ref: c.token.clone(),
         },
     );
-    vault_refs.insert(c.token.clone());
     let paths: Vec<String> = repos.iter().flat_map(azure::Repo::git_paths).collect();
     b.injections.push(Injection {
         binding: "azure_devops".into(),
@@ -739,29 +729,13 @@ fn compile_azure(
             ..Default::default()
         },
     );
-    // Organizations as their repos write them, each with its projects.
-    let mut orgs: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
-    for r in &repos {
-        let (_, projects) = orgs
-            .entry(r.org.to_ascii_lowercase())
-            .or_insert_with(|| (r.org.clone(), Vec::new()));
-        if !projects.contains(&r.project) {
-            projects.push(r.project.clone());
-        }
-    }
-    for (org, projects) in orgs.values() {
-        rewrites.extend(azure::https_rewrites(org));
-        if !over_ssh {
-            rewrites.extend(azure::ssh_to_https(org, projects, aliases));
-        }
-    }
-    dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
-    Ok(Some(AzureGuard {
+    b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+    let guard = AzureGuard {
         repos: repos.iter().map(azure::Repo::key).collect(),
         protected_branches: c.protected_branches.clone(),
         allow_tags: c.allow_tags,
-        allow_branch_delete: false,
-    }))
+    };
+    Ok((guard, repos))
 }
 
 #[cfg(test)]
@@ -769,8 +743,15 @@ mod tests {
     use super::*;
     use luoto_shared::policy::{Decision, DenyReason, RequestInfo};
 
+    const GATE: Option<Ipv4Addr> = Some(Ipv4Addr::new(10, 0, 0, 2));
+
     fn cfg(text: &str) -> EnvConfig {
         toml::from_str(text).unwrap()
+    }
+
+    /// The folder's remote `git@azure-invinite:v3/invinite/AppServices/pseudo-registry`.
+    fn alias() -> [(String, String); 1] {
+        [("invinite".into(), "azure-invinite".into())]
     }
 
     fn decide(p: &Policy, host: &str, method: &str, path: &str) -> Decision {
@@ -789,17 +770,7 @@ mod tests {
 
     #[test]
     fn azure_devops_scopes_git_to_its_repos_in_any_case() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
-        std::fs::write(
-            dir.path().join(".git/config"),
-            "[remote \"origin\"]\n\turl = git@azure-invinite:v3/invinite/AppServices/pseudo-registry\n",
-        )
-        .unwrap();
-        let text = format!(
-            r#"
-[workspace]
-dir = '{}'
+        let text = r#"
 [credentials.azure_devops]
 token = "op://v/ado/pat"
 repos = [
@@ -807,10 +778,8 @@ repos = [
   "invinite/Data Platform/dbt-core",
   "https://other@dev.azure.com/other/Web/_git/site",
 ]
-"#,
-            dir.path().display()
-        );
-        let c = compile("t", &cfg(&text), Ipv4Addr::new(10, 0, 0, 2)).unwrap();
+"#;
+        let c = compile("t", &cfg(text), GATE, &alias()).unwrap();
         let p = &c.policy;
         for (method, path) in [
             (
@@ -866,7 +835,7 @@ repos = [
             1,
             "another organization's repo, with the same PAT"
         );
-        assert!(c.vault_refs.contains("op://v/ado/pat"));
+        assert!(c.vault_refs().contains("op://v/ado/pat"));
         let guard = p.azure_devops.as_ref().unwrap();
         assert!(
             guard
@@ -889,7 +858,8 @@ repos = [
             compile(
                 "t",
                 &cfg("[credentials.azure_devops]\ntoken = \"op://v/p\"\n"),
-                Ipv4Addr::new(10, 0, 0, 2)
+                GATE,
+                &[]
             )
             .is_err(),
             "repos are required"
@@ -898,25 +868,13 @@ repos = [
 
     #[test]
     fn an_ssh_key_logs_in_to_its_hosts_and_their_remotes_stay_ssh() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
-        std::fs::write(
-            dir.path().join(".git/config"),
-            "[remote \"origin\"]\n\turl = git@azure-invinite:v3/invinite/AppServices/pseudo-registry\n",
-        )
-        .unwrap();
-        let text = format!(
-            r#"
-[workspace]
-dir = '{}'
+        let text = r#"
 [credentials.ssh]
 key = "op://v/ssh/private key?ssh-format=openssh"
 hosts = ["github.com", "ssh.dev.azure.com", "git.example.com"]
 host_keys = ["git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl x"]
-"#,
-            dir.path().display()
-        );
-        let c = compile("t", &cfg(&text), Ipv4Addr::new(10, 0, 0, 2)).unwrap();
+"#;
+        let c = compile("t", &cfg(text), GATE, &alias()).unwrap();
         let p = &c.policy;
         assert_eq!(
             p.tunnel_rule("github.com", 22, Utc::now())
@@ -956,10 +914,7 @@ host_keys = ["git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0Sd
             "[credentials.ssh]\nkey = \"op://k\"\nhosts = [\"gitlab.com\"]\n",
             "[credentials.ssh]\nkey = \"op://k\"\nhosts = [\"github.com\"]\nhost_keys = [\"other.example ssh-ed25519 AAAA\"]\n",
         ] {
-            assert!(
-                compile("t", &cfg(bad), Ipv4Addr::new(10, 0, 0, 2)).is_err(),
-                "{bad}"
-            );
+            assert!(compile("t", &cfg(bad), GATE, &[]).is_err(), "{bad}");
         }
     }
 
@@ -975,7 +930,8 @@ installation_id = 2
 private_key = "op://v/app/key"
 repos = ["Eetu/Foo"]
 "#),
-            Ipv4Addr::new(10, 0, 0, 2),
+            GATE,
+            &[],
         )
         .unwrap();
         let p = &c.policy;
@@ -1058,7 +1014,7 @@ repos = ["Eetu/Foo"]
             p.injections_for("github.com", "/other/repo.git/info/refs")
                 .is_empty()
         );
-        assert!(c.vault_refs.contains("op://v/app/key"));
+        assert!(c.vault_refs().contains("op://v/app/key"));
         assert!(c.dev_env["GH_TOKEN"].starts_with("ghs_"));
     }
 
@@ -1072,7 +1028,8 @@ token = "op://v/pat/token"
 repos = ["a/b"]
 permissions = { workflows = "write" }
 "#),
-            Ipv4Addr::new(10, 0, 0, 2),
+            GATE,
+            &[],
         )
         .err()
         .unwrap();
@@ -1088,7 +1045,8 @@ agents = ["claude"]
 [credentials.anthropic]
 oauth_token = "op://p/claude/token"
 "#),
-            Ipv4Addr::new(10, 0, 0, 2),
+            GATE,
+            &[],
         )
         .unwrap();
         let p = &c.policy;
@@ -1104,6 +1062,34 @@ oauth_token = "op://p/claude/token"
         assert_eq!(c.dev_env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1");
         assert!(c.dev_env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
         assert!(c.bindings.contains_key("anthropic.oauth_token"));
+        let fetch = r#"{"tools":[{"type":"web_fetch_20260209"}]}"#;
+        let json = luoto_shared::policy::JsonBody::parse(fetch.as_bytes()).unwrap();
+        assert!(
+            p.body_denies
+                .iter()
+                .any(|d| d.applies("api.anthropic.com", "/v1/messages") && d.asks(&json))
+        );
+    }
+
+    #[test]
+    fn server_tools_and_the_websocket_api_wait_for_the_opt_in() {
+        let openai = |extra: &str| {
+            let text = format!("[credentials.openai]\napi_key = \"op://p/oai/key\"\n{extra}");
+            compile("t", &cfg(&text), GATE, &[]).unwrap()
+        };
+        let ws = |c: &Compiled| c.policy.rules.iter().any(|r| r.rule.ws);
+        let off = openai("");
+        assert!(!off.policy.body_denies.is_empty() && !ws(&off));
+        let on = openai("server_tools = true");
+        assert!(on.policy.body_denies.is_empty() && ws(&on));
+        assert!(on.warnings.iter().any(|w| w.contains("server_tools")));
+        let err = compile(
+            "t",
+            &cfg("[credentials.openai]\nservertools = true"),
+            GATE,
+            &[],
+        );
+        assert!(err.err().unwrap().to_string().contains("not a setting"));
     }
 
     #[test]
@@ -1118,7 +1104,8 @@ token = "op://p/copilot/token"
 token = "op://p/gh/token"
 repos = ["o/r"]
 "#),
-            Ipv4Addr::new(10, 0, 0, 2),
+            GATE,
+            &[],
         )
         .unwrap();
         let p = &c.policy;
@@ -1160,13 +1147,11 @@ api_key = "env:K"
 host = "api.anthropic.com"
 mode = "tunnel"
 "#);
-        let err = compile("t", &c, Ipv4Addr::new(10, 0, 0, 2))
-            .err()
-            .expect("refused");
+        let err = compile("t", &c, GATE, &[]).err().expect("refused");
         assert!(err.to_string().contains("tunnel"), "{err}");
         // A tunnel to a host the gate enforces nothing on stays possible.
         let ok = cfg("[[allow]]\nhost = \"grpc.example.com\"\nmode = \"tunnel\"");
-        assert!(compile("t", &ok, Ipv4Addr::new(10, 0, 0, 2)).is_ok());
+        assert!(compile("t", &ok, GATE, &[]).is_ok());
     }
 
     #[test]
@@ -1175,10 +1160,7 @@ mode = "tunnel"
             let c = cfg(&format!(
                 "[credentials.custom.x]\nhost = \"{host}\"\nheader = \"authorization\"\nsecret = \"env:X\""
             ));
-            assert!(
-                compile("t", &c, Ipv4Addr::new(10, 0, 0, 2)).is_err(),
-                "{host}"
-            );
+            assert!(compile("t", &c, GATE, &[]).is_err(), "{host}");
         }
     }
 
@@ -1187,7 +1169,8 @@ mode = "tunnel"
         let c = compile(
             "t",
             &cfg("agents = [\"copilot\"]\n[credentials.copilot]\ntoken = \"env:T\""),
-            Ipv4Addr::new(10, 0, 0, 2),
+            GATE,
+            &[],
         )
         .unwrap();
         let p = &c.policy;
@@ -1209,15 +1192,13 @@ agents = ["opencode"]
 api_key = "op://p/gemini/key"
 login_inside = true
 "#);
-        let err = compile("t", &both, Ipv4Addr::new(10, 0, 0, 2))
-            .err()
-            .expect("refused");
+        let err = compile("t", &both, GATE, &[]).err().expect("refused");
         assert!(err.to_string().contains("keep one"), "{err}");
     }
 
     #[test]
     fn user_rules_are_validated() {
         let bad = cfg("[[allow]]\nhost = \"*.github.io\"\n");
-        assert!(compile("t", &bad, Ipv4Addr::new(10, 0, 0, 2)).is_err());
+        assert!(compile("t", &bad, GATE, &[]).is_err());
     }
 }

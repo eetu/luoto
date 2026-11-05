@@ -2,9 +2,15 @@
 //! forms a remote URL takes, and the rewrites that send SSH and legacy remotes to
 //! `https://dev.azure.com`, where the gate adds the PAT.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Result, bail};
 
-pub const HOST: &str = "dev.azure.com";
+use crate::config::extend_unique;
+
+pub use luoto_shared::forges::{AZURE_DEVOPS as HOST, AZURE_DEVOPS_SSH as SSH_HOST};
+/// Its legacy SSH host, where the user name is the organization.
+const LEGACY_SSH_HOST: &str = "vs-ssh.visualstudio.com";
 
 /// A repository, each part as its URLs write it (percent-encoded).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +51,7 @@ impl Repo {
 
 /// A path segment as Azure DevOps' clone URLs write it: unreserved characters as they are,
 /// everything else (a space in a project name) percent-encoded.
-pub fn encode(s: &str) -> String {
+fn encode(s: &str) -> String {
     s.bytes()
         .map(|b| {
             if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
@@ -114,7 +120,7 @@ pub fn parse_url(url: &str) -> Option<(Repo, Option<String>)> {
         return None;
     };
     let host = host.split(':').next().unwrap_or(&host).to_ascii_lowercase();
-    let alias = (host != "ssh.dev.azure.com" && host != "vs-ssh.visualstudio.com").then_some(host);
+    let alias = (host != SSH_HOST && host != LEGACY_SSH_HOST).then_some(host);
     Some((repo(org, project, name)?, alias))
 }
 
@@ -148,12 +154,9 @@ pub fn parse_repo(entry: &str) -> Result<Repo> {
     }
 }
 
-/// The host Azure DevOps serves git over SSH on.
-pub const SSH_HOST: &str = "ssh.dev.azure.com";
-
 /// `url.<base>.insteadOf` pairs that send the organization's legacy and `org@` HTTPS URLs to
 /// `https://dev.azure.com/<org>/`.
-pub fn https_rewrites(org: &str) -> Vec<(String, String)> {
+fn https_rewrites(org: &str) -> Vec<(String, String)> {
     let base = format!("https://{HOST}/{org}/");
     vec![
         (base.clone(), format!("https://{org}.visualstudio.com/")),
@@ -170,8 +173,8 @@ pub fn https_rewrites(org: &str) -> Vec<(String, String)> {
 /// `ssh.dev.azure.com` too.
 fn ssh_prefixes(org: &str, aliases: &[(String, String)], standard: bool) -> Vec<String> {
     let mut hosts: Vec<(String, String)> = vec![(
-        format!("{org}@vs-ssh.visualstudio.com:"),
-        format!("ssh://{org}@vs-ssh.visualstudio.com/"),
+        format!("{org}@{LEGACY_SSH_HOST}:"),
+        format!("ssh://{org}@{LEGACY_SSH_HOST}/"),
     )];
     if standard {
         hosts.push((format!("git@{SSH_HOST}:"), format!("ssh://git@{SSH_HOST}/")));
@@ -191,7 +194,7 @@ fn ssh_prefixes(org: &str, aliases: &[(String, String)], standard: bool) -> Vec<
 
 /// SSH remotes to HTTPS, where the PAT logs in, per project: SSH writes
 /// `v3/org/project/repo`, HTTPS `org/project/_git/repo`.
-pub fn ssh_to_https(
+fn ssh_to_https(
     org: &str,
     projects: &[String],
     aliases: &[(String, String)],
@@ -209,12 +212,51 @@ pub fn ssh_to_https(
 
 /// SSH remotes on the legacy host and on `aliases` to `ssh.dev.azure.com`, where the vault's
 /// key logs in (`[credentials.ssh]`).
-pub fn ssh_to_ssh(org: &str, aliases: &[(String, String)]) -> Vec<(String, String)> {
+fn ssh_to_ssh(org: &str, aliases: &[(String, String)]) -> Vec<(String, String)> {
     let target = format!("git@{SSH_HOST}:v3/{org}/");
     ssh_prefixes(org, aliases, false)
         .into_iter()
         .map(|from| (target.clone(), from))
         .collect()
+}
+
+/// The env's git remote rewrites for Azure DevOps, as `url.<base>.insteadOf` pairs: each
+/// organization of `repos` gets its legacy URLs sent to `https://dev.azure.com`, and its SSH
+/// remotes (`aliases` among them) too unless the vault's key logs in over SSH (`over_ssh`).
+/// With that key, SSH remotes on the legacy host and on `aliases` go to `ssh.dev.azure.com`.
+pub fn rewrites(
+    repos: &[Repo],
+    aliases: &[(String, String)],
+    over_ssh: bool,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    // Organizations as their repos write them, each with its projects.
+    let mut orgs: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
+    for r in repos {
+        let (_, projects) = orgs
+            .entry(r.org.to_ascii_lowercase())
+            .or_insert_with(|| (r.org.clone(), Vec::new()));
+        extend_unique(projects, [r.project.clone()]);
+    }
+    for (org, projects) in orgs.values() {
+        out.extend(https_rewrites(org));
+        if !over_ssh {
+            out.extend(ssh_to_https(org, projects, aliases));
+        }
+    }
+    if over_ssh {
+        let mut orgs: Vec<&str> = aliases
+            .iter()
+            .map(|(o, _)| o.as_str())
+            .chain(repos.iter().map(|r| r.org.as_str()))
+            .collect();
+        orgs.sort_by_key(|o| o.to_ascii_lowercase());
+        orgs.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        for org in orgs {
+            out.extend(ssh_to_ssh(org, aliases));
+        }
+    }
+    out
 }
 
 /// SSH host aliases from `~/.ssh/config` that the project's own remotes use for Azure DevOps
@@ -374,6 +416,29 @@ mod tests {
             rewritten(&pairs, "git@ssh.dev.azure.com:v3/invinite/AppServices/r"),
             None,
             "already the real host"
+        );
+    }
+
+    #[test]
+    fn aliases_come_from_the_folders_remotes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().join(".git/config"),
+            "[remote \"origin\"]\n\turl = git@azure-invinite:v3/invinite/AppServices/pseudo-registry\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".gitmodules"),
+            "[submodule \"x\"]\n\turl = git@ssh.dev.azure.com:v3/other/P/r\n",
+        )
+        .unwrap();
+        let ws = crate::config::Workspace {
+            dir: Some(dir.path().display().to_string()),
+        };
+        assert_eq!(
+            aliases(&ws),
+            [("invinite".to_string(), "azure-invinite".to_string())]
         );
     }
 

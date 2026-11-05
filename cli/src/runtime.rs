@@ -2,6 +2,7 @@
 //! keeps the per-runtime differences in one place. Everything luoto needs is expressed as a
 //! [`RunSpec`] or a network/volume call; nothing else talks to the runtime.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::process::{Command, ExitStatus, Stdio};
@@ -10,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::config::GlobalConfig;
+use crate::names;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flavor {
@@ -36,7 +38,7 @@ pub struct RunSpec {
     pub dns: Vec<String>,
     pub add_hosts: Vec<(String, String)>,
     pub env: Vec<(String, String)>,
-    /// (source volume or host path, target, read-only)
+    /// (volume, target, read-only)
     pub mounts: Vec<(String, String, bool)>,
     pub ports: Vec<(u16, u16)>,
     pub labels: Vec<(String, String)>,
@@ -51,15 +53,52 @@ pub struct RunSpec {
     pub read_only: bool,
     pub memory: Option<String>,
     pub cpus: Option<f64>,
-    /// OCI runtime binary (e.g. gVisor's runsc), and global flags for it.
+    /// OCI runtime binary (e.g. luoto's runsc wrapper).
     pub oci_runtime: Option<String>,
-    pub runtime_flags: Vec<String>,
-    pub userns: Option<String>,
     /// Podman: map container IDs 0..65536 to this intermediate ID onward, so the container's
     /// root is neither the user that owns podman nor shared with other containers.
     pub id_map: Option<u32>,
     pub restart: Option<String>,
     pub security_opts: Vec<String>,
+}
+
+/// The state (`running`, `exited`, …) of every luoto container, read in one call.
+#[derive(Default)]
+pub struct States {
+    by_name: HashMap<String, String>,
+    /// luoto's VM is stopped: nothing in it runs or can be asked about.
+    pub vm_stopped: bool,
+}
+
+impl States {
+    fn parse(ps: &str) -> Self {
+        let by_name = ps
+            .lines()
+            .filter_map(|l| l.trim().split_once(' '))
+            .map(|(name, state)| (name.to_string(), state.trim().to_string()))
+            .collect();
+        States {
+            by_name,
+            vm_stopped: false,
+        }
+    }
+
+    pub fn running(&self, name: &str) -> bool {
+        self.by_name.get(name).is_some_and(|s| s == "running")
+    }
+
+    /// An env's dev and gate container states, `absent` for one that doesn't exist.
+    pub fn env(&self, env: &str) -> (String, String) {
+        if self.vm_stopped {
+            return ("stopped".into(), "stopped".into());
+        }
+        let state = |c: String| {
+            self.by_name
+                .get(&c)
+                .map_or_else(|| "absent".into(), String::clone)
+        };
+        (state(names::dev(env)), state(names::gate(env)))
+    }
 }
 
 /// `LUOTO_TRACE=1` prints every runtime call: when it started (since the first call) and how
@@ -87,10 +126,6 @@ fn traced<T>(args: &[std::ffi::OsString], f: impl FnOnce() -> T) -> T {
         t.elapsed().as_secs_f64()
     );
     out
-}
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 fn which(bin: &str) -> bool {
@@ -256,6 +291,29 @@ impl Runtime {
 
     pub fn version(&self) -> Result<String> {
         Ok(self.run(["--version"])?.trim().to_string())
+    }
+
+    /// Every luoto container's state from one `ps`, for what asks about many containers
+    /// (each call is a round trip into the VM). The vault, gates and dev containers all carry
+    /// the role label; podman (5, 6) and docker print the same `.State` words as inspect's
+    /// `.State.Status`.
+    pub fn states(&self) -> Result<States> {
+        let role = format!("label={}", names::LABEL_ROLE);
+        match self.run([
+            "ps",
+            "-a",
+            "--filter",
+            &role,
+            "--format",
+            "{{.Names}} {{.State}}",
+        ]) {
+            Ok(out) => Ok(States::parse(&out)),
+            Err(_) if crate::machine::stopped(self) => Ok(States {
+                vm_stopped: true,
+                ..Default::default()
+            }),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn container_state(&self, name: &str) -> Option<String> {
@@ -441,23 +499,11 @@ impl Runtime {
         for (k, v) in &spec.env {
             a.extend(["-e".into(), format!("{k}={v}")]);
         }
-        for (src, dst, ro) in &spec.mounts {
-            let host_path =
-                src.starts_with('/') || src.starts_with('\\') || src.get(1..3) == Some(":\\");
-            if host_path {
-                a.extend([
-                    "--mount".into(),
-                    format!(
-                        "type=bind,source={src},target={dst}{}",
-                        if *ro { ",readonly" } else { "" }
-                    ),
-                ]);
-            } else {
-                a.extend([
-                    "-v".into(),
-                    format!("{src}:{dst}{}", if *ro { ":ro" } else { "" }),
-                ]);
-            }
+        for (volume, dst, ro) in &spec.mounts {
+            a.extend([
+                "-v".into(),
+                format!("{volume}:{dst}{}", if *ro { ":ro" } else { "" }),
+            ]);
         }
         for (host, cont) in &spec.ports {
             a.extend(["-p".into(), format!("127.0.0.1:{host}:{cont}")]);
@@ -500,9 +546,6 @@ impl Runtime {
                 }
             }
             Flavor::Podman => {
-                if let Some(u) = &spec.userns {
-                    a.extend(["--userns".into(), u.clone()]);
-                }
                 if let Some(start) = spec.id_map {
                     let map = format!("0:{start}:{}", crate::machine::ID_RANGE);
                     a.extend(["--uidmap".into(), map.clone(), "--gidmap".into(), map]);
@@ -551,13 +594,10 @@ impl Runtime {
         if let Some(r) = &spec.oci_runtime {
             args.extend(["--runtime".into(), r.clone()]);
         }
-        for f in &spec.runtime_flags {
-            args.extend(["--runtime-flag".into(), f.clone()]);
-        }
         args.extend(self.run_args(spec, false));
         if crate::machine::is_luoto(self.connection.as_deref()) {
             let line: Vec<String> = std::iter::once("podman".to_string())
-                .chain(args.iter().map(|a| shell_quote(a)))
+                .chain(args.iter().map(|a| crate::text::sh_quote(a)))
                 .collect();
             crate::machine::ssh(&self.bin, &line.join(" "))?;
             return Ok(());
@@ -583,33 +623,40 @@ impl Runtime {
         Ok(())
     }
 
-    pub fn exec_args(
+    /// Stop the container if it runs. Like `remove_container`, a failure counts only while
+    /// the container still runs (gVisor's network teardown).
+    pub fn stop(&self, name: &str) -> Result<()> {
+        if self.is_running(name)
+            && let Err(e) = self.run(["stop", "-t", "5", name])
+            && self.is_running(name)
+        {
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    pub fn is_running(&self, name: &str) -> bool {
+        self.container_state(name).as_deref() == Some("running")
+    }
+
+    /// Whether `script` succeeds in a login `sh` as `user` in `container` (the login PATH:
+    /// mise shims, ~/.local/bin).
+    pub fn exec_sh(&self, container: &str, user: &str, script: &str) -> bool {
+        self.succeeds(["exec", "-u", user, container, "sh", "-lc", script])
+    }
+
+    /// Run `script` with `sh -c` as `user` in `container`, `input` on its stdin; its stdout.
+    pub fn pipe_sh(
         &self,
         container: &str,
-        user: Option<&str>,
-        workdir: Option<&str>,
-        env: &[(String, String)],
-        interactive: bool,
-        tty: bool,
-    ) -> Vec<String> {
-        let mut a = vec!["exec".to_string()];
-        if interactive {
-            a.push("-i".into());
-        }
-        if tty {
-            a.push("-t".into());
-        }
-        if let Some(u) = user {
-            a.extend(["-u".into(), u.into()]);
-        }
-        if let Some(w) = workdir {
-            a.extend(["-w".into(), w.into()]);
-        }
-        for (k, v) in env {
-            a.extend(["-e".into(), format!("{k}={v}")]);
-        }
-        a.push(container.into());
-        a
+        user: &str,
+        script: &str,
+        input: &[u8],
+    ) -> Result<String> {
+        self.run_stdin(
+            ["exec", "-i", "-u", user, container, "sh", "-c", script],
+            input,
+        )
     }
 }
 
@@ -637,7 +684,6 @@ mod tests {
             ports: vec![(5173, 5173)],
             cap_drop_all: true,
             cap_add: vec!["NET_ADMIN".into()],
-            userns: Some("keep-id".into()),
             ..Default::default()
         }
     }
@@ -648,7 +694,6 @@ mod tests {
         assert!(a.contains("--network luoto-t:ip=10.213.1.2 --network luoto-t-out"));
         assert!(a.contains("-p 127.0.0.1:5173:5173"));
         assert!(a.contains("--cap-drop ALL --cap-add NET_ADMIN"));
-        assert!(a.contains("--userns keep-id"));
     }
 
     #[test]
@@ -657,7 +702,6 @@ mod tests {
         assert!(a.starts_with("create "));
         assert!(a.contains("--network luoto-t --ip 10.213.1.2"));
         assert!(!a.contains("luoto-t-out"));
-        assert!(!a.contains("--userns"));
     }
 
     #[test]
@@ -677,7 +721,17 @@ mod tests {
     }
 
     #[test]
-    fn shell_quoting_survives_quotes() {
-        assert_eq!(shell_quote("a'b c"), r"'a'\''b c'");
+    fn states_come_from_one_listing() {
+        let (dev, gate, vault) = (names::dev("web"), names::gate("web"), names::vault());
+        let s = States::parse(&format!("{gate} running\n{dev} exited\n{vault} running\n"));
+        assert!(s.running(&vault));
+        assert!(!s.running(&dev));
+        assert_eq!(s.env("web"), ("exited".into(), "running".into()));
+        assert_eq!(s.env("api"), ("absent".into(), "absent".into()));
+        let off = States {
+            vm_stopped: true,
+            ..Default::default()
+        };
+        assert_eq!(off.env("web"), ("stopped".into(), "stopped".into()));
     }
 }

@@ -6,7 +6,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::creds::Injection;
-use crate::glob::{glob_match, glob_match_any_case};
+use crate::forges;
+use crate::glob::{self, glob_match};
 use crate::host::{WildcardRisk, host_matches, normalize_host, wildcard_risk};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -122,14 +123,7 @@ impl Rule {
     }
 
     pub fn path_matches(&self, path: &str) -> bool {
-        self.paths.is_empty()
-            || self.paths.iter().any(|p| {
-                if self.ignore_case {
-                    glob_match_any_case(p, path)
-                } else {
-                    glob_match(p, path)
-                }
-            })
+        glob::matches_any(&self.paths, self.ignore_case, path)
     }
 }
 
@@ -155,6 +149,74 @@ pub struct DenyRule {
     pub reason: String,
 }
 
+/// JSON request bodies a host refuses: ones that ask a model API to reach the network for the
+/// request (fetch a URL, call an MCP server). The gate reads such a body before forwarding it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct BodyDeny {
+    pub host: String,
+    /// POST paths whose bodies are read.
+    pub paths: Vec<String>,
+    /// Top-level keys that ask for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
+    /// `tools[].type` values that ask for it, each also with a version suffix (`web_fetch`
+    /// matches `web_fetch_20260209`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_types: Vec<String>,
+    /// Keys of a `tools[]` entry that ask for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_keys: Vec<String>,
+    pub reason: String,
+}
+
+impl BodyDeny {
+    pub fn applies(&self, host: &str, path: &str) -> bool {
+        self.host == host && glob::matches_any(&self.paths, false, path)
+    }
+
+    pub fn asks(&self, body: &JsonBody) -> bool {
+        let tool_type = |t: &str| {
+            self.tool_types.iter().any(|x| {
+                t.strip_prefix(x.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('_'))
+            })
+        };
+        self.keys.iter().any(|k| body.keys.contains(k))
+            || body.tools.iter().any(|t| {
+                t.get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(tool_type)
+                    || self.tool_keys.iter().any(|k| t.contains_key(k))
+            })
+    }
+}
+
+/// What [`BodyDeny`] looks at in a JSON request body: its top-level keys and `tools` entries.
+pub struct JsonBody {
+    keys: std::collections::HashSet<String>,
+    tools: Vec<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl JsonBody {
+    /// `None` unless the body is one JSON object whose `tools`, if any, is an array of
+    /// objects. The rest of the body is skipped unread, however large. A key given twice is
+    /// refused: the API might read the copy a check skipped.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        #[derive(Deserialize)]
+        struct Tools {
+            #[serde(default)]
+            tools: Option<Vec<serde_json::Map<String, serde_json::Value>>>,
+        }
+        let keys: std::collections::HashMap<String, serde::de::IgnoredAny> =
+            serde_json::from_slice(bytes).ok()?;
+        let Tools { tools } = serde_json::from_slice(bytes).ok()?;
+        Some(JsonBody {
+            keys: keys.into_keys().collect(),
+            tools: tools.unwrap_or_default(),
+        })
+    }
+}
+
 /// GitHub write guard-rails enforced by the gate on top of rules.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct GithubGuard {
@@ -164,7 +226,6 @@ pub struct GithubGuard {
     /// GraphQL mutation root fields allowed; everything else that mutates is refused.
     pub graphql_mutations: Vec<String>,
     pub allow_tags: bool,
-    pub allow_branch_delete: bool,
 }
 
 /// Azure DevOps write guard-rails enforced by the gate on top of rules.
@@ -174,7 +235,6 @@ pub struct AzureGuard {
     pub repos: Vec<String>,
     pub protected_branches: Vec<String>,
     pub allow_tags: bool,
-    pub allow_branch_delete: bool,
 }
 
 /// Name the gate answers itself in DNS (the gate, env services).
@@ -187,11 +247,12 @@ pub struct InternalName {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct Policy {
     pub env: String,
-    pub generated_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub rules: Vec<CompiledRule>,
     #[serde(default)]
     pub denies: Vec<DenyRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub body_denies: Vec<BodyDeny>,
     #[serde(default)]
     pub injections: Vec<Injection>,
     #[serde(default)]
@@ -299,21 +360,8 @@ impl Policy {
         })
     }
 
-    /// How to treat a CONNECT to `host:port`: tunnel only if a live tunnel rule covers it;
-    /// everything else is intercepted (including denied hosts, so the client gets a
-    /// readable 403 instead of a TLS failure).
-    pub fn connect_mode(&self, host: &str, port: u16, now: DateTime<Utc>) -> Mode {
-        if self
-            .live_rules(host, port, now)
-            .any(|r| r.rule.mode == Mode::Tunnel)
-        {
-            Mode::Tunnel
-        } else {
-            Mode::Inspect
-        }
-    }
-
-    /// The tunnel rule covering host:port, if any (used to allow opaque tunnels).
+    /// The live tunnel rule covering `host:port`. A CONNECT without one is intercepted, denied
+    /// hosts included, so the client gets a readable 403 instead of a TLS failure.
     pub fn tunnel_rule<'a>(
         &'a self,
         host: &'a str,
@@ -336,29 +384,12 @@ impl Policy {
             }
         }
 
-        let candidates: Vec<&CompiledRule> = self
-            .rules
-            .iter()
-            .filter(|r| host_matches(&r.rule.host, req.host) && r.rule.port_matches(req.port))
-            .collect();
-        if candidates.is_empty() {
-            return Decision::Deny(DenyReason::NoRule);
-        }
-        let live: Vec<&CompiledRule> = candidates
-            .iter()
-            .copied()
-            .filter(|r| !r.rule.expired(now))
-            .collect();
-        if live.is_empty() {
-            return Decision::Deny(DenyReason::Expired {
-                rule: candidates[0].id.clone(),
-            });
-        }
-
+        let mut live = false;
         let mut path_ok_method_bad: Vec<&CompiledRule> = Vec::new();
         let mut ws_bad = false;
         let mut body_bad: Option<u64> = None;
-        for r in &live {
+        for r in self.live_rules(req.host, req.port, now) {
+            live = true;
             if !r.rule.path_matches(req.path) {
                 continue;
             }
@@ -383,6 +414,16 @@ impl Policy {
             };
         }
 
+        if !live {
+            let expired = self
+                .rules
+                .iter()
+                .find(|r| host_matches(&r.rule.host, req.host) && r.rule.port_matches(req.port));
+            return Decision::Deny(match expired {
+                Some(r) => DenyReason::Expired { rule: r.id.clone() },
+                None => DenyReason::NoRule,
+            });
+        }
         if ws_bad {
             return Decision::Deny(DenyReason::WebSocketNotAllowed);
         }
@@ -421,11 +462,11 @@ impl Policy {
     pub fn tunnel_bypass(&self, pattern: &str) -> Option<String> {
         let mut guards = Vec::new();
         if self.github.is_some() {
-            guards.push(("github.com", "GitHub push guard"));
-            guards.push(("api.github.com", "GitHub GraphQL guard"));
+            guards.push((forges::GITHUB, "GitHub push guard"));
+            guards.push((forges::GITHUB_API, "GitHub GraphQL guard"));
         }
         if self.azure_devops.is_some() {
-            guards.push(("dev.azure.com", "Azure DevOps push guard"));
+            guards.push((forges::AZURE_DEVOPS, "Azure DevOps push guard"));
         }
         let skipped = if let Some(i) = self
             .injections
@@ -486,6 +527,13 @@ pub struct Issue {
     pub message: String,
 }
 
+/// The first issue that refuses `rule` outright, if any.
+pub fn rule_error(rule: &Rule, origin: RuleOrigin) -> Option<Issue> {
+    validate_rule(rule, origin)
+        .into_iter()
+        .find(|i| i.severity == Severity::Error)
+}
+
 pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
     let mut issues = Vec::new();
     let err = |m: String| Issue {
@@ -495,6 +543,14 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
     let risk = |m: String| Issue {
         severity: Severity::Risk,
         message: m,
+    };
+    // What the host user may confirm, the sandbox may not ask for.
+    let host_risk = |m: String| {
+        if origin == RuleOrigin::Sandbox {
+            err(m)
+        } else {
+            risk(m)
+        }
     };
 
     let host_ok = rule.host == "*"
@@ -510,28 +566,18 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
     match wildcard_risk(&rule.host) {
         WildcardRisk::None => {}
         WildcardRisk::Everything => {
-            let m = "`*` covers every host: even read access lets code leak data in URLs".into();
-            issues.push(if origin == RuleOrigin::Sandbox {
-                err(m)
-            } else {
-                risk(m)
-            });
+            issues.push(host_risk(
+                "`*` covers every host: even read access lets code leak data in URLs".into(),
+            ));
         }
         WildcardRisk::PublicSuffix => issues.push(err(format!(
             "`{}` spans a public suffix (unrelated owners); name exact hosts instead",
             rule.host
         ))),
-        WildcardRisk::MultiTenant => {
-            let m = format!(
-                "`{}` covers a multi-tenant domain where anyone can host a subdomain",
-                rule.host
-            );
-            issues.push(if origin == RuleOrigin::Sandbox {
-                err(m)
-            } else {
-                risk(m)
-            });
-        }
+        WildcardRisk::MultiTenant => issues.push(host_risk(format!(
+            "`{}` covers a multi-tenant domain where anyone can host a subdomain",
+            rule.host
+        ))),
     }
     if rule.host.contains('/') && origin == RuleOrigin::Sandbox {
         issues.push(err("the sandbox may not request address ranges".into()));
@@ -547,12 +593,9 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
         ));
     }
     if rule.allow_private {
-        let m = "allows dialing private/host addresses (e.g. services on your machine)".to_string();
-        issues.push(if origin == RuleOrigin::Sandbox {
-            err(m)
-        } else {
-            risk(m)
-        });
+        issues.push(host_risk(
+            "allows dialing private/host addresses (e.g. services on your machine)".into(),
+        ));
     }
     if rule.access == Access::Level(AccessLevel::Write) && origin == RuleOrigin::Host {
         issues.push(risk(format!(
@@ -735,10 +778,7 @@ mod tests {
     fn tunnel_mode_only_from_tunnel_rules() {
         let mut p = policy();
         let now = Utc::now();
-        assert_eq!(
-            p.connect_mode("registry.npmjs.org", 443, now),
-            Mode::Inspect
-        );
+        assert!(p.tunnel_rule("registry.npmjs.org", 443, now).is_none());
         p.rules.push(rule(
             "grpc",
             Rule {
@@ -748,8 +788,12 @@ mod tests {
                 ..Default::default()
             },
         ));
-        assert_eq!(p.connect_mode("grpc.example.com", 443, now), Mode::Tunnel);
-        assert_eq!(p.connect_mode("evil.example", 443, now), Mode::Inspect);
+        assert_eq!(
+            p.tunnel_rule("grpc.example.com", 443, now)
+                .map(|r| r.id.as_str()),
+            Some("grpc")
+        );
+        assert!(p.tunnel_rule("evil.example", 443, now).is_none());
     }
 
     #[test]
@@ -801,5 +845,50 @@ mod tests {
         }
         assert!(p.tunnel_bypass("grpc.example.com").is_none());
         assert!(p.tunnel_bypass("*.githubusercontent.com").is_none());
+    }
+
+    #[test]
+    fn body_denies_match_server_tools_and_their_versions() {
+        let d = BodyDeny {
+            host: "api.example.com".into(),
+            paths: vec!["/v1/messages".into()],
+            keys: vec!["mcp_servers".into()],
+            tool_types: vec!["web_fetch".into()],
+            tool_keys: vec!["url_context".into()],
+            reason: "no".into(),
+        };
+        assert!(d.applies("api.example.com", "/v1/messages"));
+        assert!(!d.applies("api.example.com", "/v1/messages/count_tokens"));
+        let asks = |body: &str| d.asks(&JsonBody::parse(body.as_bytes()).unwrap());
+        assert!(asks(
+            r#"{"tools":[{"type":"web_fetch_20260209","name":"web_fetch"}]}"#
+        ));
+        assert!(asks(r#"{"tools":[{"type":"web_fetch"}]}"#));
+        assert!(asks(r#"{"mcp_servers":[],"model":"m"}"#));
+        assert!(asks(
+            r#"{"tools":[{"function_declarations":[]},{"url_context":{}}]}"#
+        ));
+        assert!(asks(r#"{"\u0074ools":[{"type":"web_fetch_1"}]}"#));
+        assert!(!asks(
+            r#"{"tools":[{"type":"web_fetcher"},{"type":"web_search_20250305"}]}"#
+        ));
+        assert!(!asks(
+            r#"{"model":"m","messages":[{"role":"user","content":"web_fetch"}]}"#
+        ));
+        assert!(!asks(r#"{"tools":null}"#));
+    }
+
+    #[test]
+    fn a_body_the_check_could_misread_does_not_parse() {
+        for body in [
+            r#"{"tools":[],"tools":[{"type":"web_fetch"}]}"#,
+            r#"[{"tools":[]}]"#,
+            r#"{"tools":{"type":"web_fetch"}}"#,
+            r#"{"tools":["web_fetch"]}"#,
+            "not json",
+            "",
+        ] {
+            assert!(JsonBody::parse(body.as_bytes()).is_none(), "{body}");
+        }
     }
 }

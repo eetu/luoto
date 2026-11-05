@@ -6,7 +6,7 @@ use luoto_shared::api::{
     AccessRequest, MAX_PENDING_REQUESTS, MAX_REASON_LEN, NewAccessRequest, RequestStatus,
 };
 use luoto_shared::host::normalize_host;
-use luoto_shared::policy::{Access, Rule, RuleOrigin, Severity, validate_rule};
+use luoto_shared::policy::{Access, Rule, RuleOrigin, rule_error};
 
 const KEEP: usize = 100;
 
@@ -37,9 +37,8 @@ impl Requests {
             paths: new.paths.clone(),
             ..Default::default()
         };
-        let issues = validate_rule(&rule, RuleOrigin::Sandbox);
-        if let Some(e) = issues.iter().find(|i| i.severity == Severity::Error) {
-            return Err(e.message.clone());
+        if let Some(e) = rule_error(&rule, RuleOrigin::Sandbox) {
+            return Err(e.message);
         }
         let reason = clean_reason(&new.reason);
         if reason.is_empty() {

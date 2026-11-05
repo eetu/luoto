@@ -2,10 +2,9 @@
 //! gate serves immediately; secrets do not — credentials are fetched from the vault.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use luoto_shared::policy::Policy;
 use rustls::ClientConfig;
 use serde::{Deserialize, Serialize};
@@ -17,6 +16,20 @@ use crate::dns::FakeIps;
 use crate::events::Emitter;
 use crate::requests::Requests;
 
+/// The gate's locks ignore poisoning: a panic in one connection's task must not stop the gate
+/// serving the rest.
+pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+pub fn read<T>(l: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    l.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+pub fn write<T>(l: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    l.write().unwrap_or_else(PoisonError::into_inner)
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct VaultSettings {
     pub url: String,
@@ -26,11 +39,10 @@ pub struct VaultSettings {
 pub struct State {
     pub cfg: Config,
     pub events: Emitter,
-    pub started: DateTime<Utc>,
     policy: RwLock<Arc<Policy>>,
     ca: RwLock<Option<Arc<Ca>>>,
     vault: RwLock<Option<Arc<VaultClient>>>,
-    pub requests: Mutex<Requests>,
+    requests: Mutex<Requests>,
     pub fake_ips: Mutex<FakeIps>,
     pub client_tls: Arc<ClientConfig>,
 }
@@ -54,7 +66,6 @@ impl State {
         let client_tls = Arc::new(upstream_tls(&cfg)?);
         Ok(Arc::new(State {
             events: Emitter::new(cfg.env.clone()),
-            started: Utc::now(),
             policy: RwLock::new(Arc::new(policy)),
             ca: RwLock::new(ca),
             vault: RwLock::new(vault),
@@ -66,18 +77,19 @@ impl State {
     }
 
     pub fn policy(&self) -> Arc<Policy> {
-        self.policy
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        read(&self.policy).clone()
     }
 
     pub fn ca(&self) -> Option<Arc<Ca>> {
-        self.ca.read().unwrap_or_else(|e| e.into_inner()).clone()
+        read(&self.ca).clone()
     }
 
     pub fn vault(&self) -> Option<Arc<VaultClient>> {
-        self.vault.read().unwrap_or_else(|e| e.into_inner()).clone()
+        read(&self.vault).clone()
+    }
+
+    pub fn requests(&self) -> MutexGuard<'_, Requests> {
+        lock(&self.requests)
     }
 
     pub fn set_policy(&self, policy: Policy) -> Result<()> {
@@ -85,7 +97,7 @@ impl State {
             &self.cfg.state_dir.join("policy.json"),
             serde_json::to_vec_pretty(&policy)?.as_slice(),
         )?;
-        *self.policy.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(policy);
+        *write(&self.policy) = Arc::new(policy);
         if let Some(v) = self.vault() {
             v.flush();
         }
@@ -96,7 +108,7 @@ impl State {
         let ca = Ca::from_pem(cert_pem, key_pem)?;
         write_private(&self.cfg.state_dir.join("ca.crt"), cert_pem.as_bytes())?;
         write_private(&self.cfg.state_dir.join("ca.key"), key_pem.as_bytes())?;
-        *self.ca.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(ca));
+        *write(&self.ca) = Some(Arc::new(ca));
         Ok(())
     }
 
@@ -106,8 +118,7 @@ impl State {
             &self.cfg.state_dir.join("vault.json"),
             serde_json::to_vec(&settings)?.as_slice(),
         )?;
-        *self.vault.write().unwrap_or_else(|e| e.into_inner()) =
-            Some(Arc::new(VaultClient::new(settings.url, settings.token)));
+        *write(&self.vault) = Some(Arc::new(VaultClient::new(settings.url, settings.token)));
         Ok(())
     }
 
@@ -158,11 +169,9 @@ fn upstream_tls(cfg: &Config) -> Result<ClientConfig> {
             roots.add(cert)?;
         }
     }
-    let mut cfg =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+    let mut cfg = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(cfg)
 }
