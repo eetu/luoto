@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.1 (unreleased)
+## 0.2.1 (2026-11-05)
 
 - **Homebrew tap:** luoto is in `eetu/tap` now. `brew install eetu/tap/luoto` installs it and
   trusts that formula only. For an install from `eetu/luoto`, `brew update` names the steps:
