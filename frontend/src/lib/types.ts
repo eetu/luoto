@@ -110,6 +110,8 @@ export type VaultStatus = {
 };
 
 export type Overview = {
+  /** `luoto`, or `luoto-dev` for a source build. */
+  instance: string;
   runtime: string;
   envs: EnvRow[];
   vault: VaultStatus | null;

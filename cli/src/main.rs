@@ -75,7 +75,7 @@ enum Cmd {
     Ui {
         /// Outside the ports envs forward to this machine (1024–32767), so no env can serve
         /// a page on the UI's origin.
-        #[arg(long, default_value_t = 47878)]
+        #[arg(long, default_value_t = names::ui_port())]
         port: u16,
         #[arg(long)]
         no_open: bool,
@@ -251,9 +251,10 @@ enum VaultCmd {
 
 fn main() -> ExitCode {
     // `COMPLETE=<shell> luoto` prints the shell hook; the hook calls back here to complete.
-    // The hook calls `luoto` from PATH, not argv[0], which in Homebrew is a versioned path.
+    // The hook calls `luoto` (`luoto-dev` for a source build, `just link-dev`) from PATH, not
+    // argv[0], which in Homebrew is a versioned path.
     CompleteEnv::with_factory(Cli::command)
-        .completer("luoto")
+        .completer(names::instance())
         .complete();
     let cli = Cli::parse();
     match run(cli.env, cli.cmd) {

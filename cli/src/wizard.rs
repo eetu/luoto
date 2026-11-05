@@ -16,9 +16,6 @@ use crate::detect;
 use crate::init::Proposal;
 use crate::secrets;
 
-/// Where a pasted token or key is kept: the OS keychain, under this service.
-const KEYCHAIN_SERVICE: &str = "luoto";
-
 struct Choice<T> {
     value: T,
     /// What the answered prompt echoes.
@@ -353,13 +350,14 @@ pub fn credential(
     };
     let how = &p.auth[&kind];
     println!("  {}", how.how);
+    let svc = crate::names::instance();
     let acct = format!("{provider_name}.{kind}");
     let mut options = Vec::new();
     if keychain_has(&acct) {
         options.push(choice(
             Source::InKeychain,
             "the one in your keychain",
-            format!("the one already in your keychain ({KEYCHAIN_SERVICE}/{acct})"),
+            format!("the one already in your keychain ({svc}/{acct})"),
         ));
     }
     options.push(choice(
@@ -390,24 +388,24 @@ pub fn credential(
     };
     let reference = match source.value {
         Source::Later => return Ok(None),
-        Source::InKeychain => format!("keyring:{KEYCHAIN_SERVICE}/{acct}"),
+        Source::InKeychain => format!("keyring:{svc}/{acct}"),
         Source::PasteKeychain => {
             let Some(secret) = paste(&how.label)? else {
                 return Ok(None);
             };
             let free = free_account(&acct, keychain_taken)?;
-            keyring::Entry::new(KEYCHAIN_SERVICE, &free)
+            keyring::Entry::new(svc, &free)
                 .and_then(|e| e.set_password(&secret))
                 .context("store the secret in the OS keychain")?;
             if free == acct {
-                println!("stored in your keychain as {KEYCHAIN_SERVICE}/{free}");
+                println!("stored in your keychain as {svc}/{free}");
             } else {
                 println!(
-                    "stored in your keychain as {KEYCHAIN_SERVICE}/{free} \
-                     ({KEYCHAIN_SERVICE}/{acct} holds another one, kept as it is)"
+                    "stored in your keychain as {svc}/{free} \
+                     ({svc}/{acct} holds another one, kept as it is)"
                 );
             }
-            format!("keyring:{KEYCHAIN_SERVICE}/{free}")
+            format!("keyring:{svc}/{free}")
         }
         Source::Paste1Password => {
             let Some(secret) = paste(&how.label)? else {
@@ -467,7 +465,7 @@ fn paste(label: &str) -> Result<Option<String>> {
 }
 
 fn keychain_has(account: &str) -> bool {
-    keyring::Entry::new(KEYCHAIN_SERVICE, account)
+    keyring::Entry::new(crate::names::instance(), account)
         .and_then(|e| e.get_password())
         .is_ok()
 }
@@ -475,11 +473,11 @@ fn keychain_has(account: &str) -> bool {
 /// Whether the keychain holds anything under `account`. Only a definite "no entry" is free:
 /// an entry the keychain can't read may still be another env's secret.
 fn keychain_taken(account: &str) -> Result<bool> {
-    match keyring::Entry::new(KEYCHAIN_SERVICE, account).and_then(|e| e.get_password()) {
+    let svc = crate::names::instance();
+    match keyring::Entry::new(svc, account).and_then(|e| e.get_password()) {
         Err(keyring::Error::NoEntry) => Ok(false),
         Ok(_) | Err(keyring::Error::BadEncoding(_) | keyring::Error::Ambiguous(_)) => Ok(true),
-        Err(e) => Err(e)
-            .with_context(|| format!("read {KEYCHAIN_SERVICE}/{account} from the OS keychain")),
+        Err(e) => Err(e).with_context(|| format!("read {svc}/{account} from the OS keychain")),
     }
 }
 
@@ -495,7 +493,8 @@ fn free_account(base: &str, taken: impl Fn(&str) -> Result<bool>) -> Result<Stri
             return Ok(account);
         }
     }
-    bail!("{KEYCHAIN_SERVICE}/{base} through {base}-99 are all taken in your keychain")
+    let svc = crate::names::instance();
+    bail!("{svc}/{base} through {base}-99 are all taken in your keychain")
 }
 
 #[cfg(test)]

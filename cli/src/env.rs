@@ -136,25 +136,25 @@ pub fn ensure_vault(ctx: &Ctx) -> Result<()> {
 fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
     let rt = &ctx.rt;
     rt.create_internal_network(
-        names::VAULT_NET,
-        names::VAULT_SUBNET,
-        names::VAULT_GW,
+        &names::vault_net(),
+        &names::vault_subnet(),
+        &names::vault_gw(),
         None,
         &labels("", "vault"),
     )?;
-    rt.create_bridge_network(names::VAULT_OUT_NET, &labels("", "vault"))?;
+    rt.create_bridge_network(&names::vault_out_net(), &labels("", "vault"))?;
     let spec = RunSpec {
-        name: names::VAULT.into(),
+        name: names::vault(),
         image: ctx.image("vault"),
-        hostname: Some("luoto-vault".into()),
+        hostname: Some(names::vault()),
         networks: vec![
-            (names::VAULT_NET.into(), Some(names::VAULT_IP)),
-            (names::VAULT_OUT_NET.into(), None),
+            (names::vault_net(), Some(names::vault_ip())),
+            (names::vault_out_net(), None),
         ],
         env: vec![
             (
                 "LUOTO_VAULT_ADDR".into(),
-                format!("{}:{}", names::VAULT_IP, luoto_shared::VAULT_PORT),
+                format!("{}:{}", names::vault_ip(), luoto_shared::VAULT_PORT),
             ),
             ("LUOTO_CTL_SOCKET".into(), "/run/luoto/ctl.sock".into()),
         ],
@@ -478,7 +478,7 @@ fn gate_spec(ctx: &Ctx, env: &str, cfg: &EnvConfig, a: &names::Addrs) -> RunSpec
         networks: vec![
             (names::internal_net(env), Some(a.gate)),
             (names::egress_net(env), None),
-            (names::VAULT_NET.into(), None),
+            (names::vault_net(), None),
         ],
         env: vec![
             ("LUOTO_ENV".into(), env.into()),
@@ -560,7 +560,7 @@ fn start_gate(
             rt,
             env,
             &GateCtl::SetVault {
-                url: format!("http://{}:{}", names::VAULT_IP, luoto_shared::VAULT_PORT),
+                url: format!("http://{}:{}", names::vault_ip(), luoto_shared::VAULT_PORT),
                 token: state.vault_token.clone(),
             },
         )?;
@@ -790,8 +790,8 @@ pub fn selftest(ctx: &Ctx, env: &str, probe: Option<&str>) -> Result<SelftestRep
 
 /// Stop luoto's VM when no dev container runs in it. The VM holds only envs and the vault's
 /// secrets in memory, so this gives its memory back; the next `up` starts it and unlocks the
-/// vault again. Asked of the VM, not this config: other config dirs (LUOTO_HOME) may have envs
-/// there.
+/// vault again. Asked of the VM, not this config: other config dirs (LUOTO_HOME) and the other
+/// instance (`names::instance`) may have envs there.
 pub fn stop_vm_if_unused(ctx: &Ctx) -> Result<bool> {
     if !machine::is_luoto(ctx.rt.connection.as_deref()) {
         return Ok(false);
@@ -833,7 +833,7 @@ pub fn remove(ctx: &Ctx, env: &str) -> Result<()> {
             ctx.rt.run(["volume", "rm", &name])?;
         }
     }
-    if ctx.rt.is_running(names::VAULT) {
+    if ctx.rt.is_running(&names::vault()) {
         let _ = ctl::vault::<bool>(
             &ctx.rt,
             &luoto_shared::ctl::VaultCtl::Unbind { env: env.into() },

@@ -495,7 +495,12 @@ container images are signed and pinned by digest in the binary.
 `luoto upgrade` updates a script or tarball install (Homebrew: `brew upgrade luoto`, Scoop:
 `scoop update luoto`); `luoto doctor` says when a newer release is out. After an update,
 `luoto setup` gets its images and `luoto up --recreate` moves an env onto them, keeping its
-volumes.
+volumes. What each release changed is in [CHANGELOG.md](CHANGELOG.md).
+
+A source build runs as `luoto-dev`, beside a release in the same VM: its config is in
+`~/.config/luoto-dev`, its envs' containers are `luoto-dev-<env>`, it has a vault of its own,
+keeps new keychain entries under `luoto-dev`, and serves `luoto ui` on port 47879. Its tab
+completion calls `luoto-dev`; `just link-dev` links that name to the checkout's debug build.
 
 Tab completion covers commands, flags, env names, agents, editors and presets. Homebrew
 installs it; otherwise add one line to your shell's startup file:

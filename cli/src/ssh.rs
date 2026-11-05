@@ -126,7 +126,7 @@ fn parse_host_key(text: &str) -> Option<String> {
 fn pin_host_key(ctx: &Ctx, env: &str, reported: &str) -> Result<()> {
     let key = parse_host_key(reported).context("the env's SSH host key is not an ed25519 key")?;
     let mut lines = known_hosts_without(ctx, env);
-    lines.push(format!("luoto-{env} {key}"));
+    lines.push(format!("{} {key}", names::dev(env)));
     write_known_hosts(ctx, &lines)
 }
 
@@ -136,7 +136,7 @@ pub fn forget_host_key(ctx: &Ctx, env: &str) -> Result<()> {
 }
 
 fn known_hosts_without(ctx: &Ctx, env: &str) -> Vec<String> {
-    let host = format!("luoto-{env}");
+    let host = names::dev(env);
     std::fs::read_to_string(dir(ctx).join("known_hosts"))
         .unwrap_or_default()
         .lines()
@@ -174,9 +174,10 @@ fn block(ctx: &Ctx, env: &str, user: &str) -> Result<String> {
         _ => format!("\"{}\" ssh-proxy {env}", exe.display()),
     };
     Ok(format!(
-        "Host luoto-{env}\n  User {user}\n  ProxyCommand {proxy}\n  IdentityFile \"{}\"\n  IdentitiesOnly yes\n  \
+        "Host {}\n  User {user}\n  ProxyCommand {proxy}\n  IdentityFile \"{}\"\n  IdentitiesOnly yes\n  \
          StrictHostKeyChecking accept-new\n  UserKnownHostsFile \"{}\"\n  ForwardAgent no\n  ForwardX11 no\n  \
          PermitLocalCommand no\n  Tunnel no\n",
+        names::dev(env),
         dir(ctx).join("id_ed25519").display(),
         dir(ctx).join("known_hosts").display()
     ))

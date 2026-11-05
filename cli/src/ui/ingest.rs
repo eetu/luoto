@@ -152,7 +152,7 @@ pub fn spawn_supervisor(store: Store) {
                 for env in config::list_envs(&ctx.paths).unwrap_or_default() {
                     targets.push((names::gate(&env), env, "gate".into()));
                 }
-                targets.push((names::VAULT.into(), String::new(), "vault".into()));
+                targets.push((names::vault(), String::new(), "vault".into()));
                 for (container, env, source) in targets {
                     if !states.running(&container)
                         || !active

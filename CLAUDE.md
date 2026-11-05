@@ -2,7 +2,9 @@
 
 Dev sandboxes that contain supply-chain attacks: tools run in a container whose only egress is
 a per-env policy gate; a per-VM vault holds secrets outside the sandbox. CLI + local web UI.
-User-facing docs: README.md. Threat model: SECURITY.md.
+User-facing docs: README.md. Threat model: SECURITY.md. A user-visible change gets an entry in
+CHANGELOG.md's top section (the release notes); ROADMAP.md holds only what isn't done.
+Releases are squash-merged from a branch named for the version (`packaging/README.md`).
 
 ## Layout
 
@@ -74,7 +76,11 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
 
 ## Working on this repo
 
-- `just images` builds images (tag `dev`); `luoto setup --build` does the same.
+- A source build is the `luoto-dev` instance (`names::instance`): its own config dirs, vault
+  (10.212.1.0/24), `luoto-dev-<env>` names, keychain service and UI port, in the same VM as
+  an installed release, whose envs it never touches. `just link-dev` links
+  `~/.local/bin/luoto-dev` to the debug build.
+- `just images` builds images (tag `dev`); `luoto-dev setup --build` does the same.
 - `LUOTO_HOME=<dir>` isolates config/state for experiments (copy `config.toml` in: it names
   luoto's VM and gVisor). `LUOTO_TRACE=1` prints every runtime call with start time and
   duration; each call is a round trip into the VM, so `up` is as fast as its call count.

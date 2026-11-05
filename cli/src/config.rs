@@ -323,6 +323,12 @@ pub fn validate_name(name: &str) -> Result<()> {
     if name == "vault" {
         bail!("`vault` is reserved");
     }
+    // A source build names env x's containers `luoto-dev-x` in the same VM (names.rs).
+    if name == "dev" || name.starts_with("dev-") {
+        bail!(
+            "env names can't be `dev` or start with `dev-` (luoto's dev build names its envs so)"
+        );
+    }
     // `luoto-x-gate` is env x's gate and `luoto-x-out` its egress network (see names.rs).
     if let Some(suffix) = ["-gate", "-out"].iter().find(|s| name.ends_with(*s)) {
         bail!("env names can't end in `{suffix}` (luoto names another env's containers so)");
@@ -657,5 +663,8 @@ oauth_token = "op://Private/claude/token"
         assert!(validate_name("My_Env").is_err());
         assert!(validate_name("../x").is_err());
         assert!(validate_name("vault").is_err());
+        assert!(validate_name("dev").is_err());
+        assert!(validate_name("dev-web").is_err());
+        assert!(validate_name("devops").is_ok());
     }
 }

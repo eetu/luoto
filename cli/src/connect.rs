@@ -146,7 +146,7 @@ pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
         return Ok(ExitCode::FAILURE);
     }
     let editor = pick_editor(&ctx, with)?;
-    let host = format!("luoto-{name}");
+    let host = names::dev(name);
     let user =
         EnvState::load(&ctx.paths, name)?.map_or_else(|| "dev".into(), |s| s.login().to_string());
     let fill = |s: &str| {

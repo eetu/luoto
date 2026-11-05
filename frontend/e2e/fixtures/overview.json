@@ -10,6 +10,7 @@
       "pending": 0
     }
   ],
+  "instance": "luoto",
   "runtime": "podman version 6.1.4",
   "vault": {
     "envs": [{ "bindings": [], "env": "web", "missing": [] }],

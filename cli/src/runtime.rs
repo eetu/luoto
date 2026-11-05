@@ -722,9 +722,10 @@ mod tests {
 
     #[test]
     fn states_come_from_one_listing() {
-        let s = States::parse("luoto-web-gate running\nluoto-web exited\nluoto-vault running\n");
-        assert!(s.running("luoto-vault"));
-        assert!(!s.running("luoto-web"));
+        let (dev, gate, vault) = (names::dev("web"), names::gate("web"), names::vault());
+        let s = States::parse(&format!("{gate} running\n{dev} exited\n{vault} running\n"));
+        assert!(s.running(&vault));
+        assert!(!s.running(&dev));
         assert_eq!(s.env("web"), ("exited".into(), "running".into()));
         assert_eq!(s.env("api"), ("absent".into(), "absent".into()));
         let off = States {

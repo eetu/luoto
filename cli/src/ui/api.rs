@@ -99,6 +99,7 @@ struct EnvRow {
 
 #[derive(Serialize)]
 struct Overview {
+    instance: &'static str,
     runtime: String,
     envs: Vec<EnvRow>,
     vault: Option<VaultStatus>,
@@ -134,10 +135,11 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
             });
         }
         let vault = states
-            .running(names::VAULT)
+            .running(&names::vault())
             .then(|| ctl::vault_status(&ctx.rt).ok())
             .flatten();
         Ok(Overview {
+            instance: names::instance(),
             runtime: ctx
                 .rt
                 .version()
