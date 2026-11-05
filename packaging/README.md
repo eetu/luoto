@@ -16,9 +16,13 @@ Maintainer-only. Release assets come from `.github/workflows/release.yaml`; `ren
 
 ## Cutting a release
 
-1. Bump `version` in the root `Cargo.toml`, commit, then `git tag vX.Y.Z && git push --tags`.
-   The first job fails if the tag and `Cargo.toml` disagree. A tag with a `-` suffix
-   (`v0.2.0-beta.1`) becomes a GitHub prerelease.
+1. Work for a release collects on a branch named for it (`0.2.0`), whose pull request is
+   squash-merged: main has one commit per release. On that branch, bump `version` in the root
+   `Cargo.toml` and date the version's heading in `CHANGELOG.md` (`## X.Y.Z (YYYY-MM-DD)`).
+   After the merge, `git tag vX.Y.Z` on main and `git push --tags`. The first job fails if the
+   tag and `Cargo.toml` disagree or `CHANGELOG.md` has no section for the version; that
+   section becomes the release notes. A tag with a `-` suffix (`v0.2.0-beta.1`) becomes a
+   GitHub prerelease, with its base version's notes.
 2. The workflow builds the UI, five binaries, four multi-arch images (native arm64 runner),
    and creates the release with archives, `SHA256SUMS` and `images.json`.
 3. Check:

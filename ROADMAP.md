@@ -1,6 +1,6 @@
 # Roadmap
 
-Not in 0.1.0, roughly in order; intent, not a schedule.
+Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Security
 
@@ -33,11 +33,11 @@ Not in 0.1.0, roughly in order; intent, not a schedule.
   audit of those files.
 - **An env from a repository** (`luoto init --clone owner/repo`): cloned through the gate into
   the workspace, then detected inside the env.
-- **Commands left out of 0.1.0:** `fork` (copy an env), `push` (a reviewed copy-in),
+- **More commands:** `fork` (copy an env), `push` (a reviewed copy-in),
   `reset-home`, `agent rm`.
 - **Notifications** for access requests (UI and OS), `luoto requests --watch`; `sandbox request`
   for presets, packages and ports; `approve` that narrows a request.
-- **Editing envs in the UI:** presets, tools, `[deps]`, agents, ports and credentials (0.1.0
+- **Editing envs in the UI:** presets, tools, `[deps]`, agents, ports and credentials (the UI
   shows them; changes go through `luoto edit`).
 - **Azure DevOps beyond git:** pull requests through its REST API (`az repos pr`), with writes
   allowlisted as for GitHub, and Git LFS objects, which it serves from blob storage.
@@ -90,8 +90,11 @@ port 22. Left for later:
 ## Internals
 
 - Windows: verified end to end, or documented as WSL2-only.
-- One core layer for the CLI and UI (prompts and progress through an interface the UI streams).
-- `sandbox provision`: one call into the env instead of ~45 runtime invocations per `up`.
+- Prompts and progress through an interface the UI streams, so it can run what the CLI asks
+  about (`init`, agent credentials, installs).
+- `sandbox provision`: one call into the env instead of the 26 runtime calls an `up` makes
+  when nothing changed.
 - Gate limits: connection cap, bounded event queue, log rotation, certificate expiry, response
   timeouts.
-- Generated frontend types; tests for the UI guard, the gate's CONNECT/TLS paths and the vault.
+- Generated frontend types; tests for the UI's Host and Origin checks, the gate's TLS
+  interception and the vault's GitHub App tokens.

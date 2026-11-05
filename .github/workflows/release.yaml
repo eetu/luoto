@@ -19,15 +19,22 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      notes: ${{ steps.v.outputs.notes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: v
-        name: Tag must match the workspace version
+        name: Tag must match the workspace version and have changelog notes
         run: |
           version="${GITHUB_REF_NAME#v}"
           crate=$(awk -F'"' '/^version *=/{print $2; exit}' Cargo.toml)
           test "$version" = "$crate" || { echo "tag $version != Cargo.toml $crate"; exit 1; }
+          # The release notes: CHANGELOG.md's section for the version (a prerelease uses its base's).
+          base="${version%%-*}"
+          notes=$(awk -v v="$base" '$1 == "##" && $2 == v {on = 1; next} on && /^## / {exit} on' \
+            CHANGELOG.md)
+          test -n "$notes" || { echo "CHANGELOG.md has no ## $base section"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          { echo "notes<<LUOTO_NOTES"; echo "$notes"; echo "LUOTO_NOTES"; } >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: frontend/.node-version
@@ -133,10 +140,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.ui.outputs.version }}
+          NOTES: ${{ needs.ui.outputs.notes }}
         run: |
           pre=""; case "$VERSION" in *-*) pre="--prerelease" ;; esac
           gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" \
-            --generate-notes $pre
+            --notes "$NOTES" --generate-notes $pre
 
   images:
     name: Images (${{ matrix.arch }})
