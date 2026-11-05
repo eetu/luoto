@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use luoto_shared::presets;
@@ -296,11 +296,12 @@ fn git_files(root: &Path) -> Option<Vec<String>> {
     })
 }
 
-/// Files down to `DEPTH` folders, skipping symlinks, hidden folders and `SKIP_DIRS`.
+/// Files down to `DEPTH` folders, skipping symlinks, hidden folders and `SKIP_DIRS`. Paths
+/// are relative with `/`, as git lists them, on every platform.
 fn walk_files(root: &Path) -> Vec<String> {
     let mut files = Vec::new();
-    let mut dirs = vec![PathBuf::new()];
-    while let Some(rel) = dirs.pop() {
+    let mut dirs = vec![(String::new(), 0)];
+    while let Some((rel, depth)) = dirs.pop() {
         let Ok(entries) = std::fs::read_dir(root.join(&rel)) else {
             continue;
         };
@@ -310,13 +311,13 @@ fn walk_files(root: &Path) -> Vec<String> {
             };
             let Ok(kind) = e.file_type() else { continue };
             if kind.is_file() {
-                files.push(rel.join(&name).to_string_lossy().into_owned());
+                files.push(join(&rel, &name));
             } else if kind.is_dir()
-                && rel.components().count() < DEPTH
+                && depth < DEPTH
                 && !name.starts_with('.')
                 && !SKIP_DIRS.contains(&name.as_str())
             {
-                dirs.push(rel.join(&name));
+                dirs.push((join(&rel, &name), depth + 1));
             }
         }
     }
