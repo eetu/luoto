@@ -321,14 +321,17 @@ pub fn credential(
             "log in inside the sandbox: the session lives in the env, readable by its code",
         ));
     }
+    let later = if p.login_hosts.is_empty() {
+        "later: `luoto agent run` asks again"
+    } else {
+        "later: log in inside the sandbox until then"
+    };
     let auth = if options.len() == 1 {
         options.remove(0).value
     } else {
-        options.push(choice(
-            Auth::Later,
-            "later",
-            "later: `luoto agent run` asks again",
-        ));
+        if p.login_hosts.is_empty() {
+            options.push(choice(Auth::Later, "later", later));
+        }
         match Select::new("Authenticate with:", options)
             .with_formatter(&short)
             .prompt_skippable()?
@@ -377,11 +380,7 @@ pub fn credential(
             "a secret reference",
             "a reference to where it already is: op://…, vault://…, keyring:…, env:…, file:…",
         ),
-        choice(
-            Source::Later,
-            "later",
-            "later: `luoto agent run` asks again",
-        ),
+        choice(Source::Later, "later", later),
     ]);
     let Some(source) = Select::new(&format!("The {}:", how.label), options)
         .with_formatter(&short)

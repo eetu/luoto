@@ -124,7 +124,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   env can use it. The default `toolchains` preset keeps vendor download servers readable
   permanently; downloading more code is not a new risk inside the sandbox.
 - **`sandbox_secrets`** and `login_inside` provider logins put credentials inside the sandbox
-  by design.
+  by design. An agent added without a credential logs in inside where its provider allows it,
+  so its session is in the sandbox until you configure a credential instead.
 
 ## Reporting
 

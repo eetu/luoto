@@ -9,7 +9,9 @@ use chrono::TimeDelta;
 use luoto_shared::policy::Rule;
 use luoto_shared::profiles;
 
-use crate::config::EnvFile;
+use std::collections::BTreeMap;
+
+use crate::config::{EnvFile, ProviderValue};
 use crate::connect::exec_login;
 use crate::env::{self, Ctx, UID};
 use crate::text::sh_quote;
@@ -128,7 +130,7 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
 }
 
 /// For each of `agents` that has no credential in the env yet: ask for one on a terminal (as
-/// `agent add` does, "later" included), else, or when put off, say how to add it.
+/// `agent add` does), else log in inside where the provider allows it, else say how to add one.
 pub fn credentials(ctx: &Ctx, env_name: &str, agents: &[String], interactive: bool) -> Result<()> {
     for a in agents.iter().filter_map(|n| profiles::agent(n)) {
         if !ask_credential(ctx, env_name, &a, interactive)? {
@@ -139,8 +141,9 @@ pub fn credentials(ctx: &Ctx, env_name: &str, agents: &[String], interactive: bo
 }
 
 /// Whether agent `a` can authenticate in the env, asking for a credential when `interactive`
-/// and it can't yet; the answer goes into the env's config. Without one the provider's API
-/// host stays closed, so the agent fails to connect even though it is installed.
+/// and it can't yet; the answer goes into the env's config. With none chosen, an agent whose
+/// provider allows it logs in inside the env, so an agent the user added works at once. Only
+/// without that does the provider's API stay closed: installed, but unable to connect.
 fn ask_credential(
     ctx: &Ctx,
     env_name: &str,
@@ -157,7 +160,36 @@ fn ask_credential(
         f.set_provider_credential(&provider, &entries)?;
         return Ok(true);
     }
-    Ok(false)
+    let Some((name, p)) = a.providers.iter().find_map(|n| {
+        profiles::provider(n)
+            .filter(|p| !p.login_hosts.is_empty())
+            .map(|p| (n, p))
+    }) else {
+        return Ok(false);
+    };
+    let entry = ("login_inside".to_string(), ProviderValue::Flag(true));
+    f.set_provider_credential(name, &BTreeMap::from([entry]))?;
+    println!("\n{}", login_notice(a, name, &p, env_name));
+    Ok(true)
+}
+
+/// Says that `a` logs in inside the env, what that costs, and how to keep a credential outside.
+fn login_notice(a: &profiles::Agent, name: &str, p: &profiles::Provider, env_name: &str) -> String {
+    // Each provider's `login_how` says where the session lives.
+    let mut out = format!(
+        "{} logs in inside the env ([credentials.{name}] login_inside = true). {}",
+        a.description,
+        p.login_how.as_deref().unwrap_or_default()
+    );
+    if !p.auth.is_empty() {
+        let kinds: Vec<&str> = p.auth.keys().map(String::as_str).collect();
+        out.push_str(&format!(
+            "\nTo keep a credential outside instead, the gate adding it to each request, replace \
+             login_inside with {} (`luoto edit -e {env_name}`).",
+            kinds.join(" or ")
+        ));
+    }
+    out
 }
 
 /// Whether the env holds a credential (or a login-inside opt-in) for one of the agent's

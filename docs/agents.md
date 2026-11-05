@@ -35,7 +35,9 @@ OS keychain (`keyring:luoto/<provider>.<kind>`, reused by later envs), a new 1Pa
 
 `login_inside = true` is the exception: the agent signs in itself and keeps the session in
 the env's home, where any code in the sandbox can read it. Providers that allow it open their
-sign-in hosts for it; luoto warns about it at `up`.
+sign-in hosts for it; luoto warns about it at `up`. It is also the default when you choose no
+credential (no terminal, "later", or a new env from the UI), so an agent you add can work at
+once; replacing it with a credential kind moves the credential outside.
 
 | provider | hosts the credential goes to | kinds | where to get one | kept out of reach |
 | --- | --- | --- | --- | --- |
