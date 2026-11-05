@@ -19,6 +19,10 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   with raw-IP TCP.
 - **Defaults for GitHub release downloads** (`toolchains`, `github` presets): public download
   counters are a slow covert channel; consider install-only grants and narrower paths.
+- **Cloud credentials outside the sandbox,** for `terraform plan`/`apply`, state backends and
+  the cloud CLIs. AWS signs every request with its secret key (SigV4), so the gate re-signs
+  with a key the vault holds; Azure and GCP take short-lived tokens the vault mints, as for a
+  GitHub App. Until then a cloud credential is a `sandbox_secret`, readable inside the env.
 
 ## Workflow
 
@@ -60,6 +64,12 @@ port 22. Left for later:
 
 ## Toolchains and agents
 
+- **Terraform and OpenTofu.** mise installs Terraform from `.terraform-version`; missing are
+  presets for their registries (`registry.terraform.io`, `registry.opentofu.org`; providers
+  come from `releases.hashicorp.com` and GitHub releases, which `toolchains` opens), OpenTofu's
+  `.opentofu-version`, and projects with only `.tf` files: `.terraform.lock.hcl` names the tool
+  by its providers' registry, and an exact `required_version` pins it. Terraform's update check
+  stays denied (`CHECKPOINT_DISABLE=1`). Verified with `init` and a `plan` in an env.
 - **More ecosystems verified.** mise installs them from their version files and presets exist
   for Maven, Gradle, RubyGems and Composer, but none has been run end to end: Java builds
   (Maven, Gradle), Ruby (Bundler), PHP (Composer), bun, deno, pipenv, pdm, hatch, conda, .NET.
@@ -77,13 +87,16 @@ port 22. Left for later:
   `modelProvider: "gemini"` in `~/.gemini/config/settings.json`, with no Google session in
   the env.
 
-## Configuration (lands with versioned configs)
+## Configuration
+
+Each change is a format migration (`cli/src/format.rs`): older files keep loading for at least
+two minor releases.
 
 - One schema at every layer, a credential library in `config.toml` referenced with
   `uses = […]`, `[install]` replacing `[deps]` and `[tools]`, `-name` to drop an inherited item,
   `luoto config show --origin`.
-- A `version` in every config file; older formats read for at least two minor releases, and
-  `luoto doctor --fix` to migrate them.
+- With the first migration: `luoto doctor` reports files in an older format, and `--fix`
+  migrates them (a copy kept).
 
 ## Internals
 
