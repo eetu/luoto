@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::env::{Ctx, EnvState, UID};
+use crate::env::{Ctx, UID};
+use crate::state::EnvState;
 use crate::{config, names};
 
 pub fn dir(ctx: &Ctx) -> PathBuf {
@@ -86,31 +87,22 @@ fn ensure_key(ctx: &Ctx) -> Result<PathBuf> {
     Ok(key)
 }
 
-/// Install luoto's public key for the env's user. No-op (false) when the image has no sshd.
+/// With an sshd in the image: authorize the key on stdin for the dev user and print the env's
+/// host key. Without one: print nothing.
+const AUTHORIZE: &str = "[ -x /usr/sbin/sshd ] || { cat >/dev/null; exit 0; }; \
+     mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat > ~/.ssh/authorized_keys \
+     && chmod 600 ~/.ssh/authorized_keys && cat /etc/ssh/ssh_host_ed25519_key.pub";
+
+/// Install luoto's public key for the env's user and pin the env's host key. No-op (false)
+/// when the image has no sshd.
 pub fn authorize(ctx: &Ctx, env: &str) -> Result<bool> {
-    let dev = names::dev(env);
-    if !ctx
-        .rt
-        .succeeds(["exec", &dev, "test", "-x", "/usr/sbin/sshd"])
-    {
-        return Ok(false);
-    }
     let key = ensure_key(ctx)?;
     let pubkey = std::fs::read(key.with_extension("pub"))?;
-    ctx.rt.run_stdin(
-        [
-            "exec",
-            "-i",
-            "-u",
-            UID,
-            &dev,
-            "sh",
-            "-c",
-            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat > ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys",
-        ],
-        &pubkey,
-    )?;
-    pin_host_key(ctx, env)?;
+    let out = ctx.rt.pipe_sh(&names::dev(env), UID, AUTHORIZE, &pubkey)?;
+    if out.trim().is_empty() {
+        return Ok(false);
+    }
+    pin_host_key(ctx, env, &out)?;
     Ok(true)
 }
 
@@ -127,17 +119,12 @@ fn parse_host_key(text: &str) -> Option<String> {
     .then(|| format!("{kind} {key}"))
 }
 
-/// Pin the env's host key in luoto's known_hosts, replacing any earlier one. SSH reaches the env
-/// through `exec` into this very container, so the key read the same way is the right one; a
-/// recreated container (new keys) then connects without a "host key changed" refusal.
-fn pin_host_key(ctx: &Ctx, env: &str) -> Result<()> {
-    let out = ctx.rt.run([
-        "exec",
-        &names::dev(env),
-        "cat",
-        "/etc/ssh/ssh_host_ed25519_key.pub",
-    ])?;
-    let key = parse_host_key(&out).context("the env's SSH host key is not an ed25519 key")?;
+/// Pin the env's host key (`reported`, as the env printed it) in luoto's known_hosts,
+/// replacing any earlier one. SSH reaches the env through `exec` into this very container, so
+/// the key read the same way is the right one; a recreated container (new keys) then connects
+/// without a "host key changed" refusal.
+fn pin_host_key(ctx: &Ctx, env: &str, reported: &str) -> Result<()> {
+    let key = parse_host_key(reported).context("the env's SSH host key is not an ed25519 key")?;
     let mut lines = known_hosts_without(ctx, env);
     lines.push(format!("luoto-{env} {key}"));
     write_known_hosts(ctx, &lines)
@@ -202,7 +189,7 @@ pub fn write_config(ctx: &Ctx) -> Result<PathBuf> {
          # Include it from ~/.ssh/config (before any Host block).\n\n",
     );
     for env in config::list_envs(&ctx.paths)? {
-        if let Some(st) = EnvState::load(ctx, &env)? {
+        if let Some(st) = EnvState::load(&ctx.paths, &env)? {
             out.push_str(&block(ctx, &env, st.login())?);
             out.push('\n');
         }

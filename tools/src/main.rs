@@ -1,7 +1,6 @@
-//! `sandbox` — the in-sandbox side of luoto. Shows the egress policy, checks URLs, files
+//! `sandbox`: the in-sandbox side of luoto. Shows the egress policy, checks URLs, files
 //! access requests for the user to approve on the host, relays ports, serves MCP and the
-//! ssh-agent socket (the key stays in the vault), and self-tests isolation. It can never
-//! change policy.
+//! ssh-agent socket (the key stays in the vault), and self-tests isolation.
 
 mod agent_setup;
 mod gate;
@@ -104,7 +103,13 @@ fn main() -> ExitCode {
             reason,
             wait,
             timeout,
-        } => request(&target, write, paths, &reason, wait, timeout),
+        } => request(
+            &target,
+            write,
+            paths,
+            &reason,
+            wait.then(|| Duration::from_secs(timeout)),
+        ),
         Cmd::Relay { port } => relay(port),
         Cmd::Mcp => mcp::serve(),
         Cmd::SshAgent { socket } => ssh_agent::serve(&socket).map(|()| ExitCode::SUCCESS),
@@ -185,8 +190,11 @@ pub fn render_status(s: &SandboxStatus) -> String {
         out.push_str("\npending access requests (the user approves on the host):\n");
         for r in pending {
             out.push_str(&format!(
-                "  #{} {} {:?} — luoto approve -e {} {}\n",
-                r.id, r.host, r.access, s.env, r.id
+                "  #{} {} {:?} — {}\n",
+                r.id,
+                r.host,
+                r.access,
+                approve_hint(&s.env, r.id)
             ));
         }
     }
@@ -198,22 +206,31 @@ pub fn render_status(s: &SandboxStatus) -> String {
     out
 }
 
-fn check(url: &str, method: &str) -> Result<ExitCode> {
+/// Ask the gate whether a request would pass. A bare host is read as `https://host`.
+pub fn check_url(url: &str, method: &str) -> Result<CheckResult> {
     let q = CheckQuery {
         url: if url.contains("://") {
             url.to_string()
         } else {
             format!("https://{url}")
         },
-        method: method.to_string(),
+        // The gate refuses lower-case methods; asked about `get`, the question is GET.
+        method: method.to_ascii_uppercase(),
     };
-    let (_, r) = gate::post_json::<_, CheckResult>("/_sandbox/check", &q)?;
-    let r = r.map_err(anyhow::Error::msg)?;
-    println!(
+    gate::post_json("/_sandbox/check", &q)
+}
+
+pub fn describe_check(r: &CheckResult) -> String {
+    format!(
         "{} — {}",
         if r.allowed { "allowed" } else { "blocked" },
         r.message
-    );
+    )
+}
+
+fn check(url: &str, method: &str) -> Result<ExitCode> {
+    let r = check_url(url, method)?;
+    println!("{}", describe_check(&r));
     Ok(if r.allowed {
         ExitCode::SUCCESS
     } else {
@@ -221,25 +238,33 @@ fn check(url: &str, method: &str) -> Result<ExitCode> {
     })
 }
 
-pub fn host_of(target: &str) -> String {
-    let t = target.trim();
-    let no_scheme = t.split_once("://").map_or(t, |(_, r)| r);
-    let authority = no_scheme.split(['/', '?', '#']).next().unwrap_or(no_scheme);
-    authority
-        .rsplit_once(':')
-        .filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit()))
-        .map_or(authority, |(h, _)| h)
-        .to_string()
+fn approve_hint(env: &str, id: u64) -> String {
+    format!("luoto approve -e {env} {id}")
 }
 
-pub fn file_request(
+const fn level(r: &AccessRequest) -> &'static str {
+    match r.access {
+        AccessLevel::Write => "write",
+        AccessLevel::Read => "read",
+    }
+}
+
+/// A filed request and, when the caller waited, what the user decided.
+pub struct Outcome {
+    pub request: AccessRequest,
+    pub waited: Option<Duration>,
+}
+
+/// File a request for the user to decide on the host; with `wait`, poll for the decision.
+pub fn request_access(
     target: &str,
     write: bool,
     paths: Vec<String>,
     reason: &str,
-) -> Result<AccessRequest> {
+    wait: Option<Duration>,
+) -> Result<Outcome> {
     let new = NewAccessRequest {
-        host: host_of(target),
+        host: luoto_shared::host::host_of(target).to_string(),
         access: if write {
             AccessLevel::Write
         } else {
@@ -248,18 +273,60 @@ pub fn file_request(
         paths,
         reason: reason.to_string(),
     };
-    let (_, r) = gate::post_json::<_, AccessRequest>("/_sandbox/requests", &new)?;
-    r.map_err(anyhow::Error::msg)
+    let mut request: AccessRequest = gate::post_json("/_sandbox/requests", &new)?;
+    if let Some(timeout) = wait {
+        eprintln!(
+            "{}\nwaiting up to {}s for the user…",
+            describe_filed(&request),
+            timeout.as_secs()
+        );
+        let start = Instant::now();
+        loop {
+            request = gate::get_json(&format!("/_sandbox/requests/{}", request.id))?;
+            if request.status != RequestStatus::Pending || start.elapsed() >= timeout {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
+    Ok(Outcome {
+        request,
+        waited: wait,
+    })
 }
 
-pub fn wait_for(id: u64, timeout: Duration) -> Result<AccessRequest> {
-    let start = Instant::now();
-    loop {
-        let r: AccessRequest = gate::get_json(&format!("/_sandbox/requests/{id}"))?;
-        if r.status != RequestStatus::Pending || start.elapsed() >= timeout {
-            return Ok(r);
+fn describe_filed(r: &AccessRequest) -> String {
+    format!(
+        "Request #{} filed: {} access to {}.\nAsk the user to approve it on the host:  {}   (or in `luoto ui`)",
+        r.id,
+        level(r),
+        r.host,
+        approve_hint(&env_name(), r.id)
+    )
+}
+
+pub fn describe(o: &Outcome) -> String {
+    let r = &o.request;
+    match (r.status, o.waited) {
+        (RequestStatus::Approved, _) => {
+            format!("Request #{} approved: {} is reachable now.", r.id, r.host)
         }
-        std::thread::sleep(Duration::from_secs(2));
+        (RequestStatus::Rejected, _) => format!(
+            "Request #{} was rejected by the user{}.",
+            r.id,
+            r.note
+                .as_ref()
+                .map(|n| format!(": {n}"))
+                .unwrap_or_default()
+        ),
+        (RequestStatus::Pending, Some(t)) => {
+            format!(
+                "{}\nStill pending after {}s.",
+                describe_filed(r),
+                t.as_secs()
+            )
+        }
+        (RequestStatus::Pending, None) => describe_filed(r),
     }
 }
 
@@ -268,40 +335,15 @@ fn request(
     write: bool,
     paths: Vec<String>,
     reason: &str,
-    wait: bool,
-    timeout: u64,
+    wait: Option<Duration>,
 ) -> Result<ExitCode> {
-    let r = file_request(target, write, paths, reason)?;
-    let env = env_name();
-    println!(
-        "Request #{} filed: {} access to {}.\nAsk the user to approve it on the host:  luoto approve -e {env} {}   (or in `luoto ui`)",
-        r.id,
-        if write { "write" } else { "read" },
-        r.host,
-        r.id
-    );
-    if !wait {
-        return Ok(ExitCode::SUCCESS);
-    }
-    eprintln!("waiting up to {timeout}s for the user…");
-    let r = wait_for(r.id, Duration::from_secs(timeout))?;
-    match r.status {
-        RequestStatus::Approved => {
-            println!("approved — {} is now reachable", r.host);
-            Ok(ExitCode::SUCCESS)
-        }
-        RequestStatus::Rejected => {
-            println!(
-                "rejected by the user{}",
-                r.note.map(|n| format!(": {n}")).unwrap_or_default()
-            );
-            Ok(ExitCode::from(1))
-        }
-        RequestStatus::Pending => {
-            println!("still pending after {timeout}s");
-            Ok(ExitCode::from(2))
-        }
-    }
+    let o = request_access(target, write, paths, reason, wait)?;
+    println!("{}", describe(&o));
+    Ok(match (o.request.status, o.waited) {
+        (RequestStatus::Rejected, _) => ExitCode::from(1),
+        (RequestStatus::Pending, Some(_)) => ExitCode::from(2),
+        _ => ExitCode::SUCCESS,
+    })
 }
 
 fn relay(port: u16) -> Result<ExitCode> {
@@ -342,17 +384,4 @@ fn relay(port: u16) -> Result<ExitCode> {
     let _ = from_stdin.shutdown(std::net::Shutdown::Write);
     let _ = t.join();
     Ok(ExitCode::SUCCESS)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::host_of;
-
-    #[test]
-    fn extracts_hosts() {
-        assert_eq!(host_of("https://docs.rs/serde/latest"), "docs.rs");
-        assert_eq!(host_of("docs.rs"), "docs.rs");
-        assert_eq!(host_of("http://example.com:8080/x"), "example.com");
-        assert_eq!(host_of("*.example.com"), "*.example.com");
-    }
 }

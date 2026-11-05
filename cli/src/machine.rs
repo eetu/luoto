@@ -3,11 +3,12 @@
 //! container its own, and gVisor for the dev containers. Podman runs one machine at a time, so
 //! starting luoto's stops whichever other machine is running, after asking.
 
-use std::io::IsTerminal;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
+
+use crate::runtime::Runtime;
 
 /// The machine (and podman connection) luoto creates and uses.
 pub const NAME: &str = "luoto";
@@ -31,9 +32,12 @@ pub fn is_luoto(connection: Option<&str>) -> bool {
     connection == Some(NAME)
 }
 
-/// What dev containers run on: `runsc` with the flags luoto needs (see [`RUNSC_FLAGS`]).
-/// Podman keeps a container's runtime path but not its flags, so a wrapper carries them to
-/// every later call (start, exec, kill, delete).
+/// Whether the runtime is luoto's VM and the VM is stopped, so nothing in it can be asked
+/// about.
+pub fn stopped(rt: &Runtime) -> bool {
+    is_luoto(rt.connection.as_deref()) && !running(&rt.bin)
+}
+
 /// The API socket podman forwards from the machine (macOS); None where it isn't a file.
 pub fn api_socket() -> Option<std::path::PathBuf> {
     cfg!(target_os = "macos").then(|| {
@@ -43,6 +47,9 @@ pub fn api_socket() -> Option<std::path::PathBuf> {
     })
 }
 
+/// What dev containers run on: `runsc` with the flags luoto needs (see [`RUNSC_FLAGS`]).
+/// Podman keeps a container's runtime path but not its flags, so a wrapper carries them to
+/// every later call (start, exec, kill, delete).
 pub fn runsc_path() -> String {
     format!("{GVISOR_DIR}/luoto-runsc")
 }
@@ -139,15 +146,15 @@ pub fn create(bin: &str, cpus: u32, memory_mib: u64) -> Result<()> {
 /// Start luoto's machine. Podman runs one machine at a time, so another running one is
 /// stopped first: `yes`, or a yes on the terminal, allows that.
 pub fn start(bin: &str, yes: bool) -> Result<()> {
-    if running(bin) {
+    let all = machines(bin);
+    if all.iter().any(|(n, r)| n == NAME && *r) {
         return Ok(());
     }
-    if let Some((other, _)) = machines(bin).into_iter().find(|(n, r)| *r && n != NAME) {
+    if let Some((other, _)) = all.into_iter().find(|(n, r)| *r && n != NAME) {
         let ok = yes
-            || (std::io::stdin().is_terminal()
-                && crate::commands::confirm(&format!(
-                    "luoto's VM is stopped and podman runs one machine at a time. Stop `{other}` and start `{NAME}`?"
-                )));
+            || crate::prompt::confirm(&format!(
+                "luoto's VM is stopped and podman runs one machine at a time. Stop `{other}` and start `{NAME}`?"
+            ));
         if !ok {
             bail!(
                 "luoto's VM is stopped while `{other}` runs; `podman machine stop {other}`, then try again"
@@ -230,8 +237,8 @@ fn write_wrapper(bin: &str) -> Result<()> {
     ssh(
         bin,
         &format!(
-            "printf %s '{}' | sudo tee {} >/dev/null && sudo chmod 755 {}",
-            script.replace('\'', "'\\''"),
+            "printf %s {} | sudo tee {} >/dev/null && sudo chmod 755 {}",
+            crate::text::sh_quote(&script),
             runsc_path(),
             runsc_path()
         ),

@@ -1,1 +1,38 @@
-{"agents":[{"description":"Claude Code","name":"claude","providers":["anthropic"]},{"description":"OpenCode","name":"opencode","providers":["anthropic","openai","openrouter","gemini"]},{"description":"OpenAI Codex CLI","name":"codex","providers":["openai"]},{"description":"GitHub Copilot CLI (untested)","name":"copilot","providers":["copilot"]},{"description":"Antigravity CLI (Google)","name":"agy","providers":["antigravity"]}],"presets":[{"description":"Debian apt mirrors (read-only)","hosts":["deb.debian.org","security.debian.org"],"name":"debian"},{"description":"Ubuntu apt mirrors (read-only)","hosts":["archive.ubuntu.com","security.ubuntu.com","ports.ubuntu.com"],"name":"ubuntu"},{"description":"Alpine package mirror (read-only)","hosts":["dl-cdn.alpinelinux.org"],"name":"alpine"},{"description":"npm, Yarn and JSR registries (read-only, plus npm audit)","hosts":["registry.npmjs.org","registry.npmjs.org","registry.yarnpkg.com","repo.yarnpkg.com","npm.jsr.io","jsr.io"],"name":"npm"},{"description":"PyPI (read-only)","hosts":["pypi.org","files.pythonhosted.org"],"name":"pypi"},{"description":"crates.io and rustup (read-only)","hosts":["crates.io","index.crates.io","static.crates.io","static.rust-lang.org","sh.rustup.rs"],"name":"crates"},{"description":"Go module proxy, checksum DB and toolchains (read-only)","hosts":["proxy.golang.org","sum.golang.org","storage.googleapis.com","dl.google.com"],"name":"go"},{"description":"GitHub reads: clone/fetch public repos, API reads, raw files, release assets","hosts":["github.com","github.com","api.github.com","codeload.github.com","raw.githubusercontent.com","objects.githubusercontent.com","release-assets.githubusercontent.com","cli.github.com"],"name":"github"},{"description":"Language runtimes and tools that mise installs: its metadata and the vendors' download servers (read-only)","hosts":["mise.jdx.dev","mise-versions.jdx.dev","mise-java.jdx.dev","mise.run","github.com","github.com","api.github.com","objects.githubusercontent.com","release-assets.githubusercontent.com","nodejs.org","go.dev","dl.google.com","static.rust-lang.org","sh.rustup.rs","api.adoptium.net","download.java.net","corretto.aws","cdn.azul.com","cache.ruby-lang.org","www.php.net","dl.deno.land","repo.yarnpkg.com","classic.yarnpkg.com","install.python-poetry.org","ziglang.org","releases.hashicorp.com","builds.dotnet.microsoft.com","builds.hex.pm","download.swift.org","tuf-repo-cdn.sigstore.dev","tuf-repo.github.com"],"name":"toolchains"},{"description":"VS Code server download and extension marketplace","hosts":["update.code.visualstudio.com","vscode.download.prss.microsoft.com","marketplace.visualstudio.com","marketplace.visualstudio.com","*.gallerycdn.vsassets.io","*.gallery.vsassets.io","*.vscode-cdn.net","vscode.blob.core.windows.net"],"name":"vscode"},{"description":"Common documentation sites (read-only) for agents reading API docs","hosts":["docs.rs","doc.rust-lang.org","developer.mozilla.org","docs.python.org","pkg.go.dev","learn.microsoft.com","docs.github.com","code.claude.com","docs.anthropic.com","platform.claude.com","svelte.dev","react.dev","nodejs.org"],"name":"docs"},{"description":"Maven Central (read-only)","hosts":["repo.maven.apache.org","repo1.maven.org"],"name":"maven"},{"description":"Gradle distributions and plugin portal (read-only)","hosts":["services.gradle.org","downloads.gradle.org","plugins.gradle.org","plugins-artifacts.gradle.org"],"name":"gradle"},{"description":"RubyGems (read-only)","hosts":["rubygems.org","index.rubygems.org"],"name":"rubygems"},{"description":"Packagist for Composer (read-only; package archives come from the github preset)","hosts":["repo.packagist.org","packagist.org"],"name":"composer"}],"providers":[{"description":"Anthropic API (Claude models; Claude Code)","host":"api.anthropic.com","kinds":["api_key","oauth_token"],"name":"anthropic"},{"description":"OpenAI API (Codex, OpenCode, …)","host":"api.openai.com","kinds":["api_key"],"name":"openai"},{"description":"OpenRouter (many models behind one API)","host":"openrouter.ai","kinds":["api_key"],"name":"openrouter"},{"description":"Google Gemini API (OpenCode, …)","host":"generativelanguage.googleapis.com","kinds":["api_key"],"name":"gemini"},{"description":"Mistral API","host":"api.mistral.ai","kinds":["api_key"],"name":"mistral"},{"description":"Groq API","host":"api.groq.com","kinds":["api_key"],"name":"groq"},{"description":"GitHub Copilot (Copilot CLI; untested, report what the egress view shows)","host":"api.githubcopilot.com","kinds":["token"],"name":"copilot"},{"description":"Google account (Antigravity CLI), signed in inside the env","host":"cloudcode-pa.googleapis.com","kinds":[],"name":"antigravity"}]}
+{
+  "agents": [
+    { "description": "Claude Code", "name": "claude" },
+    { "description": "OpenCode", "name": "opencode" },
+    { "description": "OpenAI Codex CLI", "name": "codex" },
+    { "description": "GitHub Copilot CLI (untested)", "name": "copilot" },
+    { "description": "Antigravity CLI (Google)", "name": "agy" }
+  ],
+  "presets": [
+    { "description": "Debian apt mirrors (read-only)", "name": "debian" },
+    { "description": "Ubuntu apt mirrors (read-only)", "name": "ubuntu" },
+    { "description": "Alpine package mirror (read-only)", "name": "alpine" },
+    { "description": "npm, Yarn and JSR registries (read-only, plus npm audit)", "name": "npm" },
+    { "description": "PyPI (read-only)", "name": "pypi" },
+    { "description": "crates.io and rustup (read-only)", "name": "crates" },
+    { "description": "Go module proxy, checksum DB and toolchains (read-only)", "name": "go" },
+    {
+      "description": "GitHub reads: clone/fetch public repos, API reads, raw files, release assets",
+      "name": "github"
+    },
+    {
+      "description": "Language runtimes and tools that mise installs: its metadata and the vendors' download servers (read-only)",
+      "name": "toolchains"
+    },
+    { "description": "VS Code server download and extension marketplace", "name": "vscode" },
+    {
+      "description": "Common documentation sites (read-only) for agents reading API docs",
+      "name": "docs"
+    },
+    { "description": "Maven Central (read-only)", "name": "maven" },
+    { "description": "Gradle distributions and plugin portal (read-only)", "name": "gradle" },
+    { "description": "RubyGems (read-only)", "name": "rubygems" },
+    {
+      "description": "Packagist for Composer (read-only; package archives come from the github preset)",
+      "name": "composer"
+    }
+  ]
+}

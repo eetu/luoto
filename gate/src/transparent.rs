@@ -10,18 +10,15 @@ use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper_util::rt::{TokioIo, TokioTimer};
-use luoto_shared::events::{Event, EventKind, Intake, Verdict};
+use luoto_shared::events::{EventKind, Intake};
 use luoto_shared::host::split_authority;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::dns::FakeIps;
-use crate::handler::{ConnCtx, Target, handle};
+use crate::handler::{ConnCtx, Target, handle, serve_http1};
 use crate::mitm::{self, Expect};
 use crate::respond;
-use crate::state::State;
+use crate::state::{State, lock};
 
 const SO_ORIGINAL_DST: libc::c_int = 80;
 
@@ -64,17 +61,15 @@ pub async fn serve(state: Arc<State>, listener: TcpListener) {
     }
 }
 
-fn direct(state: &State, host: String, port: u16, message: String) {
-    state.events.emit(Event {
-        kind: Some(EventKind::Direct),
-        intake: Some(Intake::Transparent),
-        verdict: Some(Verdict::Deny),
-        host: Some(host),
-        port: Some(port),
-        reason: Some("not_http".into()),
-        message: Some(message),
-        ..Default::default()
-    });
+fn direct(state: &State, host: &str, port: u16, message: String) {
+    state.events.deny_conn(
+        EventKind::Direct,
+        Intake::Transparent,
+        host,
+        port,
+        "not_http",
+        message,
+    );
 }
 
 async fn conn(state: Arc<State>, stream: TcpStream) {
@@ -85,15 +80,11 @@ async fn conn(state: Arc<State>, stream: TcpStream) {
         return;
     };
     let name = if FakeIps::is_fake(ip) {
-        let name = state
-            .fake_ips
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .name_for(ip);
+        let name = lock(&state.fake_ips).name_for(ip);
         if name.is_none() {
             direct(
                 &state,
-                ip.to_string(),
+                &ip.to_string(),
                 dst.port(),
                 "connection to an unknown or expired fake address".into(),
             );
@@ -111,7 +102,7 @@ async fn conn(state: Arc<State>, stream: TcpStream) {
         _ => {
             direct(
                 &state,
-                label,
+                &label,
                 dst.port(),
                 "connection sent nothing (server-speaks-first protocol?)".into(),
             );
@@ -141,7 +132,7 @@ async fn conn(state: Arc<State>, stream: TcpStream) {
         let Some((host, rule_id, allow_private)) = rule else {
             direct(
                 &state,
-                label.clone(),
+                &label,
                 port,
                 format!(
                     "SSH to {label}:{port} was refused; `[credentials.ssh] hosts` lists where git over SSH may go"
@@ -163,16 +154,16 @@ async fn conn(state: Arc<State>, stream: TcpStream) {
                 .await;
             }
             Err(crate::upstream::DialError::Denied(reason)) => {
-                direct(&state, label, port, reason.message(&host));
+                direct(&state, &label, port, reason.message(&host));
             }
-            Err(crate::upstream::DialError::Failed(msg)) => direct(&state, label, port, msg),
+            Err(crate::upstream::DialError::Failed(msg)) => direct(&state, &label, port, msg),
         }
         return;
     }
     if !looks_like_http(&peek[..n]) {
         direct(
             &state,
-            label.clone(),
+            &label,
             dst.port(),
             format!(
                 "non-HTTP connection to {label}:{} bypassing the proxy was refused; only HTTP(S) leaves the sandbox",
@@ -184,7 +175,7 @@ async fn conn(state: Arc<State>, stream: TcpStream) {
 
     let ctx = Arc::new(ConnCtx::new(Intake::Transparent));
     let port = dst.port();
-    let svc = service_fn(move |req: http::Request<hyper::body::Incoming>| {
+    serve_http1(stream, move |req: http::Request<hyper::body::Incoming>| {
         let state = state.clone();
         let ctx = ctx.clone();
         let name = name.clone();
@@ -216,11 +207,6 @@ async fn conn(state: Arc<State>, stream: TcpStream) {
             )
             .await
         }
-    });
-    let _ = http1::Builder::new()
-        .timer(TokioTimer::new())
-        .header_read_timeout(Duration::from_secs(60))
-        .serve_connection(TokioIo::new(stream), svc)
-        .with_upgrades()
-        .await;
+    })
+    .await;
 }

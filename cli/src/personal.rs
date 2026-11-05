@@ -13,8 +13,8 @@ use crate::config::EnvConfig;
 use crate::env::{Ctx, UID};
 use crate::names;
 
-/// Returns how many files from the home folder were copied.
-pub fn apply(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> usize {
+/// Into the dev user's `home`. Returns how many files from the home folder were copied.
+pub fn apply(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> usize {
     if let Some(shell) = preferred_shell(ctx, cfg) {
         match set_shell(ctx, env, &shell) {
             Ok(Some(path)) => println!("login shell: {}", crate::text::display(&path)),
@@ -25,7 +25,7 @@ pub fn apply(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> usize {
     if let Err(e) = git_identity(ctx, env) {
         eprintln!("warning: git identity not set in the env ({e:#})");
     }
-    match copy_home(ctx, env) {
+    match copy_home(ctx, env, home) {
         Ok(0) => 0,
         Ok(n) => {
             println!(
@@ -64,7 +64,7 @@ pub fn seed_home(dir: &Path) -> Result<bool> {
 
 /// The env's `shell`, then config.toml's, then the host's own login shell. `None` keeps the
 /// image's default.
-pub fn preferred_shell(ctx: &Ctx, cfg: &EnvConfig) -> Option<String> {
+fn preferred_shell(ctx: &Ctx, cfg: &EnvConfig) -> Option<String> {
     cfg.shell
         .clone()
         .or_else(|| ctx.global.shell.clone())
@@ -202,10 +202,7 @@ fn collect(src: &Path) -> Result<Vec<Entry>> {
     Ok(out)
 }
 
-const EXTRACT: &str = r#"h=$(awk -F: -v u="$1" '$3==u{print $6; exit}' /etc/passwd)
-cd "${h:-$HOME}" && exec tar -x -f -"#;
-
-fn copy_home(ctx: &Ctx, env: &str) -> Result<usize> {
+fn copy_home(ctx: &Ctx, env: &str, home: &str) -> Result<usize> {
     let src = ctx.paths.home_files();
     if !src.is_dir() {
         return Ok(0);
@@ -224,11 +221,12 @@ fn copy_home(ctx: &Ctx, env: &str) -> Result<usize> {
             "-u",
             UID,
             &names::dev(env),
-            "sh",
-            "-c",
-            EXTRACT,
-            "sh",
-            UID,
+            "tar",
+            "-x",
+            "-f",
+            "-",
+            "-C",
+            home,
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

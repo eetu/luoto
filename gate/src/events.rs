@@ -1,5 +1,5 @@
-//! Event emitter: numbered JSON lines on stdout plus an in-memory ring for the in-sandbox
-//! API and `ctl recent`. One writer task owns stdout so lines never interleave.
+//! Event emitter: numbered JSON lines on stdout, and the latest denials for the in-sandbox
+//! API. One writer thread owns stdout so lines never interleave.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -7,17 +7,20 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
-use luoto_shared::events::{Event, Source, Verdict};
+use luoto_shared::events::{Event, EventKind, Intake, Source, Verdict};
 use tokio::sync::mpsc;
 
-const RING: usize = 1000;
+use crate::state::lock;
+
+/// Denials kept for `/_sandbox/status`.
+const DENIALS: usize = 20;
 
 pub struct Emitter {
     env: String,
-    pub run: String,
+    run: String,
     seq: AtomicU64,
     tx: mpsc::UnboundedSender<String>,
-    recent: Mutex<VecDeque<Event>>,
+    denials: Mutex<VecDeque<Event>>,
 }
 
 impl Emitter {
@@ -38,7 +41,7 @@ impl Emitter {
             run,
             seq: AtomicU64::new(0),
             tx,
-            recent: Mutex::new(VecDeque::with_capacity(RING)),
+            denials: Mutex::new(VecDeque::with_capacity(DENIALS)),
         }
     }
 
@@ -51,29 +54,40 @@ impl Emitter {
         if let Ok(line) = serde_json::to_string(&ev) {
             let _ = self.tx.send(line);
         }
-        let mut ring = self.recent.lock().unwrap_or_else(|e| e.into_inner());
-        if ring.len() == RING {
-            ring.pop_front();
+        if ev.verdict == Some(Verdict::Deny) {
+            let mut denials = lock(&self.denials);
+            if denials.len() == DENIALS {
+                denials.pop_front();
+            }
+            denials.push_back(ev);
         }
-        ring.push_back(ev);
     }
 
-    pub fn last_seq(&self) -> u64 {
-        self.seq.load(Ordering::SeqCst)
+    /// A connection refused before any request on it: by its destination, its TLS or what it
+    /// speaks.
+    pub fn deny_conn(
+        &self,
+        kind: EventKind,
+        intake: Intake,
+        host: &str,
+        port: u16,
+        code: &str,
+        message: String,
+    ) {
+        self.emit(Event {
+            kind: Some(kind),
+            intake: Some(intake),
+            verdict: Some(Verdict::Deny),
+            host: Some(host.to_string()),
+            port: Some(port),
+            reason: Some(code.to_string()),
+            message: Some(message),
+            ..Default::default()
+        });
     }
 
-    pub fn recent(&self, limit: usize) -> Vec<Event> {
-        let ring = self.recent.lock().unwrap_or_else(|e| e.into_inner());
-        ring.iter().rev().take(limit).cloned().collect()
-    }
-
-    pub fn recent_denials(&self, limit: usize) -> Vec<Event> {
-        let ring = self.recent.lock().unwrap_or_else(|e| e.into_inner());
-        ring.iter()
-            .rev()
-            .filter(|e| e.verdict == Some(Verdict::Deny))
-            .take(limit)
-            .cloned()
-            .collect()
+    /// The latest denials, newest first.
+    pub fn recent_denials(&self) -> Vec<Event> {
+        lock(&self.denials).iter().rev().cloned().collect()
     }
 }

@@ -1,7 +1,7 @@
 //! An env's workspace is a volume seeded from a host folder. This module resolves envs from
 //! folders and moves files between host and sandbox without trusting what comes out.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -16,7 +16,7 @@ use crate::names;
 use crate::paths::Paths;
 
 /// Heavy or machine-specific directories skipped when copying in either direction.
-pub const SKIP_DIRS: &[&str] = &[
+const COPY_SKIP: &[&str] = &[
     "node_modules",
     "target",
     ".venv",
@@ -108,7 +108,7 @@ pub fn resolve(paths: &Paths, arg: Option<&str>) -> Result<String> {
 /// the invisible characters HFS+ ignores removed and the trailing dots and spaces NTFS drops.
 /// `.GIT`, `.g\u{200c}it` and `.git.` all name `.git` there. Folding goes through upper case
 /// first, as the filesystems' tables do: `ſ` (long s) names `s`, `ı` names `i`.
-pub fn fold(component: &str) -> String {
+fn fold(component: &str) -> String {
     let s: String = component
         .chars()
         .filter(|c| !crate::text::is_format(*c))
@@ -200,13 +200,106 @@ pub fn risky(rel: &str) -> Option<&'static str> {
     }
 }
 
-// ---------- push / pull ----------
+/// Prints each file named in its arguments (relative to the workspace) as its length and that
+/// many bytes, at most `$0`, or `-` when it is not a regular file. Never through a symlink: a
+/// repository can commit one to `/dev/zero`, a FIFO or a file of the dev user's.
+const READ_FILES: &str = r#"cd /workspace || exit 1
+for f; do
+  if [ -f "$f" ] && [ ! -L "$f" ]; then
+    printf '%s\n' "$(head -c "$0" -- "$f" | wc -c)"
+    head -c "$0" -- "$f"
+  else
+    printf -- '-\n'
+  fi
+done"#;
 
-fn skip(rel: &Path, include_git: bool) -> bool {
-    rel.components().any(|c| {
-        let s = c.as_os_str().to_string_lossy();
-        SKIP_DIRS.contains(&s.as_ref()) || (!include_git && s == ".git")
-    })
+/// What [`read_files`] does with a file larger than its cap.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Oversize {
+    /// Fail: the caller needs the whole text.
+    Refuse,
+    /// Keep the first `cap` bytes.
+    Truncate,
+}
+
+/// Regular files of the env's workspace by relative path, read as the dev user in one call,
+/// each at most `cap` bytes. Missing and other files are left out.
+pub fn read_files(
+    ctx: &Ctx,
+    env: &str,
+    rels: &[String],
+    cap: usize,
+    oversize: Oversize,
+) -> Result<HashMap<String, Vec<u8>>> {
+    if rels.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let limit = match oversize {
+        Oversize::Refuse => cap + 1,
+        Oversize::Truncate => cap,
+    };
+    let limit_arg = limit.to_string();
+    let dev = names::dev(env);
+    let mut args = vec![
+        "exec",
+        "-u",
+        UID,
+        dev.as_str(),
+        "sh",
+        "-c",
+        READ_FILES,
+        &limit_arg,
+    ];
+    args.extend(rels.iter().map(String::as_str));
+    let out = ctx
+        .rt
+        .command()
+        .args(&args)
+        .output()
+        .context("read the workspace's files in the env")?;
+    if !out.status.success() {
+        bail!(
+            "reading the workspace's files failed: {}",
+            crate::text::display(String::from_utf8_lossy(&out.stderr).trim())
+        );
+    }
+    let files = framed(rels, &out.stdout, limit);
+    if let Some((rel, _)) = files.iter().find(|(_, b)| b.len() > cap) {
+        bail!("{} is larger than {cap} bytes", crate::text::display(rel));
+    }
+    Ok(files)
+}
+
+/// Output framed as [`READ_FILES`] frames it (a length line, then that many bytes, or `-`),
+/// by `names` in order, each at most `limit` bytes. Stops at anything else.
+pub fn framed<S: AsRef<str>>(
+    names: &[S],
+    mut out: &[u8],
+    limit: usize,
+) -> HashMap<String, Vec<u8>> {
+    let mut found = HashMap::new();
+    for name in names {
+        let Some(nl) = out.iter().position(|b| *b == b'\n') else {
+            break;
+        };
+        let head = String::from_utf8_lossy(&out[..nl]).trim().to_string();
+        out = &out[nl + 1..];
+        if head == "-" {
+            continue;
+        }
+        let Ok(n) = head.parse::<usize>() else { break };
+        if n > out.len() || n > limit {
+            break;
+        }
+        found.insert(name.as_ref().to_string(), out[..n].to_vec());
+        out = &out[n..];
+    }
+    found
+}
+
+fn skip(rel: &Path) -> bool {
+    rel.components()
+        .any(|c| COPY_SKIP.contains(&c.as_os_str().to_string_lossy().as_ref()))
 }
 
 /// Copy a host directory into the env's workspace (host → sandbox is the trusted direction).
@@ -242,7 +335,7 @@ pub fn push(ctx: &Ctx, env: &str, src: &Path) -> Result<usize> {
             let entry = entry?;
             let path = entry.path();
             let rel = path.strip_prefix(src)?.to_path_buf();
-            if skip(&rel, true) {
+            if skip(&rel) {
                 continue;
             }
             let ft = entry.file_type()?;
@@ -347,7 +440,7 @@ pub fn plan_pull(ctx: &Ctx, env: &str, dest: &Path, include_git: bool) -> Result
         "-f".into(),
         "-".into(),
     ];
-    for d in SKIP_DIRS {
+    for d in COPY_SKIP {
         args.push(format!("--exclude={d}"));
     }
     if !include_git {
@@ -441,40 +534,23 @@ fn build_plan(raw: &[u8], dest: &Path) -> Result<PullPlan> {
             refused.push((rel_s, "special file".into()));
             continue;
         };
-        let (change, size, executable) = match &content {
-            Content::File { bytes, executable } => {
-                let same = std::fs::symlink_metadata(&host).is_ok_and(|m| m.is_file())
-                    && std::fs::read(&host).is_ok_and(|h| &h == bytes);
-                (
-                    if same {
-                        None
-                    } else if host.exists() {
-                        Some("changed")
-                    } else {
-                        Some("new")
-                    },
-                    bytes.len() as u64,
-                    *executable,
-                )
-            }
-            Content::Link(t) => {
-                let same = std::fs::read_link(&host).is_ok_and(|h| &h == t);
-                (
-                    if same {
-                        None
-                    } else if host.symlink_metadata().is_ok() {
-                        Some("changed")
-                    } else {
-                        Some("new")
-                    },
-                    0,
-                    false,
-                )
-            }
+        let (same, size, executable) = match &content {
+            Content::File { bytes, executable } => (
+                std::fs::symlink_metadata(&host).is_ok_and(|m| m.is_file())
+                    && std::fs::read(&host).is_ok_and(|h| &h == bytes),
+                bytes.len() as u64,
+                *executable,
+            ),
+            Content::Link(t) => (std::fs::read_link(&host).is_ok_and(|h| &h == t), 0, false),
         };
-        let Some(change) = change else {
+        if same {
             unchanged += 1;
             continue;
+        }
+        let change = if host.symlink_metadata().is_ok() {
+            "changed"
+        } else {
+            "new"
         };
         hasher.update(rel_s.as_bytes());
         match &content {
@@ -607,7 +683,7 @@ fn ensure_parents_inside(root: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Write `n` lines describing a plan.
+/// What a plan writes, what it skips as risky and what it refuses, for a terminal.
 pub fn describe(plan: &PullPlan, w: &mut impl Write) -> std::io::Result<()> {
     let risky: Vec<&PlanEntry> = plan.entries.iter().filter(|e| e.risky.is_some()).collect();
     writeln!(
@@ -720,6 +796,18 @@ mod tests {
             b.append_link(&mut h, p, target).unwrap();
         }
         b.into_inner().unwrap()
+    }
+
+    #[test]
+    fn each_file_is_read_by_its_length_and_anything_else_stops_it() {
+        let names = ["a", "b", "c", "d"];
+        let t = framed(&names, b"3\nx\ny-\n  2\nzz", 9);
+        assert_eq!(t.get("a").map(Vec::as_slice), Some(&b"x\ny"[..]));
+        assert_eq!(t.get("c").map(Vec::as_slice), Some(&b"zz"[..]));
+        assert_eq!(t.len(), 2, "b is absent and d never came");
+        assert!(framed(&names, b"9\nshort", 9).is_empty());
+        assert!(framed(&names, b"3\nabc", 2).is_empty(), "over the limit");
+        assert!(framed(&names, b"x\n", 9).is_empty());
     }
 
     #[test]

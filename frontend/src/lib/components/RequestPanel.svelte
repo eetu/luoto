@@ -1,32 +1,27 @@
 <script lang="ts">
-  import { api, ApiError } from "$lib/api";
-  import { act, ago, app, refreshEnv, refreshOverview, say } from "$lib/stores/app.svelte";
+  import { api } from "$lib/api";
+  import Risks from "$lib/components/Risks.svelte";
+  import { act, ago, app, TTLS } from "$lib/stores/app.svelte";
 
   let { id }: { id: number } = $props();
 
   const req = $derived(app.requests.find((r) => r.id === id) ?? null);
-  let ttl = $state("1h");
+  let ttl = $state(60);
   let risks = $state<string[]>([]);
 
   async function approve(force: boolean) {
     const env = app.env;
     if (!env || !req) return;
     const host = req.host;
-    app.busy = "approving…";
-    try {
-      await api.approve(env, id, ttl || undefined, force);
+    const rule = await act(
+      "approving…",
+      () => api.approve(env, id, ttl ? `${ttl}m` : undefined, force),
+      `approved #${id}: ${host}`,
+      (found) => (risks = found),
+    );
+    if (rule) {
       risks = [];
-      say(`approved #${id}: ${host}`);
       app.subject = { kind: "host", host };
-      await Promise.all([refreshEnv(), refreshOverview()]);
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 409) {
-        risks = (e.data.risks as string[]) ?? [];
-      } else {
-        say(e instanceof Error ? e.message : String(e), true);
-      }
-    } finally {
-      app.busy = null;
     }
   }
 
@@ -65,26 +60,14 @@
       <label class="field">
         <span>for</span>
         <select bind:value={ttl}>
-          <option value="15m">15 min</option>
-          <option value="1h">1 hour</option>
-          <option value="1d">1 day</option>
-          <option value="">until revoked</option>
+          {#each TTLS as t (t.minutes)}<option value={t.minutes}>{t.label}</option>{/each}
         </select>
       </label>
       {#if risks.length > 0}
-        <div class="risks">
-          <p>confirm:</p>
-          <ul>
-            {#each risks as r (r)}<li>{r}</li>{/each}
-          </ul>
-        </div>
+        <Risks {risks} confirm="approve anyway" onconfirm={() => void approve(true)} />
       {/if}
       <div class="actions">
-        {#if risks.length > 0}
-          <button class="btn danger" onclick={() => void approve(true)} disabled={!!app.busy}
-            >approve anyway</button
-          >
-        {:else}
+        {#if risks.length === 0}
           <button class="btn primary" onclick={() => void approve(false)} disabled={!!app.busy}
             >approve</button
           >
@@ -98,12 +81,6 @@
 </div>
 
 <style>
-  .panel {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
   h2 {
     margin: 0;
     font-size: 15px;
@@ -126,56 +103,11 @@
     margin: 0;
   }
 
-  .untrusted {
-    padding: 8px 10px;
-    border: 1px dashed var(--halo-border);
-    border-radius: var(--halo-radius);
-  }
-
   .reason {
     margin: 0;
     white-space: pre-wrap;
     word-break: break-word;
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
     font-size: 12px;
-  }
-
-  .warn {
-    margin: 0;
-    color: var(--halo-error);
-    font-size: 12px;
-  }
-
-  .field {
-    display: grid;
-    grid-template-columns: 58px 1fr;
-    gap: 8px;
-    align-items: center;
-    font-size: 13px;
-  }
-
-  .field span {
-    color: var(--halo-text-muted);
-  }
-
-  .actions {
-    display: flex;
-    gap: 8px;
-  }
-
-  .risks {
-    padding: 8px 10px;
-    border-left: 2px solid var(--halo-error);
-    background: color-mix(in srgb, var(--halo-error) 8%, transparent);
-    font-size: 12px;
-  }
-
-  .risks p {
-    margin: 0;
-  }
-
-  .risks ul {
-    margin: 4px 0 0;
-    padding-left: 16px;
   }
 </style>

@@ -1,6 +1,6 @@
 //! The in-sandbox API the gate serves at `http://gate:3128/_sandbox/…` for the `sandbox`
-//! helper (and through it, MCP-capable agents). Read-mostly; the only write is filing an
-//! access request, which only the host can resolve.
+//! helper (and through it, MCP-capable agents). Read-mostly; the writes are filing an access
+//! request, which only the host can resolve, and passing ssh-agent messages to the vault.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,11 @@ pub const API_PREFIX: &str = "/_sandbox";
 
 /// Where `sandbox ssh-agent` sends each agent message (under [`API_PREFIX`]).
 pub const SSH_AGENT_PATH: &str = "/ssh-agent";
+
+/// The longest ssh-agent message passed on to the vault, unencoded. OpenSSH's (identities, a
+/// session bind, a login to sign) take a few KiB at most; the gate and the vault size the JSON
+/// body that carries one in base64 from this.
+pub const MAX_AGENT_MESSAGE: usize = 8 * 1024;
 
 /// One ssh-agent protocol message, or the reply to it: without its length prefix, base64.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

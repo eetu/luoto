@@ -11,9 +11,9 @@ use inquire::validator::Validation;
 use inquire::{MultiSelect, Password, Select, Text};
 use luoto_shared::{presets, profiles};
 
-use crate::commands::Proposal;
-use crate::config::{EnvConfig, Isolation, ProviderValue};
+use crate::config::{EnvConfig, GlobalConfig, Isolation, ProviderValue};
 use crate::detect;
+use crate::init::Proposal;
 use crate::secrets;
 
 /// Where a pasted token or key is kept: the OS keychain, under this service.
@@ -54,7 +54,7 @@ fn shorts<T>(opts: &[ListOption<&Choice<T>>]) -> String {
 }
 
 /// Walk the proposal's settings; a credential question follows each agent that needs one.
-pub fn customize(p: &mut Proposal) -> Result<()> {
+pub fn customize(p: &mut Proposal, global: &GlobalConfig) -> Result<()> {
     println!();
     isolation(p)?;
     pick_presets(p)?;
@@ -62,7 +62,7 @@ pub fn customize(p: &mut Proposal) -> Result<()> {
     pick_agents(&mut p.cfg)?;
     for name in p.cfg.agents.clone() {
         if let Some(a) = profiles::agent(&name)
-            && let Some((provider, entries)) = credential(&p.cfg, &a)?
+            && let Some((provider, entries)) = credential(&p.cfg, &a, global)?
         {
             p.cfg.credentials.providers.insert(provider, entries);
         }
@@ -261,6 +261,7 @@ enum Source {
 pub fn credential(
     cfg: &EnvConfig,
     a: &profiles::Agent,
+    global: &GlobalConfig,
 ) -> Result<Option<(String, BTreeMap<String, ProviderValue>)>> {
     let configured = |p: &String| cfg.credentials.providers.contains_key(p);
     if a.providers.is_empty() || a.providers.iter().any(configured) {
@@ -413,9 +414,8 @@ pub fn credential(
             let Some(secret) = paste(&how.label)? else {
                 return Ok(None);
             };
-            let global = crate::config::load_global(&crate::paths::Paths::get()?)?;
             let Some(vault) =
-                Select::new("1Password vault:", secrets::op_vaults(&global)?).prompt_skippable()?
+                Select::new("1Password vault:", secrets::op_vaults(global)?).prompt_skippable()?
             else {
                 return Ok(None);
             };
@@ -425,7 +425,7 @@ pub fn credential(
                  sees it.",
                 how.label
             );
-            let r = secrets::op_save(&global, &vault, &title, &secret, &note)?;
+            let r = secrets::op_save(global, &vault, &title, &secret, &note)?;
             println!("saved in 1Password ({vault}) as \"{title}\": {r}");
             r
         }

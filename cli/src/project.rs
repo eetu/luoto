@@ -1,25 +1,27 @@
 //! A project's own `luoto.toml`: what the team says the project needs — registries and APIs
 //! to reach, ports, system packages, agents, and the credentials each developer fills in.
 //!
-//! Whoever can write the repository writes this file, code in the sandbox included (a mount
-//! writes the host folder; a `git pull` in the env brings any commit). So it only proposes:
-//! the user reviews it, luoto keeps the exact accepted text in the env's state, and a changed
-//! file applies only after the user accepts the difference. It cannot hold credentials or
-//! secret refs, and its rules pass the same checks as the sandbox's access requests.
+//! Whoever can write the repository writes this file, code in the sandbox included (it writes
+//! the env's copy, and a `git pull` there brings any commit). So it only proposes: the user
+//! reviews it, luoto keeps the exact accepted text in the env's state, and a changed file
+//! applies only after the user accepts the difference. It cannot hold credentials or secret
+//! refs, and its rules pass the same checks as the sandbox's access requests.
 //! Layering: config.toml < the accepted luoto.toml < the env's own config.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use luoto_shared::policy::{Access, AccessLevel, Mode, Rule, RuleOrigin, Severity, validate_rule};
+use luoto_shared::policy::{Access, AccessLevel, Mode, Rule, RuleOrigin, rule_error};
 use luoto_shared::{presets, profiles};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::{Deps, EnvConfig, EnvFile};
-use crate::env::{Ctx, EnvState, UID};
+use crate::config::{Deps, EnvConfig, EnvFile, extend_unique};
+use crate::env::{Ctx, UpOptions};
 use crate::paths::write_private;
-use crate::{deps, names};
+use crate::text::display;
+use crate::workspace::{self, Oversize};
+use crate::{deps, names, sync};
 
 pub const FILE: &str = "luoto.toml";
 const MAX_BYTES: usize = 64 * 1024;
@@ -79,20 +81,17 @@ pub fn parse(text: &str) -> Result<ProjectConfig> {
 fn validate(p: &ProjectConfig) -> Result<()> {
     for n in &p.presets {
         if presets::get(n).is_none() {
-            bail!("luoto.toml: unknown preset `{}`", clean(n));
+            bail!("luoto.toml: unknown preset `{}`", display(n));
         }
     }
     for a in &p.agents {
         if profiles::agent(a).is_none() {
-            bail!("luoto.toml: unknown agent `{}`", clean(a));
+            bail!("luoto.toml: unknown agent `{}`", display(a));
         }
     }
     for r in &p.allow {
-        if let Some(i) = validate_rule(r, RuleOrigin::Sandbox)
-            .into_iter()
-            .find(|i| i.severity == Severity::Error)
-        {
-            bail!("luoto.toml: allow {}: {}", clean(&r.host), i.message);
+        if let Some(i) = rule_error(r, RuleOrigin::Sandbox) {
+            bail!("luoto.toml: allow {}: {}", display(&r.host), i.message);
         }
     }
     deps::check(&p.deps, RuleOrigin::Sandbox).context("luoto.toml")?;
@@ -101,7 +100,7 @@ fn validate(p: &ProjectConfig) -> Result<()> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"./:_@-".contains(&b))
     {
-        bail!("luoto.toml: `{}` is not an image reference", clean(i));
+        bail!("luoto.toml: `{}` is not an image reference", display(i));
     }
     let word = |s: &str, extra: &[u8]| {
         !s.is_empty()
@@ -110,14 +109,17 @@ fn validate(p: &ProjectConfig) -> Result<()> {
     };
     for r in &p.needs.github {
         if r.split('/').count() != 2 || !word(r, b"/._-") {
-            bail!("luoto.toml: needs.github: `{}` is not owner/repo", clean(r));
+            bail!(
+                "luoto.toml: needs.github: `{}` is not owner/repo",
+                display(r)
+            );
         }
     }
     for c in &p.needs.credentials {
         if !word(c, b"._-") {
             bail!(
                 "luoto.toml: needs.credentials: `{}` is not a name",
-                clean(c)
+                display(c)
             );
         }
     }
@@ -125,16 +127,11 @@ fn validate(p: &ProjectConfig) -> Result<()> {
         if !word(s, b"_") {
             bail!(
                 "luoto.toml: needs.sandbox_secrets: `{}` is not a name",
-                clean(s)
+                display(s)
             );
         }
     }
     Ok(())
-}
-
-/// Text from the file, safe to print in full (see `text::display`).
-pub fn clean(s: &str) -> String {
-    crate::text::display(s)
 }
 
 /// Hex sha256 of a luoto.toml text: what the UI shows and later sends back to accept it.
@@ -158,37 +155,26 @@ pub fn read_host(dir: &Path) -> Result<Option<String>> {
     Ok(Some(std::fs::read_to_string(&path)?))
 }
 
-/// The file as the env's workspace has it now (a `git pull` inside may have changed it).
-pub fn read_env(ctx: &Ctx, env: &str) -> Result<Option<String>> {
-    let out = ctx
-        .rt
-        .command()
-        .args([
-            "exec",
-            "-u",
-            UID,
-            &names::dev(env),
-            "sh",
-            "-c",
-            r#"f=/workspace/luoto.toml; [ -f "$f" ] && [ ! -L "$f" ] || exit 3; head -c "$0" "$f""#,
-            &(MAX_BYTES + 1).to_string(),
-        ])
-        .output()
-        .context("read luoto.toml in the env")?;
-    match out.status.code() {
-        Some(0) if out.stdout.len() > MAX_BYTES => {
-            bail!("luoto.toml is larger than {MAX_BYTES} bytes")
-        }
-        Some(0) => Ok(Some(
-            String::from_utf8(out.stdout).context("luoto.toml is not UTF-8")?,
+/// The file as the env's workspace has it now (a `git pull` inside may have changed it):
+/// the whole text or an error, never a part of it.
+fn read_env(ctx: &Ctx, env: &str) -> Result<Option<String>> {
+    let rel = [FILE.to_string()];
+    match workspace::read_files(ctx, env, &rel, MAX_BYTES, Oversize::Refuse)?.remove(FILE) {
+        Some(b) => Ok(Some(
+            String::from_utf8(b).context("luoto.toml is not UTF-8")?,
         )),
-        Some(3) => Ok(None),
-        _ => bail!("{}", String::from_utf8_lossy(&out.stderr).trim()),
+        None => Ok(None),
     }
 }
 
+/// The accepted text.
 fn snapshot_path(ctx: &Ctx, env: &str) -> PathBuf {
     ctx.paths.env_state(env).join("project.toml")
+}
+
+/// `sha` of a text the user declined, so it isn't offered again.
+fn declined_path(ctx: &Ctx, env: &str) -> PathBuf {
+    ctx.paths.env_state(env).join("project.declined")
 }
 
 /// The accepted text and its settings, if the user accepted one.
@@ -211,47 +197,33 @@ pub fn accept(ctx: &Ctx, env: &str, text: &str) -> Result<()> {
 
 /// Stop applying the project's settings; this exact text isn't offered again.
 pub fn forget(ctx: &Ctx, env: &str, current: Option<&str>) -> Result<()> {
-    match std::fs::remove_file(snapshot_path(ctx, env)) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-        _ => {}
-    }
+    remove(&snapshot_path(ctx, env))?;
     set_declined(ctx, env, current.map(sha))
 }
 
-fn set_declined(ctx: &Ctx, env: &str, hash: Option<String>) -> Result<()> {
-    if let Some(mut st) = EnvState::load(ctx, env)?
-        && st.project_declined != hash
-    {
-        st.project_declined = hash;
-        st.save(ctx, env)?;
+fn remove(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
     }
-    Ok(())
+}
+
+fn set_declined(ctx: &Ctx, env: &str, hash: Option<String>) -> Result<()> {
+    match hash {
+        Some(h) => write_private(&declined_path(ctx, env), h.as_bytes()),
+        None => remove(&declined_path(ctx, env)),
+    }
 }
 
 fn declined(ctx: &Ctx, env: &str, text: &str) -> bool {
-    EnvState::load(ctx, env)
-        .ok()
-        .flatten()
-        .and_then(|s| s.project_declined)
-        .is_some_and(|h| h == sha(text))
+    std::fs::read_to_string(declined_path(ctx, env)).is_ok_and(|h| h.trim() == sha(text))
 }
 
 /// Put the project's settings under the env's own: lists merge, the env's scalars win.
 pub fn layer(cfg: &mut EnvConfig, p: &ProjectConfig) {
-    let union = |base: &mut Vec<String>, add: &[String]| {
-        for x in add {
-            if !base.contains(x) {
-                base.push(x.clone());
-            }
-        }
-    };
-    union(&mut cfg.presets, &p.presets);
-    union(&mut cfg.agents, &p.agents);
-    for port in &p.ports {
-        if !cfg.ports.contains(port) {
-            cfg.ports.push(*port);
-        }
-    }
+    extend_unique(&mut cfg.presets, p.presets.iter().cloned());
+    extend_unique(&mut cfg.agents, p.agents.iter().cloned());
+    extend_unique(&mut cfg.ports, p.ports.iter().copied());
     if cfg.image.is_none() {
         cfg.image = p.image.clone();
     }
@@ -262,7 +234,7 @@ pub fn layer(cfg: &mut EnvConfig, p: &ProjectConfig) {
         .map(|(i, r)| Rule {
             id: Some(format!("project-{}", i + 1)),
             note: Some(match &r.note {
-                Some(n) => format!("luoto.toml: {}", clean(n)),
+                Some(n) => format!("luoto.toml: {}", display(n)),
                 None => "luoto.toml".into(),
             }),
             ..r.clone()
@@ -278,10 +250,10 @@ fn rule_line(r: &Rule) -> String {
     let mut parts = vec![match &r.access {
         Access::Level(AccessLevel::Read) => "read".to_string(),
         Access::Level(AccessLevel::Write) => "WRITE".to_string(),
-        Access::Methods(m) => clean(&m.join(",").to_uppercase()),
+        Access::Methods(m) => display(&m.join(",").to_uppercase()),
     }];
     if !r.paths.is_empty() {
-        parts.push(clean(&r.paths.join(" ")));
+        parts.push(display(&r.paths.join(" ")));
     }
     if let Some(port) = r.port {
         parts.push(format!("port {port}"));
@@ -302,9 +274,9 @@ fn rule_line(r: &Rule) -> String {
         parts.push("PRIVATE addresses".into());
     }
     if let Some(n) = &r.note {
-        parts.push(format!("note: {}", clean(n)));
+        parts.push(format!("note: {}", display(n)));
     }
-    format!("{} ({})", clean(&r.host), parts.join(", "))
+    format!("{} ({})", display(&r.host), parts.join(", "))
 }
 
 /// Everything accepting `p` sets, as `(label, item)` pairs, egress first.
@@ -313,46 +285,46 @@ fn items(p: &ProjectConfig) -> Vec<(&'static str, String)> {
     let mut add = |label: &'static str, items: Vec<String>| {
         out.extend(items.into_iter().map(|i| (label, i)));
     };
-    add("presets", p.presets.iter().map(|s| clean(s)).collect());
+    add("presets", p.presets.iter().map(|s| display(s)).collect());
     add("allow", p.allow.iter().map(rule_line).collect());
     add(
         "install",
         p.deps
             .hosts
             .iter()
-            .map(|h| format!("{} (read)", clean(h)))
+            .map(|h| format!("{} (read)", display(h)))
             .collect(),
     );
-    add("agents", p.agents.iter().map(|s| clean(s)).collect());
-    add("system", p.deps.system.iter().map(|s| clean(s)).collect());
+    add("agents", p.agents.iter().map(|s| display(s)).collect());
+    add("system", p.deps.system.iter().map(|s| display(s)).collect());
     add(
         "run",
         p.deps
             .run
             .iter()
-            .map(|s| format!("`{}`", clean(s)))
+            .map(|s| format!("`{}`", display(s)))
             .collect(),
     );
     add("ports", p.ports.iter().map(u16::to_string).collect());
-    add("image", p.image.iter().map(|s| clean(s)).collect());
+    add("image", p.image.iter().map(|s| display(s)).collect());
     let mut needs: Vec<String> = Vec::new();
     if !p.needs.github.is_empty() {
         needs.push(format!(
             "GitHub push to {}",
-            clean(&p.needs.github.join(", "))
+            display(&p.needs.github.join(", "))
         ));
     }
     needs.extend(
         p.needs
             .credentials
             .iter()
-            .map(|c| format!("{} credential", clean(c))),
+            .map(|c| format!("{} credential", display(c))),
     );
     needs.extend(
         p.needs
             .sandbox_secrets
             .iter()
-            .map(|s| format!("secret {}", clean(s))),
+            .map(|s| format!("secret {}", display(s))),
     );
     add("needs", needs);
     out
@@ -375,7 +347,7 @@ pub fn summary(p: &ProjectConfig) -> Vec<(String, String)> {
 
 /// Settings added (`+`) and removed (`-`) between two versions; a changed setting shows as
 /// both. Complete: two configs with the same lines here are equal.
-pub fn diff(old: &ProjectConfig, new: &ProjectConfig) -> Vec<String> {
+fn diff(old: &ProjectConfig, new: &ProjectConfig) -> Vec<String> {
     let (a, b) = (items(old), items(new));
     let mut out: Vec<String> = b
         .iter()
@@ -439,10 +411,6 @@ pub fn missing_needs(p: &ProjectConfig, cfg: &EnvConfig) -> Vec<String> {
     out
 }
 
-pub fn print_summary(p: &ProjectConfig, indent: &str) {
-    print_entries(&summary(p), indent);
-}
-
 /// `label  value` lines, a multi-line value's later lines aligned under its first.
 pub fn print_entries(entries: &[(String, String)], indent: &str) {
     for (label, value) in entries {
@@ -454,104 +422,31 @@ pub fn print_entries(entries: &[(String, String)], indent: &str) {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum Review {
-    /// Nothing to decide (no file, unchanged, or a change the user already declined).
-    Unchanged,
-    Accepted,
-    /// Changed and not accepted (declined, or no terminal to ask on).
-    Pending,
-}
-
-/// On `up`: compare the workspace's luoto.toml with the accepted one and let the user decide
-/// on a change. Never applies anything without a yes on a terminal.
-pub fn review(ctx: &Ctx, env: &str) -> Result<Review> {
-    let current = match read_env(ctx, env) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("warning: {}", crate::text::lines(&format!("{e:#}")));
-            return Ok(Review::Unchanged);
-        }
-    };
-    let old = accepted(ctx, env);
-    let Some(text) = current else {
-        if old.is_some() {
-            println!(
-                "note: the project no longer has luoto.toml; its accepted settings still apply \
-                 (`luoto project ignore -e {env}` drops them)"
-            );
-        }
-        return Ok(Review::Unchanged);
-    };
-    if old.as_ref().is_some_and(|(t, _)| *t == text) || declined(ctx, env, &text) {
-        return Ok(Review::Unchanged);
-    }
-    let new = match parse(&text) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!(
-                "warning: the project's luoto.toml is not applied: {}",
-                crate::text::lines(&format!("{e:#}"))
-            );
-            return Ok(Review::Pending);
-        }
-    };
-    let base = old.map(|(_, p)| p).unwrap_or_default();
-    if base == new {
-        // Only formatting or comments changed: nothing new is granted.
-        accept(ctx, env, &text)?;
-        return Ok(Review::Unchanged);
-    }
-    let mut lines = diff(&base, &new);
-    if lines.is_empty() {
-        lines.push("settings changed in a way this summary can't show; read luoto.toml".into());
-    }
-    println!("the project's luoto.toml changed (written in the repository, so review it):");
-    for l in &lines {
-        println!("  {l}");
-    }
-    if crate::commands::confirm("Apply these settings to this env?") {
-        accept(ctx, env, &text)?;
-        println!("applied");
-        Ok(Review::Accepted)
-    } else {
-        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-            forget_change(ctx, env, &text)?;
-            println!(
-                "kept the previous settings (`luoto project apply -e {env}` applies it later)"
-            );
-        } else {
-            println!("not applied: run `luoto project apply -e {env}` to review and apply");
-        }
-        Ok(Review::Pending)
-    }
-}
-
-/// The project's luoto.toml now: from the running env's workspace, else the host folder.
-pub fn current(ctx: &Ctx, env: &str, f: &EnvFile) -> Result<Option<String>> {
-    if ctx.rt.container_state(&names::dev(env)).as_deref() == Some("running") {
-        return read_env(ctx, env);
-    }
-    match f
-        .cfg
-        .workspace
-        .dir
-        .as_deref()
-        .map(crate::workspace::canonical)
-    {
-        Some(Ok(d)) => read_host(&d),
-        _ => Ok(None),
-    }
-}
-
 /// Where an env stands with its project's luoto.toml.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum State {
+    /// The project has no luoto.toml.
+    None,
+    Accepted,
+    /// It differs from the accepted one.
+    Changed,
+    /// Never accepted.
+    New,
+    /// This version was ignored.
+    Declined,
+    /// It can't be read or parsed.
+    Invalid,
+    /// The file is gone; the accepted settings still apply.
+    Removed,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Status {
-    /// `none`, `accepted`, `changed`, `new` (never accepted), `declined` (this version was
-    /// ignored), `invalid`, `removed` (the file is gone; the accepted settings still apply).
-    pub state: &'static str,
+    pub state: State,
     pub accepted: Vec<(String, String)>,
     pub current: Vec<(String, String)>,
+    /// What applying the current text adds (`+`) and removes (`-`).
     pub diff: Vec<String>,
     pub error: Option<String>,
     /// Config snippets for credentials the project needs and the env lacks.
@@ -562,11 +457,34 @@ pub struct Status {
     pub text: Option<String>,
 }
 
+impl Status {
+    /// A text the user can apply: changed, new, or ignored before.
+    pub fn pending(&self) -> bool {
+        matches!(self.state, State::Changed | State::New | State::Declined)
+    }
+}
+
+/// The project's luoto.toml now: from the running env's workspace, else the host folder.
+fn current(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<Option<String>> {
+    if ctx.rt.container_state(&names::dev(env)).as_deref() == Some("running") {
+        return read_env(ctx, env);
+    }
+    match cfg
+        .workspace
+        .dir
+        .as_deref()
+        .map(crate::workspace::canonical)
+    {
+        Some(Ok(d)) => read_host(&d),
+        _ => Ok(None),
+    }
+}
+
 pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
-    let f = EnvFile::load(&ctx.paths, env)?;
+    let cfg = EnvFile::load(&ctx.paths, env)?.cfg;
     let old = accepted(ctx, env);
     let mut s = Status {
-        state: "none",
+        state: State::None,
         accepted: old.as_ref().map(|(_, p)| summary(p)).unwrap_or_default(),
         current: Vec::new(),
         diff: Vec::new(),
@@ -575,50 +493,116 @@ pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
         sha: None,
         text: None,
     };
-    let text = match current(ctx, env, &f) {
-        Ok(t) => t,
-        Err(e) => {
-            s.state = "invalid";
-            s.error = Some(clean(&format!("{e:#}")));
+    let new =
+        current(ctx, env, &cfg).and_then(|t| t.map(|t| parse(&t).map(|p| (t, p))).transpose());
+    let (text, new) = match new {
+        Ok(Some(found)) => found,
+        Ok(None) => {
+            if let Some((_, p)) = &old {
+                s.state = State::Removed;
+                s.needs = missing_needs(p, &cfg);
+            }
             return Ok(s);
         }
-    };
-    let Some(text) = text else {
-        if let Some((_, p)) = &old {
-            s.state = "removed";
-            s.needs = missing_needs(p, &f.cfg);
-        }
-        return Ok(s);
-    };
-    let new = match parse(&text) {
-        Ok(p) => p,
         Err(e) => {
-            s.state = "invalid";
-            s.error = Some(clean(&format!("{e:#}")));
+            s.state = State::Invalid;
+            s.error = Some(crate::text::lines(&format!("{e:#}")));
             return Ok(s);
         }
     };
     s.current = summary(&new);
-    s.needs = missing_needs(&new, &f.cfg);
+    s.needs = missing_needs(&new, &cfg);
     s.state = match &old {
-        Some((t, p)) if *t == text || *p == new => "accepted",
+        Some((t, p)) if *t == text || *p == new => State::Accepted,
         Some((_, p)) => {
             s.diff = diff(p, &new);
-            "changed"
+            State::Changed
         }
-        None => "new",
+        None => {
+            s.diff = diff(&ProjectConfig::default(), &new);
+            State::New
+        }
     };
-    if s.state != "accepted" && declined(ctx, env, &text) {
-        s.state = "declined";
+    if s.state != State::Accepted && declined(ctx, env, &text) {
+        s.state = State::Declined;
     }
     s.sha = Some(sha(&text));
     s.text = Some(text);
     Ok(s)
 }
 
-/// Decline a changed text but keep whatever was accepted before.
-fn forget_change(ctx: &Ctx, env: &str, text: &str) -> Result<()> {
-    set_declined(ctx, env, Some(sha(text)))
+/// On `up`: let the user decide on a luoto.toml the workspace changed. Never applies anything
+/// without a yes on a terminal. Whether the user applied a change.
+pub fn review(ctx: &Ctx, env: &str) -> Result<bool> {
+    let st = status(ctx, env)?;
+    let text = st.text.as_deref().unwrap_or_default();
+    match st.state {
+        State::Invalid => eprintln!(
+            "warning: the project's luoto.toml is not applied: {}",
+            st.error.as_deref().unwrap_or_default()
+        ),
+        State::Removed => println!(
+            "note: the project no longer has luoto.toml; its accepted settings still apply \
+             (`luoto project ignore -e {env}` drops them)"
+        ),
+        // Only formatting or comments changed, or the file sets nothing: nothing is granted.
+        State::Accepted if accepted(ctx, env).is_some_and(|(t, _)| t != text) => {
+            accept(ctx, env, text)?;
+        }
+        State::New if parse(text).is_ok_and(|p| p == ProjectConfig::default()) => {
+            accept(ctx, env, text)?;
+        }
+        State::Changed | State::New => {
+            println!("the project's luoto.toml changed (written in the repository, so review it):");
+            if st.diff.is_empty() {
+                println!("  settings changed in a way this summary can't show; read luoto.toml");
+            }
+            for l in &st.diff {
+                println!("  {l}");
+            }
+            if crate::prompt::confirm("Apply these settings to this env?") {
+                accept(ctx, env, text)?;
+                println!("applied");
+                return Ok(true);
+            }
+            if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                set_declined(ctx, env, Some(sha(text)))?;
+                println!(
+                    "kept the previous settings (`luoto project apply -e {env}` applies it later)"
+                );
+            } else {
+                println!("not applied: run `luoto project apply -e {env}` to review and apply");
+            }
+        }
+        State::Accepted | State::None | State::Declined => {}
+    }
+    Ok(false)
+}
+
+/// Accept `reviewed`, the luoto.toml text the user reviewed, and apply it to the env if it
+/// runs. Whether it applied now; otherwise the next `up` applies it.
+pub fn apply(ctx: &Ctx, env: &str, reviewed: &str) -> Result<bool> {
+    accept(ctx, env, reviewed)?;
+    if ctx.rt.container_state(&names::dev(env)).as_deref() != Some("running") {
+        return Ok(false);
+    }
+    crate::env::up(
+        ctx,
+        env,
+        &UpOptions {
+            quiet: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(true)
+}
+
+/// Stop applying the project's luoto.toml; its current text isn't offered again.
+pub fn ignore(ctx: &Ctx, env: &str) -> Result<()> {
+    let st = status(ctx, env)?;
+    forget(ctx, env, st.text.as_deref())?;
+    sync::reapply(ctx, env)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -695,11 +679,5 @@ credentials = ["anthropic"]
             .unwrap();
         assert_eq!(diff(&a, &b), ["+ allow    up.example (WRITE)"]);
         assert_eq!(diff(&b, &a), ["- allow    up.example (WRITE)"]);
-    }
-
-    #[test]
-    fn clean_shows_terminal_escapes_in_full() {
-        assert_eq!(clean("a\u{1b}[2Jb"), "a\\u{1b}[2Jb");
-        assert_eq!(clean(&"x".repeat(500)).len(), 500);
     }
 }

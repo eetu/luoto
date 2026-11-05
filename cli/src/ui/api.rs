@@ -12,17 +12,16 @@ use axum::{Json, Router};
 use chrono::{TimeDelta, Utc};
 use futures_util::Stream;
 use luoto_shared::api::{AccessRequest, RequestStatus};
-use luoto_shared::ctl::{GateCtl, GateStatus, VaultStatus};
-use luoto_shared::events::Verdict;
+use luoto_shared::ctl::{GateStatus, VaultStatus};
 use luoto_shared::policy::{CompiledRule, Rule};
 use luoto_shared::{presets, profiles};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::Ui;
-use crate::config::{self, EnvFile, new_rule_id};
+use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx, UpOptions};
-use crate::{commands, ctl, events, names, project, setup, workspace};
+use crate::{commands, ctl, events, init, names, project, rules, setup, sync, workspace};
 
 pub struct ApiError(StatusCode, Value);
 
@@ -34,8 +33,8 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        match e.downcast::<commands::Risks>() {
-            Ok(commands::Risks(risks)) => ApiError(
+        match e.downcast::<rules::Risks>() {
+            Ok(rules::Risks(risks)) => ApiError(
                 StatusCode::CONFLICT,
                 json!({ "error": "confirm risks", "risks": risks }),
             ),
@@ -92,10 +91,6 @@ struct EnvRow {
     name: String,
     dev: String,
     gate: String,
-    image: String,
-    presets: Vec<String>,
-    agents: Vec<String>,
-    ports: Vec<u16>,
     dir: Option<String>,
     pending: usize,
     denied_recent: usize,
@@ -113,63 +108,33 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
     let store = ui.store.clone();
     blocking(move || {
         let ctx = Ctx::load()?;
+        let states = ctx.rt.states().unwrap_or_default();
+        let since = Utc::now() - TimeDelta::minutes(15);
         let mut envs = Vec::new();
         for name in config::list_envs(&ctx.paths)? {
-            let (dev, gate) = env::status_line(&ctx, &name);
-            let since = Utc::now() - TimeDelta::minutes(15);
-            let denied_recent = store
-                .query(&name, since, None, 5000)
-                .iter()
-                .filter(|e| {
-                    e.verdict == Some(Verdict::Deny)
-                        && !e
-                            .host
-                            .as_deref()
-                            .is_some_and(luoto_shared::events::is_selftest)
-                })
-                .count();
-            let pending = if gate == "running" {
-                ctl::gate::<Vec<AccessRequest>>(&ctx.rt, &name, &GateCtl::Requests)
-                    .map(|r| {
-                        r.iter()
-                            .filter(|r| r.status == RequestStatus::Pending)
-                            .count()
-                    })
-                    .unwrap_or(0)
-            } else {
-                0
+            let (dev, gate) = states.env(&name);
+            let denied_recent = store.denied_since(&name, since);
+            let pending = rules::requests(&ctx, &name, &states).map_or(0, |r| {
+                r.iter()
+                    .filter(|r| r.status == RequestStatus::Pending)
+                    .count()
+            });
+            let (dir, error) = match EnvFile::load(&ctx.paths, &name) {
+                Ok(f) => (f.cfg.workspace.dir, None),
+                Err(e) => (None, Some(format!("{e:#}"))),
             };
-            let row = match EnvFile::load(&ctx.paths, &name) {
-                Ok(f) => EnvRow {
-                    image: env::env_image(&ctx, &f.cfg),
-                    presets: f.cfg.presets.clone(),
-                    agents: f.cfg.agents.clone(),
-                    ports: f.cfg.ports.clone(),
-                    dir: f.cfg.workspace.dir.clone(),
-                    name: name.clone(),
-                    dev,
-                    gate,
-                    pending,
-                    denied_recent,
-                    error: None,
-                },
-                Err(e) => EnvRow {
-                    name: name.clone(),
-                    dev,
-                    gate,
-                    image: String::new(),
-                    presets: vec![],
-                    agents: vec![],
-                    ports: vec![],
-                    dir: None,
-                    pending,
-                    denied_recent,
-                    error: Some(format!("{e:#}")),
-                },
-            };
-            envs.push(row);
+            envs.push(EnvRow {
+                name,
+                dev,
+                gate,
+                dir,
+                pending,
+                denied_recent,
+                error,
+            });
         }
-        let vault = (ctx.rt.container_state(names::VAULT).as_deref() == Some("running"))
+        let vault = states
+            .running(names::VAULT)
             .then(|| ctl::vault_status(&ctx.rt).ok())
             .flatten();
         Ok(Overview {
@@ -188,17 +153,13 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
 async fn meta() -> Json<Value> {
     let presets: Vec<Value> = presets::all()
         .into_iter()
-        .map(|p| json!({ "name": p.name, "description": p.description, "hosts": p.rules.iter().map(|r| r.host.clone()).collect::<Vec<_>>() }))
+        .map(|p| json!({ "name": p.name, "description": p.description }))
         .collect();
     let agents: Vec<Value> = profiles::agent_names()
         .filter_map(profiles::agent)
-        .map(|a| json!({ "name": a.name, "description": a.description, "providers": a.providers }))
+        .map(|a| json!({ "name": a.name, "description": a.description }))
         .collect();
-    let providers: Vec<Value> = profiles::provider_names()
-        .filter_map(profiles::provider)
-        .map(|p| json!({ "name": p.name, "description": p.description, "host": p.host, "kinds": p.auth.keys().collect::<Vec<_>>() }))
-        .collect();
-    Json(json!({ "presets": presets, "agents": agents, "providers": providers }))
+    Json(json!({ "presets": presets, "agents": agents }))
 }
 
 async fn setup_info() -> ApiResult<Value> {
@@ -242,7 +203,6 @@ async fn setup_install() -> ApiResult<Value> {
 struct NewEnv {
     name: Option<String>,
     dir: Option<String>,
-    image: Option<String>,
     #[serde(default)]
     presets: Vec<String>,
     #[serde(default)]
@@ -266,19 +226,15 @@ fn non_empty(s: Option<String>) -> Option<String> {
     s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
-fn new_opts(n: NewEnv) -> commands::InitOpts {
-    commands::InitOpts {
+fn new_opts(n: NewEnv) -> init::InitOpts {
+    init::InitOpts {
         dir: non_empty(n.dir),
         name: non_empty(n.name),
-        image: non_empty(n.image),
         presets: n.presets,
-        tools: Vec::new(),
         agents: n.agents,
         ports: n.ports,
-        isolation: None,
-        no_up: false,
         yes: true,
-        no_project: false,
+        ..Default::default()
     }
 }
 
@@ -287,7 +243,7 @@ fn new_opts(n: NewEnv) -> commands::InitOpts {
 async fn detect(Json(n): Json<NewEnv>) -> ApiResult<Value> {
     blocking(move || {
         let ctx = Ctx::load()?;
-        let p = commands::propose(&ctx.paths, &new_opts(n))?;
+        let p = init::propose(&ctx.paths, &new_opts(n))?;
         let presets: Vec<Value> = p
             .cfg
             .presets
@@ -309,7 +265,7 @@ async fn detect(Json(n): Json<NewEnv>) -> ApiResult<Value> {
             "tools": p.found.tools,
             "project": p.project.as_ref().map(|(_, pc)| project::summary(pc)),
             "project_sha": p.project.as_ref().map(|(text, _)| project::sha(text)),
-            "project_error": p.project_error.as_deref().map(project::clean),
+            "project_error": p.project_error.as_deref().map(crate::text::display),
         }))
     })
     .await
@@ -323,32 +279,12 @@ async fn create_env(Json(n): Json<NewEnv>) -> ApiResult<Value> {
             anyhow::bail!("choose the project's folder (a new one is created)");
         }
         let reviewed = n.project_sha.clone();
-        let mut o = new_opts(n);
-        let mut p = commands::propose(&ctx.paths, &o)?;
+        let mut p = init::propose(&ctx.paths, &new_opts(n))?;
         if let Some((text, _)) = &p.project {
             check_reviewed(text, reviewed.as_deref())?;
         }
-        commands::make_folder(&mut p)?;
-        EnvFile::create(&ctx.paths, &p.name, &p.cfg)?;
-        if let Some((text, pc)) = &p.project {
-            project::accept(&ctx, &p.name, text)?;
-            for a in &pc.agents {
-                if !o.agents.contains(a) {
-                    o.agents.push(a.clone());
-                }
-            }
-        }
-        env::up(
-            &ctx,
-            &p.name,
-            &UpOptions {
-                selftest: true,
-                quiet: true,
-            },
-        )?;
-        for a in &o.agents {
-            crate::agents::install(&ctx, &p.name, a)?;
-        }
+        let agents = init::create(&ctx, &mut p, true, true)?;
+        init::start(&ctx, &p.name, &agents, true)?;
         Ok(json!({ "ok": true, "name": p.name }))
     })
     .await
@@ -375,28 +311,18 @@ async fn project_action(
 ) -> ApiResult<project::Status> {
     blocking(move || {
         let ctx = Ctx::load()?;
-        let st = project::status(&ctx, &name)?;
         match a.action.as_str() {
             "accept" => {
+                let st = project::status(&ctx, &name)?;
+                let pending = st.pending();
                 let text = st
                     .text
-                    .filter(|_| matches!(st.state, "changed" | "new" | "declined"))
+                    .filter(|_| pending)
                     .ok_or_else(|| anyhow::anyhow!("nothing to accept"))?;
                 check_reviewed(&text, a.sha.as_deref())?;
-                project::accept(&ctx, &name, &text)?;
-                env::up(
-                    &ctx,
-                    &name,
-                    &UpOptions {
-                        selftest: true,
-                        quiet: true,
-                    },
-                )?;
+                project::apply(&ctx, &name, &text)?;
             }
-            "forget" => {
-                project::forget(&ctx, &name, st.text.as_deref())?;
-                env::reapply(&ctx, &name)?;
-            }
+            "forget" => project::ignore(&ctx, &name)?,
             other => anyhow::bail!("unknown action `{other}`"),
         }
         project::status(&ctx, &name)
@@ -405,21 +331,10 @@ async fn project_action(
     .map(Json)
 }
 
-fn pull_dest(ctx: &Ctx, name: &str) -> anyhow::Result<std::path::PathBuf> {
-    let f = EnvFile::load(&ctx.paths, name)?;
-    let dir = f
-        .cfg
-        .workspace
-        .dir
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("this env has no folder to pull into"))?;
-    workspace::canonical(dir)
-}
-
 async fn pull_plan(Path(name): Path<String>) -> ApiResult<workspace::PullPlan> {
     blocking(move || {
         let ctx = Ctx::load()?;
-        let dest = pull_dest(&ctx, &name)?;
+        let dest = commands::pull_dest(&ctx, &name)?;
         workspace::plan_pull(&ctx, &name, &dest, false)
     })
     .await
@@ -436,7 +351,7 @@ struct PullApply {
 async fn pull_apply(Path(name): Path<String>, Json(a): Json<PullApply>) -> ApiResult<Value> {
     blocking(move || {
         let ctx = Ctx::load()?;
-        let dest = pull_dest(&ctx, &name)?;
+        let dest = commands::pull_dest(&ctx, &name)?;
         let plan = workspace::plan_pull(&ctx, &name, &dest, false)?;
         if plan.digest != a.digest {
             anyhow::bail!("the env's files changed since you reviewed them; review again");
@@ -474,7 +389,7 @@ async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
     blocking(move || {
         let ctx = Ctx::load()?;
         let p = env::plan(&ctx, &name)?;
-        let (dev, gate) = env::status_line(&ctx, &name);
+        let (dev, gate) = ctx.rt.states().unwrap_or_default().env(&name);
         let gate_status = (gate == "running")
             .then(|| ctl::gate_status(&ctx.rt, &name).ok())
             .flatten();
@@ -493,7 +408,7 @@ async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
             .collect();
         injections.dedup_by(|a, b| a.host == b.host && a.binding == b.binding);
         Ok(EnvDetail {
-            path: p.file.path.display().to_string(),
+            path: p.path.display().to_string(),
             rules: p.compiled.policy.rules.clone(),
             denies: p.compiled.policy.denies.len(),
             warnings: p.compiled.warnings.clone(),
@@ -540,10 +455,7 @@ async fn env_events(
 async fn requests(Path(name): Path<String>) -> ApiResult<Vec<AccessRequest>> {
     blocking(move || {
         let ctx = Ctx::load()?;
-        if ctx.rt.container_state(&names::gate(&name)).as_deref() != Some("running") {
-            return Ok(Vec::new());
-        }
-        ctl::gate(&ctx.rt, &name, &GateCtl::Requests)
+        rules::requests(&ctx, &name, &ctx.rt.states().unwrap_or_default())
     })
     .await
     .map(Json)
@@ -552,7 +464,6 @@ async fn requests(Path(name): Path<String>) -> ApiResult<Vec<AccessRequest>> {
 #[derive(Deserialize, Default)]
 struct Decision {
     ttl: Option<String>,
-    note: Option<String>,
     #[serde(default)]
     force: bool,
 }
@@ -563,30 +474,17 @@ async fn approve(
 ) -> ApiResult<Rule> {
     blocking(move || {
         let ctx = Ctx::load()?;
-        commands::approve_request(&ctx, &name, id, d.ttl.as_deref(), d.force)
+        let req = rules::request(&ctx, &name, id)?;
+        rules::approve(&ctx, &name, &req, d.ttl.as_deref(), d.force)
     })
     .await
     .map(Json)
 }
 
-async fn reject(
-    Path((name, id)): Path<(String, u64)>,
-    Json(d): Json<Decision>,
-) -> ApiResult<AccessRequest> {
-    blocking(move || {
-        let ctx = Ctx::load()?;
-        ctl::gate(
-            &ctx.rt,
-            &name,
-            &GateCtl::Resolve {
-                id,
-                approved: false,
-                note: d.note,
-            },
-        )
-    })
-    .await
-    .map(Json)
+async fn reject(Path((name, id)): Path<(String, u64)>) -> ApiResult<AccessRequest> {
+    blocking(move || rules::reject(&Ctx::load()?, &name, id, None))
+        .await
+        .map(Json)
 }
 
 #[derive(Deserialize)]
@@ -596,35 +494,16 @@ struct NewRule {
     force: bool,
 }
 
-async fn add_rule(
-    Path(name): Path<String>,
-    Json(n): Json<NewRule>,
-) -> Result<Json<Rule>, ApiError> {
-    let mut rule = n.rule;
-    if rule.id.is_none() {
-        rule.id = Some(new_rule_id());
-    }
-    blocking(move || {
-        commands::add_rule_checked(&Ctx::load()?, &name, rule.clone(), n.force)?;
-        Ok(rule)
-    })
-    .await
-    .map(Json)
+async fn add_rule(Path(name): Path<String>, Json(n): Json<NewRule>) -> ApiResult<Rule> {
+    blocking(move || rules::add_rule_checked(&Ctx::load()?, &name, n.rule, n.force))
+        .await
+        .map(Json)
 }
 
 async fn delete_rule(Path((name, id)): Path<(String, String)>) -> ApiResult<usize> {
-    blocking(move || {
-        let ctx = Ctx::load()?;
-        let mut f = EnvFile::load(&ctx.paths, &name)?;
-        let n = f.remove_rules(&id)?;
-        if n == 0 {
-            anyhow::bail!("no user rule `{id}`");
-        }
-        env::reapply(&ctx, &name)?;
-        Ok(n)
-    })
-    .await
-    .map(Json)
+    blocking(move || rules::remove(&Ctx::load()?, &name, &id))
+        .await
+        .map(Json)
 }
 
 async fn env_action(Path((name, action)): Path<(String, String)>) -> ApiResult<Value> {
@@ -635,8 +514,8 @@ async fn env_action(Path((name, action)): Path<(String, String)>) -> ApiResult<V
                 &ctx,
                 &name,
                 &UpOptions {
-                    selftest: true,
                     quiet: true,
+                    ..Default::default()
                 },
             )?,
             "down" => env::down(&ctx, &name)?,
@@ -646,8 +525,8 @@ async fn env_action(Path((name, action)): Path<(String, String)>) -> ApiResult<V
                     &ctx,
                     &name,
                     &UpOptions {
-                        selftest: true,
                         quiet: true,
+                        ..Default::default()
                     },
                 )?;
             }
@@ -668,11 +547,11 @@ async fn vault_action(Path(action): Path<String>) -> ApiResult<Value> {
         let ctx = Ctx::load()?;
         match action.as_str() {
             "unlock" => {
-                let n = env::unlock_all(&ctx)?;
+                let n = sync::unlock_all(&ctx)?;
                 Ok(json!({ "envs": n }))
             }
             "lock" => {
-                let failed = env::lock_all(&ctx)?;
+                let failed = sync::lock_all(&ctx)?;
                 if !failed.is_empty() {
                     anyhow::bail!("lock incomplete: {}", failed.join("; "));
                 }

@@ -10,9 +10,10 @@ use luoto_shared::policy::Rule;
 use luoto_shared::profiles;
 
 use crate::config::EnvFile;
-use crate::connect::{exec_login, quote};
+use crate::connect::exec_login;
 use crate::env::{self, Ctx, UID};
-use crate::names;
+use crate::text::sh_quote;
+use crate::{names, sync};
 
 pub fn list() -> Result<ExitCode> {
     println!("agents:");
@@ -42,11 +43,25 @@ pub fn list() -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Install `agent` in a running env: grant its install hosts for 15 minutes, run the install
-/// steps as the dev user, revoke the grants, then wire up briefing and MCP.
+fn profile(agent: &str) -> Result<profiles::Agent> {
+    profiles::agent(agent)
+        .with_context(|| format!("unknown agent `{agent}` (see `luoto agent list`)"))
+}
+
+/// Whether the agent's command is on the dev user's login PATH.
+fn installed(ctx: &Ctx, dev: &str, a: &profiles::Agent) -> bool {
+    ctx.rt.exec_sh(
+        dev,
+        UID,
+        &format!("command -v {} >/dev/null", sh_quote(&a.command)),
+    )
+}
+
+/// Install `agent` in a running env unless it is there: grant its install hosts for 15
+/// minutes, run the install steps as the dev user, revoke the grants; then wire up briefing
+/// and MCP.
 pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
-    let a = profiles::agent(agent)
-        .with_context(|| format!("unknown agent `{agent}` (see `luoto agent list`)"))?;
+    let a = profile(agent)?;
     let dev = names::dev(env_name);
     // An agent the accepted luoto.toml lists is the project's; only others join the user's file.
     if !env::layered(ctx, env_name)?
@@ -63,21 +78,12 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
             ctx,
             env_name,
             &env::UpOptions {
-                selftest: true,
                 quiet: true,
+                ..Default::default()
             },
         )?;
     }
-    let installed = ctx.rt.succeeds([
-        "exec",
-        "-u",
-        UID,
-        &dev,
-        "sh",
-        "-lc",
-        &format!("command -v {} >/dev/null", quote(&a.command)),
-    ]);
-    if !installed && !a.install.is_empty() {
+    if !installed(ctx, &dev, &a) && !a.install.is_empty() {
         println!(
             "installing {} in `{env_name}` (temporary access: {})…",
             a.description,
@@ -85,7 +91,7 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
         );
         let rules: Vec<Rule> = a.install_hosts.iter().map(|h| Rule::read(h)).collect();
         let script = a.install.join(" && ");
-        let status = env::with_grants(
+        let status = sync::with_grants(
             ctx,
             env_name,
             &rules,
@@ -105,16 +111,7 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
                 ])
             },
         )??;
-        let found = ctx.rt.succeeds([
-            "exec",
-            "-u",
-            UID,
-            &dev,
-            "sh",
-            "-lc",
-            &format!("command -v {} >/dev/null", quote(&a.command)),
-        ]);
-        if status.success() && !found {
+        if status.success() && !installed(ctx, &dev, &a) {
             bail!(
                 "{agent} installed, but `{}` is not on the login PATH (~/.local/bin, mise shims)",
                 a.command
@@ -133,21 +130,34 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
 /// For each of `agents` that has no credential in the env yet: ask for one on a terminal (as
 /// `agent add` does, "later" included), else, or when put off, say how to add it.
 pub fn credentials(ctx: &Ctx, env_name: &str, agents: &[String], interactive: bool) -> Result<()> {
-    for name in agents {
-        let Some(a) = profiles::agent(name) else {
-            continue;
-        };
-        let cfg = EnvFile::load(&ctx.paths, env_name)?.cfg;
-        if has_credential(&cfg, &a) {
-            continue;
+    for a in agents.iter().filter_map(|n| profiles::agent(n)) {
+        if !ask_credential(ctx, env_name, &a, interactive)? {
+            println!("\n{}", credential_help(&a, env_name));
         }
-        if interactive && let Some((provider, entries)) = crate::wizard::credential(&cfg, &a)? {
-            EnvFile::load(&ctx.paths, env_name)?.set_provider_credential(&provider, &entries)?;
-            continue;
-        }
-        println!("\n{}", credential_help(&a, env_name));
     }
     Ok(())
+}
+
+/// Whether agent `a` can authenticate in the env, asking for a credential when `interactive`
+/// and it can't yet; the answer goes into the env's config. Without one the provider's API
+/// host stays closed, so the agent fails to connect even though it is installed.
+fn ask_credential(
+    ctx: &Ctx,
+    env_name: &str,
+    a: &profiles::Agent,
+    interactive: bool,
+) -> Result<bool> {
+    let mut f = EnvFile::load(&ctx.paths, env_name)?;
+    if has_credential(&f.cfg, a) {
+        return Ok(true);
+    }
+    if interactive
+        && let Some((provider, entries)) = crate::wizard::credential(&f.cfg, a, &ctx.global)?
+    {
+        f.set_provider_credential(&provider, &entries)?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Whether the env holds a credential (or a login-inside opt-in) for one of the agent's
@@ -204,15 +214,8 @@ fn credential_help(a: &profiles::Agent, env_name: &str) -> String {
 /// Put the env on its current config before an agent works in it: a stopped env comes up, a
 /// running one picks up edits made since (a new credential, an agent's rules).
 fn ready(ctx: &Ctx, env_name: &str) -> Result<()> {
-    if env::reapply(ctx, env_name)?.is_none() {
-        env::up(
-            ctx,
-            env_name,
-            &env::UpOptions {
-                selftest: true,
-                quiet: false,
-            },
-        )?;
+    if sync::reapply(ctx, env_name)?.is_none() {
+        env::up(ctx, env_name, &env::UpOptions::default())?;
     }
     Ok(())
 }
@@ -241,32 +244,14 @@ pub fn register(ctx: &Ctx, env_name: &str, a: &profiles::Agent) -> Result<()> {
     Ok(())
 }
 
-/// Whether agent `a` can authenticate in the env, asking for a credential on a terminal when
-/// it can't yet. Without one the provider's API host stays closed, so the agent fails to
-/// connect even though it is installed.
-fn ensure_credential(ctx: &Ctx, env_name: &str, a: &profiles::Agent) -> Result<bool> {
-    let cfg = EnvFile::load(&ctx.paths, env_name)?.cfg;
-    if has_credential(&cfg, a) {
-        return Ok(true);
-    }
-    if std::io::stdin().is_terminal()
-        && let Some((provider, entries)) = crate::wizard::credential(&cfg, a)?
-    {
-        let mut f = EnvFile::load(&ctx.paths, env_name)?;
-        f.set_provider_credential(&provider, &entries)?;
-        env::reapply(ctx, env_name)?;
-        return Ok(true);
-    }
-    Ok(false)
-}
-
 pub fn add(env_name: &str, agent: &str) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
-    let a = profiles::agent(agent)
-        .with_context(|| format!("unknown agent `{agent}` (see `luoto agent list`)"))?;
+    let a = profile(agent)?;
+    // Before `ready`, so the env picks up a credential given now.
+    let can_auth = ask_credential(&ctx, env_name, &a, std::io::stdin().is_terminal())?;
     ready(&ctx, env_name)?;
     install(&ctx, env_name, agent)?;
-    if !ensure_credential(&ctx, env_name, &a)? {
+    if !can_auth {
         eprintln!(
             "\n{} is installed but can't reach its API yet: {}",
             a.description,
@@ -283,33 +268,22 @@ pub fn add(env_name: &str, agent: &str) -> Result<ExitCode> {
 
 pub fn run(env_name: &str, agent: &str, yolo: bool, args: &[String]) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
-    let a = profiles::agent(agent)
-        .with_context(|| format!("unknown agent `{agent}` (see `luoto agent list`)"))?;
-    let dev = names::dev(env_name);
+    let a = profile(agent)?;
+    let can_auth = ask_credential(&ctx, env_name, &a, std::io::stdin().is_terminal())?;
     ready(&ctx, env_name)?;
-    if !ctx.rt.succeeds([
-        "exec",
-        "-u",
-        UID,
-        &dev,
-        "sh",
-        "-lc",
-        &format!("command -v {} >/dev/null", quote(&a.command)),
-    ]) {
-        // First run installs it, through the same short-lived grants as `agent add`.
-        install(&ctx, env_name, agent)?;
-    }
-    if !ensure_credential(&ctx, env_name, &a)? {
+    // The first run installs it, through the same short-lived grants as `agent add`.
+    install(&ctx, env_name, agent)?;
+    if !can_auth {
         eprintln!(
             "{}\n\nThen run `luoto agent run -e {env_name} {agent}` again.",
             credential_help(&a, env_name)
         );
         return Ok(ExitCode::FAILURE);
     }
-    let mut argv = vec![quote(&a.command)];
+    let mut argv = vec![sh_quote(&a.command)];
     if yolo {
-        argv.extend(a.yolo.iter().map(|s| quote(s)));
+        argv.extend(a.yolo.iter().map(|s| sh_quote(s)));
     }
-    argv.extend(args.iter().map(|s| quote(s)));
+    argv.extend(args.iter().map(|s| sh_quote(s)));
     exec_login(&ctx, env_name, &format!("exec {}", argv.join(" ")))
 }

@@ -1,28 +1,12 @@
 <script lang="ts">
   import { api } from "$lib/api";
+  import LabelledLines from "$lib/components/LabelledLines.svelte";
   import { act, app } from "$lib/stores/app.svelte";
-  import type { ProjectStatus } from "$lib/types";
 
   // The project's luoto.toml: team settings written in the repository (so possibly by code in
   // the sandbox). They apply only once accepted here or with `luoto project`; a changed file
   // waits for review.
-  let status = $state<ProjectStatus | null>(null);
-
-  $effect(() => {
-    const env = app.env;
-    // Re-check whenever the env detail refreshes.
-    void app.detail;
-    if (!env) {
-      status = null;
-      return;
-    }
-    api
-      .projectStatus(env)
-      .then((s) => {
-        if (app.env === env) status = s;
-      })
-      .catch(() => (status = null));
-  });
+  const status = $derived(app.project);
 
   // Accepting names the sha of the text on screen, so a file swapped since is refused.
   async function run(action: "accept" | "forget") {
@@ -31,9 +15,7 @@
     const sha = status.sha ?? undefined;
     await act(
       action === "accept" ? "applying luoto.toml…" : "ignoring luoto.toml…",
-      async () => {
-        status = await api.projectAction(env, action, sha);
-      },
+      () => api.projectAction(env, action, sha),
       action === "accept" ? "applied luoto.toml" : "luoto.toml is ignored",
     );
   }
@@ -44,13 +26,7 @@
     <p class="label">luoto.toml</p>
     {#if status.state === "accepted"}
       <p class="small muted">the project's settings apply</p>
-      <div class="lines">
-        {#each status.current as [label, value], i (i)}
-          <p class="small entry">
-            <span class="muted">{label}</span><span class="items">{value}</span>
-          </p>
-        {/each}
-      </div>
+      <div class="lines"><LabelledLines lines={status.current} /></div>
     {:else if status.state === "changed" || status.state === "new" || status.state === "declined"}
       <p class="small" class:warn={status.state !== "declined"}>
         {status.state === "changed"
@@ -63,11 +39,7 @@
         {#if status.state === "changed"}
           {#each status.diff as line, i (i)}<p class="small mono">{line}</p>{/each}
         {:else}
-          {#each status.current as [label, value], i (i)}
-            <p class="small entry">
-              <span class="muted">{label}</span><span class="items">{value}</span>
-            </p>
-          {/each}
+          <LabelledLines lines={status.current} />
         {/if}
       </div>
       <div class="actions">
@@ -90,46 +62,8 @@
 {/if}
 
 <style>
-  .section {
-    margin-top: 12px;
-    padding-top: 10px;
-    border-top: 1px solid var(--halo-border);
-  }
-
-  .small {
-    margin: 2px 0;
-    font-size: 12px;
-    word-break: break-word;
-  }
-
-  .warn {
-    color: var(--halo-error);
-  }
-
   .lines {
     margin-top: 6px;
-  }
-
-  .entry {
-    display: flex;
-    gap: 6px;
-  }
-
-  .items {
-    min-width: 0;
-    white-space: pre-line;
-  }
-
-  .untrusted {
-    padding: 6px 8px;
-    border-left: 2px solid var(--halo-error);
-    background: var(--halo-bg-light);
-  }
-
-  .actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 8px;
   }
 
   .needs {

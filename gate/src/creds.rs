@@ -12,24 +12,22 @@ use http::{HeaderName, HeaderValue, Uri, request::Parts};
 use http_body_util::BodyExt;
 use hyper_util::rt::TokioIo;
 use luoto_shared::api::AgentMessage;
-use luoto_shared::creds::{AgentRequest, CredentialValue, Injection, Placement};
-use luoto_shared::ctl::CredentialRequest;
+use luoto_shared::creds::{
+    AgentRequest, CredentialError, CredentialRequest, CredentialValue, Injection, Placement,
+    VAULT_AGENT_PATH, VAULT_CREDENTIAL_PATH,
+};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio::net::TcpStream;
 
 use crate::body::full;
+use crate::state::lock;
 
 /// How long a static value is reused before re-asking the vault (so revocation and
 /// `luoto vault lock` take effect quickly).
 const STATIC_TTL: Duration = Duration::from_secs(120);
 /// Refresh expiring values this long before they expire.
 const EXPIRY_MARGIN: chrono::TimeDelta = chrono::TimeDelta::seconds(120);
-
-#[derive(Debug)]
-pub enum CredError {
-    Locked,
-    Unknown(String),
-    Unavailable(String),
-}
 
 struct Cached {
     value: CredentialValue,
@@ -56,14 +54,14 @@ impl VaultClient {
     }
 
     pub fn flush(&self) {
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = lock(&self.cache);
         self.generation.fetch_add(1, Ordering::SeqCst);
         cache.clear();
     }
 
-    pub async fn get(&self, binding: &str) -> Result<String, CredError> {
+    pub async fn get(&self, binding: &str) -> Result<String, CredentialError> {
         {
-            let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            let cache = lock(&self.cache);
             if let Some(c) = cache.get(binding) {
                 let fresh = match c.value.expires_at {
                     Some(exp) => exp - Utc::now() > EXPIRY_MARGIN,
@@ -75,9 +73,12 @@ impl VaultClient {
             }
         }
         let started = self.generation.load(Ordering::SeqCst);
-        let value = self.fetch(binding).await?;
+        let request = CredentialRequest {
+            binding: binding.to_string(),
+        };
+        let value: CredentialValue = self.call(VAULT_CREDENTIAL_PATH, &request).await?;
         let secret = value.value.clone();
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = lock(&self.cache);
         if self.generation.load(Ordering::SeqCst) == started {
             cache.insert(
                 binding.to_string(),
@@ -90,54 +91,42 @@ impl VaultClient {
         Ok(secret)
     }
 
-    async fn fetch(&self, binding: &str) -> Result<CredentialValue, CredError> {
-        let body = serde_json::to_vec(&CredentialRequest {
-            binding: binding.to_string(),
-        })
-        .unwrap_or_default();
-        let (status, bytes) = self.post("/v1/credential", body).await?;
-        match status {
-            200 => serde_json::from_slice(&bytes)
-                .map_err(|e| CredError::Unavailable(format!("bad vault response: {e}"))),
-            423 => Err(CredError::Locked),
-            403 | 404 => Err(CredError::Unknown(binding.to_string())),
-            _ => Err(unavailable(status, &bytes)),
-        }
-    }
-
     /// Pass one ssh-agent message to the vault, which holds the env's key under `binding`.
-    pub async fn agent(&self, binding: &str, msg: AgentMessage) -> Result<AgentMessage, CredError> {
-        let body = serde_json::to_vec(&AgentRequest {
+    pub async fn agent(
+        &self,
+        binding: &str,
+        message: AgentMessage,
+    ) -> Result<AgentMessage, CredentialError> {
+        let request = AgentRequest {
             binding: binding.to_string(),
-            message: msg,
-        })
-        .unwrap_or_default();
-        let (status, bytes) = self.post("/v1/ssh-agent", body).await?;
-        match status {
-            200 => serde_json::from_slice(&bytes)
-                .map_err(|e| CredError::Unavailable(format!("bad vault response: {e}"))),
-            423 => Err(CredError::Locked),
-            403 | 404 => Err(CredError::Unknown(binding.to_string())),
-            _ => Err(unavailable(status, &bytes)),
-        }
+            message,
+        };
+        self.call(VAULT_AGENT_PATH, &request).await
     }
 
-    async fn post(&self, path: &str, body: Vec<u8>) -> Result<(u16, bytes::Bytes), CredError> {
+    /// POST `req` to the vault's `path` as this env; its answer, or why there is none.
+    async fn call<Req: Serialize, Resp: DeserializeOwned>(
+        &self,
+        path: &str,
+        req: &Req,
+    ) -> Result<Resp, CredentialError> {
+        let failed = CredentialError::Failed;
         let uri: Uri = format!("{}{path}", self.url.trim_end_matches('/'))
             .parse()
-            .map_err(|e| CredError::Unavailable(format!("bad vault url: {e}")))?;
+            .map_err(|e| failed(format!("bad vault url: {e}")))?;
         let authority = uri
             .authority()
-            .ok_or_else(|| CredError::Unavailable("vault url has no host".into()))?
+            .ok_or_else(|| failed("vault url has no host".into()))?
             .to_string();
         let tcp = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&authority))
             .await
-            .map_err(|_| CredError::Unavailable("vault connect timed out".into()))?
-            .map_err(|e| CredError::Unavailable(format!("vault unreachable: {e}")))?;
+            .map_err(|_| failed("vault connect timed out".into()))?
+            .map_err(|e| failed(format!("vault unreachable: {e}")))?;
         let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
             .await
-            .map_err(|e| CredError::Unavailable(e.to_string()))?;
+            .map_err(|e| failed(e.to_string()))?;
         tokio::spawn(conn);
+        let body = serde_json::to_vec(req).unwrap_or_default();
         let req = http::Request::post(uri.path())
             .header(http::header::HOST, authority)
             .header(
@@ -146,30 +135,23 @@ impl VaultClient {
             )
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(full(body))
-            .map_err(|e| CredError::Unavailable(e.to_string()))?;
+            .map_err(|e| failed(e.to_string()))?;
         let resp = tokio::time::timeout(Duration::from_secs(20), sender.send_request(req))
             .await
-            .map_err(|_| CredError::Unavailable("vault request timed out".into()))?
-            .map_err(|e| CredError::Unavailable(e.to_string()))?;
+            .map_err(|_| failed("vault request timed out".into()))?
+            .map_err(|e| failed(e.to_string()))?;
         let status = resp.status().as_u16();
         let bytes = resp
             .into_body()
             .collect()
             .await
-            .map_err(|e| CredError::Unavailable(e.to_string()))?
+            .map_err(|e| failed(e.to_string()))?
             .to_bytes();
-        Ok((status, bytes))
+        if status != 200 {
+            return Err(CredentialError::from_status(status, &bytes));
+        }
+        serde_json::from_slice(&bytes).map_err(|e| failed(format!("bad vault response: {e}")))
     }
-}
-
-fn unavailable(status: u16, body: &[u8]) -> CredError {
-    CredError::Unavailable(format!(
-        "vault returned {status}: {}",
-        String::from_utf8_lossy(body)
-            .chars()
-            .take(200)
-            .collect::<String>()
-    ))
 }
 
 /// Place `secret` on the request as the injection says.

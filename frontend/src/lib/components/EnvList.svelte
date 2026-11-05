@@ -5,16 +5,12 @@
 
   import { api } from "$lib/api";
   import { openMenu } from "$lib/menu.svelte";
-  import { act, app, say, selectEnv } from "$lib/stores/app.svelte";
+  import { act, app, copyText, selectEnv } from "$lib/stores/app.svelte";
   import type { EnvRow } from "$lib/types";
 
   let { onNew }: { onNew: () => void } = $props();
 
   const vault = $derived(app.overview?.vault ?? null);
-
-  function copy(text: string) {
-    void navigator.clipboard.writeText(text).then(() => say(`copied: ${text}`));
-  }
 
   function menu(e: MouseEvent, env: EnvRow) {
     const running = env.dev === "running";
@@ -39,11 +35,11 @@
       },
       {
         label: "Copy shell command",
-        run: () => copy(`luoto shell -e ${env.name}`),
+        run: () => copyText(`luoto shell -e ${env.name}`),
       },
       {
         label: "Copy VS Code command",
-        run: () => copy(`luoto open -e ${env.name} --with code`),
+        run: () => copyText(`luoto open -e ${env.name} --with code`),
       },
     ]);
   }

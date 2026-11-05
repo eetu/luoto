@@ -22,7 +22,6 @@ serde_json.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 bytes.workspace = true
-futures-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 http-body-util.workspace = true

@@ -34,9 +34,6 @@ pub enum GateCtl {
         #[serde(default)]
         note: Option<String>,
     },
-    Recent {
-        limit: usize,
-    },
     /// Drop cached credentials so a vault lock or binding change applies at once.
     FlushCredentials,
 }
@@ -91,15 +88,10 @@ impl CtlResponse {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct GateStatus {
-    pub env: String,
-    pub version: String,
-    pub run: String,
-    pub started: DateTime<Utc>,
     pub rules: usize,
     pub ca_installed: bool,
     pub vault_configured: bool,
     pub pending_requests: usize,
-    pub last_seq: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -117,10 +109,4 @@ pub struct VaultStatus {
     pub locked: bool,
     pub loaded_refs: Vec<String>,
     pub envs: Vec<VaultEnvSummary>,
-}
-
-/// Request body for `POST /v1/credential` (gate → vault, bearer = env token).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct CredentialRequest {
-    pub binding: String,
 }

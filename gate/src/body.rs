@@ -44,6 +44,52 @@ where
     b.map_err(|e| BodyError(Box::new(e))).boxed()
 }
 
+/// `prefix`, already read from a body, then the rest of that body.
+pub fn prefixed(prefix: Bytes, rest: Body) -> Body {
+    Prefixed {
+        prefix: Some(prefix),
+        rest,
+    }
+    .boxed()
+}
+
+struct Prefixed {
+    prefix: Option<Bytes>,
+    rest: Body,
+}
+
+impl HttpBody for Prefixed {
+    type Data = Bytes;
+    type Error = BodyError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BodyError>>> {
+        if let Some(p) = self.prefix.take()
+            && !p.is_empty()
+        {
+            return Poll::Ready(Some(Ok(Frame::data(p))));
+        }
+        Pin::new(&mut self.rest).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.prefix.as_ref().is_none_or(|p| p.is_empty()) && self.rest.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        let inner = self.rest.size_hint();
+        let extra = self.prefix.as_ref().map_or(0, |p| p.len() as u64);
+        let mut h = SizeHint::new();
+        if let Some(u) = inner.upper() {
+            h.set_upper(u + extra);
+        }
+        h.set_lower(inner.lower() + extra);
+        h
+    }
+}
+
 /// Collect at most `limit` bytes; more is an error.
 pub async fn collect_limited(body: Body, limit: usize) -> Result<Bytes, BodyError> {
     let limited = http_body_util::Limited::new(body, limit);

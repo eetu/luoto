@@ -60,37 +60,8 @@
 </div>
 
 <style>
-  .panel {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
   h2 {
     margin: 0;
     font-size: 15px;
-  }
-
-  .small {
-    margin: 0;
-    font-size: 12px;
-    word-break: break-all;
-  }
-
-  .actions {
-    display: flex;
-    gap: 8px;
-  }
-
-  .section {
-    margin-top: 12px;
-    padding-top: 10px;
-    border-top: 1px solid var(--halo-border);
-  }
-
-  .warn {
-    margin: 0;
-    color: var(--halo-error);
-    font-size: 12px;
   }
 </style>

@@ -44,7 +44,8 @@ pub fn conn_id_ok(conn: &str) -> bool {
         && conn.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// The env's key, parsed once per secret.
+/// The env's key, parsed from its secret for each message: nothing derived from it outlives
+/// the secret, which `luoto vault lock` wipes.
 pub struct Key {
     private: PrivateKey,
     blob: Vec<u8>,
@@ -601,6 +602,16 @@ mod tests {
         let (r, _) = handle(&key, &hosts, &mut bound, &bind_msg(&host, b"s0", false));
         assert_eq!(r, [SUCCESS], "a session already bound binds again");
         assert_eq!(bound.len(), SESSIONS_PER_CONN);
+    }
+
+    #[test]
+    fn every_pinned_forge_key_parses() {
+        // `host_keys` drops a line it can't read: a typo would stop SSH to that forge.
+        let lines: Vec<String> = luoto_shared::forges::HOST_KEYS
+            .iter()
+            .map(|(host, key)| format!("{host} {key}"))
+            .collect();
+        assert_eq!(host_keys(&lines).len(), lines.len());
     }
 
     #[test]

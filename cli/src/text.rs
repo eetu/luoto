@@ -1,6 +1,7 @@
-//! Text that came from the sandbox, made safe to show in a terminal: control characters
-//! (escape sequences) and Unicode format characters (bidi overrides, zero-width marks) become
-//! visible `\u{…}` escapes, so they can neither move the cursor nor reorder what you read.
+//! Text made safe for a terminal or a shell. Text that came from the sandbox is shown with
+//! control characters (escape sequences) and Unicode format characters (bidi overrides,
+//! zero-width marks) as visible `\u{…}` escapes, so they can neither move the cursor nor
+//! reorder what you read.
 
 pub fn display(s: &str) -> String {
     escape(s, false)
@@ -23,6 +24,19 @@ fn escape(s: &str, keep_newlines: bool) -> String {
         }
     }
     out
+}
+
+/// `s` as one POSIX shell word: as it is when it holds only characters no shell treats
+/// specially, else single-quoted.
+pub fn sh_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_./=:@,+".contains(&b))
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 /// Unicode general category Cf (format) code points that affect how text renders.
@@ -49,7 +63,15 @@ pub fn is_format(c: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::display;
+    use super::{display, sh_quote};
+
+    #[test]
+    fn shell_words_survive_quotes() {
+        assert_eq!(sh_quote("node@22"), "node@22");
+        assert_eq!(sh_quote("a'b c"), r"'a'\''b c'");
+        assert_eq!(sh_quote(""), "''");
+        assert_eq!(sh_quote("$HOME"), "'$HOME'");
+    }
 
     #[test]
     fn escapes_terminal_and_bidi_tricks() {

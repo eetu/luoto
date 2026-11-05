@@ -1,8 +1,10 @@
 <script lang="ts">
   import { api } from "$lib/api";
+  import ChipSelect from "$lib/components/ChipSelect.svelte";
+  import LabelledLines from "$lib/components/LabelledLines.svelte";
   import Modal from "$lib/components/Modal.svelte";
+  import { useDetect } from "$lib/detect.svelte";
   import { act, app, selectEnv } from "$lib/stores/app.svelte";
-  import type { Proposal } from "$lib/types";
 
   let { open, onClose }: { open: boolean; onClose: () => void } = $props();
 
@@ -12,51 +14,16 @@
   let presets = $state<string[]>(["debian", "github", "toolchains"]);
   let presetsTouched = $state(false);
   let agents = $state<string[]>([]);
-  let proposal = $state<Proposal | null>(null);
-  /** The folder and name `proposal` answers. */
-  let proposedFor = $state<string | null>(null);
-  let detectError = $state<string | null>(null);
 
   const query = $derived({ dir: dir.trim() || undefined, name: name.trim() || undefined });
-  const queryKey = $derived(JSON.stringify(query));
-  // Creating accepts the folder's luoto.toml, so it waits until the one on screen is this
-  // folder's (the API refuses any other by its sha).
-  const ready = $derived(proposal !== null && proposedFor === queryKey);
-
-  // What the folder says about itself: suggested presets (until the user picks their own),
-  // the toolchains its version files pin and its luoto.toml.
-  $effect(() => {
-    const body = query;
-    const key = queryKey;
-    if (!body.dir) {
-      proposal = null;
-      proposedFor = null;
-      detectError = null;
-      return;
-    }
-    let stale = false;
-    const timer = setTimeout(() => {
-      api
-        .detect(body)
-        .then((p) => {
-          if (stale) return;
-          proposal = p;
-          proposedFor = key;
-          detectError = null;
-          if (!presetsTouched) presets = p.presets.map((x) => x.name);
-        })
-        .catch((e: unknown) => {
-          if (stale) return;
-          proposal = null;
-          proposedFor = null;
-          detectError = e instanceof Error ? e.message : String(e);
-        });
-    }, 300);
-    return () => {
-      stale = true;
-      clearTimeout(timer);
-    };
-  });
+  // The suggested presets stand until the user picks their own.
+  const detection = useDetect(
+    () => query,
+    (p) => {
+      if (!presetsTouched) presets = p.presets.map((x) => x.name);
+    },
+  );
+  const proposal = $derived(detection.proposal);
 
   function reason(preset: string): string | null {
     return proposal?.presets.find((p) => p.name === preset)?.reason ?? null;
@@ -74,12 +41,8 @@
   );
   const finalName = $derived(name.trim() || suggested);
   const valid = $derived(
-    /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/.test(finalName) && dir.trim() !== "" && ready,
+    /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/.test(finalName) && dir.trim() !== "" && detection.ready,
   );
-
-  function toggle(list: string[], v: string): string[] {
-    return list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
-  }
 
   async function create() {
     if (!valid || !proposal) return;
@@ -95,15 +58,12 @@
       project_sha: proposal.project_sha ?? undefined,
     };
     onClose();
-    let created = finalName;
-    const ok = await act(
+    const created = await act(
       `creating ${finalName}…`,
-      async () => {
-        created = (await api.createEnv(body)).name;
-      },
+      () => api.createEnv(body),
       `${finalName} is up`,
     );
-    if (ok) await selectEnv(created);
+    if (created) await selectEnv(created.name);
   }
 </script>
 
@@ -123,7 +83,7 @@
               bring files back with a reviewed pull.
             {/if}
           </p>
-          {#if detectError}<p class="hint error">{detectError}</p>{/if}
+          {#if detection.error}<p class="hint error">{detection.error}</p>{/if}
         </div>
       </div>
       <label>
@@ -136,28 +96,25 @@
       </label>
       <div class="choice">
         <span>egress</span>
-        <div class="chips">
-          {#each app.meta?.presets ?? [] as p (p.name)}
-            <button
-              type="button"
-              class="chip"
-              class:on={presets.includes(p.name)}
-              title={reason(p.name)
-                ? `${p.description} (suggested by ${reason(p.name)})`
-                : p.description}
-              onclick={() => {
-                presetsTouched = true;
-                presets = toggle(presets, p.name);
-              }}>{p.name}</button
-            >
-          {/each}
-        </div>
+        <ChipSelect
+          options={(app.meta?.presets ?? []).map((p) => ({
+            name: p.name,
+            title: reason(p.name)
+              ? `${p.description} (suggested by ${reason(p.name)})`
+              : p.description,
+          }))}
+          selected={presets}
+          onchange={(next) => {
+            presetsTouched = true;
+            presets = next;
+          }}
+        />
       </div>
       <div class="choice">
         <span>tools</span>
         <div>
           {#if proposal?.tools.length}
-            <div class="chips">
+            <div class="pins">
               {#each proposal.tools as t, i (i)}
                 <span class="pin" title="pinned by {t.source}">{t.tool} {t.version}</span>
               {/each}
@@ -177,11 +134,7 @@
             <p class="hint first">
               luoto.toml, written in the repository: creating the env accepts these settings.
             </p>
-            {#each proposal.project as [label, value], i (i)}
-              <p class="line">
-                <span class="label">{label}</span><span class="items">{value}</span>
-              </p>
-            {/each}
+            <LabelledLines lines={proposal.project} />
           </div>
         </div>
       {:else if proposal?.project_error}
@@ -192,17 +145,11 @@
       {/if}
       <div class="choice">
         <span>agents</span>
-        <div class="chips">
-          {#each app.meta?.agents ?? [] as a (a.name)}
-            <button
-              type="button"
-              class="chip"
-              class:on={agents.includes(a.name)}
-              title={a.description}
-              onclick={() => (agents = toggle(agents, a.name))}>{a.name}</button
-            >
-          {/each}
-        </div>
+        <ChipSelect
+          options={(app.meta?.agents ?? []).map((a) => ({ name: a.name, title: a.description }))}
+          selected={agents}
+          onchange={(next) => (agents = next)}
+        />
       </div>
     </div>
   {/snippet}
@@ -247,19 +194,10 @@
     font-size: 12px;
   }
 
-  .chips {
+  .pins {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-  }
-
-  .chip {
-    padding: 3px 9px;
-    border: 1px solid var(--halo-border);
-    border-radius: var(--halo-radius-pill, 999px);
-    background: var(--halo-bg-main);
-    color: var(--halo-text-muted);
-    font-size: 12px;
   }
 
   .pin {
@@ -270,43 +208,11 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .untrusted {
-    padding: 6px 8px;
-    border-left: 2px solid var(--halo-error);
-    background: var(--halo-bg-light);
-  }
-
-  .line {
-    margin: 2px 0;
-    font-size: 12px;
-    word-break: break-word;
-  }
-
-  .line {
-    display: flex;
-    gap: 6px;
-  }
-
-  .line .label {
-    color: var(--halo-text-muted);
-  }
-
-  .line .items {
-    min-width: 0;
-    white-space: pre-line;
-  }
-
   .hint.first {
     margin-top: 0;
   }
 
   .hint.error {
     color: var(--halo-error);
-  }
-
-  .chip.on {
-    border-color: var(--halo-accent);
-    background: var(--halo-accent-soft);
-    color: var(--halo-accent);
   }
 </style>

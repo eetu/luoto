@@ -8,33 +8,12 @@ use std::process::{ExitCode, Stdio};
 use anyhow::{Context, Result, bail};
 use luoto_shared::profiles::{self, Editor, EditorSetting};
 
-use crate::env::{Ctx, EnvState, UID};
+use crate::env::{Ctx, UID};
+use crate::state::EnvState;
 use crate::{names, ssh};
 
-pub fn host_of(target: &str) -> String {
-    let t = target.trim();
-    let no_scheme = t.split_once("://").map_or(t, |(_, r)| r);
-    let authority = no_scheme.split(['/', '?', '#']).next().unwrap_or(no_scheme);
-    authority
-        .rsplit_once(':')
-        .filter(|(_, p)| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-        .map_or(authority, |(h, _)| h)
-        .to_string()
-}
-
-pub fn quote(s: &str) -> String {
-    if !s.is_empty()
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-_./=:@,+".contains(&b))
-    {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    }
-}
-
 pub fn ensure_running(ctx: &Ctx, name: &str) -> Result<()> {
-    if ctx.rt.container_state(&names::dev(name)).as_deref() != Some("running") {
+    if !ctx.rt.is_running(&names::dev(name)) {
         bail!("env `{name}` is not running — `luoto up -e {name}`");
     }
     // Forwards and idle stop follow every session (a newer luoto replaces an older watcher).
@@ -47,16 +26,16 @@ pub fn ensure_running(ctx: &Ctx, name: &str) -> Result<()> {
 pub const LOGIN: &str =
     r#"if command -v bash >/dev/null 2>&1; then exec bash -lc "$0"; else exec sh -lc "$0"; fi"#;
 
-/// What a terminal session in the env is told about the terminal it runs in. The runtime
-/// says only `xterm`, and this terminal's own name (`xterm-ghostty`, `xterm-kitty`) may have
-/// no terminfo in the image, so `xterm-256color`, which every image has; and `COLORTERM` as it
-/// is here, for true colour.
-fn terminal_env() -> Vec<(String, String)> {
-    let mut env = vec![("TERM".to_string(), "xterm-256color".to_string())];
+/// What a terminal session in the env is told about the terminal it runs in (`exec -e`
+/// values). The runtime says only `xterm`, and this terminal's own name (`xterm-ghostty`,
+/// `xterm-kitty`) may have no terminfo in the image, so `xterm-256color`, which every image
+/// has; and `COLORTERM` as it is here, for true colour.
+fn terminal_env() -> Vec<String> {
+    let mut env = vec!["TERM=xterm-256color".to_string()];
     if let Ok(c) = std::env::var("COLORTERM")
         && (c == "truecolor" || c == "24bit")
     {
-        env.push(("COLORTERM".to_string(), c));
+        env.push(format!("COLORTERM={c}"));
     }
     env
 }
@@ -65,16 +44,23 @@ fn terminal_env() -> Vec<(String, String)> {
 pub fn exec_login(ctx: &Ctx, name: &str, inner: &str) -> Result<ExitCode> {
     ensure_running(ctx, name)?;
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let env = if tty { terminal_env() } else { Vec::new() };
-    let mut args = ctx.rt.exec_args(
-        &names::dev(name),
-        Some(UID),
-        Some("/workspace"),
-        &env,
-        true,
-        tty,
-    );
-    args.extend(["sh".into(), "-c".into(), LOGIN.into(), inner.into()]);
+    let mut args: Vec<String> = vec!["exec".into(), "-i".into()];
+    if tty {
+        args.push("-t".into());
+    }
+    args.extend(["-u".into(), UID.into(), "-w".into(), "/workspace".into()]);
+    if tty {
+        for e in terminal_env() {
+            args.extend(["-e".into(), e]);
+        }
+    }
+    args.extend([
+        names::dev(name),
+        "sh".into(),
+        "-c".into(),
+        LOGIN.into(),
+        inner.into(),
+    ]);
     let status = ctx.rt.interactive(&args)?;
     Ok(ExitCode::from(
         status.code().unwrap_or(1).clamp(0, 255) as u8
@@ -89,7 +75,10 @@ pub fn shell(name: &str, cmd: &[String]) -> Result<ExitCode> {
     } else {
         format!(
             "exec {}",
-            cmd.iter().map(|c| quote(c)).collect::<Vec<_>>().join(" ")
+            cmd.iter()
+                .map(|c| crate::text::sh_quote(c))
+                .collect::<Vec<_>>()
+                .join(" ")
         )
     };
     exec_login(&ctx, name, &inner)
@@ -158,7 +147,8 @@ pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
     }
     let editor = pick_editor(&ctx, with)?;
     let host = format!("luoto-{name}");
-    let user = EnvState::load(&ctx, name)?.map_or_else(|| "dev".into(), |s| s.login().to_string());
+    let user =
+        EnvState::load(&ctx.paths, name)?.map_or_else(|| "dev".into(), |s| s.login().to_string());
     let fill = |s: &str| {
         s.replace("{host}", &host)
             .replace("{user}", &user)

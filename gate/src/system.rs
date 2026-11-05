@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use ipnet::IpNet;
 use luoto_shared::TRANSPARENT_PORT;
 
 use crate::config::Config;
@@ -45,96 +46,32 @@ pub fn drop_self_route(cfg: &Config) -> Result<()> {
 /// - any other UDP: a closed port, so the kernel replies "unreachable" at once (QUIC
 ///   clients fall back to TCP immediately instead of timing out).
 pub fn install_redirects(cfg: &Config) -> Result<()> {
-    let subnet = cfg
+    let subnet: IpNet = cfg
         .internal_subnet
         .as_deref()
-        .context("LUOTO_INTERNAL_SUBNET is required for transparent mode")?;
-    let gate = cfg.gate_ip.to_string();
-    let tp = TRANSPARENT_PORT.to_string();
-    let rules: Vec<Vec<&str>> = vec![
-        vec!["-t", "nat", "-F", "PREROUTING"],
-        vec![
-            "-t",
-            "nat",
-            "-A",
-            "PREROUTING",
-            "-s",
-            subnet,
-            "-d",
-            &gate,
-            "-j",
-            "RETURN",
-        ],
-        vec![
-            "-t",
-            "nat",
-            "-A",
-            "PREROUTING",
-            "-s",
-            subnet,
-            "-p",
-            "udp",
-            "--dport",
-            "53",
-            "-j",
-            "REDIRECT",
-            "--to-ports",
-            "53",
-        ],
-        vec![
-            "-t",
-            "nat",
-            "-A",
-            "PREROUTING",
-            "-s",
-            subnet,
-            "-p",
-            "tcp",
-            "--dport",
-            "53",
-            "-j",
-            "REDIRECT",
-            "--to-ports",
-            "53",
-        ],
-        vec![
-            "-t",
-            "nat",
-            "-A",
-            "PREROUTING",
-            "-s",
-            subnet,
-            "-p",
-            "tcp",
-            "-j",
-            "REDIRECT",
-            "--to-ports",
-            &tp,
-        ],
-        vec![
-            "-t",
-            "nat",
-            "-A",
-            "PREROUTING",
-            "-s",
-            subnet,
-            "-p",
-            "udp",
-            "-j",
-            "REDIRECT",
-            "--to-ports",
-            "9",
-        ],
+        .context("LUOTO_INTERNAL_SUBNET is required for transparent mode")?
+        .parse()
+        .context("LUOTO_INTERNAL_SUBNET")?;
+    let gate = cfg.gate_ip;
+    // Addresses, a subnet and ports: no argument has a space in it.
+    let rules = [
+        "-t nat -F PREROUTING".to_string(),
+        format!("-t nat -A PREROUTING -s {subnet} -d {gate} -j RETURN"),
+        format!("-t nat -A PREROUTING -s {subnet} -p udp --dport 53 -j REDIRECT --to-ports 53"),
+        format!("-t nat -A PREROUTING -s {subnet} -p tcp --dport 53 -j REDIRECT --to-ports 53"),
+        format!(
+            "-t nat -A PREROUTING -s {subnet} -p tcp -j REDIRECT --to-ports {TRANSPARENT_PORT}"
+        ),
+        format!("-t nat -A PREROUTING -s {subnet} -p udp -j REDIRECT --to-ports 9"),
     ];
-    for args in rules {
+    for rule in &rules {
         let out = Command::new("iptables")
-            .args(&args)
+            .args(rule.split_whitespace())
             .output()
             .context("run iptables (is it installed in the gate image?)")?;
         if !out.status.success() {
             bail!(
-                "iptables {}: {}",
-                args.join(" "),
+                "iptables {rule}: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }

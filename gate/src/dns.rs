@@ -16,7 +16,7 @@ use luoto_shared::host::normalize_host;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 
-use crate::state::State;
+use crate::state::{State, lock};
 
 const BASE: u32 = u32::from_be_bytes([198, 18, 0, 16]);
 const POOL: u32 = (1 << 17) - 32;
@@ -110,11 +110,7 @@ fn answer(state: &State, query: &[u8]) -> Option<Vec<u8>> {
         let ip = match internal {
             Some(ip) => ip,
             None => {
-                let (ip, fresh) = state
-                    .fake_ips
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .ip_for(&name);
+                let (ip, fresh) = lock(&state.fake_ips).ip_for(&name);
                 if fresh {
                     state.events.emit(Event {
                         kind: Some(EventKind::Dns),

@@ -40,11 +40,11 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   sandbox-written files to the host goes through its `risky()` and path/symlink checks.
 - Toolchains are mise's job, driven by the project's own version files (`deps.rs` writes
   mise's system config; `detect.rs` previews the files at `luoto init`). Installs inside an env
-  (`deps.rs`, agents) get egress only via `env::with_grants`: expiring rules from preset data
+  (`deps.rs`, agents) get egress only via `sync::with_grants`: expiring rules from preset data
   (`tools`) or hosts the user confirmed. Never install from the host side, and never grant a
   host just because sandbox output named it. `luoto init` again on a running env reads the
   same files inside it (`deps::detect_in_env`: size-capped, printed through
-  `project::clean`) and adds presets only after the user confirms.
+  `text::display`) and adds presets only after the user confirms.
 - Git hosts read repo paths in any case and a remote keeps the case it was cloned with, so
   their rules and injections set `ignore_case`. Remote rewrites are one file,
   `Compiled::git_config`, written to `/run/luoto/gitconfig` at `up`.
@@ -54,7 +54,7 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
 - `project.rs`: a repo's `luoto.toml` is untrusted. It layers in (`env::plan`) only as the
   exact text the user accepted (kept in the env's state); changes need a fresh accept. Never
   let it carry secret refs or skip `RuleOrigin::Sandbox` validation, and print its strings
-  through `project::clean`.
+  through `text::display`.
 - `personal.rs` data only flows host → sandbox, on every `up`.
 - `ssh.rs` owns `<config>/ssh_config`; never edit the user's `~/.ssh/config`.
 - Secret values never touch disk or argv: host resolves refs and pipes them over `exec -i`
@@ -67,6 +67,8 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   through `exec … sandbox relay`, never a network path.
 - Control of gate/vault is only via the ctl unix socket reached through the runtime's exec.
 - The UI API requires the per-run token; keep Host/Origin checks on any new route.
+- `ui/api.rs` holds no policy logic: its routes call the core the CLI uses (`rules.rs`,
+  `init.rs`, `project.rs`, `sync.rs`), so the two can't drift.
 - Gate, vault and `sandbox` are Linux binaries; Linux-only modules are `cfg(target_os =
   "linux")` so the workspace still builds on macOS/Windows.
 

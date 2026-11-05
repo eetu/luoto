@@ -5,16 +5,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
-use luoto_shared::events::{Event, EventKind, Intake, Verdict};
+use luoto_shared::events::{EventKind, Intake};
 use luoto_shared::host::normalize_host;
 use luoto_shared::policy::DenyReason;
+use rustls::AlertDescription;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::LazyConfigAcceptor;
 
-use crate::handler::{ConnCtx, Target, handle};
+use crate::handler::{ConnCtx, Target, handle, serve_http1};
 use crate::state::State;
 
 /// Who decides the hostname for this TLS connection.
@@ -44,18 +42,14 @@ where
         .and_then(|s| normalize_host(s).ok());
     let host = match (expect, sni) {
         (Expect::Host(h), Some(s)) if s != h => {
-            state.events.emit(Event {
-                kind: Some(EventKind::Http),
-                intake: Some(intake),
-                verdict: Some(Verdict::Deny),
-                host: Some(h.clone()),
-                port: Some(port),
-                reason: Some(DenyReason::InvalidHost.code().into()),
-                message: Some(format!(
-                    "TLS SNI `{s}` does not match the destination `{h}` (domain fronting)"
-                )),
-                ..Default::default()
-            });
+            state.events.deny_conn(
+                EventKind::Http,
+                intake,
+                &h,
+                port,
+                DenyReason::InvalidHost.code(),
+                format!("TLS SNI `{s}` does not match the destination `{h}` (domain fronting)"),
+            );
             return;
         }
         (Expect::Host(h), _) => h,
@@ -73,21 +67,19 @@ where
         Ok(t) => t,
         Err(e) => {
             if is_certificate_rejection(&e) {
-                state.events.emit(Event {
-                    kind: Some(EventKind::TlsReject),
-                    intake: Some(intake),
-                    verdict: Some(Verdict::Deny),
-                    host: Some(host.clone()),
-                    port: Some(port),
-                    reason: Some("tls_reject".into()),
-                    message: Some(format!(
+                state.events.deny_conn(
+                    EventKind::TlsReject,
+                    intake,
+                    &host,
+                    port,
+                    "tls_reject",
+                    format!(
                         "the client rejected the luoto certificate for {host}: it may pin certificates \
                          or ignore the CA bundle. If you trust it, allow it as a tunnel: \
                          luoto allow -e {} {host} --tunnel",
                         state.cfg.env
-                    )),
-                    ..Default::default()
-                });
+                    ),
+                );
             }
             return;
         }
@@ -98,23 +90,47 @@ where
         port,
         tls: true,
     };
-    let svc = service_fn(move |req| handle(state.clone(), ctx.clone(), req, target.clone()));
-    let _ = http1::Builder::new()
-        .preserve_header_case(true)
-        .timer(hyper_util::rt::TokioTimer::new())
-        .header_read_timeout(Duration::from_secs(60))
-        .serve_connection(TokioIo::new(tls), svc)
-        .with_upgrades()
-        .await;
+    serve_http1(tls, move |req| {
+        handle(state.clone(), ctx.clone(), req, target.clone())
+    })
+    .await;
 }
 
+/// The client ended the handshake with an alert about our certificate. tokio-rustls hands the
+/// handshake's `rustls::Error` back as the `io::Error`'s inner error.
 fn is_certificate_rejection(e: &std::io::Error) -> bool {
-    let msg = e.to_string().to_ascii_lowercase();
-    msg.contains("bad certificate")
-        || msg.contains("badcertificate")
-        || msg.contains("unknown ca")
-        || msg.contains("unknownca")
-        || msg.contains("certificate unknown")
-        || msg.contains("certificateunknown")
-        || msg.contains("decrypt error")
+    matches!(
+        e.get_ref()
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>()),
+        Some(rustls::Error::AlertReceived(
+            AlertDescription::BadCertificate
+                | AlertDescription::UnknownCA
+                | AlertDescription::CertificateUnknown
+                | AlertDescription::DecryptError
+        ))
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn certificate_alerts_are_rejections() {
+        let tls = |e: rustls::Error| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+        let alert = |a| tls(rustls::Error::AlertReceived(a));
+        assert!(is_certificate_rejection(&alert(
+            AlertDescription::UnknownCA
+        )));
+        assert!(is_certificate_rejection(&alert(
+            AlertDescription::BadCertificate
+        )));
+        assert!(!is_certificate_rejection(&alert(
+            AlertDescription::HandshakeFailure
+        )));
+        assert!(!is_certificate_rejection(&tls(rustls::Error::DecryptError)));
+        assert!(!is_certificate_rejection(
+            &std::io::ErrorKind::UnexpectedEof.into()
+        ));
+    }
 }

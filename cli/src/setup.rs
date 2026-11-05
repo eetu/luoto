@@ -7,14 +7,14 @@ use std::process::{Command, ExitCode, Stdio};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use crate::commands::confirm;
 use crate::config;
 use crate::env::{self, Ctx};
 use crate::machine;
 use crate::names;
 use crate::paths::Paths;
+use crate::prompt::confirm;
 use crate::release;
-use crate::runtime::Runtime;
+use crate::runtime::{Flavor, Runtime};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeInfo {
@@ -34,7 +34,6 @@ pub struct Detection {
     pub runtimes: Vec<RuntimeInfo>,
     pub package_manager: Option<String>,
     pub wsl: Option<String>,
-    pub companions: Vec<(String, bool)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,35 +77,41 @@ pub fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
         })
 }
 
-fn probe_runtime(name: &str, min: (u32, u32)) -> Option<RuntimeInfo> {
-    let version_text = output(name, &["--version"])?;
-    let version = parse_version(&version_text);
+fn probe_runtime(flavor: Flavor, min: (u32, u32)) -> Option<RuntimeInfo> {
+    let rt = Runtime {
+        bin: match flavor {
+            Flavor::Podman => "podman",
+            Flavor::Docker => "docker",
+        }
+        .into(),
+        flavor,
+        connection: None,
+        api: None,
+    };
+    let version = parse_version(&rt.version().ok()?);
     let version_ok = version.is_some_and(|(a, b, _)| (a, b) >= min);
-    let (reachable, detail) = match name {
+    let (reachable, detail) = match flavor {
         // luoto starts its own machine there; podman's default one doesn't matter.
-        "podman" if crate::machine::supported() => {
+        Flavor::Podman if crate::machine::supported() => {
             (true, "podman (luoto runs envs in its own VM)".to_string())
         }
-        "podman" => match output(
-            "podman",
-            &["info", "--format", "{{.Host.RemoteSocket.Exists}}"],
-        ) {
-            Some(_) => (true, "podman reachable".to_string()),
-            None => (
+        Flavor::Podman => match rt.run(["info", "--format", "{{.Host.RemoteSocket.Exists}}"]) {
+            Ok(_) => (true, "podman reachable".to_string()),
+            Err(_) => (
                 false,
                 "podman installed but no running machine/service (`podman machine start`)".into(),
             ),
         },
-        _ => match output("docker", &["info", "--format", "{{.ServerVersion}}"]) {
-            Some(v) => (true, format!("docker engine {}", v.trim())),
-            None => (
+        Flavor::Docker => match rt.run(["info", "--format", "{{.ServerVersion}}"]) {
+            Ok(v) => (true, format!("docker engine {}", v.trim())),
+            Err(_) => (
                 false,
                 "docker CLI installed but the engine is not running".into(),
             ),
         },
     };
     Some(RuntimeInfo {
-        name: name.into(),
+        name: rt.bin,
         version,
         version_ok,
         reachable,
@@ -169,22 +174,12 @@ pub fn detect() -> Detection {
             .status()
             .is_ok()
     };
-    let runtimes = [("podman", (5, 2)), ("docker", (28, 0))]
-        .iter()
-        .filter_map(|(n, min)| probe_runtime(n, *min))
+    let runtimes = [(Flavor::Podman, (5, 2)), (Flavor::Docker, (28, 0))]
+        .into_iter()
+        .filter_map(|(f, min)| probe_runtime(f, min))
         .collect();
     let wsl = (os == "windows")
         .then(|| output("wsl", &["--status"]).unwrap_or_else(|| "not installed".into()));
-    let companions = [
-        ("op", "op"),
-        ("git", "git"),
-        ("ssh", "ssh"),
-        ("code", "code"),
-        ("zed", "zed"),
-    ]
-    .iter()
-    .map(|(label, bin)| (label.to_string(), has(bin)))
-    .collect();
     Detection {
         package_manager: package_manager_for(&os, distro.as_deref(), like.as_deref(), has),
         os,
@@ -195,8 +190,11 @@ pub fn detect() -> Detection {
             .unwrap_or(2),
         runtimes,
         wsl,
-        companions,
     }
+}
+
+fn cmd(words: &[&str]) -> Vec<String> {
+    words.iter().map(|w| w.to_string()).collect()
 }
 
 pub fn recommend(d: &Detection) -> Recommendation {
@@ -216,48 +214,15 @@ pub fn recommend(d: &Detection) -> Recommendation {
         };
     }
     let install = match (d.os.as_str(), d.package_manager.as_deref()) {
-        ("macos", Some("brew")) => Some(vec!["brew".into(), "install".into(), "podman".into()]),
-        ("windows", Some("winget")) => Some(vec![
-            "winget".into(),
-            "install".into(),
-            "-e".into(),
-            "--id".into(),
-            "RedHat.Podman".into(),
-        ]),
-        ("linux", Some("apt")) => Some(vec![
-            "sudo".into(),
-            "apt-get".into(),
-            "install".into(),
-            "-y".into(),
-            "podman".into(),
-        ]),
-        ("linux", Some("dnf")) => Some(vec![
-            "sudo".into(),
-            "dnf".into(),
-            "install".into(),
-            "-y".into(),
-            "podman".into(),
-        ]),
-        ("linux", Some("pacman")) => Some(vec![
-            "sudo".into(),
-            "pacman".into(),
-            "-S".into(),
-            "--noconfirm".into(),
-            "podman".into(),
-        ]),
-        ("linux", Some("zypper")) => Some(vec![
-            "sudo".into(),
-            "zypper".into(),
-            "install".into(),
-            "-y".into(),
-            "podman".into(),
-        ]),
-        ("linux", Some("apk")) => Some(vec![
-            "sudo".into(),
-            "apk".into(),
-            "add".into(),
-            "podman".into(),
-        ]),
+        ("macos", Some("brew")) => Some(cmd(&["brew", "install", "podman"])),
+        ("windows", Some("winget")) => {
+            Some(cmd(&["winget", "install", "-e", "--id", "RedHat.Podman"]))
+        }
+        ("linux", Some("apt")) => Some(cmd(&["sudo", "apt-get", "install", "-y", "podman"])),
+        ("linux", Some("dnf")) => Some(cmd(&["sudo", "dnf", "install", "-y", "podman"])),
+        ("linux", Some("pacman")) => Some(cmd(&["sudo", "pacman", "-S", "--noconfirm", "podman"])),
+        ("linux", Some("zypper")) => Some(cmd(&["sudo", "zypper", "install", "-y", "podman"])),
+        ("linux", Some("apk")) => Some(cmd(&["sudo", "apk", "add", "podman"])),
         _ => None,
     };
     let mut notes = Vec::new();
@@ -294,9 +259,15 @@ pub fn recommend(d: &Detection) -> Recommendation {
     }
 }
 
+#[derive(clap::Args)]
 pub struct SetupOpts {
+    /// Install the recommended runtime with the platform package manager.
+    #[arg(long)]
     pub install: bool,
+    /// Build luoto's images from this source tree instead of pulling them.
+    #[arg(long)]
     pub build: bool,
+    #[arg(long, short)]
     pub yes: bool,
 }
 
@@ -394,7 +365,7 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
     }
 
     let rt = Runtime::from_config(&global)?;
-    if rt.flavor == crate::runtime::Flavor::Podman && machine::supported() {
+    if rt.flavor == Flavor::Podman && machine::supported() {
         // Envs run in luoto's own VM: none of your folders, an ID range per env, gVisor.
         if !machine::exists(&rt.bin) {
             let memory = machine::host_memory_mib().map_or(4096, |m| (m / 4).clamp(4096, 16_384));
@@ -418,7 +389,7 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
             machine::NAME,
             machine::GVISOR_RELEASE
         );
-    } else if rt.flavor == crate::runtime::Flavor::Podman {
+    } else if rt.flavor == Flavor::Podman {
         global.gvisor = match which("runsc") {
             Some(runsc) => {
                 let wrapper = paths.data.join("luoto-runsc");
@@ -497,7 +468,7 @@ pub fn doctor() -> Result<ExitCode> {
         Ok(None) => println!("luoto {current} (no release published yet)"),
         Err(_) => println!("luoto {current} (could not check for a newer release)"),
     }
-    if ctx.rt.flavor == crate::runtime::Flavor::Podman && machine::supported() {
+    if ctx.rt.flavor == Flavor::Podman && machine::supported() {
         if !machine::is_luoto(ctx.rt.connection.as_deref()) {
             println!("VM: not luoto's own (run `luoto setup`); envs refuse to start");
             return Ok(ExitCode::FAILURE);
@@ -560,11 +531,11 @@ pub fn doctor() -> Result<ExitCode> {
         &format!("while true; do echo luoto-probe | nc -l -p {probe_port}; done"),
     ]);
     for env_name in config::list_envs(&ctx.paths)? {
-        if ctx.rt.container_state(&names::dev(&env_name)).as_deref() != Some("running") {
+        if !ctx.rt.is_running(&names::dev(&env_name)) {
             println!("env {env_name}: not running");
             continue;
         }
-        let Some(st) = env::EnvState::load(&ctx, &env_name)? else {
+        let Some(st) = crate::state::EnvState::load(&ctx.paths, &env_name)? else {
             continue;
         };
         let gw = names::addrs(st.octet).gateway;
@@ -623,7 +594,6 @@ mod tests {
             runtimes,
             package_manager: pm.map(str::to_string),
             wsl: None,
-            companions: vec![],
         }
     }
 

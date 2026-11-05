@@ -412,11 +412,8 @@ impl EnvFile {
         std::fs::write(&self.path, text).with_context(|| format!("write {}", self.path.display()))
     }
 
-    pub fn add_rule(&mut self, rule: &Rule) -> Result<()> {
-        let table = toml_edit::ser::to_document(rule)
-            .context("serialize rule")?
-            .as_table()
-            .clone();
+    /// `allow` as an array of tables, in the order of `cfg.allow`.
+    fn allow_tables(&mut self) -> Result<&mut toml_edit::ArrayOfTables> {
         // `allow = [...]` written inline (e.g. by a serializer) becomes an array of tables.
         if let Some(inline) = self.doc.get("allow").and_then(|i| i.as_array()) {
             let mut tables = toml_edit::ArrayOfTables::new();
@@ -427,18 +424,50 @@ impl EnvFile {
             }
             self.doc["allow"] = toml_edit::Item::ArrayOfTables(tables);
         }
-        let arr = self
-            .doc
+        let path = self.path.display().to_string();
+        self.doc
             .entry("allow")
-            .or_insert_with(|| toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
-        let Some(arr) = arr.as_array_of_tables_mut() else {
-            bail!(
-                "`allow` in {} is not an array of tables",
-                self.path.display()
-            );
-        };
-        arr.push(table);
+            .or_insert_with(|| toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
+            .as_array_of_tables_mut()
+            .with_context(|| format!("`allow` in {path} is not an array of tables"))
+    }
+
+    pub fn add_rule(&mut self, rule: &Rule) -> Result<()> {
+        self.add_rules(std::slice::from_ref(rule))
+    }
+
+    pub fn add_rules(&mut self, rules: &[Rule]) -> Result<()> {
+        let tables = rules
+            .iter()
+            .map(|r| {
+                Ok(toml_edit::ser::to_document(r)
+                    .context("serialize rule")?
+                    .as_table()
+                    .clone())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let arr = self.allow_tables()?;
+        for t in tables {
+            arr.push(t);
+        }
         self.save()
+    }
+
+    /// Keep the rules `keep` accepts. Returns how many were removed.
+    pub fn retain_rules(&mut self, keep: impl Fn(&Rule) -> bool) -> Result<usize> {
+        let kept: Vec<bool> = self.cfg.allow.iter().map(keep).collect();
+        let removed = kept.iter().filter(|k| !**k).count();
+        if removed == 0 {
+            return Ok(0);
+        }
+        let arr = self.allow_tables()?;
+        if arr.len() != kept.len() {
+            bail!("`allow` changed while it was being edited");
+        }
+        let mut kept = kept.into_iter();
+        arr.retain(|_| kept.next().unwrap_or(true));
+        self.save()?;
+        Ok(removed)
     }
 
     /// Write `[credentials.<provider>]`, replacing any entries it had.
@@ -502,63 +531,38 @@ impl EnvFile {
             .get_mut("hosts")
             .and_then(|i| i.as_array_mut())
             .context("`deps.hosts` is not an array")?;
-        for h in hosts {
-            if !arr.iter().any(|v| v.as_str() == Some(h)) {
-                arr.push(h.as_str());
-            }
+        let mut all = self.cfg.deps.hosts.clone();
+        let had = all.len();
+        extend_unique(&mut all, hosts.iter().cloned());
+        for h in &all[had..] {
+            arr.push(h.as_str());
         }
         self.save()
     }
 
     /// Remove rules by id or by exact host. Returns how many were removed.
     pub fn remove_rules(&mut self, id_or_host: &str) -> Result<usize> {
-        let Some(arr) = self
-            .doc
-            .get_mut("allow")
-            .and_then(|i| i.as_array_of_tables_mut())
-        else {
-            return Ok(0);
-        };
-        let before = arr.len();
-        arr.retain(|t| {
-            let id = t.get("id").and_then(|v| v.as_str());
-            let host = t.get("host").and_then(|v| v.as_str());
-            id != Some(id_or_host) && host != Some(id_or_host)
-        });
-        let removed = before - arr.len();
-        if removed > 0 {
-            self.save()?;
-        }
-        Ok(removed)
+        self.retain_rules(|r| r.id.as_deref() != Some(id_or_host) && r.host != id_or_host)
     }
 
     /// Drop expired rules (keeps the file from accumulating stale grants).
     pub fn prune_expired(&mut self) -> Result<usize> {
         let now = chrono::Utc::now();
-        let Some(arr) = self
-            .doc
-            .get_mut("allow")
-            .and_then(|i| i.as_array_of_tables_mut())
-        else {
-            return Ok(0);
-        };
-        let before = arr.len();
-        arr.retain(|t| {
-            t.get("expires")
-                .and_then(|v| v.as_str())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .is_none_or(|e| e.with_timezone(&chrono::Utc) > now)
-        });
-        let removed = before - arr.len();
-        if removed > 0 {
-            self.save()?;
-        }
-        Ok(removed)
+        self.retain_rules(|r| !r.expired(now))
     }
 }
 
 pub fn new_rule_id() -> String {
     format!("r{}", hex::encode(rand::random::<[u8; 3]>()))
+}
+
+/// Append the items of `add` that `base` lacks, in order.
+pub fn extend_unique<T: PartialEq>(base: &mut Vec<T>, add: impl IntoIterator<Item = T>) {
+    for x in add {
+        if !base.contains(&x) {
+            base.push(x);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -628,6 +632,23 @@ oauth_token = "op://Private/claude/token"
         let mut f = EnvFile::parse(path, text).unwrap();
         f.add_rule(&Rule::read("docs.rs")).unwrap();
         assert_eq!(f.cfg.allow.len(), 1);
+    }
+
+    #[test]
+    fn rules_are_added_and_pruned_in_place() {
+        let text = "# my env\npresets = []\n\n[[allow]]\nid = \"old\"\nhost = \"a.example\"\nexpires = \"2000-01-01T00:00:00Z\"\n\n[[allow]]\nid = \"keep\"\nhost = \"b.example\"\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        std::fs::write(&path, text).unwrap();
+        let mut f = EnvFile::parse(path.clone(), text).unwrap();
+        f.add_rules(&[Rule::read("c.example"), Rule::read("d.example")])
+            .unwrap();
+        assert_eq!(f.prune_expired().unwrap(), 1);
+        assert_eq!(f.remove_rules("c.example").unwrap(), 1);
+        let hosts: Vec<&str> = f.cfg.allow.iter().map(|r| r.host.as_str()).collect();
+        assert_eq!(hosts, ["b.example", "d.example"]);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.starts_with("# my env") && !saved.contains("a.example"));
     }
 
     #[test]

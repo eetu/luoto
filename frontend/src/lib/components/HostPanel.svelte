@@ -78,12 +78,6 @@
 </div>
 
 <style>
-  .panel {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
   h2 {
     margin: 0;
     font-size: 15px;
@@ -101,17 +95,6 @@
     padding: 6px 8px;
     border-left: 2px solid var(--halo-error);
     font-size: 13px;
-  }
-
-  .small {
-    margin: 0;
-    font-size: 12px;
-  }
-
-  .section {
-    margin-top: 14px;
-    padding-top: 12px;
-    border-top: 1px solid var(--halo-border);
   }
 
   .attempt {

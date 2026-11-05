@@ -1,23 +1,25 @@
 //! Env lifecycle: create/start/stop/remove the networks, volumes and containers of an env,
-//! keep the gate's policy and the vault's bindings in sync with the config, and verify
-//! isolation from inside before declaring the env ready.
+//! and verify isolation from inside before declaring the env ready. `sync` keeps a running
+//! env's gate and vault in line with its config; `state` is what the host keeps of it.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Utc};
-use luoto_shared::ctl::{GateCtl, VaultCtl};
-use luoto_shared::policy::Rule;
+use luoto_shared::ctl::GateCtl;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::ca::EnvCa;
 use crate::compile::{Compiled, compile};
 use crate::config::{self, EnvConfig, EnvFile, GlobalConfig, Isolation};
-use crate::paths::{Paths, write_private};
+use crate::paths::Paths;
 use crate::runtime::{Flavor, RunSpec, Runtime};
-use crate::{ca, ctl, deps, machine, names, personal, project, secrets, ssh, workspace};
+use crate::state::{self, EnvState};
+use crate::{
+    azure, ca, ctl, deps, machine, names, personal, project, secrets, ssh, sync, workspace,
+};
 
 pub const UID: &str = "1000";
 
@@ -40,51 +42,6 @@ impl Ctx {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnvState {
-    pub octet: u8,
-    pub home: Option<String>,
-    pub vault_token: String,
-    pub created: DateTime<Utc>,
-    /// The folder has been copied into the workspace volume.
-    #[serde(default)]
-    pub seeded: bool,
-    /// Login user in the dev container (uid 1000).
-    #[serde(default)]
-    pub user: Option<String>,
-    /// Hash of a luoto.toml text the user declined, so it isn't offered again.
-    #[serde(default)]
-    pub project_declined: Option<String>,
-}
-
-impl EnvState {
-    /// The dev user's login name for SSH: the recorded one if it is a plain user name.
-    pub fn login(&self) -> &str {
-        self.user
-            .as_deref()
-            .filter(|u| crate::ssh::valid_user(u))
-            .unwrap_or("dev")
-    }
-
-    pub fn load(ctx: &Ctx, env: &str) -> Result<Option<Self>> {
-        let p = ctx.paths.env_state(env).join("state.json");
-        match std::fs::read(&p) {
-            Ok(b) => Ok(Some(
-                serde_json::from_slice(&b).with_context(|| format!("parse {}", p.display()))?,
-            )),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    pub fn save(&self, ctx: &Ctx, env: &str) -> Result<()> {
-        write_private(
-            &ctx.paths.env_state(env).join("state.json"),
-            &serde_json::to_vec_pretty(self)?,
-        )
-    }
-}
-
 fn labels(env: &str, role: &str) -> Vec<(String, String)> {
     vec![
         (names::LABEL_ENV.into(), env.into()),
@@ -95,114 +52,88 @@ fn labels(env: &str, role: &str) -> Vec<(String, String)> {
 
 /// Hash of the run arguments plus the image ID, so a rebuilt image under the same tag also
 /// counts as a changed spec.
-fn spec_hash(rt: &Runtime, spec: &RunSpec) -> String {
+fn spec_hash(rt: &Runtime, spec: &RunSpec, image_id: &str) -> String {
     let args = [
         rt.run_args(spec, false),
         spec.oci_runtime.iter().cloned().collect(),
-        spec.runtime_flags.clone(),
     ]
     .concat()
     .join("\u{1f}");
-    let image = image_id(rt, &spec.image);
-    hex::encode(&Sha256::digest(format!("{args}\u{1f}{image}").as_bytes())[..8])
+    hex::encode(&Sha256::digest(format!("{args}\u{1f}{image_id}").as_bytes())[..8])
 }
 
-fn image_id(rt: &Runtime, image: &str) -> String {
-    rt.run(["image", "inspect", "--format", "{{.Id}}", image])
-        .unwrap_or_default()
-        .trim()
-        .to_string()
-}
-
-/// Pick a free 10.213.x.0/24 for a new env.
-fn allocate_octet(ctx: &Ctx) -> Result<u8> {
-    let used = ctx.rt.used_subnets()?;
-    let mut taken: BTreeSet<u8> = BTreeSet::new();
-    for env in config::list_envs(&ctx.paths)? {
-        if let Some(s) = EnvState::load(ctx, &env)? {
-            taken.insert(s.octet);
-        }
-    }
-    (1..=254u8)
-        .find(|o| !taken.contains(o) && !used.iter().any(|s| s == &names::addrs(*o).subnet))
-        .context("no free 10.213.x.0/24 subnet left for a new env")
-}
-
-pub fn state_or_init(ctx: &Ctx, env: &str, image: &str) -> Result<EnvState> {
-    if let Some(s) = EnvState::load(ctx, env)? {
-        return Ok(s);
-    }
-    let home = detect_home(ctx, image);
-    let s = EnvState {
-        octet: allocate_octet(ctx)?,
-        home,
-        vault_token: hex::encode(rand::random::<[u8; 32]>()),
-        created: Utc::now(),
-        seeded: false,
-        user: None,
-        project_declined: None,
-    };
-    s.save(ctx, env)?;
-    Ok(s)
-}
-
-/// Home of uid 1000 in the image, or None (init.sh creates `/home/dev`).
-fn detect_home(ctx: &Ctx, image: &str) -> Option<String> {
-    ctx.rt
-        .run([
-            "run",
-            "--rm",
-            "--network",
-            "none",
-            "--entrypoint",
-            "sh",
-            image,
-            "-c",
-            "awk -F: '$3==1000{print $6}' /etc/passwd 2>/dev/null",
-        ])
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| s.starts_with('/'))
+/// The IDs of `images` from one `image inspect`; `None` unless every one is there.
+fn image_ids<const N: usize>(rt: &Runtime, images: &[String; N]) -> Option<[String; N]> {
+    let out = rt
+        .run(
+            ["image", "inspect", "--format", "{{.Id}}"]
+                .into_iter()
+                .map(String::from)
+                .chain(images.iter().cloned()),
+        )
+        .ok()?;
+    let ids: Vec<String> = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
+    ids.try_into().ok()
 }
 
 pub fn env_image(ctx: &Ctx, cfg: &EnvConfig) -> String {
     cfg.image.clone().unwrap_or_else(|| ctx.image("base"))
 }
 
-pub fn ensure_images(ctx: &Ctx, cfg: Option<&EnvConfig>) -> Result<()> {
-    let mut all: Vec<String> = ["gate", "vault", "tools"]
-        .iter()
-        .map(|c| ctx.image(c))
-        .collect();
-    all.extend(cfg.map(|c| env_image(ctx, c)));
+/// IDs of the images `up` runs.
+struct ImageIds {
+    gate: String,
+    vault: String,
+    tools: String,
+    dev: String,
+}
+
+/// luoto's images (from `luoto setup`) and the env's own `dev` image, pulled if missing.
+fn ensure_images(ctx: &Ctx, dev: &str) -> Result<ImageIds> {
+    let all = [
+        ctx.image("gate"),
+        ctx.image("vault"),
+        ctx.image("tools"),
+        dev.to_string(),
+    ];
     // One call when everything is there, the common case.
-    if ctx.rt.succeeds(
-        ["image".to_string(), "inspect".into()]
-            .into_iter()
-            .chain(all),
-    ) {
-        return Ok(());
-    }
-    let mut missing = Vec::new();
-    for c in ["gate", "vault", "tools"] {
-        let img = ctx.image(c);
-        if !ctx.rt.image_exists(&img) {
-            missing.push(img);
+    let ids = match image_ids(&ctx.rt, &all) {
+        Some(ids) => ids,
+        None => {
+            let missing: Vec<&str> = all
+                .iter()
+                .filter(|img| {
+                    !ctx.rt.image_exists(img) && (*img != dev || ctx.rt.run(["pull", dev]).is_err())
+                })
+                .map(String::as_str)
+                .collect();
+            if !missing.is_empty() {
+                bail!("missing images: {} — run `luoto setup`", missing.join(", "));
+            }
+            image_ids(&ctx.rt, &all).context("inspect the env's images")?
         }
-    }
-    if let Some(cfg) = cfg {
-        let img = env_image(ctx, cfg);
-        if !ctx.rt.image_exists(&img) && ctx.rt.run(["pull", &img]).is_err() {
-            missing.push(img);
-        }
-    }
-    if !missing.is_empty() {
-        bail!("missing images: {} — run `luoto setup`", missing.join(", "));
-    }
-    Ok(())
+    };
+    let [gate, vault, tools, dev] = ids;
+    Ok(ImageIds {
+        gate,
+        vault,
+        tools,
+        dev,
+    })
 }
 
 pub fn ensure_vault(ctx: &Ctx) -> Result<()> {
+    let id = image_ids(&ctx.rt, &[ctx.image("vault")]).map_or_else(String::new, |[id]| id);
+    start_vault(ctx, &id)
+}
+
+/// The vault from its image `image_id`, and its networks.
+fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
     let rt = &ctx.rt;
     rt.create_internal_network(
         names::VAULT_NET,
@@ -235,8 +166,8 @@ pub fn ensure_vault(ctx: &Ctx) -> Result<()> {
         labels: labels("", "vault"),
         ..Default::default()
     };
-    start_or_create(ctx, &spec, true)?;
-    wait_until(Duration::from_secs(20), || ctl::vault_status(rt).is_ok())
+    start_or_create(ctx, &spec, image_id, true)?;
+    wait_until(Duration::from_secs(20), || ctl::vault_status(rt).ok())
         .context("vault did not come up")?;
     Ok(())
 }
@@ -249,10 +180,11 @@ enum Launch {
     Created,
 }
 
-/// Start a stopped container, (re)create one whose spec changed when `recreate` allows.
-fn start_or_create(ctx: &Ctx, spec: &RunSpec, recreate: bool) -> Result<Launch> {
+/// Start a stopped container, (re)create one whose spec (or image, `image_id`) changed when
+/// `recreate` allows.
+fn start_or_create(ctx: &Ctx, spec: &RunSpec, image_id: &str, recreate: bool) -> Result<Launch> {
     let rt = &ctx.rt;
-    let hash = spec_hash(rt, spec);
+    let hash = spec_hash(rt, spec, image_id);
     let mut spec = spec.clone();
     spec.labels.push((names::LABEL_SPEC.into(), hash.clone()));
     match rt.container_state_label(&spec.name, names::LABEL_SPEC) {
@@ -282,18 +214,19 @@ fn start_or_create(ctx: &Ctx, spec: &RunSpec, recreate: bool) -> Result<Launch> 
     }
 }
 
-fn wait_until(timeout: Duration, mut ok: impl FnMut() -> bool) -> Result<()> {
+/// Poll until `ready` gives a value, and return it.
+fn wait_until<T>(timeout: Duration, mut ready: impl FnMut() -> Option<T>) -> Result<T> {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if ok() {
-            return Ok(());
+        if let Some(v) = ready() {
+            return Ok(v);
         }
         std::thread::sleep(Duration::from_millis(400));
     }
     bail!("timed out after {}s", timeout.as_secs())
 }
 
-pub fn static_dev_env(env: &str, gate_ip: Ipv4Addr) -> Vec<(String, String)> {
+fn static_dev_env(env: &str, gate_ip: Ipv4Addr) -> Vec<(String, String)> {
     let proxy = format!(
         "http://{}:{}",
         luoto_shared::GATE_HOST,
@@ -332,8 +265,12 @@ pub fn static_dev_env(env: &str, gate_ip: Ipv4Addr) -> Vec<(String, String)> {
 }
 
 pub struct Plan {
-    pub file: EnvFile,
-    pub state: EnvState,
+    /// The env's file.
+    pub path: PathBuf,
+    /// Its config with the accepted luoto.toml layered in.
+    pub cfg: EnvConfig,
+    /// `None` until the env's first `up`.
+    pub state: Option<EnvState>,
     pub compiled: Compiled,
     pub image: String,
 }
@@ -347,174 +284,44 @@ pub fn layered(ctx: &Ctx, env: &str) -> Result<EnvConfig> {
     Ok(cfg)
 }
 
+/// What the env's config compiles to, changing nothing: expired grants are left out here (`up`
+/// drops them from the file), and an env that was never up has no gate address in its policy.
 pub fn plan(ctx: &Ctx, env: &str) -> Result<Plan> {
-    let mut file = EnvFile::load(&ctx.paths, env)?;
-    file.prune_expired()?;
-    // In memory only: the env file on disk stays the user's own.
-    if let Some((_, p)) = project::accepted(ctx, env) {
-        project::layer(&mut file.cfg, &p);
-    }
-    let image = env_image(ctx, &file.cfg);
-    let state = state_or_init(ctx, env, &image)?;
-    let a = names::addrs(state.octet);
-    let compiled = compile(env, &file.cfg, a.gate)?;
+    let cfg = layered(ctx, env)?;
+    let state = EnvState::load(&ctx.paths, env)?;
+    let gate = state.as_ref().map(|s| names::addrs(s.octet).gate);
+    let compiled = compile(env, &cfg, gate, &azure::aliases(&cfg.workspace))?;
     for r in compiled
-        .vault_refs
+        .vault_refs()
         .iter()
         .chain(compiled.sandbox_refs.values())
     {
         secrets::check_ref(r)?;
     }
     Ok(Plan {
-        file,
+        path: ctx.paths.env_config(env),
+        image: env_image(ctx, &cfg),
+        cfg,
         state,
         compiled,
-        image,
     })
 }
 
-/// Register the env with the vault and load any secrets it is missing (prompting the user's
-/// secret store only for those).
-pub fn sync_vault(ctx: &Ctx, env: &str, p: &Plan) -> Result<()> {
-    bind_vault(ctx, env, p)?;
-    load_secrets(ctx, env, p)
-}
-
-/// Register the env's bindings with the vault. With a running gate this comes before
-/// `apply_policy`: applying flushes the gate's credential cache, and whatever the gate fetches
-/// after that must come from the new bindings, not refill the cache with the old value.
-fn bind_vault(ctx: &Ctx, env: &str, p: &Plan) -> Result<()> {
-    let token_sha = hex::encode(Sha256::digest(p.state.vault_token.as_bytes()));
-    ctl::vault::<bool>(
-        &ctx.rt,
-        &VaultCtl::Bind {
-            env: env.into(),
-            token_sha256: token_sha,
-            bindings: p.compiled.bindings.clone(),
-        },
-    )?;
-    Ok(())
-}
-
-/// Load the env's secrets the vault is missing, prompting the user's secret store only for
-/// those.
-fn load_secrets(ctx: &Ctx, env: &str, p: &Plan) -> Result<()> {
-    let status = ctl::vault_status(&ctx.rt)?;
-    let loaded: BTreeSet<&String> = status.loaded_refs.iter().collect();
-    let missing: BTreeSet<String> = p
-        .compiled
-        .vault_refs
-        .iter()
-        .filter(|r| !loaded.contains(r))
-        .cloned()
-        .collect();
-    if !missing.is_empty() {
-        eprintln!(
-            "unlocking {} secret(s) for `{env}` from your secret store…",
-            missing.len()
-        );
-        let values = secrets::resolve_all(&ctx.global, &missing)?;
-        ctl::vault::<usize>(&ctx.rt, &VaultCtl::Load { secrets: values })?;
-    }
-    Ok(())
-}
-
-pub fn apply_policy(ctx: &Ctx, env: &str, compiled: &Compiled) -> Result<()> {
-    ctl::gate::<usize>(
-        &ctx.rt,
-        env,
-        &GateCtl::ApplyPolicy {
-            policy: Box::new(compiled.policy.clone()),
-        },
-    )?;
-    Ok(())
-}
-
-/// Bring a running env in line with its config without recreating anything: gate policy,
-/// vault bindings, and the sandbox's runtime env when what it should hold has changed.
-/// Image, port and workspace changes still need `up --recreate`. `None` when the env is down.
-pub fn reapply(ctx: &Ctx, env: &str) -> Result<Option<Plan>> {
-    let p = plan(ctx, env)?;
-    let running = |c: String| ctx.rt.container_state(&c).as_deref() == Some("running");
-    if !running(names::gate(env)) || !running(names::dev(env)) {
-        return Ok(None);
-    }
-    // The policy lands even when the vault can't be reached.
-    let bound = bind_vault(ctx, env, &p);
-    apply_policy(ctx, env, &p.compiled)?;
-    bound?;
-    load_secrets(ctx, env, &p)?;
-    let applied = ctx
-        .rt
-        .run(["exec", &names::dev(env), "cat", RUNTIME_ENV_SUM])
-        .unwrap_or_default();
-    if applied.trim() != runtime_env_sum(&p) {
-        write_runtime_env(ctx, env, &p)?;
-    }
-    Ok(Some(p))
-}
-
-/// Wipe credentials from the vault and from every running gate's cache. Best effort: one
-/// failure must not leave the others holding credentials. Returns what failed.
-pub fn lock_all(ctx: &Ctx) -> Result<Vec<String>> {
-    let mut failed = Vec::new();
-    if let Err(e) = ctl::vault::<bool>(&ctx.rt, &VaultCtl::Lock) {
-        failed.push(format!("vault: {e:#}"));
-    }
-    for e in config::list_envs(&ctx.paths)? {
-        if ctx.rt.container_state(&names::gate(&e)).as_deref() == Some("running")
-            && let Err(err) = ctl::gate::<bool>(&ctx.rt, &e, &GateCtl::FlushCredentials)
-        {
-            failed.push(format!(
-                "gate of `{e}`: {err:#} (stop it: luoto down -e {e})"
-            ));
-        }
-    }
-    Ok(failed)
-}
-
-/// Run `f` with `rules` added to the env's policy as grants that expire after `ttl`. They
-/// are removed when `f` returns, and expire on their own if luoto dies first.
-pub fn with_grants<T>(
+/// Fill the tools volume from the tools image (`tools_id`), with the env's CA, unless it holds
+/// them already.
+fn populate_tools(
     ctx: &Ctx,
     env: &str,
-    rules: &[Rule],
-    ttl: chrono::TimeDelta,
-    note: &str,
-    f: impl FnOnce() -> T,
-) -> Result<T> {
-    if rules.is_empty() {
-        return Ok(f());
-    }
-    let mut file = EnvFile::load(&ctx.paths, env)?;
-    let mut ids = Vec::new();
-    for r in rules {
-        let id = config::new_rule_id();
-        file.add_rule(&Rule {
-            id: Some(id.clone()),
-            expires: Some(Utc::now() + ttl),
-            note: Some(note.to_string()),
-            ..r.clone()
-        })?;
-        ids.push(id);
-    }
-    let push = || -> Result<()> {
-        let p = plan(ctx, env)?;
-        apply_policy(ctx, env, &p.compiled)
-    };
-    push()?;
-    let out = f();
-    let mut file = EnvFile::load(&ctx.paths, env)?;
-    for id in &ids {
-        file.remove_rules(id)?;
-    }
-    push()?;
-    Ok(out)
-}
-
-fn populate_tools(ctx: &Ctx, env: &str, ca_pem: &str) -> Result<()> {
+    state: &EnvState,
+    tools_id: &str,
+    ca_pem: &str,
+) -> Result<()> {
     let vol = names::volume(env, "tools");
-    ctx.rt.create_volume(&vol, &labels(env, "tools"))?;
+    let created = ctx.rt.create_volume(&vol, &labels(env, "tools"))?;
+    let stamp = hex::encode(Sha256::digest(format!("{tools_id}\u{1f}{ca_pem}")));
+    if !created && state.tools.as_deref() == Some(stamp.as_str()) {
+        return Ok(());
+    }
     ctx.rt.run_stdin(
         [
             "run",
@@ -531,11 +338,13 @@ fn populate_tools(ctx: &Ctx, env: &str, ca_pem: &str) -> Result<()> {
         ],
         ca_pem.as_bytes(),
     )?;
-    Ok(())
+    EnvState::update(&ctx.paths, env, |s| s.tools = Some(stamp))
 }
 
+#[derive(Default)]
 pub struct UpOptions {
-    pub selftest: bool,
+    /// Skip the isolation self-test after a start.
+    pub no_selftest: bool,
     pub quiet: bool,
 }
 
@@ -561,17 +370,19 @@ pub fn ensure_vm(ctx: &Ctx) -> Result<()> {
 
 pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     ensure_vm(ctx)?;
-    let p = plan(ctx, env)?;
+    EnvFile::load(&ctx.paths, env)?.prune_expired()?;
+    let image = env_image(ctx, &layered(ctx, env)?);
+    let ids = ensure_images(ctx, &image)?;
+    let state = state::ensure(ctx, env, &image)?;
+    let mut p = plan(ctx, env)?;
     for w in &p.compiled.warnings {
         eprintln!("warning: {w}");
     }
-    ensure_images(ctx, Some(&p.file.cfg))?;
     let rt = &ctx.rt;
-    let a = names::addrs(p.state.octet);
-    let state_dir = ctx.paths.env_state(env);
-    let env_ca = ca::ensure(&state_dir, env)?;
+    let a = names::addrs(state.octet);
+    let env_ca = ca::ensure(&ctx.paths.env_state(env), env)?;
 
-    ensure_vault(ctx)?;
+    start_vault(ctx, &ids.vault)?;
 
     rt.create_internal_network(
         &names::internal_net(env),
@@ -587,11 +398,80 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     for v in ["home", "gate"] {
         rt.create_volume(&names::volume(env, v), &labels(env, v))?;
     }
-    populate_tools(ctx, env, &env_ca.cert_pem)?;
+    populate_tools(ctx, env, &state, &ids.tools, &env_ca.cert_pem)?;
 
-    let cfg = &p.file.cfg;
-    let transparent = cfg.transparent.unwrap_or(true);
-    let gate_spec = RunSpec {
+    let gate = start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)?;
+    let dev = start_dev(ctx, env, &p, &state, &ids)?;
+    // Containers that were already running passed the self-test when they started.
+    let restarted = gate != Launch::AlreadyRunning || dev != Launch::AlreadyRunning;
+    after_start(ctx, env, &p, &state, restarted && !opts.no_selftest)?;
+
+    if fresh_work || !state.seeded {
+        let dir = workspace::canonical(p.cfg.workspace.dir.as_deref().with_context(|| {
+            format!("env `{env}` has no folder: set `[workspace] dir` (`luoto edit -e {env}`)")
+        })?)?;
+        println!("copying {} into the env…", dir.display());
+        let n = workspace::push(ctx, env, &dir)?;
+        println!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
+        EnvState::update(&ctx.paths, env, |s| s.seeded = true)?;
+    }
+    if project::review(ctx, env)? {
+        // The accepted settings reach the gate (policy, credentials, ports) and the runtime env.
+        let image = p.image.clone();
+        p = plan(ctx, env)?;
+        if start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)? != Launch::AlreadyRunning
+            && !opts.no_selftest
+        {
+            check_isolation(ctx, env)?;
+        }
+        sync::write_runtime_env(ctx, env, &p.compiled)?;
+        if p.image != image {
+            eprintln!(
+                "note: luoto.toml names another image; `luoto up --recreate` applies it (volumes are kept)"
+            );
+        }
+    }
+    if let Err(e) = deps::ensure(ctx, env, &p.cfg, state.home()) {
+        eprintln!(
+            "warning: deps not installed: {e:#}\n         \
+             see `luoto egress -e {env} --denied --since 30m`; `luoto up -e {env}` retries"
+        );
+    }
+
+    crate::watch::spawn(ctx);
+
+    if !opts.quiet {
+        println!(
+            "env `{env}` is up{}",
+            if dev == Launch::Created {
+                " (new dev container)"
+            } else {
+                ""
+            }
+        );
+        if !p.cfg.ports.is_empty() {
+            let ports: Vec<String> = p
+                .cfg
+                .ports
+                .iter()
+                .map(|p| format!("http://127.0.0.1:{p}"))
+                .collect();
+            println!("  ports:  {}", ports.join("  "));
+        }
+        let editors: Vec<&str> = luoto_shared::profiles::editor_names().collect();
+        println!("  shell:   luoto shell -e {env}");
+        println!(
+            "  editor:  luoto open -e {env}   (or --with {})",
+            editors.join("|")
+        );
+        println!("  egress:  luoto egress -e {env}");
+        println!("  web UI:  luoto ui");
+    }
+    Ok(())
+}
+
+fn gate_spec(ctx: &Ctx, env: &str, cfg: &EnvConfig, a: &names::Addrs) -> RunSpec {
+    RunSpec {
         name: names::gate(env),
         image: ctx.image("gate"),
         hostname: Some(format!("{env}-gate")),
@@ -607,7 +487,12 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             ("LUOTO_DEV_IP".into(), a.dev.to_string()),
             (
                 "LUOTO_TRANSPARENT".into(),
-                if transparent { "1" } else { "0" }.into(),
+                if cfg.transparent.unwrap_or(true) {
+                    "1"
+                } else {
+                    "0"
+                }
+                .into(),
             ),
             ("LUOTO_DNS".into(), "1".into()),
             (
@@ -635,19 +520,31 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         restart: Some("on-failure".into()),
         labels: labels(env, "gate"),
         ..Default::default()
-    };
-    let gate_started = start_or_create(ctx, &gate_spec, true)?;
-    wait_until(Duration::from_secs(20), || {
-        ctl::gate_status(rt, env).is_ok()
-    })
-    .with_context(|| {
-        format!(
-            "gate for `{env}` did not come up (see `{} logs {}`)",
-            rt.name(),
-            names::gate(env)
-        )
-    })?;
-    let gs = ctl::gate_status(rt, env)?;
+    }
+}
+
+/// Start the gate from its image `image_id` (recreated when its spec changed), give it the
+/// env's CA and the vault, then the env's bindings, policy and secrets.
+fn start_gate(
+    ctx: &Ctx,
+    env: &str,
+    p: &Plan,
+    state: &EnvState,
+    env_ca: &EnvCa,
+    image_id: &str,
+) -> Result<Launch> {
+    let rt = &ctx.rt;
+    let a = names::addrs(state.octet);
+    let launch = start_or_create(ctx, &gate_spec(ctx, env, &p.cfg, &a), image_id, true)?;
+    let gs = wait_until(Duration::from_secs(20), || ctl::gate_status(rt, env).ok()).with_context(
+        || {
+            format!(
+                "gate for `{env}` did not come up (see `{} logs {}`)",
+                rt.name(),
+                names::gate(env)
+            )
+        },
+    )?;
     if !gs.ca_installed {
         ctl::gate::<bool>(
             rt,
@@ -658,28 +555,34 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             },
         )?;
     }
-    ctl::gate::<bool>(
-        rt,
-        env,
-        &GateCtl::SetVault {
-            url: format!("http://{}:{}", names::VAULT_IP, luoto_shared::VAULT_PORT),
-            token: p.state.vault_token.clone(),
-        },
-    )?;
-    let bound = bind_vault(ctx, env, &p);
-    apply_policy(ctx, env, &p.compiled)?;
+    if !gs.vault_configured {
+        ctl::gate::<bool>(
+            rt,
+            env,
+            &GateCtl::SetVault {
+                url: format!("http://{}:{}", names::VAULT_IP, luoto_shared::VAULT_PORT),
+                token: state.vault_token.clone(),
+            },
+        )?;
+    }
+    let bound = sync::bind_vault(ctx, env, state, &p.compiled);
+    sync::apply_policy(ctx, env, &p.compiled)?;
     // Credentials failing to unlock must not block the env: credentialed hosts fail closed
     // ("credentials locked") until `luoto vault unlock` succeeds.
-    if let Err(e) = bound.and_then(|()| load_secrets(ctx, env, &p)) {
+    if let Err(e) =
+        bound.and_then(|()| sync::load_secrets(ctx, &p.compiled.vault_refs(), &format!("`{env}`")))
+    {
         eprintln!(
             "warning: credentials not unlocked ({e:#}); credentialed hosts return 403 until `luoto vault unlock`"
         );
     }
+    Ok(launch)
+}
 
-    let home = p.state.home.clone().unwrap_or_else(|| "/home/dev".into());
-    let dir = workspace::canonical(cfg.workspace.dir.as_deref().with_context(|| {
-        format!("env `{env}` has no folder: set `[workspace] dir` (`luoto edit -e {env}`)")
-    })?)?;
+fn dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &str) -> Result<RunSpec> {
+    let rt = &ctx.rt;
+    let cfg = &p.cfg;
+    let a = names::addrs(state.octet);
     let gvisor = cfg.isolation(&ctx.global) == Isolation::Gvisor;
     let runsc = if gvisor {
         Some(ctx.global.gvisor.clone().context(
@@ -691,7 +594,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     if gvisor && (cfg.resources.memory.is_some() || cfg.resources.cpus.is_some()) {
         eprintln!("warning: memory and CPU limits don't apply to gVisor envs (rootless podman)");
     }
-    let dev_spec = RunSpec {
+    Ok(RunSpec {
         name: names::dev(env),
         image: p.image.clone(),
         hostname: Some(env.into()),
@@ -701,7 +604,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         env: static_dev_env(env, a.gate),
         mounts: vec![
             (names::volume(env, "work"), "/workspace".into(), false),
-            (names::volume(env, "home"), home.clone(), false),
+            (names::volume(env, "home"), state.home().into(), false),
             (names::volume(env, "tools"), "/opt/luoto".into(), true),
         ],
         tmpfs: vec!["/run/luoto:rw,mode=755,size=4m".into()],
@@ -719,19 +622,24 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         // In luoto's VM each env's dev container has its own ID range, and its root is not
         // the VM user that owns podman (so not the vault's or other envs' owner either).
         id_map: machine::is_luoto(rt.connection.as_deref())
-            .then(|| machine::dev_id_start(p.state.octet)),
+            .then(|| machine::dev_id_start(state.octet)),
         // init.sh comes from the tools image and runs only at container start, so a new
         // tools image makes the container's spec stale.
         labels: [
             labels(env, "dev"),
-            vec![("luoto.tools".into(), image_id(rt, &ctx.image("tools")))],
+            vec![("luoto.tools".into(), tools_id.into())],
         ]
         .concat(),
         ..Default::default()
-    };
-    let dev_started = start_or_create(ctx, &dev_spec, false)?;
-    let created = dev_started == Launch::Created;
-    if rt.flavor == Flavor::Docker && transparent {
+    })
+}
+
+/// Start the dev container and wait for its init.sh.
+fn start_dev(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, ids: &ImageIds) -> Result<Launch> {
+    let rt = &ctx.rt;
+    let spec = dev_spec(ctx, env, p, state, &ids.tools)?;
+    let launch = start_or_create(ctx, &spec, &ids.dev, false)?;
+    if rt.flavor == Flavor::Docker && p.cfg.transparent.unwrap_or(true) {
         rt.run([
             "run",
             "--rm",
@@ -745,11 +653,12 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             "replace",
             "default",
             "via",
-            &a.gate.to_string(),
+            &names::addrs(state.octet).gate.to_string(),
         ])?;
     }
     wait_until(Duration::from_secs(90), || {
         rt.succeeds(["exec", &names::dev(env), "test", "-f", "/run/luoto/ready"])
+            .then_some(())
     })
     .with_context(|| {
         format!(
@@ -758,23 +667,21 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             names::dev(env)
         )
     })?;
+    Ok(launch)
+}
+
+/// Once both containers run: the self-test when `selftest`, then the runtime env, the login
+/// name, home files and SSH access.
+fn after_start(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, selftest: bool) -> Result<()> {
     // Isolation first: secrets, dotfiles and the SSH key enter only a container that passed.
-    // Containers that were already running passed when they started.
-    let restarted = gate_started != Launch::AlreadyRunning || dev_started != Launch::AlreadyRunning;
-    if opts.selftest && restarted {
-        let report = selftest(ctx, env, None)?;
-        if !report.ok {
-            rt.run(["stop", "-t", "2", &names::dev(env)]).ok();
-            bail!(
-                "isolation self-test FAILED — the dev container was stopped:\n{}\nrun `luoto doctor` for details",
-                report.render()
-            );
-        }
+    if selftest {
+        check_isolation(ctx, env)?;
     }
-    write_runtime_env(ctx, env, &p)?;
+    sync::write_runtime_env(ctx, env, &p.compiled)?;
     // The login name is read back from the sandbox and ends up in the ssh_config the user
     // includes, so only a plain POSIX user name is kept.
-    let reported = rt
+    let reported = ctx
+        .rt
         .run(["exec", &names::dev(env), "cat", "/run/luoto/user"])
         .ok()
         .map(|u| u.trim().to_string());
@@ -785,14 +692,13 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     if user.is_none() && reported.is_some_and(|u| !u.is_empty()) {
         eprintln!("warning: the env reported an invalid login name; SSH uses `dev`");
     }
-    let mut st = EnvState::load(ctx, env)?.unwrap_or_else(|| p.state.clone());
-    if st.user != user {
-        st.user = user;
-        st.save(ctx, env)?;
+    if state.user != user {
+        EnvState::update(&ctx.paths, env, |s| s.user = user)?;
     }
-    if personal::apply(ctx, env, cfg) > 0 {
+    if personal::apply(ctx, env, &p.cfg, state.home()) > 0 {
         // Home files may have replaced an agent's config, and with it luoto's entry there.
-        for a in cfg
+        for a in p
+            .cfg
             .agents
             .iter()
             .filter_map(|n| luoto_shared::profiles::agent(n))
@@ -806,158 +712,19 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         eprintln!("warning: SSH access not set up ({e:#})");
     }
     ssh::write_config(ctx)?;
-
-    if fresh_work || !p.state.seeded {
-        println!("copying {} into the env…", dir.display());
-        let n = workspace::push(ctx, env, &dir)?;
-        println!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
-        let mut st = EnvState::load(ctx, env)?.unwrap_or_else(|| p.state.clone());
-        st.seeded = true;
-        st.save(ctx, env)?;
-    }
-    if project::review(ctx, env)? == project::Review::Accepted {
-        return up(
-            ctx,
-            env,
-            &UpOptions {
-                selftest: opts.selftest,
-                quiet: opts.quiet,
-            },
-        );
-    }
-    if let Err(e) = deps::ensure(ctx, env, cfg) {
-        eprintln!(
-            "warning: deps not installed: {e:#}\n         \
-             see `luoto egress -e {env} --denied --since 30m`; `luoto up -e {env}` retries"
-        );
-    }
-
-    crate::watch::spawn(ctx);
-
-    if !opts.quiet {
-        println!(
-            "env `{env}` is up{}",
-            if created { " (new dev container)" } else { "" }
-        );
-        if !cfg.ports.is_empty() {
-            let ports: Vec<String> = cfg
-                .ports
-                .iter()
-                .map(|p| format!("http://127.0.0.1:{p}"))
-                .collect();
-            println!("  ports:  {}", ports.join("  "));
-        }
-        let editors: Vec<&str> = luoto_shared::profiles::editor_names().collect();
-        println!("  shell:   luoto shell -e {env}");
-        println!(
-            "  editor:  luoto open -e {env}   (or --with {})",
-            editors.join("|")
-        );
-        println!("  egress:  luoto egress -e {env}");
-        println!("  web UI:  luoto ui");
-    }
     Ok(())
 }
 
-/// Agent/placeholder env + sandbox secrets, written to a tmpfs inside the dev container
-/// (memory only) and sourced by shells.
-pub fn runtime_env(ctx: &Ctx, p: &Plan) -> Result<BTreeMap<String, String>> {
-    let mut env = p.compiled.dev_env.clone();
-    if !p.compiled.sandbox_refs.is_empty() {
-        let refs: BTreeSet<String> = p.compiled.sandbox_refs.values().cloned().collect();
-        let values = secrets::resolve_all(&ctx.global, &refs)?;
-        for (k, r) in &p.compiled.sandbox_refs {
-            if let Some(v) = values.get(r) {
-                env.insert(k.clone(), v.clone());
-            }
-        }
+/// The isolation self-test; a dev container that fails it is stopped.
+fn check_isolation(ctx: &Ctx, env: &str) -> Result<()> {
+    let report = selftest(ctx, env, None)?;
+    if !report.ok {
+        ctx.rt.run(["stop", "-t", "2", &names::dev(env)]).ok();
+        bail!(
+            "isolation self-test FAILED — the dev container was stopped:\n{}\nrun `luoto doctor` for details",
+            report.render()
+        );
     }
-    Ok(env)
-}
-
-fn shell_quote(v: &str) -> String {
-    format!("'{}'", v.replace('\'', "'\\''"))
-}
-
-const RUNTIME_ENV_SUM: &str = "/run/luoto/env.sum";
-
-/// Fingerprint of what the runtime env should hold: variable names, placeholders and secret
-/// refs, never resolved values. Kept beside env.sh so `reapply` resolves secrets only when it
-/// has to rewrite, and a restarted container (empty tmpfs) never looks current.
-fn runtime_env_sum(p: &Plan) -> String {
-    let mut h = Sha256::new();
-    h.update(format!(
-        "{:?}{:?}{:?}{:?}",
-        p.compiled.dev_env, p.compiled.sandbox_refs, p.compiled.git_config, p.compiled.known_hosts
-    ));
-    hex::encode(h.finalize())
-}
-
-/// fish's single quotes: only `\\` and `\'` are escapes, and newlines are kept.
-fn fish_quote(v: &str) -> String {
-    format!("'{}'", v.replace('\\', "\\\\").replace('\'', "\\'"))
-}
-
-fn write_runtime_env(ctx: &Ctx, env: &str, p: &Plan) -> Result<()> {
-    // Git's remote rewrites and SSH's pinned host keys, which the system configs init.sh
-    // writes read from here.
-    for (path, text) in [
-        ("/run/luoto/gitconfig", &p.compiled.git_config),
-        ("/run/luoto/ssh_known_hosts", &p.compiled.known_hosts),
-    ] {
-        ctx.rt.run_stdin(
-            [
-                "exec",
-                "-i",
-                "-u",
-                "0",
-                &names::dev(env),
-                "sh",
-                "-c",
-                "umask 022; cat > \"$0\"",
-                path,
-            ],
-            text.as_bytes(),
-        )?;
-    }
-    let vars = runtime_env(ctx, p)?;
-    let mut script = String::from("# written by luoto (memory only)\n");
-    let mut fish = script.clone();
-    for (k, v) in &vars {
-        if k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-            script.push_str(&format!("export {k}={}\n", shell_quote(v)));
-            fish.push_str(&format!("set -gx {k} {}\n", fish_quote(v)));
-        }
-    }
-    ctx.rt.run_stdin(
-        [
-            "exec",
-            "-i",
-            "-u",
-            "0",
-            &names::dev(env),
-            "sh",
-            "-c",
-            "umask 022; cat > /run/luoto/env.fish",
-        ],
-        fish.as_bytes(),
-    )?;
-    ctx.rt.run_stdin(
-        [
-            "exec",
-            "-i",
-            "-u",
-            "0",
-            &names::dev(env),
-            "sh",
-            "-c",
-            "umask 022; cat > /run/luoto/env.sh && printf %s \"$1\" > \"$2\"",
-            "sh",
-            &runtime_env_sum(p),
-            RUNTIME_ENV_SUM,
-        ],
-        script.as_bytes(),
-    )?;
     Ok(())
 }
 
@@ -1044,13 +811,7 @@ pub fn stop_vm_if_unused(ctx: &Ctx) -> Result<bool> {
 
 pub fn down(ctx: &Ctx, env: &str) -> Result<()> {
     for c in [names::dev(env), names::gate(env)] {
-        if ctx.rt.container_state(&c).as_deref() == Some("running")
-            && let Err(e) = ctx.rt.run(["stop", "-t", "5", &c])
-            // gVisor: podman's network teardown can fail once the container has stopped.
-            && ctx.rt.container_state(&c).as_deref() == Some("running")
-        {
-            return Err(e);
-        }
+        ctx.rt.stop(&c)?;
     }
     Ok(())
 }
@@ -1072,49 +833,15 @@ pub fn remove(ctx: &Ctx, env: &str) -> Result<()> {
             ctx.rt.run(["volume", "rm", &name])?;
         }
     }
-    if ctx.rt.container_state(names::VAULT).as_deref() == Some("running") {
-        let _ = ctl::vault::<bool>(&ctx.rt, &VaultCtl::Unbind { env: env.into() });
+    if ctx.rt.is_running(names::VAULT) {
+        let _ = ctl::vault::<bool>(
+            &ctx.rt,
+            &luoto_shared::ctl::VaultCtl::Unbind { env: env.into() },
+        );
     }
     let state = ctx.paths.env_state(env);
     if state.exists() {
         std::fs::remove_dir_all(&state)?;
     }
     Ok(())
-}
-
-/// Recompile every env, re-register bindings and load all secrets (after a VM reboot).
-pub fn unlock_all(ctx: &Ctx) -> Result<usize> {
-    ensure_vault(ctx)?;
-    let mut n = 0;
-    for env in config::list_envs(&ctx.paths)? {
-        if EnvState::load(ctx, &env)?.is_none() {
-            continue;
-        }
-        let p = plan(ctx, &env)?;
-        sync_vault(ctx, &env, &p)?;
-        n += 1;
-    }
-    Ok(n)
-}
-
-pub fn status_line(ctx: &Ctx, env: &str) -> (String, String) {
-    let dev = ctx
-        .rt
-        .container_state(&names::dev(env))
-        .unwrap_or_else(|| "absent".into());
-    let gate = ctx
-        .rt
-        .container_state(&names::gate(env))
-        .unwrap_or_else(|| "absent".into());
-    (dev, gate)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fish_quoting_keeps_multi_line_values_and_quotes() {
-        assert_eq!(fish_quote("a'b\\c\nd"), "'a\\'b\\\\c\nd'");
-    }
 }

@@ -15,17 +15,22 @@ mod detect;
 mod env;
 mod events;
 mod idle;
+mod init;
 mod machine;
 mod names;
 mod paths;
 mod personal;
 mod ports;
 mod project;
+mod prompt;
 mod release;
+mod rules;
 mod runtime;
 mod secrets;
 mod setup;
 mod ssh;
+mod state;
+mod sync;
 mod text;
 mod ui;
 mod upgrade;
@@ -61,16 +66,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Detect the host, recommend/install a container runtime, prepare images.
-    Setup {
-        /// Install the recommended runtime with the platform package manager.
-        #[arg(long)]
-        install: bool,
-        /// Build luoto's images from this source tree instead of pulling them.
-        #[arg(long)]
-        build: bool,
-        #[arg(long, short)]
-        yes: bool,
-    },
+    Setup(setup::SetupOpts),
     /// Check the runtime, images, vault and every env's isolation.
     Doctor,
     /// Update luoto to the latest release.
@@ -85,42 +81,7 @@ enum Cmd {
         no_open: bool,
     },
     /// Create an env for a folder (default: the current one) and start it.
-    Init {
-        /// The project folder, copied into the env (default: `.`); created when missing.
-        dir: Option<String>,
-        /// Env name (default: the folder's name).
-        #[arg(long)]
-        name: Option<String>,
-        #[arg(long)]
-        image: Option<String>,
-        /// Egress presets (repeatable), replacing the defaults and the detected ones:
-        /// debian, github, toolchains, npm, pypi, crates, go, maven, gradle, vscode, docs, …
-        #[arg(long = "preset", add = ArgValueCandidates::new(complete::presets))]
-        presets: Vec<String>,
-        /// Default toolchain (repeatable), e.g. `--tool node=24`; the project's own version
-        /// files still win.
-        #[arg(long = "tool", value_name = "TOOL=VERSION")]
-        tools: Vec<String>,
-        /// Coding agents to set up (repeatable): claude, opencode, codex, copilot, agy.
-        #[arg(long = "agent", add = ArgValueCandidates::new(complete::agents))]
-        agents: Vec<String>,
-        /// Dev-server ports to publish on 127.0.0.1 (repeatable).
-        #[arg(long = "port")]
-        ports: Vec<u16>,
-        /// `gvisor` (default once `luoto setup` installed it): the env gets its own user-space
-        /// kernel. `container`: it shares the VM's kernel, with builds about 1.6× faster.
-        #[arg(long, value_enum)]
-        isolation: Option<config::Isolation>,
-        /// Only write the config.
-        #[arg(long)]
-        no_up: bool,
-        /// Create without asking; accepts the folder's luoto.toml (`--no-project` ignores it).
-        #[arg(long, short)]
-        yes: bool,
-        /// Ignore the folder's luoto.toml.
-        #[arg(long)]
-        no_project: bool,
-    },
+    Init(init::InitOpts),
     /// Create or update the env's containers from its config and start it.
     Up {
         #[arg(long)]
@@ -193,37 +154,7 @@ enum Cmd {
         yes: bool,
     },
     /// Allow egress to a host.
-    Allow {
-        host: String,
-        /// Any method (default: read-only GET/HEAD/OPTIONS).
-        #[arg(long)]
-        write: bool,
-        /// Specific methods instead of read/write (repeatable).
-        #[arg(long = "method")]
-        methods: Vec<String>,
-        /// Path globs (repeatable), e.g. `/serde/**`.
-        #[arg(long = "path")]
-        paths: Vec<String>,
-        /// Expire after a duration: 30m, 1h, 2d.
-        #[arg(long)]
-        ttl: Option<String>,
-        /// Opaque tunnel (no inspection) for certificate-pinning clients.
-        #[arg(long)]
-        tunnel: bool,
-        /// Allow websocket upgrades.
-        #[arg(long)]
-        ws: bool,
-        /// Allow private/host addresses (e.g. a service on your machine).
-        #[arg(long)]
-        private: bool,
-        #[arg(long)]
-        port: Option<u16>,
-        #[arg(long)]
-        note: Option<String>,
-        /// Accept risky rules (wildcards over shared domains, `*`, write) without asking.
-        #[arg(long)]
-        force: bool,
-    },
+    Allow(rules::AllowOpts),
     /// Remove rules by id or host.
     Revoke { rule: String },
     /// List access requests filed from inside envs (all envs unless one is picked).
@@ -339,47 +270,15 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
     let paths = paths::Paths::get()?;
     let env = || workspace::resolve(&paths, env_arg.as_deref());
     match cmd {
-        Cmd::Setup {
-            install,
-            build,
-            yes,
-        } => setup::setup(setup::SetupOpts {
-            install,
-            build,
-            yes,
-        }),
+        Cmd::Setup(o) => setup::setup(o),
         Cmd::Doctor => setup::doctor(),
         Cmd::Upgrade => upgrade::upgrade(),
         Cmd::Ui { port, no_open } => ui::serve(port, !no_open),
-        Cmd::Init {
-            dir,
-            name,
-            image,
-            presets,
-            tools,
-            agents,
-            ports,
-            isolation,
-            no_up,
-            yes,
-            no_project,
-        } => {
+        Cmd::Init(o) => {
             if env_arg.is_some() {
                 anyhow::bail!("`init` names the env with --name, not -e");
             }
-            c::init(c::InitOpts {
-                dir,
-                name,
-                image,
-                presets,
-                tools,
-                agents,
-                ports,
-                isolation,
-                no_up,
-                yes,
-                no_project,
-            })
+            init::init(o)
         }
         Cmd::Up {
             no_selftest,
@@ -389,7 +288,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             // A folder without an env: offer to set one up (init shows it and asks first).
             Err(_) if env_arg.is_none() && std::io::stdin().is_terminal() => {
                 println!("No env for this folder yet.\n");
-                c::init(c::InitOpts::default())
+                init::init(init::InitOpts::default())
             }
             Err(e) => Err(e),
         },
@@ -417,32 +316,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             include_git,
             yes,
         } => c::pull(&env()?, to.as_deref(), include_risky, include_git, yes),
-        Cmd::Allow {
-            host,
-            write,
-            methods,
-            paths: path_globs,
-            ttl,
-            tunnel,
-            ws,
-            private,
-            port,
-            note,
-            force,
-        } => c::allow(c::AllowOpts {
-            name: env()?,
-            host,
-            write,
-            methods,
-            paths: path_globs,
-            ttl,
-            tunnel,
-            ws,
-            private,
-            port,
-            note,
-            force,
-        }),
+        Cmd::Allow(o) => c::allow(&env()?, o),
         Cmd::Revoke { rule } => c::revoke(&env()?, &rule),
         Cmd::Requests => {
             // No env picked and none here: every env's requests.

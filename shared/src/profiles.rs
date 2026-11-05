@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use crate::policy::Rule;
+use crate::{embed, load};
 
 /// How a model API credential is injected by the gate.
 #[derive(Debug, Clone, Deserialize)]
@@ -167,12 +168,6 @@ pub struct EditorSetting {
     pub snippet: String,
 }
 
-macro_rules! embed {
-    ($dir:literal; $($name:literal),* $(,)?) => {
-        &[$(($name, include_str!(concat!("../", $dir, "/", $name, ".toml")))),*]
-    };
-}
-
 const PROVIDERS: &[(&str, &str)] = embed!("providers"; "anthropic", "openai", "openrouter", "gemini", "mistral", "groq", "copilot", "antigravity");
 const AGENTS: &[(&str, &str)] = embed!("agents"; "claude", "opencode", "codex", "copilot", "agy");
 const EDITORS: &[(&str, &str)] = embed!("editors"; "zed", "code", "cursor", "ssh");
@@ -183,10 +178,7 @@ pub fn editor_names() -> impl Iterator<Item = &'static str> {
 }
 
 pub fn editor(name: &str) -> Option<Editor> {
-    let (n, src) = EDITORS.iter().find(|(n, _)| *n == name)?;
-    let mut e: Editor = toml::from_str(src).expect("built-in editor parses");
-    e.name = (*n).to_string();
-    Some(e)
+    load(EDITORS, name, |e: &mut Editor| &mut e.name)
 }
 
 pub fn provider_names() -> impl Iterator<Item = &'static str> {
@@ -198,17 +190,11 @@ pub fn agent_names() -> impl Iterator<Item = &'static str> {
 }
 
 pub fn provider(name: &str) -> Option<Provider> {
-    let (n, src) = PROVIDERS.iter().find(|(n, _)| *n == name)?;
-    let mut p: Provider = toml::from_str(src).expect("built-in provider parses");
-    p.name = (*n).to_string();
-    Some(p)
+    load(PROVIDERS, name, |p: &mut Provider| &mut p.name)
 }
 
 pub fn agent(name: &str) -> Option<Agent> {
-    let (n, src) = AGENTS.iter().find(|(n, _)| *n == name)?;
-    let mut a: Agent = toml::from_str(src).expect("built-in agent parses");
-    a.name = (*n).to_string();
-    Some(a)
+    load(AGENTS, name, |a: &mut Agent| &mut a.name)
 }
 
 #[cfg(test)]

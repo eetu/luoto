@@ -28,38 +28,22 @@ pub enum DialError {
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub async fn resolve_vetted(
-    state: &State,
-    host: &str,
-    port: u16,
-    allow_private: bool,
-) -> Result<Vec<SocketAddr>, DialError> {
+/// A local test server of the integration tests (`test-hooks` builds only): dialed at its
+/// mapped address without the private-address check, and given credentials over plain HTTP.
+/// Release builds have none.
+pub fn test_server(state: &State, host: &str) -> Option<SocketAddr> {
     #[cfg(feature = "test-hooks")]
-    if let Some((_, addr)) = state.cfg.test_resolve.iter().find(|(h, _)| h == host) {
-        return Ok(vec![*addr]);
-    }
+    return state
+        .cfg
+        .test_resolve
+        .iter()
+        .find(|(h, _)| h == host)
+        .map(|(_, addr)| *addr);
     #[cfg(not(feature = "test-hooks"))]
-    let _ = state;
-
-    let addrs: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
-        vec![SocketAddr::new(ip, port)]
-    } else {
-        tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, port)))
-            .await
-            .map_err(|_| DialError::Failed(format!("DNS lookup for {host} timed out")))?
-            .map_err(|e| DialError::Failed(format!("DNS lookup for {host} failed: {e}")))?
-            .collect()
-    };
-    if addrs.is_empty() {
-        return Err(DialError::Failed(format!("{host} has no addresses")));
+    {
+        let _ = (state, host);
+        None
     }
-    // Any private record taints the name: mixed answers are a rebinding trick.
-    if !allow_private && addrs.iter().any(|a| is_private(a.ip())) {
-        return Err(DialError::Denied(DenyReason::PrivateAddress));
-    }
-    let mut addrs = addrs;
-    addrs.sort_by_key(|a| a.is_ipv6());
-    Ok(addrs)
 }
 
 pub async fn dial_tcp(
@@ -68,7 +52,27 @@ pub async fn dial_tcp(
     port: u16,
     allow_private: bool,
 ) -> Result<TcpStream, DialError> {
-    let mut addrs = resolve_vetted(state, host, port, allow_private).await?;
+    let mut addrs: Vec<SocketAddr> = if let Some(addr) = test_server(state, host) {
+        vec![addr]
+    } else {
+        let addrs: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
+            vec![SocketAddr::new(ip, port)]
+        } else {
+            tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, port)))
+                .await
+                .map_err(|_| DialError::Failed(format!("DNS lookup for {host} timed out")))?
+                .map_err(|e| DialError::Failed(format!("DNS lookup for {host} failed: {e}")))?
+                .collect()
+        };
+        if addrs.is_empty() {
+            return Err(DialError::Failed(format!("{host} has no addresses")));
+        }
+        // Any private record taints the name: mixed answers are a rebinding trick.
+        if !allow_private && addrs.iter().any(|a| is_private(a.ip())) {
+            return Err(DialError::Denied(DenyReason::PrivateAddress));
+        }
+        addrs
+    };
     // IPv4 first: many networks (CI runners among them) have no IPv6 route, and each address
     // that can't connect costs a timeout.
     addrs.sort_by_key(|a| a.is_ipv6());
