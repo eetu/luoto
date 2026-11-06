@@ -98,6 +98,7 @@ pub fn compile(
         for (i, r) in p.rules.into_iter().enumerate() {
             b.rule(format!("{name}-{i}"), &format!("preset:{name}"), r);
         }
+        b.dev_env.extend(p.env);
     }
 
     for name in &cfg.agents {

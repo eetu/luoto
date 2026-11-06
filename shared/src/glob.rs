@@ -47,8 +47,17 @@ pub fn glob_match_any_case(pattern: &str, path: &str) -> bool {
     glob_match(&pattern.to_ascii_lowercase(), &path.to_ascii_lowercase())
 }
 
-/// Whole-path match of `path` (no query string) against `pattern`.
+/// Whole-path match of `path` (no query string) against `pattern`. A pattern ending in `/**`
+/// also matches the path it is under (`/serde/**` matches `/serde`): registries serve a
+/// package's metadata there and its files below, and a rule for one is meant for both.
 pub fn glob_match(pattern: &str, path: &str) -> bool {
+    pattern
+        .strip_suffix("/**")
+        .is_some_and(|dir| !dir.is_empty() && dp_match(dir, path))
+        || dp_match(pattern, path)
+}
+
+fn dp_match(pattern: &str, path: &str) -> bool {
     let toks = tokenize(pattern);
     let s = path.as_bytes();
     // prev[j]: tokens[..i] match s[..j]
@@ -101,6 +110,19 @@ mod tests {
             "/eetu/foo.git/git-upload-pack"
         ));
         assert!(glob_match("**", "/anything/at/all"));
+    }
+
+    #[test]
+    fn a_trailing_double_star_covers_its_directory() {
+        assert!(glob_match("/basedpyright/**", "/basedpyright"));
+        assert!(glob_match(
+            "/basedpyright/**",
+            "/basedpyright/-/basedpyright-1.0.0.tgz"
+        ));
+        assert!(!glob_match("/basedpyright/**", "/basedpyright-x"));
+        assert!(!glob_match("/basedpyright/**", "/based"));
+        assert!(glob_match("/repos/*/**", "/repos/eetu"));
+        assert!(!glob_match("/**", ""));
     }
 
     #[test]

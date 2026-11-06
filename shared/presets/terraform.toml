@@ -1,0 +1,7 @@
+description = "Terraform provider and module registry (read-only); providers download from releases.hashicorp.com and GitHub releases, which toolchains opens"
+tools = ["terraform"]
+# Its update and telemetry check (checkpoint-api.hashicorp.com) stays denied; this stops the tries.
+env = { CHECKPOINT_DISABLE = "1" }
+
+[[rule]]
+host = "registry.terraform.io"

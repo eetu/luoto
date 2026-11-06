@@ -213,6 +213,7 @@ dir = "/Users/me/dev/web"     # the project folder, copied in on the first `up`
 
 [[allow]]
 host = "docs.rs"
+paths = ["/serde/**"]         # /serde and below; `*` stays within one path segment
 expires = "2026-12-01T00:00:00Z"
 
 [credentials.github]          # a GitHub App: tokens minted per env, scoped to these repos
@@ -288,6 +289,12 @@ The project chooses its toolchains, as it would on your machine: luoto runs
 yarn and pnpm). Anything in mise's registry or an asdf/vfox plugin installs: node, python,
 java, go, rust, php, ruby, terraform, ….
 
+Terraform and OpenTofu are found by `.terraform-version`, `.opentofu-version`, `main.tf`,
+`versions.tf`, `terraform.tf` (or `main.tofu`, `versions.tofu`) and `.terraform.lock.hcl`,
+whose providers' registry tells the two apart; an exact `required_version` sets the version.
+Their presets (`terraform`, `opentofu`) open the provider and module registry. Cloud credentials for `plan` and `apply` aren't handled yet
+([ROADMAP.md](ROADMAP.md)).
+
 - `luoto init` reads the folder first and shows what it found (toolchains with the file that
   pins each, presets for the registries it uses) before creating anything. It looks three
   levels into subfolders (a monorepo's `frontend/` and `backend/`), skipping ignored,
@@ -317,8 +324,8 @@ No runtime is baked into luoto-base. `npm i -g` and `pipx` install into `~/.loca
 persists with the home volume, as do mise's toolchains.
 
 Verified by hand, from `luoto init` to a build or test run in the env: npm, Yarn 1 and 4, pnpm,
-pip, uv, Poetry, Cargo, Go, Java (pyspark with `--tool java=21`) and a Rust + Yarn + uv
-monorepo. Other toolchains mise installs are untested ([ROADMAP.md](ROADMAP.md)).
+pip, uv, Poetry, Cargo, Go, Java (pyspark with `--tool java=21`), Terraform and OpenTofu
+(`init` and `plan`), and a Rust + Yarn + uv monorepo. Other toolchains mise installs are untested ([ROADMAP.md](ROADMAP.md)).
 
 ## Team settings: `luoto.toml`
 
@@ -498,9 +505,10 @@ carries checksums and build provenance (`gh attestation verify <file> --repo eet
 container images are signed and pinned by digest in the binary.
 
 `luoto upgrade` updates a script or tarball install (Homebrew: `brew upgrade luoto`, Scoop:
-`scoop update luoto`); `luoto doctor` says when a newer release is out. After an update,
-`luoto setup` gets its images and `luoto up --recreate` moves an env onto them, keeping its
-volumes. What each release changed is in [CHANGELOG.md](CHANGELOG.md).
+`scoop update luoto`); `luoto doctor` says when a newer release is out. After an update, the
+next `luoto up` pulls the release's images, showing progress, and moves the env's gate and
+the vault onto them; `luoto up --recreate` moves its dev container too, keeping its volumes.
+What each release changed is in [CHANGELOG.md](CHANGELOG.md).
 
 A source build runs as `luoto-dev`, beside a release in the same VM: its config is in
 `~/.config/luoto-dev`, its envs' containers are `luoto-dev-<env>`, it has a vault of its own,

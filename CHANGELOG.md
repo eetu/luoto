@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.2 (2026-11-06)
+
+- **Image pulls:** `up` and `init` pull every missing image themselves (after an upgrade, all
+  of luoto's), naming each and showing the runtime's progress, where a slow pull looked hung
+  and luoto's own images waited for `luoto setup`.
+- **Terraform and OpenTofu:** `luoto init` finds them by their version files, module
+  files (`main.tf`, `versions.tf`, their `.tofu` forms) and the lock file (whose providers' registry tells the two apart), sets the
+  version an exact `required_version` names, and adds the `terraform` or `opentofu` preset for
+  the provider and module registry. Terraform's update check is off (`CHECKPOINT_DISABLE`).
+- **Presets set environment:** a preset's `env` reaches the env's shells, as an agent's does.
+- **Path rules:** a path ending in `/**` also covers the path it is under, so `/basedpyright/**`
+  (as the UI offers it) allows the package's metadata at `/basedpyright` as well as its files.
+  It widens the same way in deny rules and where credentials go.
+
 ## 0.2.1 (2026-11-05)
 
 - **Homebrew tap:** luoto is in `eetu/tap` now. `brew install eetu/tap/luoto` installs it and

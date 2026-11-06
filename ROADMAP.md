@@ -64,12 +64,6 @@ port 22. Left for later:
 
 ## Toolchains and agents
 
-- **Terraform and OpenTofu.** mise installs Terraform from `.terraform-version`; missing are
-  presets for their registries (`registry.terraform.io`, `registry.opentofu.org`; providers
-  come from `releases.hashicorp.com` and GitHub releases, which `toolchains` opens), OpenTofu's
-  `.opentofu-version`, and projects with only `.tf` files: `.terraform.lock.hcl` names the tool
-  by its providers' registry, and an exact `required_version` pins it. Terraform's update check
-  stays denied (`CHECKPOINT_DISABLE=1`). Verified with `init` and a `plan` in an env.
 - **More ecosystems verified.** mise installs them from their version files and presets exist
   for Maven, Gradle, RubyGems and Composer, but none has been run end to end: Java builds
   (Maven, Gradle), Ruby (Bundler), PHP (Composer), bun, deno, pipenv, pdm, hatch, conda, .NET.

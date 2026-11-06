@@ -1,0 +1,5 @@
+description = "OpenTofu provider and module registry (read-only); providers download from GitHub releases, which toolchains opens"
+tools = ["opentofu"]
+
+[[rule]]
+host = "registry.opentofu.org"

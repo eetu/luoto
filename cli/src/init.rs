@@ -198,10 +198,7 @@ fn print_proposal(p: &Proposal) {
                 .iter()
                 .find(|t| &t.tool == k && t.version == v)
             {
-                Some(t) => format!(
-                    "default: {} pins no version",
-                    crate::text::display(&t.source)
-                ),
+                Some(t) => format!("default, from {}", crate::text::display(&t.source)),
                 None => "--tool".into(),
             };
             tools.push(format!("{k} {v} ({why})"));
@@ -517,7 +514,7 @@ pub fn offer(
     }
     for t in &tools {
         println!(
-            "  toolchain + {} {} (default: {} pins no version)",
+            "  toolchain + {} {} (default, from {})",
             t.tool,
             t.version,
             crate::text::display(&t.source)

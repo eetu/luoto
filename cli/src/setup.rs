@@ -431,10 +431,7 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
             println!("\nimages present; `luoto setup --build` rebuilds them from source");
         } else if release::pinned() && global.images.is_none() {
             for r in missing {
-                println!("pulling {r} …");
-                if !rt.interactive(["pull", r.as_str()])?.success() {
-                    bail!("pulling {r} failed");
-                }
+                rt.pull(r)?;
             }
         } else if source_root().is_some() {
             build_images(&rt, global.images.as_deref().unwrap_or("dev"))?;
