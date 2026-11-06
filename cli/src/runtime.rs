@@ -289,6 +289,16 @@ impl Runtime {
         Ok(self.command().args(args).status()?)
     }
 
+    /// Pull `image` with the runtime's own progress on the terminal: a first pull can take
+    /// minutes on a slow network, and a silent one looks hung.
+    pub fn pull(&self, image: &str) -> Result<()> {
+        eprintln!("pulling {image} …");
+        if !self.interactive(["pull", image])?.success() {
+            bail!("pulling {image} failed");
+        }
+        Ok(())
+    }
+
     pub fn version(&self) -> Result<String> {
         Ok(self.run(["--version"])?.trim().to_string())
     }

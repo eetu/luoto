@@ -93,7 +93,8 @@ struct ImageIds {
     dev: String,
 }
 
-/// luoto's images (from `luoto setup`) and the env's own `dev` image, pulled if missing.
+/// luoto's images and the env's own `dev` image, each pulled (with progress) when missing, as
+/// after an upgrade. A local image (`localhost/…`, a source build's) can't be pulled.
 fn ensure_images(ctx: &Ctx, dev: &str) -> Result<ImageIds> {
     let all = [
         ctx.image("gate"),
@@ -105,15 +106,11 @@ fn ensure_images(ctx: &Ctx, dev: &str) -> Result<ImageIds> {
     let ids = match image_ids(&ctx.rt, &all) {
         Some(ids) => ids,
         None => {
-            let missing: Vec<&str> = all
-                .iter()
-                .filter(|img| {
-                    !ctx.rt.image_exists(img) && (*img != dev || ctx.rt.run(["pull", dev]).is_err())
-                })
-                .map(String::as_str)
-                .collect();
-            if !missing.is_empty() {
-                bail!("missing images: {} — run `luoto setup`", missing.join(", "));
+            for img in all.iter().filter(|img| !ctx.rt.image_exists(img)) {
+                if img.starts_with("localhost/") {
+                    bail!("missing image {img}: a local image (`luoto setup` builds luoto's own)");
+                }
+                ctx.rt.pull(img)?;
             }
             image_ids(&ctx.rt, &all).context("inspect the env's images")?
         }
