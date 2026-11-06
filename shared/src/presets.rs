@@ -19,6 +19,10 @@ pub struct Preset {
     pub tools: Vec<String>,
     #[serde(default, rename = "rule")]
     pub rules: Vec<Rule>,
+    /// Environment for the env's shells, as agents set theirs: what turns a tool's update
+    /// checks and telemetry off.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 impl Preset {
@@ -50,6 +54,8 @@ const PRESETS: &[(&str, &str)] = crate::embed!(
     "gradle",
     "rubygems",
     "composer",
+    "terraform",
+    "opentofu",
 );
 
 pub fn names() -> impl Iterator<Item = &'static str> {

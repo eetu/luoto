@@ -103,6 +103,18 @@ const OTHER_PINS: &[&str] = &[
     "Gemfile",
 ];
 
+/// Files that mark a Terraform or OpenTofu module; detection reads them for the tool and its
+/// `required_version`.
+const TF_FILES: &[&str] = &[
+    ".terraform.lock.hcl",
+    ".opentofu-version",
+    "versions.tf",
+    "terraform.tf",
+    "main.tf",
+    "versions.tofu",
+    "main.tofu",
+];
+
 /// Task runners a project drives through a file of theirs: (file, tool). The env gets the
 /// latest unless a version file pins one.
 const RUNNERS: &[(&str, &str)] = &[
@@ -141,6 +153,8 @@ const UNPINNED: &[(&str, &str, &str)] = &[
 pub fn preset_for(tool: &str) -> Option<&'static str> {
     match tool {
         "go" => Some("go"),
+        "terraform" => Some("terraform"),
+        "opentofu" => Some("opentofu"),
         _ => UNPINNED
             .iter()
             .find(|(_, t, _)| *t == tool)
@@ -164,6 +178,7 @@ pub fn read_paths(files: &[String]) -> Vec<String> {
     names.extend(OTHER_PINS);
     // What `MANAGERS` reads: pyproject's `[tool.*]` tables and yarn.lock's version.
     names.extend(["pyproject.toml", "yarn.lock"]);
+    names.extend(TF_FILES);
     let listed: HashSet<&str> = files.iter().map(String::as_str).collect();
     pin_dirs(files.iter().map(String::as_str))
         .iter()
@@ -238,6 +253,7 @@ pub fn pin_dirs<'a>(files: impl Iterator<Item = &'a str>) -> BTreeSet<String> {
     names.extend(MISE_CONFIGS.iter().filter(|f| !f.contains('/')));
     names.extend(RUNNERS.iter().map(|(f, _)| *f));
     names.extend(MANAGERS.iter().map(|(f, _, _)| *f));
+    names.extend(TF_FILES);
     let presets = presets::all();
     names.extend(
         presets
@@ -459,6 +475,8 @@ fn detect_in(tree: &Listed, listed: &HashSet<&str>, rel: &str, d: &mut Detected)
         }
     }
 
+    terraform(&read, &has, &source, d);
+
     for t in here {
         if !d
             .tools
@@ -483,6 +501,88 @@ fn detect_in(tree: &Listed, listed: &HashSet<&str>, rel: &str, d: &mut Detected)
         {
             d.presets.push((p.name.clone(), source(f)));
         }
+    }
+}
+
+/// Terraform or OpenTofu: the lock file names the tool by its providers' registry, and
+/// `.opentofu-version` or a `.tofu` file means OpenTofu. Its version (OpenTofu's version file,
+/// else an exact `required_version`, else the latest) is a default, as mise reads neither;
+/// `.terraform-version`, which it does read, pins over it.
+fn terraform<'a>(
+    read: &impl Fn(&str) -> Option<&'a str>,
+    has: &impl Fn(&str) -> bool,
+    source: &impl Fn(&str) -> String,
+    d: &mut Detected,
+) {
+    let Some(marker) = std::iter::once(&".terraform-version")
+        .chain(TF_FILES)
+        .find(|f| has(f))
+    else {
+        return;
+    };
+    let tofu = has(".opentofu-version")
+        || TF_FILES.iter().any(|f| f.ends_with(".tofu") && has(f))
+        || read(".terraform.lock.hcl").is_some_and(|l| l.contains("\"registry.opentofu.org/"));
+    let tool = if tofu { "opentofu" } else { "terraform" };
+    let from_file = tofu
+        .then(|| read(".opentofu-version"))
+        .flatten()
+        .and_then(|s| {
+            s.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with('#'))
+        })
+        .filter(|v| {
+            v.len() <= 32
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        })
+        .map(|v| (v.to_string(), ".opentofu-version"));
+    let (version, file) = from_file
+        .or_else(|| {
+            [
+                "versions.tf",
+                "terraform.tf",
+                "main.tf",
+                "versions.tofu",
+                "main.tofu",
+            ]
+            .into_iter()
+            .find_map(|f| read(f).and_then(required_version).map(|v| (v, f)))
+        })
+        .unwrap_or_else(|| ("latest".into(), marker));
+    if !d.defaults.iter().any(|t| t.tool == tool) {
+        d.defaults.push(ToolPin {
+            tool: tool.into(),
+            version,
+            source: source(file),
+        });
+    }
+    if !d.presets.iter().any(|(n, _)| n == tool) {
+        d.presets.push((tool.into(), source(marker)));
+    }
+}
+
+/// The version an exact or patch-level `required_version` names (`1.9.5`, `= 1.9.5`,
+/// `~> 1.9.0` as `1.9`); `None` for a range, which leaves the latest.
+fn required_version(text: &str) -> Option<String> {
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("required_version"))?;
+    let quoted = line.split_once('=')?.1.trim().strip_prefix('"')?;
+    let value = quoted.split('"').next()?.trim();
+    let (exact, v) = match value.strip_prefix("~>") {
+        Some(v) => (false, v.trim()),
+        None => (true, value.strip_prefix('=').unwrap_or(value).trim()),
+    };
+    let parts: Vec<&str> = v.split('.').collect();
+    let numbers = parts
+        .iter()
+        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    match (numbers, parts.len(), exact) {
+        (true, 3, true) => Some(v.to_string()),
+        (true, 3, false) => Some(parts[..2].join(".")),
+        _ => None,
     }
 }
 
@@ -731,5 +831,79 @@ mod tests {
                 ("python", "shim/pyproject.toml")
             ]
         );
+    }
+
+    /// The Terraform or OpenTofu default and preset detection proposes for `files`.
+    fn infra(files: &[(&str, &str)]) -> (Vec<(String, String, String)>, Vec<String>) {
+        let d = tempfile::tempdir().unwrap();
+        for (f, s) in files {
+            let p = d.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, s).unwrap();
+        }
+        let r = detect(d.path());
+        let tools = r
+            .defaults
+            .into_iter()
+            .chain(r.tools)
+            .filter(|t| t.tool == "terraform" || t.tool == "opentofu")
+            .map(|t| (t.tool, t.version, t.source))
+            .collect();
+        let presets = r
+            .presets
+            .into_iter()
+            .map(|(p, _)| p)
+            .filter(|p| p == "terraform" || p == "opentofu")
+            .collect();
+        (tools, presets)
+    }
+
+    #[test]
+    fn the_lock_file_names_terraform_or_opentofu() {
+        let lock = |registry: &str| {
+            format!("provider \"{registry}/hashicorp/random\" {{\n  version = \"3.6.3\"\n}}\n")
+        };
+        let tf = lock("registry.terraform.io");
+        assert_eq!(
+            infra(&[("infra/.terraform.lock.hcl", &tf), ("infra/main.tf", "")]),
+            (
+                vec![pin("terraform", "latest", "infra/.terraform.lock.hcl")],
+                vec!["terraform".into()]
+            )
+        );
+        let tofu = lock("registry.opentofu.org");
+        assert_eq!(
+            infra(&[(".terraform.lock.hcl", &tofu)]),
+            (
+                vec![pin("opentofu", "latest", ".terraform.lock.hcl")],
+                vec!["opentofu".into()]
+            )
+        );
+        assert_eq!(infra(&[("main.tofu", "")]).1, ["opentofu"]);
+    }
+
+    #[test]
+    fn an_exact_required_version_or_a_version_file_sets_the_version() {
+        let versions = |c: &str| format!("terraform {{\n  required_version = \"{c}\"\n}}\n");
+        for (constraint, version) in [
+            ("1.9.5", "1.9.5"),
+            ("= 1.9.5", "1.9.5"),
+            ("~> 1.9.0", "1.9"),
+            ("~> 1.9", "latest"),
+            (">= 1.5, < 2.0", "latest"),
+        ] {
+            let (tools, _) = infra(&[("versions.tf", &versions(constraint))]);
+            assert_eq!(tools[0].1, version, "{constraint}");
+        }
+        // OpenTofu's version file, which mise doesn't read, is the default's version.
+        let (tools, _) = infra(&[(".opentofu-version", "1.10.6\n"), ("main.tf", "")]);
+        assert_eq!(tools, [pin("opentofu", "1.10.6", ".opentofu-version")]);
+        // A version file mise reads pins, and no default competes with it.
+        let (tools, presets) = infra(&[(".terraform-version", "1.9.8\n"), ("main.tf", "")]);
+        assert_eq!(tools, [pin("terraform", "1.9.8", ".terraform-version")]);
+        assert_eq!(presets, ["terraform"]);
+        // Text that isn't a version stays out of the proposal.
+        let (tools, _) = infra(&[(".opentofu-version", "\u{1b}[2J1.0\n")]);
+        assert_eq!(tools, [pin("opentofu", "latest", ".opentofu-version")]);
     }
 }
