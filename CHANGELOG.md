@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.2 (unreleased)
+## 0.2.2 (2026-11-06)
 
 - **Image pulls:** `up` and `init` pull every missing image themselves (after an upgrade, all
   of luoto's), naming each and showing the runtime's progress, where a slow pull looked hung
