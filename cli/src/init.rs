@@ -642,72 +642,6 @@ pub fn origin_url(dir: &Path) -> Option<String> {
     None
 }
 
-/// `owner/repo` of a GitHub remote URL, HTTPS or SSH.
-fn github_repo(url: &str) -> Option<String> {
-    let path = url
-        .strip_prefix("https://github.com/")
-        .or_else(|| url.strip_prefix("git@github.com:"))
-        .or_else(|| url.strip_prefix("ssh://git@github.com/"))?;
-    let repo = path.trim_end_matches('/').trim_end_matches(".git");
-    (repo.split('/').count() == 2).then(|| repo.to_string())
-}
-
-/// `ssh://…` or scp-like `user@host:path`.
-fn is_ssh_url(url: &str) -> bool {
-    url.starts_with("ssh://") || (!url.contains("://") && url.contains(':'))
-}
-
-/// After `init`: the credential that lets the env fetch and push `origin`, in the form its URL
-/// uses, unless the env has one that would. An SSH remote stays SSH with `[credentials.ssh]`;
-/// with only the forge's HTTPS credential it goes to HTTPS, which works too.
-fn credential_hint(name: &str, url: &str, creds: &config::Credentials) -> Option<String> {
-    let (has, table, host, repo, token) = if let Some(repo) = github_repo(url) {
-        (
-            creds.github.is_some(),
-            "github",
-            "github.com",
-            crate::text::display(&repo),
-            "fine-grained PAT, or app_id + installation_id + private_key",
-        )
-    } else {
-        let (r, _) = crate::azure::parse_url(url)?;
-        let repo = format!(
-            "{}/{}/{}",
-            crate::text::display(&r.org),
-            crate::text::display(&crate::azure::decode(&r.project)),
-            crate::text::display(&crate::azure::decode(&r.name))
-        );
-        (
-            creds.azure_devops.is_some(),
-            "azure_devops",
-            "ssh.dev.azure.com",
-            repo,
-            "PAT with Code (Read & write)",
-        )
-    };
-    if has {
-        return None;
-    }
-    let edit = format!("`luoto edit -e {name}`");
-    if is_ssh_url(url) {
-        return creds.ssh.is_none().then(|| {
-            format!(
-                "To fetch and push {repo} over SSH, give the env a key ({edit}); the vault keeps it:\n\n  \
-                 [credentials.ssh]\n  \
-                 key = \"op://<vault>/<item>/private key?ssh-format=openssh\"   # a deploy key reaches only this repo\n  \
-                 hosts = [\"{host}\"]\n\n\
-                 luoto can't limit an SSH key to repos; [credentials.{table}] over HTTPS can."
-            )
-        });
-    }
-    Some(format!(
-        "To fetch and push {repo} from the env, give it a credential ({edit}):\n\n  \
-         [credentials.{table}]\n  \
-         token = \"op://<vault>/<item>/<field>\"   # {token}\n  \
-         repos = [\"{repo}\"]"
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,28 +656,7 @@ mod tests {
         )
         .unwrap();
         let url = origin_url(dir.path()).unwrap();
-        assert_eq!(github_repo(&url).as_deref(), Some("Eetu/luoto"));
-    }
-
-    #[test]
-    fn credential_hint_follows_the_remote_form() {
-        let none = config::Credentials::default();
-        let https = credential_hint("e", "https://github.com/o/r.git", &none).unwrap();
-        assert!(https.contains("[credentials.github]") && https.contains("repos = [\"o/r\"]"));
-        let ssh = credential_hint("e", "git@github.com:o/r.git", &none).unwrap();
-        assert!(ssh.contains("[credentials.ssh]") && ssh.contains("hosts = [\"github.com\"]"));
-        let ado = credential_hint("e", "git@ssh.dev.azure.com:v3/org/P/r", &none).unwrap();
-        assert!(ado.contains("hosts = [\"ssh.dev.azure.com\"]"));
-        assert!(credential_hint("e", "https://gitlab.com/o/r", &none).is_none());
-
-        // An HTTPS credential covers an SSH remote too (luoto sends it over HTTPS).
-        let github: config::Credentials =
-            toml::from_str("[github]\ntoken = \"env:T\"\nrepos = [\"o/r\"]").unwrap();
-        assert!(credential_hint("e", "git@github.com:o/r.git", &github).is_none());
-        let key: config::Credentials =
-            toml::from_str("[ssh]\nkey = \"env:K\"\nhosts = [\"github.com\"]").unwrap();
-        assert!(credential_hint("e", "git@github.com:o/r.git", &key).is_none());
-        assert!(credential_hint("e", "https://github.com/o/r", &key).is_some());
+        assert_eq!(repos::github_repo(&url).as_deref(), Some("Eetu/luoto"));
     }
 
     #[test]

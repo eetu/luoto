@@ -15,6 +15,13 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   `.git`, `.envrc` or `.vscode` is held back like the top folder's.
 - **Detection** (`luoto init`, toolchain installs on `up`) reads the repositories in the
   folder, which git in the folder doesn't list.
+- **Read-only repos:** `read_repos` in `[credentials.github]` and `[credentials.azure_devops]`
+  are fetched and read through the gate, never pushed to or written; a GitHub App mints a
+  read-only token for them.
+- **A GitHub credential per owner:** `[[credentials.github]]`, once per account. Each repo's
+  requests get the credential that lists it, GraphQL the first one's. A single
+  `[credentials.github]` stays as it is; a token that reaches several owners is one credential
+  listing all their repos, and `up` offers a reference the config has before asking for another.
 - **Copies follow `.gitignore`:** from a git repository (the folder, a repo, or one inside),
   `up` copies what git doesn't ignore plus `.git`, so ignored secrets (`.env`, `*.tfvars`, state
   files, `.kube/`) stay on your machine. Other folders copy as before, now without

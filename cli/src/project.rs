@@ -443,7 +443,7 @@ fn diff(old: &ProjectConfig, new: &ProjectConfig) -> Vec<String> {
 /// Config snippets for credentials the project needs and the env lacks.
 pub fn missing_needs(p: &ProjectConfig, cfg: &EnvConfig) -> Vec<String> {
     let mut out = Vec::new();
-    if !p.needs.github.is_empty() && cfg.credentials.github.is_none() {
+    if !p.needs.github.is_empty() && cfg.credentials.github.is_empty() {
         out.push(format!(
             "[credentials.github]\ntoken = \"op://<vault>/<item>/<field>\"   # or app_id + installation_id + private_key\nrepos = [{}]",
             p.needs

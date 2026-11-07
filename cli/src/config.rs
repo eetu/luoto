@@ -159,9 +159,13 @@ pub struct GithubCred {
     /// Ref to a fine-grained PAT, instead of an App.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    /// `owner/repo` the env may write to.
+    /// `owner/repo` the env may read and write: push (protected branches refused) and pull
+    /// requests.
     #[serde(default)]
     pub repos: Vec<String>,
+    /// `owner/repo` the env may only fetch and read (a private one needs it here).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_repos: Vec<String>,
     #[serde(default)]
     pub permissions: BTreeMap<String, String>,
     #[serde(default = "default_protected")]
@@ -238,10 +242,70 @@ fn default_format() -> String {
     "Bearer {secret}".into()
 }
 
+/// `[credentials.github]`, or `[[credentials.github]]` once per account: a token or an App
+/// installation reaches one owner's repos.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GithubCreds(pub Vec<GithubCred>);
+
+impl GithubCreds {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Whether one of them lists `owner/repo`, to write (`write`) or at all.
+    pub fn covers(&self, repo: &str, write: bool) -> bool {
+        self.0.iter().any(|c| {
+            c.repos
+                .iter()
+                .chain(c.read_repos.iter().filter(|_| !write))
+                .any(|r| r.eq_ignore_ascii_case(repo))
+        })
+    }
+}
+
+impl Serialize for GithubCreds {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self.0.as_slice() {
+            [one] => one.serialize(s),
+            many => many.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GithubCreds {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::value::{MapAccessDeserializer, SeqAccessDeserializer};
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = GithubCreds;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a [credentials.github] table, or [[credentials.github]] tables")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                m: A,
+            ) -> Result<GithubCreds, A::Error> {
+                Ok(GithubCreds(vec![GithubCred::deserialize(
+                    MapAccessDeserializer::new(m),
+                )?]))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                s: A,
+            ) -> Result<GithubCreds, A::Error> {
+                Ok(GithubCreds(Vec::deserialize(SeqAccessDeserializer::new(
+                    s,
+                ))?))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Credentials {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub github: Option<GithubCred>,
+    #[serde(default, skip_serializing_if = "GithubCreds::is_empty")]
+    pub github: GithubCreds,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure_devops: Option<AzureDevopsCred>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -720,12 +784,7 @@ oauth_token = "op://Private/claude/token"
         std::fs::write(&path, SAMPLE).unwrap();
         let mut f = EnvFile::parse(path.clone(), SAMPLE).unwrap();
         assert_eq!(
-            f.cfg
-                .credentials
-                .github
-                .as_ref()
-                .unwrap()
-                .protected_branches,
+            f.cfg.credentials.github.0[0].protected_branches,
             vec!["main", "master"]
         );
         assert_eq!(
@@ -803,6 +862,34 @@ oauth_token = "op://Private/claude/token"
             !std::fs::read_to_string(&path)
                 .unwrap()
                 .contains("workspace.repos")
+        );
+    }
+
+    #[test]
+    fn github_credentials_are_one_table_or_several() {
+        let one: EnvConfig =
+            toml::from_str("[credentials.github]\ntoken = \"env:T\"\nrepos = [\"o/r\"]\n").unwrap();
+        assert_eq!(one.credentials.github.0.len(), 1);
+        let two: EnvConfig = toml::from_str(
+            "[[credentials.github]]\ntoken = \"env:A\"\nrepos = [\"a/r\"]\n[[credentials.github]]\ntoken = \"env:B\"\nread_repos = [\"b/r\"]\n",
+        )
+        .unwrap();
+        assert!(two.credentials.github.covers("B/R", false));
+        assert!(!two.credentials.github.covers("b/r", true));
+        let typo = toml::from_str::<EnvConfig>(
+            "[credentials.github]\ntoken = \"env:T\"\nrepo = [\"o/r\"]\n",
+        );
+        assert!(typo.unwrap_err().to_string().contains("repo"));
+        // Written back in the form it was read.
+        assert!(
+            toml::to_string(&one)
+                .unwrap()
+                .contains("[credentials.github]")
+        );
+        assert!(
+            toml::to_string(&two)
+                .unwrap()
+                .contains("[[credentials.github]]")
         );
     }
 

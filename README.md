@@ -221,13 +221,15 @@ expires = "2026-12-01T00:00:00Z"
 app_id = "123456"             # (or `token = "<ref>"` for a fine-grained token)
 installation_id = 7890123
 private_key = "op://Dev/luoto-github-app/private key"
-repos = ["owner/repo"]
+repos = ["owner/repo"]        # read and write: pushes, pull requests
+read_repos = ["owner/lib"]    # fetched and read only (an App mints a read-only token for them)
 permissions = { contents = "write", pull_requests = "write" }
 protected_branches = ["main"]
 
 [credentials.azure_devops]    # Azure DevOps git over HTTPS
 token = "op://Dev/ado/pat"    # a PAT with Code (Read & write)
 repos = ["myorg/Project/repo"]   # `org/project/repo`, or the clone URL
+# read_repos = ["myorg/Project/lib"]   # fetched only
 protected_branches = ["main"]
 
 [credentials.ssh]             # git over SSH: the vault keeps the key and signs logins
@@ -268,6 +270,10 @@ sandbox never sees it.
 
 A GitHub App for luoto needs only repository permissions such as Contents and Pull requests;
 luoto refuses Workflows, Actions, Secrets and Administration ([why](SECURITY.md#what-holds-the-line)).
+A token or App installation reaches one owner's repos; for another owner's, write
+`[[credentials.github]]` once per owner instead of `[credentials.github]`. Each repo's requests
+get the credential that lists it, and GraphQL (`gh pr create`) the first one's, so the others
+open pull requests over REST (`gh api repos/<owner>/<repo>/pulls`).
 
 An Azure DevOps credential lets the env fetch and push its repos over HTTPS. Remotes keep
 working as they are: SSH ones (`git@ssh.dev.azure.com:v3/…`, or a host alias from your

@@ -26,8 +26,9 @@ impl Repo {
         format!("{}/{}/{}", self.org, self.project, self.name).to_ascii_lowercase()
     }
 
-    /// Its smart-HTTP and LFS paths on `dev.azure.com`, in both URL forms.
-    pub fn git_paths(&self) -> Vec<String> {
+    /// Its smart-HTTP and LFS paths on `dev.azure.com`, in both URL forms; `write` adds
+    /// pushes.
+    pub fn git_paths(&self, write: bool) -> Vec<String> {
         let mut bases = vec![format!("/{}/{}/_git/{}", self.org, self.project, self.name)];
         if self.project.eq_ignore_ascii_case(&self.name) {
             bases.push(format!("/{}/_git/{}", self.org, self.name));
@@ -41,7 +42,9 @@ impl Repo {
                     "git-receive-pack",
                     "info/lfs/**",
                 ] {
-                    paths.push(format!("{b}/{end}"));
+                    if write || end != "git-receive-pack" {
+                        paths.push(format!("{b}/{end}"));
+                    }
                 }
             }
         }
@@ -453,9 +456,15 @@ mod tests {
 
     #[test]
     fn paths_cover_both_url_forms() {
-        let p = repo("o", "Proj", "proj").git_paths();
+        let p = repo("o", "Proj", "proj").git_paths(true);
         assert!(p.contains(&"/o/Proj/_git/proj/info/refs".to_string()));
         assert!(p.contains(&"/o/_git/proj.git/git-receive-pack".to_string()));
-        assert_eq!(repo("o", "P", "r").git_paths().len(), 8);
+        assert_eq!(repo("o", "P", "r").git_paths(true).len(), 8);
+        assert!(
+            !repo("o", "P", "r")
+                .git_paths(false)
+                .iter()
+                .any(|p| p.ends_with("receive-pack"))
+        );
     }
 }

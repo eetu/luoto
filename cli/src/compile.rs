@@ -121,12 +121,7 @@ pub fn compile(
     for (cname, c) in &cfg.credentials.custom {
         compile_custom(&mut b, cname, c)?;
     }
-    let github = cfg
-        .credentials
-        .github
-        .as_ref()
-        .map(|gh| compile_github(&mut b, gh))
-        .transpose()?;
+    let github = compile_github(&mut b, &cfg.credentials.github.0)?;
 
     let (ssh_hosts, known_hosts) = compile_ssh(&mut b, cfg.credentials.ssh.as_ref())?;
     let over_ssh = |h: &str| ssh_hosts.iter().any(|s| s == h);
@@ -499,87 +494,71 @@ fn split_repo(full: &str) -> Result<(String, String)> {
     }
 }
 
-fn compile_github(b: &mut Builder, gh: &GithubCred) -> Result<GithubGuard> {
-    if gh.repos.is_empty() {
-        bail!(
-            "credentials.github: list the repos the env may write to (`repos = [\"owner/repo\"]`)"
+/// Git paths of `owner/repo` on github.com, both URL forms; `write` adds pushes.
+fn github_git_paths(o: &str, r: &str, write: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    for base in [format!("/{o}/{r}"), format!("/{o}/{r}.git")] {
+        out.push(format!("{base}/info/refs"));
+        out.push(format!("{base}/git-upload-pack"));
+        if write {
+            out.push(format!("{base}/git-receive-pack"));
+        }
+        out.push(format!("{base}/info/lfs/**"));
+    }
+    out
+}
+
+/// Every `[[credentials.github]]` (one per account, as an org's token reaches only that org).
+/// Each repo's git and REST paths get the credential that lists it; `/graphql`, which names no
+/// repo, gets the first one's. One push guard covers them all, as strict as the strictest.
+fn compile_github(b: &mut Builder, creds: &[GithubCred]) -> Result<Option<GithubGuard>> {
+    let Some(first) = creds.first() else {
+        return Ok(None);
+    };
+    let mut guard = GithubGuard {
+        // GraphQL goes out with the first credential: a read-only one mutates nothing.
+        graphql_mutations: if first.repos.is_empty() {
+            Vec::new()
+        } else {
+            first.graphql_mutations.clone()
+        },
+        allow_tags: creds.iter().all(|c| c.allow_tags),
+        ..Default::default()
+    };
+    let mut tokens: BTreeSet<&str> = BTreeSet::new();
+    for t in creds.iter().filter_map(|c| c.token.as_deref()) {
+        if !tokens.insert(t) {
+            b.warnings.push(format!(
+                "credentials.github: two credentials use {t}; one listing all their repos lets \
+                 GraphQL (`gh pr create`) reach every one of them"
+            ));
+        }
+    }
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    for (i, gh) in creds.iter().enumerate() {
+        let name = if i == 0 {
+            "github".to_string()
+        } else {
+            format!("github-{}", i + 1)
+        };
+        let write = compile_github_one(b, gh, &name, i == 0)?;
+        for (o, r) in gh
+            .repos
+            .iter()
+            .chain(&gh.read_repos)
+            .map(|r| split_repo(r))
+            .collect::<Result<Vec<_>>>()?
+        {
+            if !seen.insert((o.clone(), r.clone())) {
+                bail!("credentials.github: {o}/{r} is listed twice");
+            }
+        }
+        guard.repos.extend(write);
+        extend_unique(
+            &mut guard.protected_branches,
+            gh.protected_branches.iter().cloned(),
         );
     }
-    for p in gh.permissions.keys() {
-        if FORBIDDEN_GITHUB_PERMISSIONS.contains(&p.as_str()) {
-            bail!(
-                "credentials.github: permission `{p}` is refused — it would let the sandbox reach CI secrets or account settings"
-            );
-        }
-    }
-    let repos: Vec<(String, String)> = gh
-        .repos
-        .iter()
-        .map(|r| split_repo(r))
-        .collect::<Result<_>>()?;
-    let spec = match (&gh.app_id, &gh.private_key, &gh.token) {
-        (Some(app_id), Some(key), None) => {
-            let Some(installation_id) = gh.installation_id else {
-                bail!("credentials.github: installation_id is required with app_id");
-            };
-            let mut permissions = gh.permissions.clone();
-            if permissions.is_empty() {
-                permissions.insert("contents".into(), "write".into());
-                permissions.insert("pull_requests".into(), "write".into());
-            }
-            permissions
-                .entry("metadata".into())
-                .or_insert_with(|| "read".into());
-            BindingSpec::GithubApp {
-                app_id: app_id.clone(),
-                installation_id,
-                key_ref: key.clone(),
-                repos: repos.iter().map(|(_, r)| r.clone()).collect(),
-                permissions,
-                api_base: gh.api_base.clone().unwrap_or_else(default_github_api),
-            }
-        }
-        (None, None, Some(token)) => BindingSpec::Static {
-            secret_ref: token.clone(),
-        },
-        _ => {
-            bail!("credentials.github: set either app_id + installation_id + private_key, or token")
-        }
-    };
-    b.bindings.insert("github".into(), spec);
-
-    let mut git_paths = Vec::new();
-    let mut api_paths = vec!["/graphql".to_string()];
-    for (o, r) in &repos {
-        for base in [format!("/{o}/{r}"), format!("/{o}/{r}.git")] {
-            git_paths.push(format!("{base}/info/refs"));
-            git_paths.push(format!("{base}/git-upload-pack"));
-            git_paths.push(format!("{base}/git-receive-pack"));
-            git_paths.push(format!("{base}/info/lfs/**"));
-        }
-        api_paths.push(format!("/repos/{o}/{r}"));
-        api_paths.push(format!("/repos/{o}/{r}/**"));
-    }
-    // GitHub reads owner and repo in any case, and a remote keeps the case it was cloned with.
-    b.injections.push(Injection {
-        binding: "github".into(),
-        host: forges::GITHUB.into(),
-        paths: git_paths.clone(),
-        place: Placement::Basic {
-            username: "x-access-token".into(),
-        },
-        ignore_case: true,
-    });
-    b.injections.push(Injection {
-        binding: "github".into(),
-        host: forges::GITHUB_API.into(),
-        paths: api_paths,
-        place: Placement::Header {
-            name: "authorization".into(),
-            format: "Bearer {secret}".into(),
-        },
-        ignore_case: true,
-    });
     if !b.has_read(forges::GITHUB) {
         b.rule("github-read".into(), "github", Rule::read(forges::GITHUB));
     }
@@ -590,50 +569,6 @@ fn compile_github(b: &mut Builder, gh: &GithubCred) -> Result<GithubGuard> {
             Rule::read(forges::GITHUB_API),
         );
     }
-    b.rule(
-        "github-git".into(),
-        "github",
-        Rule {
-            host: forges::GITHUB.into(),
-            access: Access::Methods(vec!["GET".into(), "POST".into()]),
-            paths: git_paths,
-            ignore_case: true,
-            ..Default::default()
-        },
-    );
-    // REST writes are an allowlist: pull requests, reviews and issues. Branch content goes
-    // through git-receive-pack, where the push guard checks every ref; the contents, git-data,
-    // merge, ref, release and settings endpoints would bypass it.
-    let mut write_paths = vec!["/graphql".to_string()];
-    for (o, r) in &repos {
-        for path in [
-            "pulls",
-            "pulls/*",
-            "pulls/*/comments",
-            "pulls/*/comments/*/replies",
-            "pulls/*/reviews",
-            "pulls/*/requested_reviewers",
-            "pulls/comments/*",
-            "issues",
-            "issues/*",
-            "issues/*/comments",
-            "issues/*/labels",
-            "issues/comments/*",
-        ] {
-            write_paths.push(format!("/repos/{o}/{r}/{path}"));
-        }
-    }
-    b.rule(
-        "github-api-write".into(),
-        "github",
-        Rule {
-            host: forges::GITHUB_API.into(),
-            access: Access::Methods(vec!["POST".into(), "PATCH".into()]),
-            paths: write_paths,
-            ignore_case: true,
-            ..Default::default()
-        },
-    );
     let write = vec!["POST".into(), "PUT".into(), "PATCH".into(), "DELETE".into()];
     for (paths, reason) in [
         (
@@ -681,6 +616,188 @@ fn compile_github(b: &mut Builder, gh: &GithubCred) -> Result<GithubGuard> {
     b.dev_env
         .insert("GITHUB_TOKEN".into(), GH_PLACEHOLDER.into());
     b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+    Ok(Some(guard))
+}
+
+/// One GitHub credential as binding `name`: its `repos` read and written (pushes, pull
+/// requests, issues), its `read_repos` fetched and read only. An App mints a separate
+/// read-only token for those, so not even GraphQL can write there. Returns the written
+/// repos, `owner/repo` lowercase.
+fn compile_github_one(
+    b: &mut Builder,
+    gh: &GithubCred,
+    name: &str,
+    graphql: bool,
+) -> Result<Vec<String>> {
+    if gh.repos.is_empty() && gh.read_repos.is_empty() {
+        bail!(
+            "credentials.github: list the repos the env may write to (`repos = [\"owner/repo\"]`) \
+             or only read (`read_repos`)"
+        );
+    }
+    for p in gh.permissions.keys() {
+        if FORBIDDEN_GITHUB_PERMISSIONS.contains(&p.as_str()) {
+            bail!(
+                "credentials.github: permission `{p}` is refused — it would let the sandbox reach CI secrets or account settings"
+            );
+        }
+    }
+    let parse = |list: &[String]| -> Result<Vec<(String, String)>> {
+        list.iter().map(|r| split_repo(r)).collect()
+    };
+    let (repos, read_repos) = (parse(&gh.repos)?, parse(&gh.read_repos)?);
+    let read_name = if repos.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}-read")
+    };
+    match (&gh.app_id, &gh.private_key, &gh.token) {
+        (Some(app_id), Some(key), None) => {
+            let Some(installation_id) = gh.installation_id else {
+                bail!("credentials.github: installation_id is required with app_id");
+            };
+            let mut permissions = gh.permissions.clone();
+            if permissions.is_empty() {
+                permissions.insert("contents".into(), "write".into());
+                permissions.insert("pull_requests".into(), "write".into());
+            }
+            permissions
+                .entry("metadata".into())
+                .or_insert_with(|| "read".into());
+            let app = |repos: &[(String, String)], permissions| BindingSpec::GithubApp {
+                app_id: app_id.clone(),
+                installation_id,
+                key_ref: key.clone(),
+                repos: repos.iter().map(|(_, r)| r.clone()).collect(),
+                permissions,
+                api_base: gh.api_base.clone().unwrap_or_else(default_github_api),
+            };
+            if !repos.is_empty() {
+                b.bindings
+                    .insert(name.into(), app(&repos, permissions.clone()));
+            }
+            if !read_repos.is_empty() {
+                let read = permissions
+                    .keys()
+                    .map(|k| (k.clone(), "read".to_string()))
+                    .collect();
+                b.bindings.insert(read_name.clone(), app(&read_repos, read));
+            }
+        }
+        (None, None, Some(token)) => {
+            // One token: its scope at GitHub decides what GraphQL can write; the gate keeps
+            // git and REST writes to `repos`.
+            b.bindings.insert(
+                name.into(),
+                BindingSpec::Static {
+                    secret_ref: token.clone(),
+                },
+            );
+        }
+        _ => {
+            bail!("credentials.github: set either app_id + installation_id + private_key, or token")
+        }
+    }
+    let read_binding = if gh.token.is_some() {
+        name.to_string()
+    } else {
+        read_name
+    };
+    let mut git_paths = Vec::new();
+    for (list, binding, write) in [
+        (&repos, name.to_string(), true),
+        (&read_repos, read_binding, false),
+    ] {
+        if list.is_empty() {
+            continue;
+        }
+        let paths: Vec<String> = list
+            .iter()
+            .flat_map(|(o, r)| github_git_paths(o, r, write))
+            .collect();
+        let mut api_paths: Vec<String> = list
+            .iter()
+            .flat_map(|(o, r)| [format!("/repos/{o}/{r}"), format!("/repos/{o}/{r}/**")])
+            .collect();
+        if graphql && (write || repos.is_empty()) {
+            api_paths.insert(0, "/graphql".to_string());
+        }
+        // GitHub reads owner and repo in any case, and a remote keeps the case it was cloned
+        // with.
+        b.injections.push(Injection {
+            binding: binding.clone(),
+            host: forges::GITHUB.into(),
+            paths: paths.clone(),
+            place: Placement::Basic {
+                username: "x-access-token".into(),
+            },
+            ignore_case: true,
+        });
+        b.injections.push(Injection {
+            binding,
+            host: forges::GITHUB_API.into(),
+            paths: api_paths,
+            place: Placement::Header {
+                name: "authorization".into(),
+                format: "Bearer {secret}".into(),
+            },
+            ignore_case: true,
+        });
+        git_paths.extend(paths);
+    }
+    b.rule(
+        format!("{name}-git"),
+        "github",
+        Rule {
+            host: forges::GITHUB.into(),
+            access: Access::Methods(vec!["GET".into(), "POST".into()]),
+            paths: git_paths,
+            ignore_case: true,
+            ..Default::default()
+        },
+    );
+    // REST writes are an allowlist: pull requests, reviews and issues. Branch content goes
+    // through git-receive-pack, where the push guard checks every ref; the contents, git-data,
+    // merge, ref, release and settings endpoints would bypass it.
+    // GraphQL reads are POSTs too; the guard decides which mutations pass.
+    let mut write_paths = if graphql {
+        vec!["/graphql".to_string()]
+    } else {
+        Vec::new()
+    };
+    for (o, r) in &repos {
+        for path in [
+            "pulls",
+            "pulls/*",
+            "pulls/*/comments",
+            "pulls/*/comments/*/replies",
+            "pulls/*/reviews",
+            "pulls/*/requested_reviewers",
+            "pulls/comments/*",
+            "issues",
+            "issues/*",
+            "issues/*/comments",
+            "issues/*/labels",
+            "issues/comments/*",
+        ] {
+            write_paths.push(format!("/repos/{o}/{r}/{path}"));
+        }
+    }
+    if !write_paths.is_empty() {
+        b.rule(
+            format!("{name}-api-write"),
+            "github",
+            Rule {
+                host: forges::GITHUB_API.into(),
+                access: Access::Methods(vec!["POST".into(), "PATCH".into()]),
+                paths: write_paths,
+                ignore_case: true,
+                ..Default::default()
+            },
+        );
+    }
+    Ok(repos.iter().map(|(o, r)| format!("{o}/{r}")).collect())
+}
 
     Ok(GithubGuard {
         repos: repos.iter().map(|(o, r)| format!("{o}/{r}")).collect(),
@@ -694,23 +811,27 @@ fn compile_github(b: &mut Builder, gh: &GithubCred) -> Result<GithubGuard> {
 /// (case-insensitively, as Azure DevOps reads them) and the push guard. The guard, and the
 /// repos for the remote rewrites ([`azure::rewrites`]).
 fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Vec<azure::Repo>)> {
-    if c.repos.is_empty() {
+    if c.repos.is_empty() && c.read_repos.is_empty() {
         bail!(
-            "credentials.azure_devops: list the repos the env may use (`repos = [\"org/project/repo\"]`)"
+            "credentials.azure_devops: list the repos the env may use (`repos = [\"org/project/repo\"]`, or `read_repos` for fetch only)"
         );
     }
-    let repos: Vec<azure::Repo> = c
-        .repos
-        .iter()
-        .map(|r| azure::parse_repo(r))
-        .collect::<Result<_>>()?;
+    let parse = |list: &[String]| -> Result<Vec<azure::Repo>> {
+        list.iter().map(|r| azure::parse_repo(r)).collect()
+    };
+    let (writable, readable) = (parse(&c.repos)?, parse(&c.read_repos)?);
+    let repos: Vec<azure::Repo> = writable.iter().chain(&readable).cloned().collect();
     b.bindings.insert(
         "azure_devops".into(),
         BindingSpec::Static {
             secret_ref: c.token.clone(),
         },
     );
-    let paths: Vec<String> = repos.iter().flat_map(azure::Repo::git_paths).collect();
+    let paths: Vec<String> = writable
+        .iter()
+        .flat_map(|r| r.git_paths(true))
+        .chain(readable.iter().flat_map(|r| r.git_paths(false)))
+        .collect();
     b.injections.push(Injection {
         binding: "azure_devops".into(),
         host: azure::HOST.into(),
@@ -733,7 +854,7 @@ fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Ve
     );
     b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     let guard = AzureGuard {
-        repos: repos.iter().map(azure::Repo::key).collect(),
+        repos: writable.iter().map(azure::Repo::key).collect(),
         protected_branches: c.protected_branches.clone(),
         allow_tags: c.allow_tags,
     };
@@ -1018,6 +1139,144 @@ repos = ["Eetu/Foo"]
         );
         assert!(c.vault_refs().contains("op://v/app/key"));
         assert!(c.dev_env["GH_TOKEN"].starts_with("ghs_"));
+    }
+
+    #[test]
+    fn read_repos_are_fetched_never_written() {
+        let c = compile(
+            "t",
+            &cfg(r#"
+[credentials.github]
+app_id = "1"
+installation_id = 2
+private_key = "op://v/app/key"
+repos = ["acme/web"]
+read_repos = ["acme/lib"]
+
+[credentials.azure_devops]
+token = "op://v/ado/pat"
+read_repos = ["org/Infra/agent"]
+"#),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        let p = &c.policy;
+        let allowed =
+            |host, method, path| matches!(decide(p, host, method, path), Decision::Allow { .. });
+        assert!(allowed(
+            "github.com",
+            "POST",
+            "/acme/lib.git/git-upload-pack"
+        ));
+        assert!(!allowed(
+            "github.com",
+            "POST",
+            "/acme/lib.git/git-receive-pack"
+        ));
+        assert!(allowed(
+            "github.com",
+            "POST",
+            "/acme/web.git/git-receive-pack"
+        ));
+        assert!(!allowed("api.github.com", "POST", "/repos/acme/lib/pulls"));
+        assert!(allowed("api.github.com", "POST", "/repos/acme/web/pulls"));
+        let binding = |path| p.injections_for("github.com", path)[0].binding.clone();
+        assert_eq!(binding("/acme/web.git/info/refs"), "github");
+        assert_eq!(binding("/acme/lib.git/info/refs"), "github-read");
+        let BindingSpec::GithubApp {
+            permissions, repos, ..
+        } = &c.bindings["github-read"]
+        else {
+            panic!("an App token for the read repos");
+        };
+        assert_eq!(repos, &["lib"]);
+        assert!(permissions.values().all(|v| v == "read"));
+        assert_eq!(p.github.as_ref().unwrap().repos, ["acme/web"]);
+        assert!(allowed(
+            "dev.azure.com",
+            "POST",
+            "/org/Infra/_git/agent/git-upload-pack"
+        ));
+        assert!(!allowed(
+            "dev.azure.com",
+            "POST",
+            "/org/Infra/_git/agent/git-receive-pack"
+        ));
+        assert!(p.azure_devops.as_ref().unwrap().repos.is_empty());
+    }
+
+    #[test]
+    fn each_github_owner_gets_its_own_credential() {
+        let c = compile(
+            "t",
+            &cfg(r#"
+[[credentials.github]]
+token = "op://v/fi/token"
+repos = ["invinite-fi/upcloud-dev"]
+protected_branches = ["main"]
+
+[[credentials.github]]
+token = "op://v/open/token"
+repos = ["inviniteopen/upcloud-web"]
+protected_branches = ["prod"]
+"#),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        let p = &c.policy;
+        let binding = |host, path| {
+            p.injections_for(host, path)
+                .iter()
+                .map(|i| i.binding.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            binding("github.com", "/invinite-fi/upcloud-dev/info/refs"),
+            ["github"]
+        );
+        assert_eq!(
+            binding("github.com", "/inviniteopen/upcloud-web/info/refs"),
+            ["github-2"]
+        );
+        assert_eq!(
+            binding("api.github.com", "/repos/inviniteopen/upcloud-web/pulls"),
+            ["github-2"]
+        );
+        assert_eq!(binding("api.github.com", "/graphql"), ["github"]);
+        for path in [
+            "/repos/invinite-fi/upcloud-dev/pulls",
+            "/repos/inviniteopen/upcloud-web/pulls",
+        ] {
+            assert!(matches!(
+                decide(p, "api.github.com", "POST", path),
+                Decision::Allow { .. }
+            ));
+        }
+        let guard = p.github.as_ref().unwrap();
+        assert_eq!(guard.repos.len(), 2);
+        assert_eq!(guard.protected_branches, ["main", "prod"]);
+        let twice = cfg(
+            "[[credentials.github]]\ntoken = \"env:A\"\nrepos = [\"a/x\"]\n[[credentials.github]]\ntoken = \"env:B\"\nread_repos = [\"A/X\"]\n",
+        );
+        assert!(compile("t", &twice, GATE, &[]).is_err());
+    }
+
+    #[test]
+    fn a_token_shared_by_two_credentials_is_pointed_out() {
+        let c = compile(
+            "t",
+            &cfg("[[credentials.github]]\ntoken = \"env:T\"\nrepos = [\"a/x\"]\n[[credentials.github]]\ntoken = \"env:T\"\nrepos = [\"b/y\"]\n"),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("two credentials use env:T"))
+        );
     }
 
     #[test]
