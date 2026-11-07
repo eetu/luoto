@@ -326,9 +326,10 @@ pub fn pin_dirs<'a>(files: impl Iterator<Item = &'a str>) -> BTreeSet<String> {
     dirs
 }
 
-/// Tracked and untracked-but-not-ignored files, when `root` is a git work tree. Run with
-/// fsmonitor off, so a repository's config can't make this start a program.
-fn git_files(root: &Path) -> Option<Vec<String>> {
+/// Tracked and untracked-but-not-ignored files, when `root` is a git work tree; a repository
+/// inside it is one entry, `name/`. Run with fsmonitor off, so a repository's config can't
+/// make this start a program.
+pub fn git_files(root: &Path) -> Option<Vec<String>> {
     let out = Command::new("git")
         .args(["-c", "core.fsmonitor=false", "-C"])
         .arg(root)

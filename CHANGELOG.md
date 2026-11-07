@@ -15,6 +15,11 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   `.git`, `.envrc` or `.vscode` is held back like the top folder's.
 - **Detection** (`luoto init`, toolchain installs on `up`) reads the repositories in the
   folder, which git in the folder doesn't list.
+- **Copies follow `.gitignore`:** from a git repository (the folder, a repo, or one inside),
+  `up` copies what git doesn't ignore plus `.git`, so ignored secrets (`.env`, `*.tfvars`, state
+  files, `.kube/`) stay on your machine. Other folders copy as before, now without
+  `.terraform`, which holds the host's provider binaries.
+
 ## 0.2.2 (2026-11-06)
 
 - **Image pulls:** `up` and `init` pull every missing image themselves (after an upgrade, all

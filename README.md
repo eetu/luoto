@@ -370,7 +370,9 @@ only proposes:
 ## Folders
 
 Every env belongs to a folder, and gets a copy of it: the first `up` puts the folder, git
-history included, into the env, and the sandbox never writes to your folder. Development
+history included, into the env, and the sandbox never writes to your folder. From a git
+repository it copies what git doesn't ignore, so ignored files such as `.env`, `*.tfvars` or
+state files stay on your machine. Development
 happens inside, in Zed or VS Code attached to the env, and work leaves as git pushes (with a
 `[credentials.github]` or `[credentials.azure_devops]` for the repo, or `[credentials.ssh]`
 for an SSH remote; `luoto init` prints the one that fits the folder's origin on GitHub or

@@ -15,7 +15,9 @@ use crate::env::{Ctx, UID};
 use crate::names;
 use crate::paths::Paths;
 
-/// Heavy or machine-specific directories skipped when copying in either direction.
+/// Heavy or machine-specific directories skipped when copying in either direction
+/// (`.terraform` holds the host platform's provider binaries; `terraform init` in the env
+/// fetches its own).
 const COPY_SKIP: &[&str] = &[
     "node_modules",
     "target",
@@ -25,6 +27,7 @@ const COPY_SKIP: &[&str] = &[
     ".next",
     ".svelte-kit",
     ".gradle",
+    ".terraform",
 ];
 
 /// Cap on a pull (it is buffered so it can be reviewed before anything is written).
@@ -322,24 +325,137 @@ fn skip(rel: &Path) -> bool {
         .any(|c| COPY_SKIP.contains(&c.as_os_str().to_string_lossy().as_ref()))
 }
 
-/// Copy a host directory into the env's workspace (host → sandbox is the trusted direction).
-pub fn push(ctx: &Ctx, env: &str, src: &Path) -> Result<usize> {
+/// What a copy into the env takes from `src`, as relative paths with `true` for a folder, each
+/// folder before what it holds. From a git repository that is the files git doesn't ignore
+/// and the repository itself (`.git`), so ignored secrets (`.env`, `*.tfvars`, state files)
+/// and build output stay out; from any other folder it is everything, with the repositories
+/// inside read the same way. `COPY_SKIP` never goes.
+pub fn copy_list(src: &Path) -> Result<Vec<(PathBuf, bool)>> {
+    let mut out = Vec::new();
+    let mut dirs = std::collections::HashSet::new();
+    collect(src, Path::new(""), &mut out, &mut dirs)?;
+    Ok(out)
+}
+
+fn add(
+    out: &mut Vec<(PathBuf, bool)>,
+    dirs: &mut std::collections::HashSet<PathBuf>,
+    rel: PathBuf,
+    dir: bool,
+) {
+    let mut parents: Vec<&Path> = rel
+        .ancestors()
+        .skip(1)
+        .filter(|a| !a.as_os_str().is_empty())
+        .collect();
+    parents.reverse();
+    for p in parents {
+        if dirs.insert(p.to_path_buf()) {
+            out.push((p.to_path_buf(), true));
+        }
+    }
+    if !dir || dirs.insert(rel.clone()) {
+        out.push((rel, dir));
+    }
+}
+
+/// `rel` under `src`: through git when it is a work tree, else walked.
+fn collect(
+    src: &Path,
+    rel: &Path,
+    out: &mut Vec<(PathBuf, bool)>,
+    dirs: &mut std::collections::HashSet<PathBuf>,
+) -> Result<()> {
+    let dir = src.join(rel);
+    // Only a repository's own root: a folder inside a bigger work tree (a home folder kept in
+    // git with `*` ignored, say) would otherwise copy nothing.
+    let files = dir
+        .join(".git")
+        .exists()
+        .then(|| crate::detect::git_files(&dir))
+        .flatten();
+    let Some(files) = files else {
+        return walk(src, rel, false, out, dirs);
+    };
+    for f in files {
+        let r = rel.join(f.trim_end_matches('/'));
+        if skip(&r) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(src.join(&r)) else {
+            // Tracked, but deleted in the work tree.
+            continue;
+        };
+        if meta.is_dir() {
+            // A repository git doesn't descend into: one inside this one, or a submodule.
+            if src.join(&r).join(".git").exists() {
+                collect(src, &r, out, dirs)?;
+            }
+        } else if meta.is_file() || meta.is_symlink() {
+            add(out, dirs, r, false);
+        }
+    }
+    let git = rel.join(".git");
+    match std::fs::symlink_metadata(src.join(&git)) {
+        Ok(m) if m.is_dir() => {
+            add(out, dirs, git.clone(), true);
+            walk(src, &git, true, out, dirs)?;
+        }
+        Ok(_) => add(out, dirs, git, false),
+        Err(_) => {}
+    }
+    Ok(())
+}
+
+/// Everything in `rel`, but a repository inside through [`collect`] (unless `plain`).
+fn walk(
+    src: &Path,
+    rel: &Path,
+    plain: bool,
+    out: &mut Vec<(PathBuf, bool)>,
+    dirs: &mut std::collections::HashSet<PathBuf>,
+) -> Result<()> {
+    let path = src.join(rel);
+    for entry in std::fs::read_dir(&path).with_context(|| format!("read {}", path.display()))? {
+        let entry = entry?;
+        let r = rel.join(entry.file_name());
+        if skip(&r) {
+            continue;
+        }
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            if !plain && entry.path().join(".git").exists() {
+                collect(src, &r, out, dirs)?;
+            } else {
+                add(out, dirs, r.clone(), true);
+                walk(src, &r, plain, out, dirs)?;
+            }
+        } else if ft.is_file() || ft.is_symlink() {
+            add(out, dirs, r, false);
+        }
+    }
+    Ok(())
+}
+
+/// Copy a host directory into the env's workspace, or into its folder `sub` (a repo's name),
+/// created if needed (host → sandbox is the trusted direction): what [`copy_list`] takes.
+pub fn push(ctx: &Ctx, env: &str, src: &Path, sub: Option<&str>) -> Result<usize> {
+    let list = copy_list(src)?;
+    let dev = names::dev(env);
+    let mut args = vec!["exec", "-i", "-u", UID, dev.as_str()];
+    match sub {
+        None => args.extend(["tar", "-x", "-f", "-", "-C", "/workspace"]),
+        Some(name) => args.extend([
+            "sh",
+            "-c",
+            r#"mkdir -p "/workspace/$0" && exec tar -x -f - -C "/workspace/$0""#,
+            name,
+        ]),
+    }
     let mut child = ctx
         .rt
         .command()
-        .args([
-            "exec",
-            "-i",
-            "-u",
-            UID,
-            &names::dev(env),
-            "tar",
-            "-x",
-            "-f",
-            "-",
-            "-C",
-            "/workspace",
-        ])
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -349,23 +465,13 @@ pub fn push(ctx: &Ctx, env: &str, src: &Path) -> Result<usize> {
     let mut builder = tar::Builder::new(stdin);
     builder.follow_symlinks(false);
     let mut count = 0;
-    let mut stack = vec![src.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
-            let entry = entry?;
-            let path = entry.path();
-            let rel = path.strip_prefix(src)?.to_path_buf();
-            if skip(&rel) {
-                continue;
-            }
-            let ft = entry.file_type()?;
-            if ft.is_dir() {
-                builder.append_dir(&rel, &path)?;
-                stack.push(path);
-            } else if ft.is_file() || ft.is_symlink() {
-                builder.append_path_with_name(&path, &rel)?;
-                count += 1;
-            }
+    for (rel, dir) in &list {
+        let path = src.join(rel);
+        if *dir {
+            builder.append_dir(rel, &path)?;
+        } else {
+            builder.append_path_with_name(&path, rel)?;
+            count += 1;
         }
     }
     builder.into_inner()?.flush()?;
@@ -1112,4 +1218,69 @@ mod tests {
         assert_eq!(env_for_dir(&paths, &sub).unwrap().as_deref(), Some("api"));
     }
 
+    #[test]
+    fn copies_leave_out_what_git_ignores() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let git = |dir: &Path| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(["init", "-q"])
+                    .arg(dir)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        let write = |rel: &str, text: &str| {
+            let p = r.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        git(r);
+        write(".gitignore", "secret.env\n.kube/\n");
+        write("a.txt", "a");
+        write("secret.env", "TOKEN=x");
+        write(".kube/config", "x");
+        write("node_modules/x.js", "x");
+        git(&r.join("sub"));
+        write("sub/.gitignore", "*.tfvars\n");
+        write("sub/main.tf", "x");
+        write("sub/prod.tfvars", "x");
+        let list = copy_list(r).unwrap();
+        let has = |p: &str| list.iter().any(|(rel, _)| rel == Path::new(p));
+        for p in [
+            ".gitignore",
+            "a.txt",
+            ".git",
+            ".git/HEAD",
+            "sub",
+            "sub/main.tf",
+            "sub/.git/HEAD",
+        ] {
+            assert!(has(p), "{p} is copied: {list:?}");
+        }
+        for p in [
+            "secret.env",
+            ".kube/config",
+            "node_modules/x.js",
+            "sub/prod.tfvars",
+        ] {
+            assert!(!has(p), "{p} stays out");
+        }
+        // Folders come before what they hold.
+        let at = |p: &str| {
+            list.iter()
+                .position(|(rel, _)| rel == Path::new(p))
+                .unwrap()
+        };
+        assert!(at("sub") < at("sub/main.tf"));
+        // A plain folder holding the repo copies everything else, and the repo through git.
+        let outer = tempfile::tempdir().unwrap();
+        std::fs::write(outer.path().join("notes.md"), "n").unwrap();
+        std::fs::rename(r, outer.path().join("repo")).unwrap();
+        let list = copy_list(outer.path()).unwrap();
+        let has = |p: &str| list.iter().any(|(rel, _)| rel == Path::new(p));
+        assert!(has("notes.md") && has("repo/a.txt") && !has("repo/secret.env"));
+    }
 }
