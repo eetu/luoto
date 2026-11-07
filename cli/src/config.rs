@@ -111,6 +111,27 @@ pub struct Workspace {
     /// first `up`; `luoto pull` writes back to it. Every env has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
+    /// Repositories beside the folder, each at `/workspace/<name>` (`repos.rs`), over the
+    /// accepted luoto.toml's of the same name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub repos: BTreeMap<String, Repo>,
+}
+
+/// A repository in the workspace: a host folder copied in, or a remote cloned in the env.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Repo {
+    /// A host folder (absolute), copied in on the env's next `up`; `luoto pull` writes back
+    /// to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// A remote cloned inside the env, through the gate, on its next `up`: `owner/repo` on
+    /// GitHub, an `https://` or `ssh://` URL, or `user@host:path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The branch a clone checks out (default: the remote's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -538,6 +559,50 @@ impl EnvFile {
         self.save()
     }
 
+    /// `[workspace.repos]`, created when missing.
+    fn repos_table(&mut self) -> Result<&mut dyn toml_edit::TableLike> {
+        let path = self.path.display().to_string();
+        let ws = self
+            .doc
+            .entry("workspace")
+            .or_insert_with(toml_edit::table)
+            .as_table_like_mut()
+            .with_context(|| format!("`workspace` in {path} is not a table"))?;
+        ws.entry("repos")
+            .or_insert_with(|| {
+                let mut t = toml_edit::Table::new();
+                t.set_implicit(true);
+                toml_edit::Item::Table(t)
+            })
+            .as_table_like_mut()
+            .with_context(|| format!("`workspace.repos` in {path} is not a table"))
+    }
+
+    /// Write `[workspace.repos.<name>]`, replacing any it had.
+    pub fn set_repo(&mut self, name: &str, repo: &Repo) -> Result<()> {
+        let table = toml_edit::ser::to_document(repo)
+            .context("serialize repo")?
+            .as_table()
+            .clone();
+        self.repos_table()?
+            .insert(name, toml_edit::Item::Table(table));
+        self.save()
+    }
+
+    pub fn remove_repo(&mut self, name: &str) -> Result<()> {
+        let repos = self.repos_table()?;
+        repos.remove(name);
+        if repos.is_empty()
+            && let Some(ws) = self
+                .doc
+                .get_mut("workspace")
+                .and_then(|w| w.as_table_like_mut())
+        {
+            ws.remove("repos");
+        }
+        self.save()
+    }
+
     pub fn set_list(&mut self, key: &str, values: &[String]) -> Result<()> {
         let mut arr = toml_edit::Array::new();
         for v in values {
@@ -705,6 +770,40 @@ oauth_token = "op://Private/claude/token"
         assert_eq!(hosts, ["b.example", "d.example"]);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.starts_with("# my env") && !saved.contains("a.example"));
+    }
+
+    #[test]
+    fn repos_are_added_and_removed_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        std::fs::write(&path, SAMPLE).unwrap();
+        let mut f = EnvFile::parse(path.clone(), SAMPLE).unwrap();
+        let web = Repo {
+            url: Some("acme/web".into()),
+            branch: Some("dev".into()),
+            ..Default::default()
+        };
+        f.set_repo("web", &web).unwrap();
+        f.set_repo(
+            "api",
+            &Repo {
+                dir: Some("/home/me/api".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("[workspace.repos.web]") && saved.contains("# my env"));
+        assert_eq!(f.cfg.workspace.dir.as_deref(), Some("/home/me/foo"));
+        assert_eq!(f.cfg.workspace.repos["web"], web);
+        f.remove_repo("web").unwrap();
+        f.remove_repo("api").unwrap();
+        assert!(f.cfg.workspace.repos.is_empty());
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("workspace.repos")
+        );
     }
 
     #[test]

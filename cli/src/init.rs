@@ -12,7 +12,7 @@ use crate::config::{self, EnvConfig, EnvFile, Workspace};
 use crate::env::{self, Ctx, UpOptions};
 use crate::paths::Paths;
 use crate::prompt::{ask, confirm};
-use crate::{complete, detect, names, project, workspace};
+use crate::{complete, detect, names, project, repos, workspace};
 
 #[derive(Default, clap::Args)]
 pub struct InitOpts {
@@ -37,6 +37,10 @@ pub struct InitOpts {
     /// Dev-server ports to publish on 127.0.0.1 (repeatable).
     #[arg(long = "port")]
     pub ports: Vec<u16>,
+    /// A repository beside the folder, at `/workspace/<name>` (repeatable): a host folder,
+    /// copied in, or a remote (`owner/repo` on GitHub, an https or ssh URL), cloned in the env.
+    #[arg(long = "repo", value_name = "FOLDER|REMOTE")]
+    pub repos: Vec<String>,
     /// `gvisor` (default once `luoto setup` installed it): the env gets its own user-space
     /// kernel. `container`: it shares the VM's kernel, with builds about 1.6× faster.
     #[arg(long, value_enum)]
@@ -73,8 +77,31 @@ pub struct Proposal {
 /// Defaults plus what the folder says about itself; explicit options replace both. Touches
 /// nothing on disk.
 pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
-    let (name, workspace) = new_workspace(paths, o.dir.as_deref(), o.name.as_deref())?;
+    let (name, mut workspace) = new_workspace(paths, o.dir.as_deref(), o.name.as_deref())?;
     let dir = std::path::PathBuf::from(workspace.dir.as_deref().unwrap_or_default());
+    for spec in &o.repos {
+        let src = repos::parse_source(spec)?;
+        let repo_name = repos::default_name(&src)?;
+        let repo = match src {
+            repos::Source::Folder(d) => {
+                repos::check_folder(workspace.dir.as_deref(), &d)?;
+                config::Repo {
+                    dir: Some(d.display().to_string()),
+                    ..Default::default()
+                }
+            }
+            repos::Source::Remote(u) => config::Repo {
+                url: Some(u),
+                ..Default::default()
+            },
+        };
+        if workspace.repos.insert(repo_name.clone(), repo).is_some() {
+            bail!(
+                "two --repo are named `{repo_name}`; add one with `luoto repo add … --name` \
+                 after init"
+            );
+        }
+    }
     let new_folder = std::fs::read_dir(&dir).map_or(true, |mut d| d.next().is_none());
     let (project, project_error) = if o.no_project || new_folder {
         (None, None)
@@ -86,11 +113,18 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
             Err(e) => (None, Some(format!("{e:#}"))),
         }
     };
-    let found = if new_folder {
-        detect::Detected::default()
-    } else {
-        detect::detect(&dir)
-    };
+    // The folder and the host folders of its repos, each repo's files under its name.
+    let mut roots: Vec<(String, std::path::PathBuf)> = Vec::new();
+    if !new_folder {
+        roots.push((String::new(), dir.clone()));
+    }
+    roots.extend(
+        workspace
+            .repos
+            .iter()
+            .filter_map(|(n, r)| Some((n.clone(), r.dir.as_ref()?.into()))),
+    );
+    let found = detect::detect_roots(&roots);
     let presets = if o.presets.is_empty() {
         let mut p: Vec<String> = DEFAULT_PRESETS.iter().map(|s| s.to_string()).collect();
         config::extend_unique(&mut p, found.presets.iter().map(|(n, _)| n.clone()));
@@ -168,6 +202,42 @@ fn print_proposal(p: &Proposal) {
         println!(
             "  workspace  new folder, created now: the env starts empty, and `luoto pull` fills the folder"
         );
+    }
+    let mut repos: Vec<(String, String)> = ws
+        .repos
+        .iter()
+        .map(|(n, r)| {
+            let what = match (&r.dir, &r.url) {
+                (Some(d), _) => format!("{d} (copied in)"),
+                (None, Some(u)) => format!("{} (cloned in the env)", crate::text::display(u)),
+                _ => String::new(),
+            };
+            (n.clone(), what)
+        })
+        .collect();
+    if let Some((_, pc)) = &p.project {
+        repos.extend(
+            pc.repos
+                .iter()
+                .filter(|(n, _)| !ws.repos.keys().any(|o| o.eq_ignore_ascii_case(n)))
+                .map(|(n, r)| {
+                    (
+                        crate::text::display(n),
+                        format!(
+                            "{} (cloned in the env, from luoto.toml)",
+                            crate::text::display(&r.url)
+                        ),
+                    )
+                }),
+        );
+    }
+    if !repos.is_empty() {
+        let width = repos.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+        for (i, (n, what)) in repos.iter().enumerate() {
+            let label = if i == 0 { "repos" } else { "" };
+            println!("  {label:<10} {n:<width$}  {what}");
+        }
+        println!("{INDENT}each at /workspace/<name>");
     }
     println!("  isolation  {}", isolation_text(p.cfg.isolation, p.gvisor));
     let presets: Vec<String> = p
@@ -308,6 +378,7 @@ pub fn new_workspace(
         name,
         Workspace {
             dir: Some(dir.display().to_string()),
+            ..Default::default()
         },
     ))
 }
@@ -551,7 +622,7 @@ pub fn print_needs(name: &str, needs: &[String]) {
 }
 
 /// The URL of a folder's `origin` remote, if any.
-fn origin_url(dir: &Path) -> Option<String> {
+pub fn origin_url(dir: &Path) -> Option<String> {
     let cfg = std::fs::read_to_string(dir.join(".git").join("config")).ok()?;
     let mut in_origin = false;
     for line in cfg.lines() {

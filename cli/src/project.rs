@@ -8,6 +8,7 @@
 //! refs, and its rules pass the same checks as the sandbox's access requests.
 //! Layering: config.toml < the accepted luoto.toml < the env's own config.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -16,7 +17,7 @@ use luoto_shared::{presets, profiles};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::{Deps, EnvConfig, EnvFile, extend_unique};
+use crate::config::{Deps, EnvConfig, EnvFile, Repo, extend_unique};
 use crate::env::{Ctx, UpOptions};
 use crate::paths::write_private;
 use crate::text::display;
@@ -43,6 +44,18 @@ pub struct ProjectConfig {
     pub deps: Deps,
     #[serde(default)]
     pub needs: Needs,
+    /// Repositories cloned beside the project in the env, each at `/workspace/<name>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub repos: BTreeMap<String, ProjectRepo>,
+}
+
+/// A remote the env clones (`repos.rs`); never a host folder, which is each developer's own.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRepo {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// Credentials the project expects; each developer fills in their own refs.
@@ -75,6 +88,18 @@ pub fn parse(text: &str) -> Result<ProjectConfig> {
     }
     if table.contains_key("tools") {
         bail!("luoto.toml doesn't take [tools]: pin toolchains in mise.toml or .tool-versions");
+    }
+    if let Some(repos) = table.get("repos").and_then(|r| r.as_table())
+        && let Some(name) = repos
+            .iter()
+            .find(|(_, r)| r.as_table().is_some_and(|t| t.contains_key("dir")))
+            .map(|(n, _)| n)
+    {
+        bail!(
+            "luoto.toml: repos.{}: a repository can't name your folders; give its `url`, or \
+             add your own copy with `luoto repo add <folder>`",
+            display(name)
+        );
     }
     let p: ProjectConfig = toml::Value::Table(table).try_into().context("luoto.toml")?;
     validate(&p)?;
@@ -132,6 +157,20 @@ fn validate(p: &ProjectConfig) -> Result<()> {
                 "luoto.toml: needs.sandbox_secrets: `{}` is not a name",
                 display(s)
             );
+        }
+    }
+    let mut folded = std::collections::BTreeSet::new();
+    for (name, r) in &p.repos {
+        crate::repos::check_name(name).context("luoto.toml: repos")?;
+        if !folded.insert(name.to_lowercase()) {
+            bail!(
+                "luoto.toml: repos: `{}` differs from another only by case",
+                display(name)
+            );
+        }
+        crate::repos::check_url(&r.url).with_context(|| format!("luoto.toml: repos.{name}"))?;
+        if let Some(b) = &r.branch {
+            crate::repos::check_branch(b).with_context(|| format!("luoto.toml: repos.{name}"))?;
         }
     }
     Ok(())
@@ -246,6 +285,25 @@ pub fn layer(cfg: &mut EnvConfig, p: &ProjectConfig) {
     rules.append(&mut cfg.allow);
     cfg.allow = rules;
     cfg.deps = deps::merged(&p.deps, &cfg.deps);
+    for (name, r) in &p.repos {
+        // The env's own repo of a name (a folder of yours, say) replaces the project's, also
+        // when the two differ only by case.
+        if !cfg
+            .workspace
+            .repos
+            .keys()
+            .any(|n| n.eq_ignore_ascii_case(name))
+        {
+            cfg.workspace.repos.insert(
+                name.clone(),
+                Repo {
+                    url: Some(r.url.clone()),
+                    branch: r.branch.clone(),
+                    ..Default::default()
+                },
+            );
+        }
+    }
 }
 
 /// Every setting of a rule, so no change to it can pass the review unseen.
@@ -310,6 +368,23 @@ fn items(p: &ProjectConfig) -> Vec<(&'static str, String)> {
     );
     add("ports", p.ports.iter().map(u16::to_string).collect());
     add("image", p.image.iter().map(|s| display(s)).collect());
+    add(
+        "repos",
+        p.repos
+            .iter()
+            .map(|(n, r)| {
+                format!(
+                    "{} cloned from {}{}",
+                    display(n),
+                    display(&r.url),
+                    r.branch
+                        .as_deref()
+                        .map(|b| format!(" ({})", display(b)))
+                        .unwrap_or_default()
+                )
+            })
+            .collect(),
+    );
     let mut needs: Vec<String> = Vec::new();
     if !p.needs.github.is_empty() {
         needs.push(format!(
@@ -659,6 +734,42 @@ credentials = ["anthropic"]
         let needs = missing_needs(&p, &cfg);
         assert_eq!(needs.len(), 2);
         assert!(needs[0].contains("repos = [\"acme/web\"]"));
+    }
+
+    #[test]
+    fn repos_are_remotes_under_the_envs_own() {
+        assert!(parse("[repos.api]\ndir = \"/home/me/.ssh\"").is_err());
+        assert!(parse("[repos.api]\nurl = \"file:///etc\"").is_err());
+        assert!(parse("[repos.\".git\"]\nurl = \"acme/api\"").is_err());
+        assert!(parse("[repos.api]\nurl = \"acme/api\"\nbranch = \"--x\"").is_err());
+        assert!(parse("[repos.api]\nurl = \"a/b\"\n[repos.API]\nurl = \"a/c\"").is_err());
+        let p = parse(
+            "[repos.api]\nurl = \"acme/api\"\n\n[repos.web]\nurl = \"git@github.com:acme/web.git\"\nbranch = \"dev\"\n",
+        )
+        .unwrap();
+        let mut cfg = EnvConfig::default();
+        cfg.workspace.repos.insert(
+            "API".into(),
+            Repo {
+                dir: Some("/home/me/api".into()),
+                ..Default::default()
+            },
+        );
+        layer(&mut cfg, &p);
+        let names: Vec<&str> = cfg.workspace.repos.keys().map(String::as_str).collect();
+        assert_eq!(names, ["API", "web"]);
+        assert_eq!(cfg.workspace.repos["web"].branch.as_deref(), Some("dev"));
+        assert!(
+            summary(&p)
+                .iter()
+                .any(|(l, v)| l == "repos" && v.contains("web cloned from git@github.com"))
+        );
+    }
+
+    #[test]
+    fn the_launchpad_example_parses() {
+        let p = parse(include_str!("../../docs/examples/launchpad/luoto.toml")).unwrap();
+        assert_eq!(p.repos.len(), 4);
     }
 
     #[test]

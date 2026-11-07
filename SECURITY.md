@@ -52,12 +52,14 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   or use it for anything but those hosts. The gate passes the session through unread, so
   neither the repository nor the push guard applies there: what the key reaches at the forge
   is the boundary. Prefer a deploy key; use HTTPS credentials where repo scoping matters.
-- **Filesystem.** The sandbox sees only its env's folder. It gets a copy and never writes to
-  the host; work leaves through git pushes or a reviewed `pull`. `pull` reviews changes, holds
-  back risky files (compared case-insensitively, as macOS and Windows name them), refuses
-  `.git` under any spelling, names that collide by case, and paths and symlinks that leave the
-  folder. With podman on macOS and Windows, envs run only in luoto's own VM, which mounts none
-  of your folders (`luoto doctor` checks), so an escape doesn't reach your home directory.
+- **Filesystem.** The sandbox sees only its env's folder and the folders of the repos you add
+  to it (a repository's `luoto.toml` names remotes only). It gets a copy, without what git
+  ignores in a repository, and never writes to the host; work leaves through git pushes or a reviewed `pull`. `pull` reviews changes, holds
+  back risky files in any folder within the pull (compared case-insensitively, as macOS and
+  Windows name them), refuses `.git` under any spelling, names that collide by case, and paths
+  and symlinks that leave the folder. With podman on macOS and Windows, envs run only in
+  luoto's own VM, which mounts none of your folders (`luoto doctor` checks), so an escape
+  doesn't reach your home directory.
 - **Isolation.** With podman, dev containers run on gVisor (in luoto's VM on macOS and
   Windows; on Linux once `runsc` is installed): the sandbox's system calls reach gVisor's
   user-space kernel, not the VM's or the host's. In luoto's VM each env's dev container has its

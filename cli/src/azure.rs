@@ -261,11 +261,19 @@ pub fn rewrites(
 
 /// SSH host aliases from `~/.ssh/config` that the project's own remotes use for Azure DevOps
 /// (`git@my-azure:v3/org/…`), as (organization as the remote writes it, alias): read from the
-/// folder's `.git/config` and `.gitmodules`. The env has no SSH config, so these are
-/// rewritten like the standard hosts.
+/// `.git/config` and `.gitmodules` of the folder and its repos' folders, and from the remotes
+/// its repos clone. The env has no SSH config, so these are rewritten like the standard hosts.
 pub fn aliases(workspace: &crate::config::Workspace) -> Vec<(String, String)> {
-    let mut urls: Vec<String> = Vec::new();
-    if let Some(dir) = &workspace.dir {
+    let mut urls: Vec<String> = workspace
+        .repos
+        .values()
+        .filter_map(|r| r.url.clone())
+        .collect();
+    let folders = workspace
+        .dir
+        .iter()
+        .chain(workspace.repos.values().filter_map(|r| r.dir.as_ref()));
+    for dir in folders {
         let dir = std::path::Path::new(dir);
         for f in [dir.join(".git").join("config"), dir.join(".gitmodules")] {
             let Ok(text) = std::fs::read_to_string(f) else {
@@ -435,6 +443,7 @@ mod tests {
         .unwrap();
         let ws = crate::config::Workspace {
             dir: Some(dir.path().display().to_string()),
+            ..Default::default()
         };
         assert_eq!(
             aliases(&ws),

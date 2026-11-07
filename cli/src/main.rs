@@ -25,6 +25,7 @@ mod ports;
 mod project;
 mod prompt;
 mod release;
+mod repos;
 mod rules;
 mod runtime;
 mod secrets;
@@ -140,11 +141,21 @@ enum Cmd {
         #[command(subcommand)]
         action: AgentCmd,
     },
-    /// Copy changed files from the env back to its folder (reviewed first).
+    /// Repositories beside the env's folder, each at /workspace/<name>: list, add, remove.
+    Repo {
+        #[command(subcommand)]
+        action: Option<RepoCmd>,
+    },
+    /// Copy changed files from the env back to its folder, and its repos copied in from
+    /// folders back to theirs (reviewed first).
     Pull {
-        /// Write here instead of the env's folder.
+        /// Write here instead of the env's folder (or the `--repo`'s).
         #[arg(long)]
         to: Option<String>,
+        /// Only this repo: to its host folder, or else (a clone) the same name in the env's
+        /// folder.
+        #[arg(long)]
+        repo: Option<String>,
         /// Also write files host tools act on (git hooks/config, .envrc, .vscode, …).
         #[arg(long)]
         include_risky: bool,
@@ -226,6 +237,28 @@ enum AgentCmd {
     /// List known agents and providers.
     #[command(visible_alias = "ls")]
     List,
+}
+
+#[derive(Subcommand)]
+enum RepoCmd {
+    /// The env's repos and where each comes from.
+    #[command(visible_alias = "ls")]
+    List,
+    /// Add a host folder (copied in) or a remote (cloned in the env), at /workspace/<name>.
+    Add {
+        /// A folder (starts with `/`, `~` or `.`, or exists), else a remote: `owner/repo` on
+        /// GitHub, an https or ssh URL, or user@host:path.
+        #[arg(value_name = "FOLDER|REMOTE")]
+        source: String,
+        /// Its folder in the workspace (default: the last part of the path or URL).
+        #[arg(long)]
+        name: Option<String>,
+        /// The branch a clone checks out (default: the remote's).
+        #[arg(long)]
+        branch: Option<String>,
+    },
+    /// Remove a repo from the env's config; its copy in the env stays.
+    Rm { name: String },
 }
 
 #[derive(Subcommand)]
@@ -312,12 +345,29 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             AgentCmd::Add { agent } => agents::add(&env()?, &agent),
             AgentCmd::List => agents::list(),
         },
+        Cmd::Repo { action } => match action.unwrap_or(RepoCmd::List) {
+            RepoCmd::List => repos::list(&env()?),
+            RepoCmd::Add {
+                source,
+                name,
+                branch,
+            } => repos::add(&env()?, &source, name.as_deref(), branch.as_deref()),
+            RepoCmd::Rm { name } => repos::rm(&env()?, &name),
+        },
         Cmd::Pull {
             to,
+            repo,
             include_risky,
             include_git,
             yes,
-        } => c::pull(&env()?, to.as_deref(), include_risky, include_git, yes),
+        } => c::pull(
+            &env()?,
+            to.as_deref(),
+            repo.as_deref(),
+            include_risky,
+            include_git,
+            yes,
+        ),
         Cmd::Allow(o) => c::allow(&env()?, o),
         Cmd::Revoke { rule } => c::revoke(&env()?, &rule),
         Cmd::Requests => {

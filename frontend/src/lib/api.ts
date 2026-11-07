@@ -10,7 +10,7 @@ import type {
   Overview,
   ProjectStatus,
   Proposal,
-  PullPlan,
+  PullPlans,
   Rule,
   SelftestReport,
   SetupInfo,
@@ -117,7 +117,7 @@ export const api = {
   action: (name: string, action: "up" | "down" | "rebuild") =>
     request<unknown>("POST", `${env(name)}/${action}`, {}),
   selftest: (name: string) => request<SelftestReport>("POST", `${env(name)}/selftest`, {}),
-  pullPlan: (name: string) => request<PullPlan>("GET", `${env(name)}/pull`),
+  pullPlan: (name: string) => request<PullPlans>("GET", `${env(name)}/pull`),
   pull: (name: string, digest: string, includeRisky: boolean) =>
     request<{ written: number; skipped: number }>("POST", `${env(name)}/pull`, {
       digest,

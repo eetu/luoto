@@ -19,9 +19,19 @@ env's name and its current rules.
 - **Writes.** Remote writes only work where the user granted them (for example pushing
   feature branches to one GitHub repository). Protected branches, tags, workflow files and
   GitHub Actions are off-limits.
-- **Files.** Only this container exists; the project is in `/workspace`. `/workspace` and your
-  home directory persist; the rest of the container's filesystem is reset when luoto recreates
-  it.
+- **Files.** Only this container exists; the project is in `/workspace`, and related
+  repositories the user added are folders in it, each with its own git remote. `/workspace` and
+  your home directory persist; the rest of the container's filesystem is reset when luoto
+  recreates it.
+
+## Several repositories
+
+`/workspace` can hold related repositories, each in its own folder with its own git remote
+(`git -C /workspace/<name> remote -v`). Commit and push each from its own folder, on a branch
+of its own, and open one pull request per repository. A repository the env may only read
+refuses pushes: say so instead of working around it. Where `gh pr create` is refused for a
+repository of a second GitHub owner, open the pull request over REST:
+`gh api repos/<owner>/<repo>/pulls -f head=<branch> -f base=main -f title=… -f body=…`.
 
 ## Toolchains and packages
 

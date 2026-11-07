@@ -41,7 +41,10 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
 - Every env has a folder (`[workspace] dir`), copied into its workspace volume on the first
   `up`; `luoto init` creates a missing one. `workspace.rs` owns env-from-cwd resolution and
   push/pull (tar over exec, so no VM file sharing needed). Anything that brings
-  sandbox-written files to the host goes through its `risky()` and path/symlink checks.
+  sandbox-written files to the host goes through its `risky_nested()` and path/symlink checks.
+- `repos.rs` owns an env's repos at `/workspace/<name>`: a host folder copied in, or a remote
+  cloned in the env (through the gate, as the dev user) on `up`; seeded names live in the env's
+  state. A `luoto.toml` names remotes only, never host folders.
 - Toolchains are mise's job, driven by the project's own version files (`deps.rs` writes
   mise's system config; `detect.rs` previews the files at `luoto init`). Installs inside an env
   (`deps.rs`, agents) get egress only via `sync::with_grants`: expiring rules from preset data

@@ -18,7 +18,7 @@ use crate::paths::Paths;
 use crate::runtime::{Flavor, RunSpec, Runtime};
 use crate::state::{self, EnvState};
 use crate::{
-    azure, ca, ctl, deps, machine, names, personal, project, secrets, ssh, sync, workspace,
+    azure, ca, ctl, deps, machine, names, personal, project, repos, secrets, ssh, sync, workspace,
 };
 
 pub const UID: &str = "1000";
@@ -408,10 +408,16 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             format!("env `{env}` has no folder: set `[workspace] dir` (`luoto edit -e {env}`)")
         })?)?;
         println!("copying {} into the env…", dir.display());
-        let n = workspace::push(ctx, env, &dir)?;
+        let n = workspace::push(ctx, env, &dir, None)?;
         println!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
         EnvState::update(&ctx.paths, env, |s| s.seeded = true)?;
     }
+    // A new volume holds none of the repos, whatever the host remembers.
+    let seeded_repos = if fresh_work {
+        Default::default()
+    } else {
+        state.repos.clone()
+    };
     if project::review(ctx, env)? {
         // The accepted settings reach the gate (policy, credentials, ports) and the runtime env.
         let image = p.image.clone();
@@ -427,6 +433,10 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
                 "note: luoto.toml names another image; `luoto up --recreate` applies it (volumes are kept)"
             );
         }
+    }
+    let repos = repos::seed(ctx, env, &p.cfg.workspace, &seeded_repos);
+    if repos != state.repos {
+        EnvState::update(&ctx.paths, env, |s| s.repos = repos)?;
     }
     if let Err(e) = deps::ensure(ctx, env, &p.cfg, state.home()) {
         eprintln!(

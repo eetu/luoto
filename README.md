@@ -152,6 +152,7 @@ Commands act on the env of the current folder; `-e NAME` picks another (`luoto s
 | you want                                                                                             | run                                                                                                                                |
 | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | an env for a folder (copied in)                                                                      | `luoto init [DIR]`                                                                                                                 |
+| related repositories beside it (a host folder, or a remote cloned in the env)                        | `luoto init --repo ~/dev/api --repo acme/web`<br>`luoto repo add acme/lib`<br>`luoto repo list`                                    |
 | a new project (the folder is created)                                                                | `luoto init ~/dev/new-app`                                                                                                         |
 | to review, apply or ignore the team's `luoto.toml`                                                   | `luoto project`<br>`luoto project apply`<br>`luoto project ignore`                                                                 |
 | your editor, or a shell                                                                              | `luoto open`<br>`luoto open --with code`<br>`luoto shell`                                                                          |
@@ -350,7 +351,8 @@ credentials = ["anthropic"]
 sandbox_secrets = ["DATABASE_URL"]
 ```
 
-It also takes `image` and `agents`; toolchains belong in `mise.toml`. Layering:
+It also takes `image`, `agents` and the team's repositories (`[repos.<name>]`,
+[below](#several-repositories)); toolchains belong in `mise.toml`. Layering:
 `config.toml` < the accepted `luoto.toml` < the env's own config.
 
 Anyone who can write the repository writes this file, code in the sandbox included, so it
@@ -373,9 +375,53 @@ happens inside, in Zed or VS Code attached to the env, and work leaves as git pu
 `[credentials.github]` or `[credentials.azure_devops]` for the repo, or `[credentials.ssh]`
 for an SSH remote; `luoto init` prints the one that fits the folder's origin on GitHub or
 Azure DevOps). `luoto pull` brings files back when you need them on the host: it lists changed
-files, skips risky ones unless you pass `--include-risky`, refuses paths or symlinks that leave
+files, skips risky ones (in the folder or any folder within it, such as a repository's own
+`.git` or `.envrc`) unless you pass `--include-risky`, refuses paths or symlinks that leave
 the folder, and never writes through host symlinks. `.git` and heavy directories
 (`node_modules`, `target`, …) are skipped.
+
+## Several repositories
+
+An env can hold related repositories beside its folder, each at `/workspace/<name>`, so an
+agent sees them together and changes them in one session:
+
+```console
+$ luoto init ~/dev/platform --repo ~/dev/api --repo acme/web
+```
+
+- A folder (`~/dev/api`) is copied in like the env's own, and `luoto pull` writes it back
+  there. luoto commands run in that folder act on this env.
+- A remote (`acme/web` on GitHub, an https or ssh URL) is cloned in the env, through the gate,
+  on the next `up`. Its work leaves by git push; `luoto pull --repo web` copies it into the
+  env's folder.
+- `luoto repo add|rm|list` changes an existing env; a repo added while the env runs is copied
+  or cloned at once.
+
+A public GitHub repo needs only the `github` preset. Private ones and pushes take HTTPS
+credentials, which `up` asks for on a terminal (and prints without one): each lists the repos
+it may write (`repos`) or only read (`read_repos`), and the gate refuses pushes to protected
+branches. SSH remotes use them as they are. `[credentials.ssh]` works too, but a key reaches
+every repo its account can.
+
+The env's folder can be a repository of its own whose `luoto.toml` lists the team's repos, so
+a clone of it and `luoto init` give every developer the same set:
+
+```toml
+# luoto.toml
+[repos.api]
+url = "acme/api"
+
+[repos.web]
+url = "git@github.com:acme/web.git"
+branch = "develop"
+```
+
+`luoto.toml` names remotes only, never your folders; `luoto repo add ~/dev/api` makes your own
+checkout replace its `api` in your env. In the env, the repos are listed in the folder's
+`.git/info/exclude`, so they stay out of its `git status`.
+
+[docs/multi-repo.md](docs/multi-repo.md) has the three ways to set one up (command line,
+launchpad, both) and a [launchpad example](docs/examples/launchpad/).
 
 ## Shell
 

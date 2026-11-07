@@ -33,8 +33,12 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   need the files as they change. The sandbox can then write where host tools act on their own
   (`.git/config` and hooks, `.envrc`, editor and pre-commit configs), so it comes with an
   audit of those files.
-- **An env from a repository** (`luoto init --clone owner/repo`): cloned through the gate into
-  the workspace, then detected inside the env.
+- **Presets from cloned repos:** after `up` clones a repo, offer the presets its files suggest,
+  as `luoto init` does for a folder (today a second `luoto init` in the env's folder does).
+- **Headless runs:** `luoto run` starts an env from a folder and its config, runs an agent on a
+  prompt (an audit, fixes opened as pull requests until review agrees, a value computed from a
+  data set) and hands back its result as a file or on stdout, then stops; for scheduled or
+  triggered jobs. Pull requests and merges stay behind the gate's write rules.
 - **More commands:** `fork` (copy an env), `push` (a reviewed copy-in),
   `reset-home`, `agent rm`.
 - **Notifications** for access requests (UI and OS), `luoto requests --watch`; `sandbox request`

@@ -87,6 +87,7 @@ pub fn compile(
     aliases: &[(String, String)],
 ) -> Result<Compiled> {
     let mut b = Builder::default();
+    crate::repos::check(&cfg.workspace)?;
 
     for name in &cfg.presets {
         let Some(p) = presets::get(name) else {

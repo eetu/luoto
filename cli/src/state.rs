@@ -1,6 +1,6 @@
 //! An env's host-side state (`<data>/envs/<env>/state.json`): its subnet, vault token, the
-//! dev user's home and login name, and whether its workspace has been filled. The env's first
-//! `up` makes it.
+//! dev user's home and login name, and whether its workspace and repositories have been
+//! filled. The env's first `up` makes it.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -23,6 +23,9 @@ pub struct EnvState {
     /// The folder has been copied into the workspace volume.
     #[serde(default)]
     pub seeded: bool,
+    /// Repositories copied or cloned into the workspace volume, or found there (`repos.rs`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub repos: BTreeSet<String>,
     /// Login user in the dev container (uid 1000).
     #[serde(default)]
     pub user: Option<String>,
@@ -85,6 +88,7 @@ pub fn ensure(ctx: &Ctx, env: &str, image: &str) -> Result<EnvState> {
         home: detect_home(ctx, image),
         vault_token: hex::encode(rand::random::<[u8; 32]>()),
         seeded: false,
+        repos: BTreeSet::new(),
         user: None,
         tools: None,
     };

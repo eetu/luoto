@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+Related repositories in one env, git on any forge, and an `up` that sets up what an env lacks.
+
+- **Repos:** `--repo` on `luoto init`, `luoto repo add|rm|list` and `[workspace.repos.<name>]`
+  put repositories at `/workspace/<name>`: a host folder, copied in and pulled back to it, or a
+  remote (`owner/repo`, an https or ssh URL), cloned in the env through the gate on `up`.
+  luoto commands in a repo's folder act on its env. The UI lists an env's repos.
+- **Repos in `luoto.toml`:** `[repos.<name>] url = …` gives a team the same set of remotes; the
+  env's own repo of a name replaces the file's.
+- **Pull:** each copied-in repo goes back to its own folder; cloned ones stay out unless named
+  with `--repo`. Risky files count in any folder within the pull, so a nested repository's
+  `.git`, `.envrc` or `.vscode` is held back like the top folder's.
+- **Detection** (`luoto init`, toolchain installs on `up`) reads the repositories in the
+  folder, which git in the folder doesn't list.
 ## 0.2.2 (2026-11-06)
 
 - **Image pulls:** `up` and `init` pull every missing image themselves (after an upgrade, all

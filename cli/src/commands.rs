@@ -12,6 +12,7 @@ use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx, UpOptions};
 use crate::prompt::confirm;
 use crate::rules::{self, AllowOpts};
+use crate::state::EnvState;
 use crate::{ctl, events, machine, names, project, sync, workspace};
 
 /// Show, accept or drop the project's luoto.toml settings for an env.
@@ -79,58 +80,80 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
     Ok(ExitCode::SUCCESS)
 }
 
-/// The env's own folder, where `pull` writes unless told otherwise.
-pub fn pull_dest(ctx: &Ctx, name: &str) -> Result<PathBuf> {
-    let dir = EnvFile::load(&ctx.paths, name)?
-        .cfg
-        .workspace
-        .dir
-        .with_context(|| {
-            format!("env `{name}` has no folder to pull into (`luoto pull --to <dir>` picks one)")
-        })?;
-    workspace::canonical(&dir)
+/// What `pull` writes where (`workspace::pull_targets`), from the env's config.
+pub fn pull_targets(
+    ctx: &Ctx,
+    name: &str,
+    to: Option<PathBuf>,
+    repo: Option<&str>,
+) -> Result<Vec<workspace::PullTarget>> {
+    let ws = env::layered(ctx, name)?.workspace;
+    let present = EnvState::load(&ctx.paths, name)?
+        .map(|s| s.repos)
+        .unwrap_or_default();
+    workspace::pull_targets(&ws, to, repo, &present)
 }
 
 pub fn pull(
     name: &str,
     to: Option<&str>,
+    repo: Option<&str>,
     include_risky: bool,
     include_git: bool,
     yes: bool,
 ) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     crate::connect::ensure_running(&ctx, name)?;
-    let dest = match to {
+    let to = match to {
         Some(t) => {
             std::fs::create_dir_all(workspace::expand(t))?;
-            workspace::canonical(t)?
+            Some(workspace::canonical(t)?)
         }
-        None => pull_dest(&ctx, name)?,
+        None => None,
     };
-    let plan = workspace::plan_pull(&ctx, name, &dest, include_git)?;
-    workspace::describe(&plan, &mut std::io::stdout())?;
-    if plan.entries.is_empty() {
+    let mut plans = Vec::new();
+    for t in pull_targets(&ctx, name, to, repo)? {
+        let plan = workspace::plan_pull(&ctx, name, &t, include_git)?;
+        if let Some(r) = &plan.repo {
+            println!("\nrepo {r}:");
+        }
+        workspace::describe(&plan, &mut std::io::stdout())?;
+        plans.push(plan);
+    }
+    let changed = |p: &workspace::PullPlan| {
+        p.entries
+            .iter()
+            .filter(|e| include_risky || e.risky.is_none())
+            .count()
+    };
+    if plans.iter().all(|p| p.entries.is_empty()) {
         println!("nothing to pull");
         return Ok(ExitCode::SUCCESS);
     }
-    let writable = plan
-        .entries
-        .iter()
-        .filter(|e| include_risky || e.risky.is_none())
-        .count();
+    let writable: usize = plans.iter().map(changed).sum();
     if writable == 0 {
         println!("only risky files changed; re-run with --include-risky after reviewing them");
         return Ok(ExitCode::SUCCESS);
     }
+    let dirs: Vec<&str> = plans
+        .iter()
+        .filter(|p| changed(p) > 0)
+        .map(|p| p.dir.as_str())
+        .collect();
     if !yes
         && !confirm(&format!(
             "Write {writable} file(s) into {}?",
-            dest.display()
+            dirs.join(", ")
         ))
     {
         bail!("nothing written (use --yes to skip the prompt)");
     }
-    let (written, skipped) = workspace::apply_pull(&plan, include_risky)?;
+    let (mut written, mut skipped) = (0, 0);
+    for plan in &plans {
+        let (w, s) = workspace::apply_pull(plan, include_risky)?;
+        written += w;
+        skipped += s;
+    }
     println!(
         "wrote {written} file(s){}",
         if skipped > 0 {

@@ -92,6 +92,8 @@ struct EnvRow {
     dev: String,
     gate: String,
     dir: Option<String>,
+    /// Repositories beside the folder (`repos.rs`).
+    repos: Vec<crate::repos::Listed>,
     pending: usize,
     denied_recent: usize,
     error: Option<String>,
@@ -124,11 +126,13 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
                 Ok(f) => (f.cfg.workspace.dir, None),
                 Err(e) => (None, Some(format!("{e:#}"))),
             };
+            let repos = crate::repos::listed(&ctx, &name).unwrap_or_default();
             envs.push(EnvRow {
                 name,
                 dev,
                 gate,
                 dir,
+                repos,
                 pending,
                 denied_recent,
                 error,
@@ -334,14 +338,30 @@ async fn project_action(
     .map(Json)
 }
 
-async fn pull_plan(Path(name): Path<String>) -> ApiResult<workspace::PullPlan> {
-    blocking(move || {
-        let ctx = Ctx::load()?;
-        let dest = commands::pull_dest(&ctx, &name)?;
-        workspace::plan_pull(&ctx, &name, &dest, false)
-    })
-    .await
-    .map(Json)
+/// Every folder a pull writes, and one digest over them that applying checks.
+#[derive(Serialize)]
+struct PullPlans {
+    plans: Vec<workspace::PullPlan>,
+    digest: String,
+}
+
+fn pull_plans(ctx: &Ctx, name: &str) -> anyhow::Result<PullPlans> {
+    let plans = commands::pull_targets(ctx, name, None, None)?
+        .iter()
+        .map(|t| workspace::plan_pull(ctx, name, t, false))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let digest = plans
+        .iter()
+        .map(|p| p.digest.as_str())
+        .collect::<Vec<_>>()
+        .join(":");
+    Ok(PullPlans { plans, digest })
+}
+
+async fn pull_plan(Path(name): Path<String>) -> ApiResult<PullPlans> {
+    blocking(move || pull_plans(&Ctx::load()?, &name))
+        .await
+        .map(Json)
 }
 
 #[derive(Deserialize)]
@@ -354,12 +374,16 @@ struct PullApply {
 async fn pull_apply(Path(name): Path<String>, Json(a): Json<PullApply>) -> ApiResult<Value> {
     blocking(move || {
         let ctx = Ctx::load()?;
-        let dest = commands::pull_dest(&ctx, &name)?;
-        let plan = workspace::plan_pull(&ctx, &name, &dest, false)?;
-        if plan.digest != a.digest {
+        let all = pull_plans(&ctx, &name)?;
+        if all.digest != a.digest {
             anyhow::bail!("the env's files changed since you reviewed them; review again");
         }
-        let (written, skipped) = workspace::apply_pull(&plan, a.include_risky)?;
+        let (mut written, mut skipped) = (0, 0);
+        for plan in &all.plans {
+            let (w, s) = workspace::apply_pull(plan, a.include_risky)?;
+            written += w;
+            skipped += s;
+        }
         Ok(json!({ "written": written, "skipped": skipped }))
     })
     .await

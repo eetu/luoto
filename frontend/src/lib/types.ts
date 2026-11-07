@@ -91,6 +91,20 @@ export type AccessRequest = {
   reason: string;
   status: "pending" | "approved" | "rejected";
   created: string;
+  note?: string | null;
+  install?: Install | null;
+};
+
+/** A repository beside the env's folder, at `/workspace/<name>`. */
+export type Repo = {
+  name: string;
+  /** The host folder or the remote. */
+  source: string;
+  kind: "folder" | "clone";
+  branch: string | null;
+  origin: "env" | "project";
+  /** In the workspace already. */
+  present: boolean;
 };
 
 export type EnvRow = {
@@ -98,6 +112,7 @@ export type EnvRow = {
   dev: string;
   gate: string;
   dir?: string | null;
+  repos: Repo[];
   pending: number;
   denied_recent: number;
   error?: string | null;
@@ -167,6 +182,8 @@ export type SetupInfo = {
 
 export type PullPlan = {
   dir: string;
+  /** The repo it pulls, or null for the env's folder. */
+  repo: string | null;
   entries: {
     path: string;
     change: string;
@@ -174,6 +191,12 @@ export type PullPlan = {
   }[];
   unchanged: number;
   refused: [string, string][];
+  digest: string;
+};
+
+/** Every folder a pull writes, with one digest that applying them checks. */
+export type PullPlans = {
+  plans: PullPlan[];
   digest: string;
 };
 

@@ -1,7 +1,7 @@
 //! An env's workspace is a volume seeded from a host folder. This module resolves envs from
 //! folders and moves files between host and sandbox without trusting what comes out.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::config::{self, EnvFile};
+use crate::config::{self, EnvFile, Workspace};
 use crate::env::{Ctx, UID};
 use crate::names;
 use crate::paths::Paths;
@@ -64,21 +64,28 @@ pub fn name_from(s: &str) -> String {
     out.trim_end_matches('-').to_string()
 }
 
-/// The env whose directory contains `cwd` (the deepest one).
+/// The env whose folder, or a repo folder of whose, contains `cwd`: the deepest one, and at
+/// the same depth an env's own folder over another's repo.
 pub fn env_for_dir(paths: &Paths, cwd: &Path) -> Result<Option<String>> {
-    let mut best: Option<(usize, String)> = None;
+    let mut best: Option<((usize, bool), String)> = None;
     for name in config::list_envs(paths)? {
         let Ok(f) = EnvFile::load(paths, &name) else {
             continue;
         };
-        let Some(dir) = f.cfg.workspace.dir.as_deref() else {
-            continue;
-        };
-        let Ok(dir) = canonical(dir) else { continue };
-        if cwd.starts_with(&dir) {
-            let depth = dir.components().count();
-            if best.as_ref().is_none_or(|(d, _)| depth > *d) {
-                best = Some((depth, name));
+        let ws = &f.cfg.workspace;
+        let folders = ws.dir.iter().map(|d| (d, true)).chain(
+            ws.repos
+                .values()
+                .filter_map(|r| r.dir.as_ref())
+                .map(|d| (d, false)),
+        );
+        for (dir, own) in folders {
+            let Ok(dir) = canonical(dir) else { continue };
+            if cwd.starts_with(&dir) {
+                let rank = (dir.components().count(), own);
+                if best.as_ref().is_none_or(|(r, _)| rank > *r) {
+                    best = Some((rank, name.clone()));
+                }
             }
         }
     }
@@ -197,6 +204,19 @@ pub fn risky(rel: &str) -> Option<&'static str> {
         ".claude" | ".cursor" => Some("coding-agent hooks and settings that run on the host"),
         _ if file.ends_with(".code-workspace") => Some("VS Code workspace (tasks, settings)"),
         _ => None,
+    }
+}
+
+/// [`risky`] for a path in the folder or in any folder it is under: host tools act on a
+/// nested project's files when they work there (a repository in the folder, a package of a
+/// monorepo).
+pub fn risky_nested(rel: &str) -> Option<&'static str> {
+    let mut rest = rel;
+    loop {
+        if let Some(why) = risky(rest) {
+            return Some(why);
+        }
+        rest = rest.split_once('/')?.1;
     }
 }
 
@@ -372,6 +392,8 @@ pub struct PlanEntry {
 #[derive(Debug, Clone, Serialize)]
 pub struct PullPlan {
     pub dir: String,
+    /// The repo it pulls, or `None` for the workspace.
+    pub repo: Option<String>,
     pub entries: Vec<PlanEntry>,
     pub unchanged: usize,
     /// Entries refused outright (unsafe paths, links leaving the folder, special files).
@@ -429,7 +451,83 @@ fn link_stays_inside(rel: &Path, target: &Path) -> bool {
     true
 }
 
-pub fn plan_pull(ctx: &Ctx, env: &str, dest: &Path, include_git: bool) -> Result<PullPlan> {
+/// A folder of the env that `pull` writes back to the host.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PullTarget {
+    /// The repo (`/workspace/<name>`), or `None` for the whole workspace.
+    pub repo: Option<String>,
+    pub dest: PathBuf,
+    /// Repos left out of the workspace's pull: each is a target of its own, if any.
+    pub skip: Vec<String>,
+}
+
+/// Where `pull` writes: the workspace to the env's folder (or `to`), less its repos, and each
+/// repo copied in from a host folder back to that folder; a cloned repo's work leaves by git
+/// push. With `repo`, only that one, to its host folder or else the same name in the env's
+/// folder (or `to`). `present` are the repos in the workspace: a folder repo not copied in yet
+/// has nothing to pull.
+pub fn pull_targets(
+    ws: &Workspace,
+    to: Option<PathBuf>,
+    repo: Option<&str>,
+    present: &BTreeSet<String>,
+) -> Result<Vec<PullTarget>> {
+    let root =
+        || -> Result<PathBuf> {
+            canonical(ws.dir.as_deref().context(
+                "the env has no folder to pull into (`luoto pull --to <dir>` picks one)",
+            )?)
+        };
+    if let Some(name) = repo {
+        let r = ws.repos.get(name).with_context(|| {
+            format!(
+                "the env has no repo `{}` (`luoto repo list`)",
+                crate::text::display(name)
+            )
+        })?;
+        let dest = match (to, &r.dir) {
+            (Some(t), _) => t,
+            (None, Some(d)) => canonical(d)?,
+            (None, None) => {
+                let d = root()?.join(name);
+                std::fs::create_dir_all(&d)?;
+                d
+            }
+        };
+        return Ok(vec![PullTarget {
+            repo: Some(name.to_string()),
+            dest,
+            skip: Vec::new(),
+        }]);
+    }
+    let mut out = vec![PullTarget {
+        repo: None,
+        dest: match to {
+            Some(t) => t,
+            None => root()?,
+        },
+        skip: ws.repos.keys().cloned().collect(),
+    }];
+    let own = ws
+        .repos
+        .iter()
+        .filter_map(|(n, r)| Some((n, r.dir.as_ref()?)))
+        .filter(|(n, _)| present.contains(*n));
+    for (name, dir) in own {
+        out.push(PullTarget {
+            repo: Some(name.clone()),
+            dest: canonical(dir)?,
+            skip: Vec::new(),
+        });
+    }
+    Ok(out)
+}
+
+pub fn plan_pull(ctx: &Ctx, env: &str, target: &PullTarget, include_git: bool) -> Result<PullPlan> {
+    let src = match &target.repo {
+        Some(name) => format!("/workspace/{name}"),
+        None => "/workspace".to_string(),
+    };
     let mut args = vec![
         "exec".to_string(),
         "-u".into(),
@@ -446,7 +544,10 @@ pub fn plan_pull(ctx: &Ctx, env: &str, dest: &Path, include_git: bool) -> Result
     if !include_git {
         args.push("--exclude=.git".into());
     }
-    args.extend(["-C".into(), "/workspace".into(), ".".into()]);
+    for name in &target.skip {
+        args.push(format!("--exclude=./{name}"));
+    }
+    args.extend(["-C".into(), src.clone(), ".".into()]);
     let mut child = ctx
         .rt
         .command()
@@ -465,18 +566,22 @@ pub fn plan_pull(ctx: &Ctx, env: &str, dest: &Path, include_git: bool) -> Result
         .read_to_end(&mut raw)?;
     let out = child.wait_with_output()?;
     if raw.len() as u64 > MAX_PULL_BYTES {
-        bail!("the workspace is larger than 2 GiB; pull a narrower set or push to a git remote");
+        bail!("{src} is larger than 2 GiB; pull a narrower set or push to a git remote");
     }
     if !out.status.success() && raw.is_empty() {
         bail!(
-            "reading the env's workspace failed: {}",
+            "reading {src} in the env failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    build_plan(&raw, dest)
+    let mut plan = build_plan(&raw, &target.dest, &target.skip)?;
+    plan.repo = target.repo.clone();
+    Ok(plan)
 }
 
-fn build_plan(raw: &[u8], dest: &Path) -> Result<PullPlan> {
+/// The plan for a tar of the env's files, less the top-level folders in `skip` (left out in
+/// the env too, where its tar can).
+fn build_plan(raw: &[u8], dest: &Path, skip: &[String]) -> Result<PullPlan> {
     let mut archive = tar::Archive::new(raw);
     let mut entries = Vec::new();
     let mut refused = Vec::new();
@@ -501,6 +606,10 @@ fn build_plan(raw: &[u8], dest: &Path) -> Result<PullPlan> {
             continue;
         };
         let rel_s = rel.to_string_lossy().replace('\\', "/");
+        let top = rel_s.split('/').next().unwrap_or_default();
+        if skip.iter().any(|n| fold(n) == fold(top)) {
+            continue;
+        }
         if rel_s.split('/').any(disguised_git) {
             refused.push((rel_s, "names .git under another spelling".into()));
             continue;
@@ -561,7 +670,7 @@ fn build_plan(raw: &[u8], dest: &Path) -> Result<PullPlan> {
             Content::Link(t) => hasher.update(t.to_string_lossy().as_bytes()),
         }
         let newly_exec = executable && !std::fs::metadata(&host).is_ok_and(|m| is_executable(&m));
-        let risky = risky(&rel_s)
+        let risky = risky_nested(&rel_s)
             .map(str::to_string)
             .or_else(|| newly_exec.then(|| "becomes executable".to_string()))
             .or_else(|| matches!(content, Content::Link(_)).then(|| "symlink".to_string()));
@@ -576,6 +685,7 @@ fn build_plan(raw: &[u8], dest: &Path) -> Result<PullPlan> {
     }
     Ok(PullPlan {
         dir: dest.display().to_string(),
+        repo: None,
         entries,
         unchanged,
         refused,
@@ -749,7 +859,7 @@ mod tests {
             ("readme.MD", b"b"),
             (".VSCODE/tasks.json", b"{}"),
         ]);
-        let plan = build_plan(&raw, dir.path()).unwrap();
+        let plan = build_plan(&raw, dir.path(), &[]).unwrap();
         let refused: Vec<&str> = plan.refused.iter().map(|(p, _)| p.as_str()).collect();
         assert!(refused.contains(&".GIT/config"));
         assert!(refused.contains(&".g\u{200c}it/HEAD"));
@@ -835,7 +945,7 @@ mod tests {
                 ("./abs", "/etc/passwd"),
             ],
         );
-        let plan = build_plan(&raw, dir.path()).unwrap();
+        let plan = build_plan(&raw, dir.path(), &[]).unwrap();
         assert_eq!(plan.unchanged, 1);
         let get = |p: &str| plan.entries.iter().find(|e| e.path == p);
         assert!(get("src/main.rs").unwrap().risky.is_none());
@@ -867,7 +977,7 @@ mod tests {
             ],
             &[("./l", "..\\..\\.zshrc")],
         );
-        let plan = build_plan(&raw, &dir).unwrap();
+        let plan = build_plan(&raw, &dir, &[]).unwrap();
         assert!(plan.entries.is_empty(), "{:?}", plan.entries);
         assert_eq!(plan.refused.len(), 3);
         apply_pull(&plan, true).unwrap();
@@ -893,8 +1003,113 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), dir.path().join("src")).unwrap();
         let raw = tarball(&[("./src/x.rs", b"x", 0o644)], &[]);
-        let plan = build_plan(&raw, dir.path()).unwrap();
+        let plan = build_plan(&raw, dir.path(), &[]).unwrap();
         assert!(apply_pull(&plan, false).is_err());
         assert!(!outside.path().join("x.rs").exists());
     }
+
+    #[test]
+    fn risky_holds_for_nested_projects() {
+        for p in [
+            "api/.git/hooks/post-checkout",
+            "api/.envrc",
+            "web/.vscode/tasks.json",
+            "libs/core/gradlew",
+            "api/.claude/settings.json",
+        ] {
+            assert!(risky_nested(p).is_some(), "{p}");
+        }
+        assert!(risky_nested("api/src/main.rs").is_none());
+        assert!(risky_nested("docs/envrc.md").is_none());
+    }
+
+    #[test]
+    fn pull_leaves_out_repos_with_their_own_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = tar_of(&[
+            ("./notes.md", b"n"),
+            ("./api/src/main.rs", b"x"),
+            ("./API/x", b"x"),
+            ("./web/.envrc", b"x"),
+        ]);
+        let plan = build_plan(&raw, dir.path(), &["api".into()]).unwrap();
+        let paths: Vec<&str> = plan.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["notes.md", "web/.envrc"]);
+        assert!(plan.entries[1].risky.is_some());
+    }
+
+    #[test]
+    fn pull_targets_send_each_folder_repo_home() {
+        let root = tempfile::tempdir().unwrap();
+        let api = tempfile::tempdir().unwrap();
+        let canon = |p: &Path| p.canonicalize().unwrap();
+        let ws = Workspace {
+            dir: Some(root.path().display().to_string()),
+            repos: BTreeMap::from([
+                (
+                    "api".to_string(),
+                    config::Repo {
+                        dir: Some(api.path().display().to_string()),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "web".to_string(),
+                    config::Repo {
+                        url: Some("acme/web".into()),
+                        ..Default::default()
+                    },
+                ),
+            ]),
+        };
+        let present = BTreeSet::from(["api".to_string()]);
+        let all = pull_targets(&ws, None, None, &present).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].dest, canon(root.path()));
+        assert_eq!(all[0].skip, ["api", "web"]);
+        assert_eq!(all[1].repo.as_deref(), Some("api"));
+        assert_eq!(all[1].dest, canon(api.path()));
+        assert_eq!(
+            pull_targets(&ws, None, None, &BTreeSet::new())
+                .unwrap()
+                .len(),
+            1
+        );
+        let web = pull_targets(&ws, None, Some("web"), &present).unwrap();
+        assert_eq!(web[0].dest, canon(root.path()).join("web"));
+        assert!(pull_targets(&ws, None, Some("nope"), &present).is_err());
+    }
+
+    #[test]
+    fn a_repo_folder_finds_its_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config: dir.path().join("config"),
+            data: dir.path().join("data"),
+        };
+        let platform = tempfile::tempdir().unwrap();
+        let api = tempfile::tempdir().unwrap();
+        let api_s = api.path().display().to_string();
+        let mut cfg = config::EnvConfig::default();
+        cfg.workspace.dir = Some(platform.path().display().to_string());
+        cfg.workspace.repos.insert(
+            "api".into(),
+            config::Repo {
+                dir: Some(api_s.clone()),
+                ..Default::default()
+            },
+        );
+        EnvFile::create(&paths, "platform", &cfg).unwrap();
+        let sub = api.path().canonicalize().unwrap().join("src");
+        assert_eq!(
+            env_for_dir(&paths, &sub).unwrap().as_deref(),
+            Some("platform")
+        );
+        // The repo's own env wins over the env it is a repo of.
+        let mut own = config::EnvConfig::default();
+        own.workspace.dir = Some(api_s);
+        EnvFile::create(&paths, "api", &own).unwrap();
+        assert_eq!(env_for_dir(&paths, &sub).unwrap().as_deref(), Some("api"));
+    }
+
 }
