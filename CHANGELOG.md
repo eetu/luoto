@@ -60,6 +60,9 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   upstream refuses a credential (401), the background watcher reads it again itself if its
   source needs no one (the keychain, a 1Password service account, `file:`, Vault), at most
   every 10 minutes; for the 1Password app it notes `luoto vault reload` in its log.
+- **Azure DevOps pull requests:** for the repos in `[credentials.azure_devops] repos`, the gate
+  adds the PAT to their pull requests' REST paths (by repo name): open, comment, change title,
+  description, draft state or target. Completing one, auto-complete and votes are refused.
 - **`luoto requests --watch`** prints each new request as it comes, with the terminal's bell.
 - **Requests in the UI** can be ticked and approved or rejected together; one whose rule has
   risks stays ticked, for review on its own.
@@ -87,6 +90,7 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   repo's credential goes on its smart-HTTP and LFS paths only.
 - **Private addresses:** `luoto allow --private` and `private = true` never reach loopback,
   cloud metadata or luoto's own networks.
+- **Explicit denies** (GitHub Actions, releases, …) match paths in any case.
 - **Loopback only:** luoto's SSH config sets `GatewayPorts no`, so an editor's port forwards
   stay on localhost, and a published port's relay refuses the vault network.
 

@@ -69,8 +69,8 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
 - **Editing envs in the UI:** presets, tools, `[deps]`, agents, ports, credentials and repos
   (the UI shows them; changes go through `luoto edit`), and removing an env. A new env's agent
   credential from the UI, where today it falls back to a login inside.
-- **Azure DevOps beyond git:** pull requests through its REST API (`az repos pr`), with writes
-  allowlisted as for GitHub, and Git LFS objects, which it serves from blob storage.
+- **Azure DevOps beyond git:** `az repos pr`, which addresses repos by ID (the gate would
+  learn each granted repo's ID), and Git LFS objects, which it serves from blob storage.
 
 ## Git over SSH
 

@@ -330,6 +330,7 @@ fn compile_provider(
                      `server_tools = true` under [credentials.{pname}]",
                     t.what
                 ),
+                ..Default::default()
             });
         }
     }
@@ -1067,6 +1068,100 @@ fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Ve
             ..Default::default()
         },
     );
+    // Pull requests over REST, for the repos the env may write: read, open, comment, and
+    // change a title, description, draft state or target. The bodies are an allowlist, so
+    // completing one (a merge), auto-complete and votes stay with people, as a merge does on
+    // GitHub; branch content goes only through the push guard.
+    let mut reads = Vec::new();
+    let mut posts = Vec::new();
+    let mut patches = Vec::new();
+    for r in &writable {
+        let base = r.api_base();
+        reads.extend([
+            base.clone(),
+            format!("{base}/pullrequests"),
+            format!("{base}/pullrequests/**"),
+        ]);
+        posts.extend([
+            format!("{base}/pullrequests"),
+            format!("{base}/pullrequests/*/threads"),
+            format!("{base}/pullrequests/*/threads/*/comments"),
+        ]);
+        patches.push(format!("{base}/pullrequests/*"));
+    }
+    if !writable.is_empty() {
+        b.injections.push(Injection {
+            binding: "azure_devops".into(),
+            host: azure::HOST.into(),
+            paths: reads.iter().chain(&posts).cloned().collect(),
+            place: Placement::Basic {
+                username: String::new(),
+            },
+            ignore_case: true,
+        });
+        for (id, methods, paths) in [
+            ("azure-api-read", vec!["GET"], &reads),
+            ("azure-api-post", vec!["POST"], &posts),
+            ("azure-api-patch", vec!["PATCH"], &patches),
+        ] {
+            b.rule(
+                id.into(),
+                "azure_devops",
+                Rule {
+                    host: azure::HOST.into(),
+                    access: Access::Methods(methods.iter().map(|m| m.to_string()).collect()),
+                    paths: paths.clone(),
+                    ignore_case: true,
+                    ..Default::default()
+                },
+            );
+        }
+        b.denies.push(DenyRule {
+            host: azure::HOST.into(),
+            paths: vec![
+                "/*/*/_apis/git/repositories/*/pullrequests/*/reviewers".into(),
+                "/*/*/_apis/git/repositories/*/pullrequests/*/reviewers/**".into(),
+            ],
+            methods: vec!["POST".into(), "PUT".into(), "PATCH".into(), "DELETE".into()],
+            reason: "votes on pull requests are cast by people".into(),
+        });
+        let keys = |k: &[&str]| k.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        let pr_paths: Vec<String> = writable
+            .iter()
+            .map(|r| format!("{}/pullrequests", r.api_base()))
+            .collect();
+        b.body_denies.push(BodyDeny {
+            host: azure::HOST.into(),
+            paths: pr_paths,
+            ignore_case: true,
+            only_keys: keys(&[
+                "sourceRefName",
+                "targetRefName",
+                "title",
+                "description",
+                "isDraft",
+                "reviewers",
+                "workItemRefs",
+                "labels",
+            ]),
+            reason: "a pull request opened from the sandbox takes a title, description, \
+                     branches, draft state, reviewers, work items and labels; completing it \
+                     stays with you"
+                .into(),
+            ..Default::default()
+        });
+        b.body_denies.push(BodyDeny {
+            host: azure::HOST.into(),
+            paths: patches.clone(),
+            methods: vec!["PATCH".into()],
+            ignore_case: true,
+            only_keys: keys(&["title", "description", "isDraft", "targetRefName"]),
+            reason: "the sandbox may change a pull request's title, description, draft state \
+                     and target; completing it (or auto-complete) stays with you"
+                .into(),
+            ..Default::default()
+        });
+    }
     b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     let guard = AzureGuard {
         repos: writable.iter().map(azure::Repo::key).collect(),
@@ -1104,6 +1199,80 @@ mod tests {
             },
             Utc::now(),
         )
+    }
+
+    #[test]
+    fn azure_devops_pull_requests_go_through_rest_but_are_completed_by_people() {
+        use luoto_shared::policy::JsonBody;
+        let text = r#"
+[credentials.azure_devops]
+token = "op://v/ado/pat"
+repos = ["invinite/InviniteInfra/azure-devops-agent"]
+read_repos = ["invinite/InviniteInfra/lib"]
+"#;
+        let c = compile("t", &cfg(text), GATE, &alias()).unwrap();
+        let p = &c.policy;
+        let base = "/invinite/InviniteInfra/_apis/git/repositories/azure-devops-agent";
+        let allowed = |method: &str, path: &str| {
+            matches!(
+                decide(p, "dev.azure.com", method, path),
+                Decision::Allow { .. }
+            )
+        };
+        for (method, path) in [
+            ("POST", format!("{base}/pullrequests")),
+            ("POST", format!("{base}/pullRequests")),
+            ("GET", format!("{base}/pullrequests/12")),
+            ("PATCH", format!("{base}/pullRequests/12")),
+            ("POST", format!("{base}/pullrequests/12/threads")),
+            ("POST", format!("{base}/pullrequests/12/threads/3/comments")),
+        ] {
+            assert!(allowed(method, &path), "{method} {path}");
+            assert_eq!(p.injections_for("dev.azure.com", &path).len(), 1, "{path}");
+        }
+        for (method, path) in [
+            ("PUT", format!("{base}/pullrequests/12/reviewers/me")),
+            ("POST", format!("{base}/pushes")),
+            (
+                "POST",
+                "/invinite/InviniteInfra/_apis/git/repositories/lib/pullrequests".into(),
+            ),
+            ("POST", "/invinite/_apis/projects".into()),
+        ] {
+            assert!(!allowed(method, &path), "{method} {path}");
+        }
+        assert!(
+            p.injections_for(
+                "dev.azure.com",
+                "/invinite/InviniteInfra/_apis/git/repositories/lib/pullrequests"
+            )
+            .is_empty()
+        );
+        let refused = |method: &str, path: &str, body: &str| {
+            let json = JsonBody::parse(body.as_bytes()).unwrap();
+            p.body_denies
+                .iter()
+                .any(|d| d.applies("dev.azure.com", method, path) && d.asks(&json))
+        };
+        let create = format!("{base}/PullRequests");
+        let one = format!("{base}/pullrequests/12");
+        assert!(!refused(
+            "POST",
+            &create,
+            r#"{"sourceRefName":"refs/heads/f","targetRefName":"refs/heads/main","title":"t"}"#
+        ));
+        assert!(refused(
+            "POST",
+            &create,
+            r#"{"title":"t","completionOptions":{}}"#
+        ));
+        assert!(!refused("PATCH", &one, r#"{"description":"d"}"#));
+        assert!(refused("PATCH", &one, r#"{"status":"completed"}"#));
+        assert!(refused(
+            "PATCH",
+            &one.to_uppercase(),
+            r#"{"autoCompleteSetBy":{"id":"x"}}"#
+        ));
     }
 
     #[test]
@@ -1661,11 +1830,11 @@ oauth_token = "op://p/claude/token"
         assert!(c.bindings.contains_key("anthropic.oauth_token"));
         let fetch = r#"{"tools":[{"type":"web_fetch_20260209"}]}"#;
         let json = luoto_shared::policy::JsonBody::parse(fetch.as_bytes()).unwrap();
-        assert!(
-            p.body_denies
-                .iter()
-                .any(|d| d.applies("api.anthropic.com", "/v1/messages") && d.asks(&json))
-        );
+        assert!(p.body_denies.iter().any(|d| d.applies(
+            "api.anthropic.com",
+            "POST",
+            "/v1/messages"
+        ) && d.asks(&json)));
     }
 
     #[test]

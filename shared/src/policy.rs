@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::creds::Injection;
 use crate::forges;
-use crate::glob::{self, glob_match};
+use crate::glob;
 use crate::host::{WildcardRisk, host_matches, normalize_host, wildcard_risk};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -154,8 +154,17 @@ pub struct DenyRule {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct BodyDeny {
     pub host: String,
-    /// POST paths whose bodies are read.
+    /// Paths whose bodies are read.
     pub paths: Vec<String>,
+    /// The methods whose bodies are read; empty: POST.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<String>,
+    /// `paths` match in any case, for a host that routes them so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_case: bool,
+    /// The only top-level keys a body may have; empty: any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only_keys: Vec<String>,
     /// Top-level keys that ask for it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<String>,
@@ -170,8 +179,16 @@ pub struct BodyDeny {
 }
 
 impl BodyDeny {
-    pub fn applies(&self, host: &str, path: &str) -> bool {
-        self.host == host && glob::matches_any(&self.paths, false, path)
+    pub fn applies(&self, host: &str, method: &str, path: &str) -> bool {
+        let method_ok = if self.methods.is_empty() {
+            method == "POST"
+        } else {
+            self.methods.iter().any(|m| m == method)
+        };
+        self.host == host
+            && method_ok
+            && !self.paths.is_empty()
+            && glob::matches_any(&self.paths, self.ignore_case, path)
     }
 
     pub fn asks(&self, body: &JsonBody) -> bool {
@@ -182,6 +199,7 @@ impl BodyDeny {
             })
         };
         self.keys.iter().any(|k| body.keys.contains(k))
+            || (!self.only_keys.is_empty() && body.keys.iter().any(|k| !self.only_keys.contains(k)))
             || body.tools.iter().any(|t| {
                 t.get("type")
                     .and_then(serde_json::Value::as_str)
@@ -389,7 +407,9 @@ impl Policy {
         for d in &self.denies {
             let method_hit = d.methods.is_empty()
                 || d.methods.iter().any(|m| m.eq_ignore_ascii_case(req.method));
-            let path_hit = d.paths.is_empty() || d.paths.iter().any(|p| glob_match(p, req.path));
+            // In any case: an explicit deny on a host that routes paths without case must not
+            // be stepped around with capitals.
+            let path_hit = glob::matches_any(&d.paths, true, req.path);
             if host_matches(&d.host, req.host) && method_hit && path_hit {
                 return Decision::Deny(DenyReason::Explicit {
                     reason: d.reason.clone(),
@@ -872,9 +892,11 @@ mod tests {
             tool_types: vec!["web_fetch".into()],
             tool_keys: vec!["url_context".into()],
             reason: "no".into(),
+            ..Default::default()
         };
-        assert!(d.applies("api.example.com", "/v1/messages"));
-        assert!(!d.applies("api.example.com", "/v1/messages/count_tokens"));
+        assert!(d.applies("api.example.com", "POST", "/v1/messages"));
+        assert!(!d.applies("api.example.com", "PATCH", "/v1/messages"));
+        assert!(!d.applies("api.example.com", "POST", "/v1/messages/count_tokens"));
         let asks = |body: &str| d.asks(&JsonBody::parse(body.as_bytes()).unwrap());
         assert!(asks(
             r#"{"tools":[{"type":"web_fetch_20260209","name":"web_fetch"}]}"#

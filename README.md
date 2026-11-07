@@ -309,7 +309,10 @@ so the others open pull requests over REST (`gh api repos/<owner>/<repo>/pulls`)
 An Azure DevOps credential lets the env fetch and push its repos over HTTPS. Remotes keep
 working as they are: SSH ones (`git@ssh.dev.azure.com:v3/…`, or a host alias from your
 `~/.ssh/config` that the folder's remotes use) and `*.visualstudio.com` ones are rewritten to
-`https://dev.azure.com` in the env. Pull requests are opened in Azure DevOps itself.
+`https://dev.azure.com` in the env. Pull requests for the repos in `repos` go over its REST
+API by the repository's name (`…/_apis/git/repositories/<repo>/pullrequests`): opened,
+commented on, their title, description, draft state and target changed; completing them, and
+votes, stay with you. `az repos pr` addresses repos by ID, which the gate doesn't match.
 
 A `[[credentials.git]]` works with any forge, as git speaks the same protocol to all: the gate
 adds the token to the listed repos' git requests only and guards pushes as on GitHub. It

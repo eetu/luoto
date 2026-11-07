@@ -29,16 +29,16 @@ pub async fn check(
     headers: &HeaderMap,
     body: Body,
 ) -> Result<Body, String> {
-    if method != "POST" {
-        return Ok(body);
-    }
     let denies: Vec<&BodyDeny> = policy
         .body_denies
         .iter()
-        .filter(|d| d.applies(host, path))
+        .filter(|d| d.applies(host, method, path))
         .collect();
     if !denies.is_empty() {
         return check_json(&denies, headers, body).await;
+    }
+    if method != "POST" {
+        return Ok(body);
     }
     // Git hosts route paths without regard to case, as their rules match them.
     if path.to_ascii_lowercase().ends_with("/git-receive-pack") {
@@ -85,8 +85,9 @@ pub async fn check(
     Ok(body)
 }
 
-/// A model API request whose body may ask the provider to reach the network: read whole
-/// (a body the check can't read is refused) and forwarded unless it asks.
+/// A request whose body may ask for what the env doesn't allow (a model API reaching the
+/// network, a pull request completed): read whole (a body the check can't read is refused)
+/// and forwarded unless it asks.
 async fn check_json(denies: &[&BodyDeny], headers: &HeaderMap, body: Body) -> Result<Body, String> {
     if headers
         .get(CONTENT_ENCODING)

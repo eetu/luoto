@@ -47,10 +47,12 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   GraphQL names no repository in its path, so with a token (not an App) it reaches what the
   token does, `read_repos` and unlisted repositories included; only an App's minted token is
   limited to the env's repositories.
-- **Azure DevOps writes.** The PAT goes only on the granted repositories' git paths, and pushes
-  pass the same guard as on GitHub. A PAT reaches its whole organization, so the gate's paths
-  are the only repository boundary; its REST API is not reachable. Configure branch policies
-  in Azure DevOps as well.
+- **Azure DevOps writes.** The PAT goes only on the granted repositories' git paths and their
+  pull requests' REST paths, and pushes pass the same guard as on GitHub. A pull request's
+  body is an allowlist of fields (title, description, branches, draft, reviewers, work items,
+  labels), so completing one (a merge) or setting auto-complete is refused, as are votes. A PAT
+  reaches its whole organization, so the gate's paths are the only repository boundary; the
+  rest of its REST API is not reachable. Configure branch policies in Azure DevOps as well.
 - **Other forges** (`[[credentials.git]]`). The token goes only on the granted repositories'
   smart-HTTP and LFS paths, pushes pass the same guard, and push options (which can open merge
   requests or skip CI) are refused. The forge's API is not reachable with it; the token's

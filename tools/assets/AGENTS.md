@@ -32,6 +32,9 @@ of its own, and open one pull request per repository. A repository the env may o
 refuses pushes: say so instead of working around it. Where `gh pr create` is refused for a
 repository of a second GitHub owner, open the pull request over REST:
 `gh api repos/<owner>/<repo>/pulls -f head=<branch> -f base=<base branch> -f title=… -f body=…`.
+On Azure DevOps, open it over REST by the repository's name (no token: the gate adds it);
+completing it stays with the user:
+`curl -sf -X POST -H 'Content-Type: application/json' "https://dev.azure.com/<org>/<project>/_apis/git/repositories/<repo>/pullrequests?api-version=7.1" -d '{"sourceRefName":"refs/heads/<branch>","targetRefName":"refs/heads/<base>","title":"…","description":"…"}'`.
 
 ## Toolchains and packages
 

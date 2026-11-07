@@ -26,6 +26,15 @@ impl Repo {
         format!("{}/{}/{}", self.org, self.project, self.name).to_ascii_lowercase()
     }
 
+    /// Its REST API base on `dev.azure.com`, by name (the REST API also takes the repo's
+    /// ID, which luoto doesn't know).
+    pub fn api_base(&self) -> String {
+        format!(
+            "/{}/{}/_apis/git/repositories/{}",
+            self.org, self.project, self.name
+        )
+    }
+
     /// Its smart-HTTP and LFS paths on `dev.azure.com`, in both URL forms; `write` adds
     /// pushes.
     pub fn git_paths(&self, write: bool) -> Vec<String> {
