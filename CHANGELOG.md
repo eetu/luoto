@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-11-07)
 
 Related repositories in one env, git on any forge, and an `up` that sets up what an env lacks.
 
