@@ -29,7 +29,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Path matching.** A path is matched and forwarded in one canonical form; dot segments, empty
   segments and backslashes are refused.
 - **Secrets.** Root secrets live only in the vault's memory, loaded from the host's secret
-  store at unlock and wiped by `luoto vault lock` or a VM restart. Each gate authenticates to the
+  store at unlock and wiped by `luoto vault lock` or a VM restart. `luoto vault reload` reads
+  them again; one an upstream refuses (401) is read again on its own, at most every 10
+  minutes, when its source needs no one (the keychain, a 1Password service account, `file:`,
+  Vault). Each gate authenticates to the
   vault with its own token and receives only its env's bindings, as short-lived values
   (GitHub installation tokens restricted to the env's repositories and permissions). On a
   credentialed host the gate removes any credential the client sent before injecting its own,

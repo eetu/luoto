@@ -670,6 +670,40 @@ pub fn unlock() -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+pub fn reload(env: Option<&str>) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    let refs = match env {
+        Some(e) => {
+            let name = workspace::resolve(&ctx.paths, Some(e))?;
+            env::plan(&ctx, &name)?.compiled.vault_refs()
+        }
+        None => crate::ctl::vault_status(&ctx.rt)?
+            .loaded_refs
+            .into_iter()
+            .collect(),
+    };
+    if refs.is_empty() {
+        println!("the vault holds no secrets to read again (`luoto vault unlock` loads them)");
+        return Ok(ExitCode::SUCCESS);
+    }
+    eprintln!("reading {} secret(s) from your secret store…", refs.len());
+    let r = sync::reload(&ctx, &refs)?;
+    println!(
+        "read {}: {} changed{}",
+        r.read,
+        r.changed,
+        if r.changed > 0 { ", in use now" } else { "" }
+    );
+    if !r.failed.is_empty() {
+        eprintln!(
+            "not read (their old values stay):\n  {}",
+            r.failed.join("\n  ")
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 pub fn lock() -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let failed = sync::lock_all(&ctx)?;

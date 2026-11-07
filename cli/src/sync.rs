@@ -120,15 +120,22 @@ pub fn lock_all(ctx: &Ctx) -> Result<Vec<String>> {
     if let Err(e) = ctl::vault::<bool>(&ctx.rt, &VaultCtl::Lock) {
         failed.push(format!("vault: {e:#}"));
     }
+    failed.extend(flush_gates(ctx)?);
+    Ok(failed)
+}
+
+/// Drop every running gate's cached credentials, so what the vault holds applies at once.
+/// The gates that couldn't be reached.
+fn flush_gates(ctx: &Ctx) -> Result<Vec<String>> {
     let states = match ctx.rt.states() {
         Ok(s) => s,
         Err(e) => {
-            failed.push(format!(
+            return Ok(vec![format!(
                 "gates: none flushed, the runtime could not list them ({e:#})"
-            ));
-            return Ok(failed);
+            )]);
         }
     };
+    let mut failed = Vec::new();
     for e in config::list_envs(&ctx.paths)? {
         if states.running(&names::gate(&e))
             && let Err(err) = ctl::gate::<bool>(&ctx.rt, &e, &GateCtl::FlushCredentials)
@@ -139,6 +146,44 @@ pub fn lock_all(ctx: &Ctx) -> Result<Vec<String>> {
         }
     }
     Ok(failed)
+}
+
+/// What [`reload`] did.
+pub struct Reloaded {
+    pub read: usize,
+    pub changed: usize,
+    /// The references that couldn't be read, and the gates that weren't flushed.
+    pub failed: Vec<String>,
+}
+
+/// Read `refs` from the secret store again (a token rotated there) and give the vault those
+/// that changed; the gates then drop their cached copies. A reference that can't be read
+/// keeps the value the vault has.
+pub fn reload(ctx: &Ctx, refs: &BTreeSet<String>) -> Result<Reloaded> {
+    let mut values = BTreeMap::new();
+    let mut failed = Vec::new();
+    for r in refs {
+        match secrets::resolve(&ctx.global, r) {
+            Ok(v) => {
+                values.insert(r.clone(), v);
+            }
+            Err(e) => failed.push(format!("{r}: {e:#}")),
+        }
+    }
+    let read = values.len();
+    let changed = if values.is_empty() {
+        0
+    } else {
+        ctl::vault::<usize>(&ctx.rt, &VaultCtl::Load { secrets: values })?
+    };
+    if changed > 0 {
+        failed.extend(flush_gates(ctx)?);
+    }
+    Ok(Reloaded {
+        read,
+        changed,
+        failed,
+    })
 }
 
 /// Recompile every env, re-register bindings and load all secrets (after a VM reboot), with

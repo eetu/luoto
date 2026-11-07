@@ -51,7 +51,7 @@ fn dispatch(vault: &Vault, op: VaultCtl) -> CtlResponse {
         VaultCtl::Status => CtlResponse::ok(vault.status()),
         VaultCtl::Load { secrets } => {
             let n = vault.load(secrets);
-            lifecycle(vault, "", format!("unlocked: {n} secret(s) loaded"));
+            lifecycle(vault, "", format!("{n} secret(s) loaded or changed"));
             CtlResponse::ok(n)
         }
         VaultCtl::Bind {

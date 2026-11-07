@@ -316,6 +316,9 @@ enum VaultCmd {
     Unlock,
     /// Wipe secrets from the vault and every gate.
     Lock,
+    /// Read the secrets again (after rotating one in your secret store): all the vault holds,
+    /// or with `-e` the env's.
+    Reload,
 }
 
 fn main() -> ExitCode {
@@ -459,6 +462,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             VaultCmd::Status => c::vault_status(),
             VaultCmd::Unlock => c::unlock(),
             VaultCmd::Lock => c::lock(),
+            VaultCmd::Reload => c::reload(env_arg.as_deref()),
         },
         Cmd::SshProxy { env: e } => connect::ssh_proxy(&e),
         Cmd::Watch => watch::watch(),

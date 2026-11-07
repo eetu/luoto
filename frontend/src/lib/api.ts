@@ -131,6 +131,8 @@ export const api = {
       include_risky: includeRisky,
     }),
   vault: (action: "unlock" | "lock") => request<unknown>("POST", `/vault/${action}`, {}),
+  reloadVault: () =>
+    request<{ read: number; changed: number; failed: string[] }>("POST", "/vault/reload", {}),
 };
 
 /** Follow the live event stream (fetch-based SSE, so the token can travel in a header). */

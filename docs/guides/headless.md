@@ -22,7 +22,8 @@ how it is started (`headless` in `shared/agents/<agent>.toml`).
   OS keychain (`keyring:luoto/anthropic.oauth_token`, where the prompt's "paste it into your
   keychain" keeps it), a 1Password service account (`[sources.op] mode = "service-account"`
   and its `service_account_token` ref in `config.toml`), `env:` or `file:`. Set one without the
-  prompt with `luoto agent add claude --credential oauth_token=<ref>`.
+  prompt with `luoto agent add claude --credential oauth_token=<ref>`. A token rotated in such
+  a source is read again once an upstream refuses the old one.
 - **Access up front.** An agent that hits a blocked host asks for it (`sandbox request`), and
   only you can approve, so an unattended run would wait for nobody. Give the env the presets
   and rules the task needs first; `luoto egress -e <env> --denied` after a trial run shows

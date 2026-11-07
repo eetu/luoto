@@ -243,10 +243,36 @@ impl Vault {
         }
     }
 
-    /// Merge resolved secrets into memory; how many were given.
+    /// Merge resolved secrets into memory; how many were new or changed. A changed one (a
+    /// rotated token, a new App key) also retires every minted token, as one could come from
+    /// the old key.
     pub fn load(&self, secrets: BTreeMap<String, String>) -> usize {
-        let n = secrets.len();
-        self.lock().secrets.extend(secrets);
+        let mut inner = self.lock();
+        let mut n = 0;
+        let mut rotated = false;
+        for (r, value) in secrets {
+            match inner.secrets.get_mut(&r) {
+                Some(old) if *old == value => {}
+                Some(old) => {
+                    // SAFETY: zero bytes keep the String valid UTF-8.
+                    unsafe { old.as_bytes_mut().fill(0) };
+                    *old = value;
+                    rotated = true;
+                    n += 1;
+                }
+                None => {
+                    inner.secrets.insert(r, value);
+                    n += 1;
+                }
+            }
+        }
+        if rotated {
+            inner.minted.clear();
+            let generation = inner.next_generation();
+            for e in inner.envs.values_mut() {
+                e.generation = generation;
+            }
+        }
         n
     }
 
@@ -313,5 +339,26 @@ mod tests {
             seen.is_sorted() && seen.windows(2).all(|w| w[0] != w[1]),
             "{seen:?}"
         );
+    }
+
+    #[test]
+    fn a_changed_secret_retires_minted_tokens() {
+        let v = Vault::new(client_tls());
+        v.bind("e", [0; 32], BTreeMap::new());
+        let load = |val: &str| v.load(BTreeMap::from([("op://a/b/c".into(), val.into())]));
+        let mint = || {
+            v.lock()
+                .minted
+                .insert(("e".into(), "github".into()), ("ghs_x".into(), Utc::now()));
+        };
+        assert_eq!(load("one"), 1);
+        mint();
+        let before = v.lock().generation_of("e");
+        assert_eq!(load("one"), 0);
+        assert_eq!(v.lock().minted.len(), 1);
+        assert_eq!(load("two"), 1);
+        assert!(v.lock().minted.is_empty());
+        assert_ne!(v.lock().generation_of("e"), before);
+        assert_eq!(v.lock().secrets["op://a/b/c"], "two");
     }
 }

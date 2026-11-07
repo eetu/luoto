@@ -617,6 +617,14 @@ async fn vault_action(Path(action): Path<String>) -> ApiResult<Value> {
                 let n = sync::unlock_all(&ctx)?;
                 Ok(json!({ "envs": n }))
             }
+            "reload" => {
+                let refs = ctl::vault_status(&ctx.rt)?
+                    .loaded_refs
+                    .into_iter()
+                    .collect();
+                let r = sync::reload(&ctx, &refs)?;
+                Ok(json!({ "read": r.read, "changed": r.changed, "failed": r.failed }))
+            }
             "lock" => {
                 let failed = sync::lock_all(&ctx)?;
                 if !failed.is_empty() {

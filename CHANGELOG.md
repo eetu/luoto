@@ -55,6 +55,11 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
 - **`sandbox request --preset npm`** (MCP: `preset` in `sandbox_request_access`) asks for one of
   luoto's presets; approving adds it to the env and opens its hosts at once.
 - **`luoto agent rm`** drops an agent from an env's config and its hosts from the policy.
+- **Rotated secrets:** `luoto vault reload` (or the UI's vault panel) reads the vault's
+  secrets again and puts the changed ones in use at once; `-e` limits it to one env's. When an
+  upstream refuses a credential (401), the background watcher reads it again itself if its
+  source needs no one (the keychain, a 1Password service account, `file:`, Vault), at most
+  every 10 minutes; for the 1Password app it notes `luoto vault reload` in its log.
 - **`luoto requests --watch`** prints each new request as it comes, with the terminal's bell.
 - **Requests in the UI** can be ticked and approved or rejected together; one whose rule has
   risks stays ticked, for review on its own.
