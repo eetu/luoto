@@ -295,8 +295,8 @@ A GitHub App for luoto needs only repository permissions such as Contents and Pu
 luoto refuses Workflows, Actions, Secrets and Administration ([why](SECURITY.md#what-holds-the-line)).
 A token or App installation reaches one owner's repos; for another owner's, write
 `[[credentials.github]]` once per owner instead of `[credentials.github]`. Each repo's requests
-get the credential that lists it, and GraphQL (`gh pr create`) the first one's, so the others
-open pull requests over REST (`gh api repos/<owner>/<repo>/pulls`).
+get the credential that lists it, and GraphQL (`gh pr create`) the first one that may write,
+so the others open pull requests over REST (`gh api repos/<owner>/<repo>/pulls`).
 
 An Azure DevOps credential lets the env fetch and push its repos over HTTPS. Remotes keep
 working as they are: SSH ones (`git@ssh.dev.azure.com:v3/…`, or a host alias from your

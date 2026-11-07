@@ -983,6 +983,12 @@ impl EnvFile {
         if found.is_some() && table.get("token").is_none() && new.token.is_some() {
             table["token"] = toml_edit::value(new.token.as_deref().unwrap_or_default());
             table["username"] = toml_edit::value(new.username.as_str());
+            if new.private && table.get("private").is_none() {
+                table["private"] = toml_edit::value(true);
+            }
+            if let Some(ca) = new.ca.as_deref().filter(|_| table.get("ca").is_none()) {
+                table["ca"] = toml_edit::value(ca);
+            }
         }
         push_unique(table, key, repos);
         self.save()

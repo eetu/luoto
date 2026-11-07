@@ -564,17 +564,20 @@ fn github_git_paths(o: &str, r: &str, write: bool) -> Vec<String> {
 
 /// Every `[[credentials.github]]` (one per account, as an org's token reaches only that org).
 /// Each repo's git and REST paths get the credential that lists it; `/graphql`, which names no
-/// repo, gets the first one's. One push guard covers them all, as strict as the strictest.
+/// repo, gets the first one that may write. One push guard covers them all, as strict as the
+/// strictest.
 fn compile_github(b: &mut Builder, creds: &[GithubCred]) -> Result<Option<GithubGuard>> {
-    let Some(first) = creds.first() else {
+    if creds.is_empty() {
         return Ok(None);
-    };
+    }
+    // GraphQL names no repo in its path, so it goes out with one credential: the first that
+    // may write, else the first; a read-only one mutates nothing.
+    let graphql = creds.iter().position(|c| !c.repos.is_empty()).unwrap_or(0);
     let mut guard = GithubGuard {
-        // GraphQL goes out with the first credential: a read-only one mutates nothing.
-        graphql_mutations: if first.repos.is_empty() {
+        graphql_mutations: if creds[graphql].repos.is_empty() {
             Vec::new()
         } else {
-            first.graphql_mutations.clone()
+            creds[graphql].graphql_mutations.clone()
         },
         allow_tags: creds.iter().all(|c| c.allow_tags),
         ..Default::default()
@@ -595,7 +598,7 @@ fn compile_github(b: &mut Builder, creds: &[GithubCred]) -> Result<Option<Github
         } else {
             format!("github-{}", i + 1)
         };
-        let write = compile_github_one(b, gh, &name, i == 0)?;
+        let write = compile_github_one(b, gh, &name, i == graphql)?;
         for (o, r) in gh
             .repos
             .iter()
@@ -1525,6 +1528,25 @@ ca = "{}"
         let public = cfg("[[credentials.git]]\nhost = \"codeberg.org\"\nread_repos = [\"o/r\"]");
         let c = compile("t", &public, GATE, &[]).unwrap();
         assert!(c.policy.injections.is_empty() && c.policy.git.is_empty());
+    }
+
+    #[test]
+    fn graphql_goes_with_the_first_credential_that_writes() {
+        let c = compile(
+            "t",
+            &cfg("[[credentials.github]]\ntoken = \"env:R\"\nread_repos = [\"a/x\"]\n[[credentials.github]]\ntoken = \"env:W\"\nrepos = [\"b/y\"]\n"),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        let p = &c.policy;
+        let graphql: Vec<&str> = p
+            .injections_for("api.github.com", "/graphql")
+            .iter()
+            .map(|i| i.binding.as_str())
+            .collect();
+        assert_eq!(graphql, ["github-2"]);
+        assert!(!p.github.as_ref().unwrap().graphql_mutations.is_empty());
     }
 
     #[test]

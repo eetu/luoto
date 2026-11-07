@@ -19,8 +19,8 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   are fetched and read through the gate, never pushed to or written; a GitHub App mints a
   read-only token for them.
 - **A GitHub credential per owner:** `[[credentials.github]]`, once per account. Each repo's
-  requests get the credential that lists it, GraphQL the first one's; `[credentials.github]` is
-  the form for one. A token that reaches several owners is one credential listing all their
+  requests get the credential that lists it, GraphQL the first one that may write;
+  `[credentials.github]` is the form for one. A token that reaches several owners is one credential listing all their
   repos, and `up` offers a reference the config has before asking for another.
 - **Git on any forge:** `[[credentials.git]]` gives a host (GitLab, Forgejo, Gitea, Bitbucket,
   self-hosted) a token the gate adds to the listed repos' git requests as basic auth, with the
@@ -33,8 +33,9 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   an HTTPS credential for each GitHub owner and Azure DevOps organization whose repos none
   covers (push or read only, kept in the keychain, 1Password or a reference). Repos answered
   as public aren't asked about again; a removed credential is asked for anew. Without a
-  terminal, or with `init --yes`, agents log in inside and `up` prints the git credentials to
-  add. `luoto repo add` asks the same before it clones.
+  terminal `up` changes no config and prints what to add; `init --yes`, `agent add` and the
+  UI's new env let an agent without a credential log in inside. `luoto repo add` asks the same
+  before it clones.
 - **Packages and toolchains on request:** `sandbox request --package <name>` and
   `--tool <tool>@<version>` (MCP: `sandbox_request_install`) ask you to keep software in the
   env. `luoto approve` (or the UI) installs it and writes it into `[deps] system` or `[tools]`,

@@ -332,14 +332,14 @@ fn skip(rel: &Path) -> bool {
 /// inside read the same way. `COPY_SKIP` never goes.
 pub fn copy_list(src: &Path) -> Result<Vec<(PathBuf, bool)>> {
     let mut out = Vec::new();
-    let mut dirs = std::collections::HashSet::new();
-    collect(src, Path::new(""), &mut out, &mut dirs)?;
+    let mut seen = std::collections::HashSet::new();
+    collect(src, Path::new(""), &mut out, &mut seen)?;
     Ok(out)
 }
 
 fn add(
     out: &mut Vec<(PathBuf, bool)>,
-    dirs: &mut std::collections::HashSet<PathBuf>,
+    seen: &mut std::collections::HashSet<PathBuf>,
     rel: PathBuf,
     dir: bool,
 ) {
@@ -350,11 +350,12 @@ fn add(
         .collect();
     parents.reverse();
     for p in parents {
-        if dirs.insert(p.to_path_buf()) {
+        if seen.insert(p.to_path_buf()) {
             out.push((p.to_path_buf(), true));
         }
     }
-    if !dir || dirs.insert(rel.clone()) {
+    // A file git lists twice (an unmerged one, once per stage) goes in once.
+    if seen.insert(rel.clone()) {
         out.push((rel, dir));
     }
 }
@@ -364,7 +365,7 @@ fn collect(
     src: &Path,
     rel: &Path,
     out: &mut Vec<(PathBuf, bool)>,
-    dirs: &mut std::collections::HashSet<PathBuf>,
+    seen: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<()> {
     let dir = src.join(rel);
     // Only a repository's own root: a folder inside a bigger work tree (a home folder kept in
@@ -375,7 +376,13 @@ fn collect(
         .then(|| crate::detect::git_files(&dir))
         .flatten();
     let Some(files) = files else {
-        return walk(src, rel, false, out, dirs);
+        if dir.join(".git").exists() {
+            eprintln!(
+                "warning: git can't list {}; copying all of it, ignored files included",
+                dir.display()
+            );
+        }
+        return walk(src, rel, false, out, seen);
     };
     for f in files {
         let r = rel.join(f.trim_end_matches('/'));
@@ -389,19 +396,19 @@ fn collect(
         if meta.is_dir() {
             // A repository git doesn't descend into: one inside this one, or a submodule.
             if src.join(&r).join(".git").exists() {
-                collect(src, &r, out, dirs)?;
+                collect(src, &r, out, seen)?;
             }
         } else if meta.is_file() || meta.is_symlink() {
-            add(out, dirs, r, false);
+            add(out, seen, r, false);
         }
     }
     let git = rel.join(".git");
     match std::fs::symlink_metadata(src.join(&git)) {
         Ok(m) if m.is_dir() => {
-            add(out, dirs, git.clone(), true);
-            walk(src, &git, true, out, dirs)?;
+            add(out, seen, git.clone(), true);
+            walk(src, &git, true, out, seen)?;
         }
-        Ok(_) => add(out, dirs, git, false),
+        Ok(_) => add(out, seen, git, false),
         Err(_) => {}
     }
     Ok(())
@@ -413,7 +420,7 @@ fn walk(
     rel: &Path,
     plain: bool,
     out: &mut Vec<(PathBuf, bool)>,
-    dirs: &mut std::collections::HashSet<PathBuf>,
+    seen: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<()> {
     let path = src.join(rel);
     for entry in std::fs::read_dir(&path).with_context(|| format!("read {}", path.display()))? {
@@ -425,13 +432,13 @@ fn walk(
         let ft = entry.file_type()?;
         if ft.is_dir() {
             if !plain && entry.path().join(".git").exists() {
-                collect(src, &r, out, dirs)?;
+                collect(src, &r, out, seen)?;
             } else {
-                add(out, dirs, r.clone(), true);
-                walk(src, &r, plain, out, dirs)?;
+                add(out, seen, r.clone(), true);
+                walk(src, &r, plain, out, seen)?;
             }
         } else if ft.is_file() || ft.is_symlink() {
-            add(out, dirs, r, false);
+            add(out, seen, r, false);
         }
     }
     Ok(())
@@ -445,10 +452,12 @@ pub fn push(ctx: &Ctx, env: &str, src: &Path, sub: Option<&str>) -> Result<usize
     let mut args = vec!["exec", "-i", "-u", UID, dev.as_str()];
     match sub {
         None => args.extend(["tar", "-x", "-f", "-", "-C", "/workspace"]),
+        // Into a hidden folder first, moved into place only once the whole archive is in, so
+        // a copy cut short leaves no half-filled repo for the next `up` to take as done.
         Some(name) => args.extend([
             "sh",
             "-c",
-            r#"mkdir -p "/workspace/$0" && exec tar -x -f - -C "/workspace/$0""#,
+            r#"t="/workspace/.$0.luoto-copy"; rm -rf "$t" && mkdir "$t" && tar -x -f - -C "$t" && mv "$t" "/workspace/$0""#,
             name,
         ]),
     }
@@ -462,19 +471,33 @@ pub fn push(ctx: &Ctx, env: &str, src: &Path, sub: Option<&str>) -> Result<usize
         .spawn()
         .context("start tar in the env")?;
     let stdin = child.stdin.take().context("stdin")?;
-    let mut builder = tar::Builder::new(stdin);
-    builder.follow_symlinks(false);
-    let mut count = 0;
-    for (rel, dir) in &list {
-        let path = src.join(rel);
-        if *dir {
-            builder.append_dir(rel, &path)?;
-        } else {
-            builder.append_path_with_name(&path, rel)?;
-            count += 1;
+    let sent = (|| -> Result<usize> {
+        let mut builder = tar::Builder::new(stdin);
+        builder.follow_symlinks(false);
+        let mut count = 0;
+        for (rel, dir) in &list {
+            let path = src.join(rel);
+            if *dir {
+                builder.append_dir(rel, &path)?;
+            } else {
+                builder
+                    .append_path_with_name(&path, rel)
+                    .with_context(|| format!("read {}", path.display()))?;
+                count += 1;
+            }
         }
-    }
-    builder.into_inner()?.flush()?;
+        builder.into_inner()?.flush()?;
+        Ok(count)
+    })();
+    let count = match sent {
+        Ok(n) => n,
+        Err(e) => {
+            // An archive cut short must not be taken as whole: the copy stops here.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    };
     let out = child.wait_with_output()?;
     if !out.status.success() {
         bail!(
@@ -567,11 +590,12 @@ pub struct PullTarget {
     pub skip: Vec<String>,
 }
 
-/// Where `pull` writes: the workspace to the env's folder (or `to`), less its repos, and each
-/// repo copied in from a host folder back to that folder; a cloned repo's work leaves by git
-/// push. With `repo`, only that one, to its host folder or else the same name in the env's
-/// folder (or `to`). `present` are the repos in the workspace: a folder repo not copied in yet
-/// has nothing to pull.
+/// Where `pull` writes: the workspace to the env's folder, less its repos, and each repo
+/// copied in from a host folder back to that folder; a cloned repo's work leaves by git push.
+/// With `to`, all of it goes there instead, each repo at `<to>/<name>`. With `repo`, only that
+/// one, to its host folder or else the same name in the env's folder (or `to`). `present` are
+/// the repos in the workspace: a folder repo not copied in yet has nothing to pull, and one
+/// whose host folder is gone is left out with a warning.
 pub fn pull_targets(
     ws: &Workspace,
     to: Option<PathBuf>,
@@ -608,8 +632,8 @@ pub fn pull_targets(
     }
     let mut out = vec![PullTarget {
         repo: None,
-        dest: match to {
-            Some(t) => t,
+        dest: match &to {
+            Some(t) => t.clone(),
             None => root()?,
         },
         skip: ws.repos.keys().cloned().collect(),
@@ -620,9 +644,23 @@ pub fn pull_targets(
         .filter_map(|(n, r)| Some((n, r.dir.as_ref()?)))
         .filter(|(n, _)| present.contains(*n));
     for (name, dir) in own {
+        let dest = match &to {
+            Some(t) => {
+                let d = t.join(name);
+                std::fs::create_dir_all(&d)?;
+                d
+            }
+            None => match canonical(dir) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("warning: repo {name} left out: {e:#}");
+                    continue;
+                }
+            },
+        };
         out.push(PullTarget {
             repo: Some(name.clone()),
-            dest: canonical(dir)?,
+            dest,
             skip: Vec::new(),
         });
     }
@@ -1179,6 +1217,26 @@ mod tests {
             pull_targets(&ws, None, None, &BTreeSet::new())
                 .unwrap()
                 .len(),
+            1
+        );
+        // With `--to`, each repo lands under it, never in its own folder.
+        let to = tempfile::tempdir().unwrap();
+        let elsewhere = pull_targets(&ws, Some(to.path().to_path_buf()), None, &present).unwrap();
+        assert_eq!(elsewhere[1].dest, to.path().join("api"));
+        // A repo whose folder is gone is left out.
+        let gone = Workspace {
+            repos: BTreeMap::from([(
+                "old".to_string(),
+                config::Repo {
+                    dir: Some("/nonexistent/luoto-test".into()),
+                    ..Default::default()
+                },
+            )]),
+            ..ws.clone()
+        };
+        let present_old = BTreeSet::from(["old".to_string()]);
+        assert_eq!(
+            pull_targets(&gone, None, None, &present_old).unwrap().len(),
             1
         );
         let web = pull_targets(&ws, None, Some("web"), &present).unwrap();

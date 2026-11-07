@@ -113,19 +113,40 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
     Ok(())
 }
 
-/// For the agents `cfg` lists (the accepted luoto.toml's included) with no credential: ask
-/// how each authenticates on a terminal, as `agent add` always has, else let it log in
-/// inside; the answer goes into the env's config. `up` asks before it starts the gate, so the
-/// gate has it.
-pub fn ask_missing(ctx: &Ctx, env_name: &str, cfg: &crate::config::EnvConfig) -> Result<()> {
+/// The agents `cfg` lists (the accepted luoto.toml's included) that have no credential.
+fn lacking(ctx: &Ctx, env_name: &str, cfg: &crate::config::EnvConfig) -> Result<Vec<String>> {
     let own = EnvFile::load(&ctx.paths, env_name)?.cfg;
-    let lacking: Vec<String> = cfg
+    Ok(cfg
         .agents
         .names()
         .filter(|n| profiles::agent(n).is_some_and(|a| !has_credential(&own, &a)))
         .cloned()
-        .collect();
-    credentials(ctx, env_name, &lacking, crate::prompt::interactive())
+        .collect())
+}
+
+/// For the agents `cfg` lists with no credential: on a terminal, ask how each authenticates,
+/// as `agent add` does, and write the answer into the env's config (`up` asks before it
+/// starts the gate, so the gate has it). Without one, say what to add and change nothing.
+pub fn ask_missing(ctx: &Ctx, env_name: &str, cfg: &crate::config::EnvConfig) -> Result<()> {
+    let lacking = lacking(ctx, env_name, cfg)?;
+    if crate::prompt::interactive() {
+        return credentials(ctx, env_name, &lacking, true);
+    }
+    for a in lacking.iter().filter_map(|n| profiles::agent(n)) {
+        eprintln!("note: {}", credential_help(&a, env_name));
+    }
+    Ok(())
+}
+
+/// For a command that adds agents without a terminal (`init --yes`, `agent add`, the UI's new
+/// env): each of the env's agents with no credential logs in inside where its provider allows
+/// it, as the user asked for the agent there and then.
+pub fn login_inside_unless_set(ctx: &Ctx, env_name: &str) -> Result<()> {
+    if crate::prompt::interactive() {
+        return Ok(());
+    }
+    let lacking = lacking(ctx, env_name, &env::layered(ctx, env_name)?)?;
+    credentials(ctx, env_name, &lacking, false)
 }
 
 /// Install each of `agents` that the env lacks (one call finds them) and say how it logs in,
@@ -156,18 +177,26 @@ pub fn ensure(ctx: &Ctx, env_name: &str, agents: &[String], quiet: bool) -> Resu
         .context("look for the env's agents")?;
     let missing: Vec<&str> = out.lines().map(str::trim).collect();
     let cfg = EnvFile::load(&ctx.paths, env_name)?.cfg;
+    // One agent that fails to install leaves the others to try.
+    let mut failed = Vec::new();
     for (name, a) in &wanted {
-        if missing.contains(&a.command.as_str()) {
-            install(ctx, env_name, name)?;
-            if quiet {
-                continue;
-            }
+        if !missing.contains(&a.command.as_str()) {
+            continue;
+        }
+        if let Err(e) = install(ctx, env_name, name) {
+            failed.push(format!("{name}: {e:#}"));
+            continue;
+        }
+        if !quiet {
             println!(
                 "{} is ready ({}): luoto agent run -e {env_name} {name}",
                 a.description,
                 auth_summary(&cfg, a, env_name)
             );
         }
+    }
+    if !failed.is_empty() {
+        bail!("{}", failed.join("; "));
     }
     Ok(())
 }
@@ -455,6 +484,7 @@ pub fn add(env_name: &str, agent: &str, credential: Option<&str>) -> Result<Exit
         set_credentials(&ctx, env_name, &[agent.to_string()], &[c.to_string()])?;
     }
     let listed = !list_agent(&ctx, env_name, agent)?;
+    login_inside_unless_set(&ctx, env_name)?;
     let dev = names::dev(env_name);
     let there = listed && ctx.rt.is_running(&dev) && installed(&ctx, &dev, &a);
     env::up(&ctx, env_name, &env::UpOptions::default())?;
@@ -488,6 +518,12 @@ pub fn headless(
     let prompt = prompt.trim();
     if prompt.is_empty() || prompt.len() > 100_000 {
         bail!("the prompt is empty or longer than 100 kB");
+    }
+    // The answer's file, made before the run: a path that can't be written fails now.
+    let out_file = output.map(crate::workspace::expand).unwrap_or_default();
+    if output.is_some() {
+        std::fs::write(&out_file, b"")
+            .with_context(|| format!("can't write {}", out_file.display()))?;
     }
     list_agent(&ctx, env_name, agent)?;
     let progress = Stdio::from(std::io::stderr());
@@ -528,15 +564,21 @@ pub fn headless(
     let status = match output {
         Some(path) => {
             let out = cmd.stderr(Stdio::inherit()).output()?;
-            // The agent's answer is the sandbox's text: written as it is, never run.
-            std::fs::write(crate::workspace::expand(path), &out.stdout)?;
+            // The agent's answer is the sandbox's text: written as it is, never run. A write
+            // that fails leaves it on stderr rather than lost.
+            if let Err(e) = std::fs::write(&out_file, &out.stdout) {
+                eprintln!("warning: {path} not written ({e}); the answer follows");
+                std::io::Write::write_all(&mut std::io::stderr(), &out.stdout)?;
+            }
             out.status
         }
         None => cmd.status()?,
     };
     if down {
-        env::down(&ctx, env_name)?;
-        eprintln!("env `{env_name}` stopped");
+        match env::down(&ctx, env_name) {
+            Ok(()) => eprintln!("env `{env_name}` stopped"),
+            Err(e) => eprintln!("warning: env `{env_name}` not stopped ({e:#})"),
+        }
     }
     Ok(ExitCode::from(
         status.code().unwrap_or(1).clamp(0, 255) as u8

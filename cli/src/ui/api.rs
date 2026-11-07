@@ -293,6 +293,7 @@ async fn create_env(Json(n): Json<NewEnv>) -> ApiResult<Value> {
             check_reviewed(text, reviewed.as_deref())?;
         }
         init::create(&ctx, &mut p, true, true)?;
+        crate::agents::login_inside_unless_set(&ctx, &p.name)?;
         init::start(&ctx, &p.name, true)?;
         Ok(json!({ "ok": true, "name": p.name }))
     })

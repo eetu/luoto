@@ -359,7 +359,11 @@ pub fn seed(ctx: &Ctx, env: &str, ws: &Workspace, done: &BTreeSet<String>) -> BT
     let mut added = Vec::new();
     for (name, r) in pending {
         if found.contains(name) {
-            println!("repo {name}: /workspace/{name} is there already; left as it is");
+            println!(
+                "repo {name}: /workspace/{name} is there already (from the env's folder or an \
+                 earlier repo of that name) and is left as it is; to start it over, delete it \
+                 in the env and `luoto up`"
+            );
             now.insert(name.clone());
             continue;
         }
@@ -401,9 +405,12 @@ fn clone(
 ) -> Result<()> {
     println!("cloning {} into /workspace/{name}…", display(url));
     // No prompts: a remote that wants a password or an unknown host key fails instead.
+    // Into a hidden folder first, moved into place only when the clone is whole: one cut
+    // short leaves nothing the next `up` would take as done.
+    let tmp = sh_quote(&format!("/workspace/.{name}.luoto-clone"));
     let script = format!(
         "export GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes'\n\
-         exec git clone{}{} -- {} {}",
+         rm -rf {tmp} && git clone{}{} -- {} {tmp} && mv {tmp} {} || {{ rm -rf {tmp}; exit 1; }}",
         if std::io::stderr().is_terminal() {
             " --progress"
         } else {
@@ -722,14 +729,28 @@ fn private_host(host: &str) -> bool {
 
 /// The user name a new git host credential sends with its token, and, for a host on a private
 /// network, the CA its certificate may be signed by.
+/// Whether the env may reach `host` on a private network: asked when it resolves only to
+/// private addresses here. The host comes from a remote, maybe one a team's luoto.toml named,
+/// so the address alone never decides it.
+fn ask_private(host: &str) -> bool {
+    private_host(host)
+        && crate::prompt::confirm(&format!(
+            "  {} resolves to private addresses here. Let the env reach it there \
+             (`private = true`)?",
+            display(host)
+        ))
+}
+
 fn git_details(host: &str, private: bool, ca: &mut Option<String>) -> Result<String> {
     if private {
-        println!("  {host} is on a private network: the env may reach it there (`private = true`)");
-        let path =
-            inquire::Text::new("Its CA certificate (a PEM file), if an internal CA signs it:")
-                .with_help_message("empty when its certificate is public")
-                .prompt_skippable()?
-                .unwrap_or_default();
+        let question = format!(
+            "The CA certificate (a PEM file) of {}, if an internal CA signs it:",
+            display(host)
+        );
+        let path = inquire::Text::new(&question)
+            .with_help_message("empty when its certificate is public")
+            .prompt_skippable()?
+            .unwrap_or_default();
         let path = path.trim();
         if !path.is_empty() {
             *ca = Some(path.to_string());
@@ -799,7 +820,7 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
                 let Forge::Git(h) = &forge else { continue };
                 let new = GitCred {
                     host: h.clone(),
-                    private: private_host(h),
+                    private: ask_private(h),
                     ..Default::default()
                 };
                 f.add_git_repos(&new, &repos, true)?;
@@ -919,7 +940,7 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
                 let mut new = GitCred {
                     host: h.clone(),
                     token: token.clone(),
-                    private: private_host(h),
+                    private: ask_private(h),
                     ..Default::default()
                 };
                 if token.is_some() {

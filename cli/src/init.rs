@@ -106,6 +106,7 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
             );
         }
     }
+    repos::check(&workspace)?;
     let new_folder = std::fs::read_dir(&dir).map_or(true, |mut d| d.next().is_none());
     let (project, project_error) = if o.no_project || new_folder {
         (None, None)
@@ -514,6 +515,7 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
             },
         )?;
     }
+    crate::agents::login_inside_unless_set(&ctx, &name)?;
     if o.no_up {
         // `up` asks for the credentials the repos lack; until then, say what they are.
         let cfg = env::layered(&ctx, &name)?;

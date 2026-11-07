@@ -103,8 +103,8 @@ also lets `gh pr create` reach every one of them.
 
 A public GitHub repo needs none to be cloned. SSH remotes use these as they are; with
 `[credentials.ssh]` they stay on SSH, with a key luoto can't limit to repos. GraphQL
-(`gh pr create`) goes with the first GitHub credential; the others open pull requests over
-REST (`gh api repos/<owner>/<repo>/pulls`).
+(`gh pr create`) goes with the first GitHub credential that may write; the others open pull
+requests over REST (`gh api repos/<owner>/<repo>/pulls`).
 
 ## Moving files
 
