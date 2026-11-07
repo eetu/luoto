@@ -56,6 +56,8 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   luoto's presets; approving adds it to the env and opens its hosts at once.
 - **`luoto agent rm`** drops an agent from an env's config and its hosts from the policy.
 - **`luoto requests --watch`** prints each new request as it comes, with the terminal's bell.
+- **Requests in the UI** can be ticked and approved or rejected together; one whose rule has
+  risks stays ticked, for review on its own.
 - **Agent model and effort:** `[agents.claude] model = "opus"`, `effort = "medium"` in an
   env's config, its `luoto.toml`, or `config.toml` for every env that has the agent; `up`
   writes them into the agent's settings as the default a session can change. `agents = [...]`
