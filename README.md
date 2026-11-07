@@ -191,6 +191,8 @@ Without a terminal, `luoto run --agent claude --prompt "…"` runs one prompt: i
 up (asking nothing), runs the agent in its non-interactive mode and prints its answer (or
 writes it with `--output FILE`), exiting with the agent's code; `--down` stops the env after.
 A cron job or CI step can run it; pull requests it opens go through the gate as any other.
+[docs/headless.md](docs/headless.md) has examples, what an unattended run needs, and how to let
+GitHub merge its pull requests.
 
 | agent                         | command    | credential                                                  |
 | ----------------------------- | ---------- | ----------------------------------------------------------- |
