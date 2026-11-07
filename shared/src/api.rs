@@ -79,6 +79,9 @@ pub struct NewAccessRequest {
     #[serde(default)]
     pub paths: Vec<String>,
     pub reason: String,
+    /// Software to install; `host` is then empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<Install>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -89,9 +92,54 @@ pub enum RequestStatus {
     Rejected,
 }
 
+/// Software the sandbox asks to have in the env. Approved, it joins the env's config (`[deps]
+/// system`, `[tools]`), so it is installed again whenever the container is recreated.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Install {
+    /// A package of the image's package manager (apt, apk or dnf).
+    Package { name: String },
+    /// A toolchain mise installs: `node` and `24`, `cargo:ripgrep` and `latest`.
+    Tool { name: String, version: String },
+}
+
+impl Install {
+    /// Names a package manager or mise takes as they are: no options, spaces or shell.
+    pub fn check(&self) -> Result<(), String> {
+        let plain = |s: &str, extra: &[u8], max: usize| {
+            !s.is_empty()
+                && s.len() <= max
+                && s.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || extra.contains(&b))
+        };
+        match self {
+            Install::Package { name } if !plain(name, b"+._-", 100) => {
+                Err(format!("`{name}` is not a package name"))
+            }
+            Install::Tool { name, .. } if !plain(name, b"._/:@-", 100) => {
+                Err(format!("`{name}` is not a mise tool name"))
+            }
+            Install::Tool { version, .. } if !plain(version, b"+._-", 50) => {
+                Err(format!("`{version}` is not a version"))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// What it is, for people: `package postgresql-client`, `node 24 (mise)`.
+    pub fn describe(&self) -> String {
+        match self {
+            Install::Package { name } => format!("package {name}"),
+            Install::Tool { name, version } => format!("{name} {version} (mise)"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AccessRequest {
     pub id: u64,
+    /// Empty for an install request.
     pub host: String,
     pub access: AccessLevel,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -104,6 +152,9 @@ pub struct AccessRequest {
     pub resolved: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Software to install instead of access to a host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<Install>,
 }
 
 /// Limits on what the sandbox can file, so requests can't be used for approval fatigue.

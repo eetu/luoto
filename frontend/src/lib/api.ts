@@ -107,7 +107,10 @@ export const api = {
     ),
   requests: (name: string) => request<AccessRequest[]>("GET", `${env(name)}/requests`),
   approve: (name: string, id: number, ttl?: string, force = false) =>
-    request<Rule>("POST", `${env(name)}/requests/${id}/approve`, { ttl, force }),
+    request<Rule | { installed: string }>("POST", `${env(name)}/requests/${id}/approve`, {
+      ttl,
+      force,
+    }),
   reject: (name: string, id: number) =>
     request<AccessRequest>("POST", `${env(name)}/requests/${id}/reject`, {}),
   addRule: (name: string, rule: Rule, force = false) =>

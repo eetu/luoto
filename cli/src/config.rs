@@ -1064,6 +1064,27 @@ impl EnvFile {
         self.save()
     }
 
+    /// Add a package to `[deps] system`.
+    pub fn add_system_package(&mut self, name: &str) -> Result<()> {
+        if !self.doc.contains_key("deps") {
+            self.doc["deps"] = toml_edit::table();
+        }
+        let deps = self.doc["deps"]
+            .as_table_like_mut()
+            .context("`deps` is not a table")?;
+        if deps.get("system").is_none() {
+            deps.insert("system", toml_edit::value(toml_edit::Array::new()));
+        }
+        let arr = deps
+            .get_mut("system")
+            .and_then(|i| i.as_array_mut())
+            .context("`deps.system` is not a list")?;
+        if !arr.iter().any(|v| v.as_str() == Some(name)) {
+            arr.push(name);
+        }
+        self.save()
+    }
+
     /// Add hosts to `[deps] hosts` (readable only while installs run).
     pub fn add_install_hosts(&mut self, hosts: &[String]) -> Result<()> {
         if !self.doc.contains_key("deps") {

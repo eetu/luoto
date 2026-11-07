@@ -1,7 +1,7 @@
 <script lang="ts">
   import ShieldQuestion from "@lucide/svelte/icons/shield-question";
 
-  import { ago, app } from "$lib/stores/app.svelte";
+  import { ago, app, installLabel } from "$lib/stores/app.svelte";
 </script>
 
 {#if app.pending.length > 0}
@@ -13,7 +13,11 @@
         onclick={() => (app.subject = { kind: "request", id: r.id })}
       >
         <ShieldQuestion size={16} />
-        <span><b>{r.access}</b> access to <b>{r.host}</b> requested from inside the sandbox</span>
+        {#if r.install}
+          <span>install <b>{installLabel(r.install)}</b> requested from inside the sandbox</span>
+        {:else}
+          <span><b>{r.access}</b> access to <b>{r.host}</b> requested from inside the sandbox</span>
+        {/if}
         <span class="muted">#{r.id}, {ago(r.created)}: review</span>
       </button>
     {/each}

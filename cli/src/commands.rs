@@ -385,15 +385,24 @@ pub fn revoke(name: &str, rule: &str) -> Result<ExitCode> {
 
 /// What the sandbox asked for and why, escaped: the sandbox wrote all of it.
 fn fmt_request(r: &AccessRequest) -> String {
+    let what = match &r.install {
+        Some(i) => format!(
+            "install {}, kept in the env's config",
+            crate::text::display(&i.describe())
+        ),
+        None => format!(
+            "{} {:?}{}",
+            crate::text::display(&r.host),
+            r.access,
+            if r.paths.is_empty() {
+                String::new()
+            } else {
+                format!(" paths {}", crate::text::display(&r.paths.join(",")))
+            }
+        ),
+    };
     format!(
-        "{} {:?}{}\n   reason (written by the sandbox, untrusted): {:?}",
-        crate::text::display(&r.host),
-        r.access,
-        if r.paths.is_empty() {
-            String::new()
-        } else {
-            format!(" paths {}", crate::text::display(&r.paths.join(",")))
-        },
+        "{what}\n   reason (written by the sandbox, untrusted): {:?}",
         r.reason
     )
 }
@@ -433,6 +442,10 @@ pub fn approve(name: &str, id: u64, ttl: Option<&str>, yes: bool, force: bool) -
     println!("request #{id}: {}", fmt_request(&req));
     if !yes && !confirm("Approve?") {
         bail!("not approved (use --yes to skip the prompt)");
+    }
+    if req.install.is_some() {
+        println!("{}", rules::approve_install(&ctx, name, &req)?);
+        return Ok(ExitCode::SUCCESS);
     }
     let rule = rules::accepting_risks(force, |force| rules::approve(&ctx, name, &req, ttl, force))?;
     println!("approved: {} {}", rule.host, rule.access.describe());

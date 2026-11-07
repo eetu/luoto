@@ -118,7 +118,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   checked to stay in the folder as written, but it can lead through another link (one on the
   host, or one the same pull writes) that points elsewhere.
 - **Social engineering.** Access requests are written by code in the sandbox. Read the host
-  and access, not the reason.
+  and access, not the reason. An install request names a package or toolchain the gate has
+  checked to be a plain name; approving it runs that package's install scripts as root inside
+  the env (still the sandbox), and its downloads take the env's usual presets and install
+  windows.
 - **Images.** Release images are pinned by digest in the binary; images from
   `luoto setup --build` are as trustworthy as your source tree.
 - **Install windows.** The project's version files, which the sandbox controls, decide which

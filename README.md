@@ -136,7 +136,10 @@ hour if you like:
 
 An agent that needs a host asks with `sandbox request`; only you can approve it, on your
 machine (`luoto approve`, which asks you to accept the rule's risks like `luoto allow` does;
-`--force` accepts them without asking).
+`--force` accepts them without asking). It asks the same way for a system package or a
+toolchain the env should keep (`sandbox request --package postgresql-client`,
+`--tool node@24`): approving installs it and writes it into the env's `[deps] system` or
+`[tools]`, so a recreated container has it too.
 
 ### 6. Bring files back and stop
 
@@ -169,7 +172,8 @@ Commands act on the env of the current folder; `-e NAME` picks another (`luoto s
 | to check isolation                                                                                   | `luoto doctor`                                                                                                                     |
 
 Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host> --reason …`
-asks you for access; only you can approve, on the host.
+asks you for access (`--package <name>` or `--tool <tool>@<version>` for software to keep);
+only you can approve, on the host.
 
 ## Agents
 

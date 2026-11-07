@@ -35,6 +35,10 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   as public aren't asked about again; a removed credential is asked for anew. Without a
   terminal, or with `init --yes`, agents log in inside and `up` prints the git credentials to
   add. `luoto repo add` asks the same before it clones.
+- **Packages and toolchains on request:** `sandbox request --package <name>` and
+  `--tool <tool>@<version>` (MCP: `sandbox_request_install`) ask you to keep software in the
+  env. `luoto approve` (or the UI) installs it and writes it into `[deps] system` or `[tools]`,
+  so a recreated container gets it again; the sandbox learns whether the install worked.
 - **Agent model and effort:** `[agents.claude] model = "opus"`, `effort = "medium"` in an
   env's config, its `luoto.toml`, or `config.toml` for every env that has the agent; `up`
   writes them into the agent's settings as the default a session can change. `agents = [...]`

@@ -6,6 +6,7 @@ use luoto_shared::api::{
     AccessRequest, MAX_PENDING_REQUESTS, MAX_REASON_LEN, NewAccessRequest, RequestStatus,
 };
 use luoto_shared::host::normalize_host;
+use luoto_shared::policy::AccessLevel;
 use luoto_shared::policy::{Access, Rule, RuleOrigin, rule_error};
 
 const KEEP: usize = 100;
@@ -27,6 +28,32 @@ fn clean_reason(s: &str) -> String {
 
 impl Requests {
     pub fn create(&mut self, new: NewAccessRequest) -> Result<AccessRequest, String> {
+        if let Some(install) = &new.install {
+            install.check()?;
+            let reason = clean_reason(&new.reason);
+            if reason.is_empty() {
+                return Err("a reason is required".into());
+            }
+            if let Some(existing) = self
+                .items
+                .iter()
+                .find(|r| r.status == RequestStatus::Pending && r.install.as_ref() == Some(install))
+            {
+                return Ok(existing.clone());
+            }
+            return self.file(AccessRequest {
+                id: 0,
+                host: String::new(),
+                access: AccessLevel::Read,
+                paths: Vec::new(),
+                reason,
+                status: RequestStatus::Pending,
+                created: Utc::now(),
+                resolved: None,
+                note: None,
+                install: Some(install.clone()),
+            });
+        }
         let host = match new.host.strip_prefix("*.") {
             Some(rest) => format!("*.{}", normalize_host(rest).map_err(|e| e.to_string())?),
             None => normalize_host(&new.host).map_err(|e| e.to_string())?,
@@ -49,6 +76,22 @@ impl Requests {
         }) {
             return Ok(existing.clone());
         }
+        self.file(AccessRequest {
+            id: 0,
+            host,
+            access: new.access,
+            paths: new.paths,
+            reason,
+            status: RequestStatus::Pending,
+            created: Utc::now(),
+            resolved: None,
+            note: None,
+            install: None,
+        })
+    }
+
+    /// Queue `req` under the next id, unless too many wait already.
+    fn file(&mut self, mut req: AccessRequest) -> Result<AccessRequest, String> {
         let pending = self
             .items
             .iter()
@@ -60,17 +103,7 @@ impl Requests {
             ));
         }
         self.next += 1;
-        let req = AccessRequest {
-            id: self.next,
-            host,
-            access: new.access,
-            paths: new.paths,
-            reason,
-            status: RequestStatus::Pending,
-            created: Utc::now(),
-            resolved: None,
-            note: None,
-        };
+        req.id = self.next;
         self.items.push(req.clone());
         if self.items.len() > KEEP {
             let drop = self.items.len() - KEEP;
@@ -119,7 +152,7 @@ impl Requests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use luoto_shared::policy::AccessLevel;
+    use luoto_shared::api::Install;
 
     fn new(host: &str) -> NewAccessRequest {
         NewAccessRequest {
@@ -127,6 +160,7 @@ mod tests {
             access: AccessLevel::Read,
             paths: vec![],
             reason: "read the docs\n\u{1b}[31m".into(),
+            install: None,
         }
     }
 
@@ -145,5 +179,43 @@ mod tests {
         assert!(r.create(new("*.github.io")).is_err());
         r.resolve(a.id, true, None).unwrap();
         assert_eq!(r.pending(), 4);
+    }
+
+    #[test]
+    fn install_requests_name_plain_software() {
+        let mut r = Requests::default();
+        let ask = |install: Install| NewAccessRequest {
+            host: String::new(),
+            access: AccessLevel::Read,
+            paths: vec![],
+            reason: "psql for the migrations".into(),
+            install: Some(install),
+        };
+        let pkg = Install::Package {
+            name: "postgresql-client".into(),
+        };
+        let a = r.create(ask(pkg.clone())).unwrap();
+        assert_eq!(a.install.as_ref(), Some(&pkg));
+        assert_eq!(r.create(ask(pkg)).unwrap().id, a.id);
+        let tool = Install::Tool {
+            name: "node".into(),
+            version: "24".into(),
+        };
+        assert!(r.create(ask(tool)).is_ok());
+        for bad in [
+            Install::Package {
+                name: "-oDebug::x".into(),
+            },
+            Install::Package { name: "a b".into() },
+            Install::Package {
+                name: "x;rm".into(),
+            },
+            Install::Tool {
+                name: "node".into(),
+                version: "$(id)".into(),
+            },
+        ] {
+            assert!(r.create(ask(bad)).is_err());
+        }
     }
 }

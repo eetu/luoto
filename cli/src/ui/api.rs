@@ -494,14 +494,27 @@ struct Decision {
     force: bool,
 }
 
+/// An approved request: the rule it became, or what an install request did.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum Approved {
+    Rule(Rule),
+    Installed { installed: String },
+}
+
 async fn approve(
     Path((name, id)): Path<(String, u64)>,
     Json(d): Json<Decision>,
-) -> ApiResult<Rule> {
+) -> ApiResult<Approved> {
     blocking(move || {
         let ctx = Ctx::load()?;
         let req = rules::request(&ctx, &name, id)?;
-        rules::approve(&ctx, &name, &req, d.ttl.as_deref(), d.force)
+        if req.install.is_some() {
+            return Ok(Approved::Installed {
+                installed: rules::approve_install(&ctx, &name, &req)?,
+            });
+        }
+        rules::approve(&ctx, &name, &req, d.ttl.as_deref(), d.force).map(Approved::Rule)
     })
     .await
     .map(Json)

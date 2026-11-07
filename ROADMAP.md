@@ -42,9 +42,9 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
 - **More commands:** `fork` (copy an env), `push` (a reviewed copy-in),
   `reset-home`, `agent rm`.
 - **Notifications** for access requests (UI and OS), `luoto requests --watch`; `sandbox request`
-  for presets, packages and ports; `approve` that narrows a request.
-- **Editing envs in the UI:** presets, tools, `[deps]`, agents, ports and credentials (the UI
-  shows them; changes go through `luoto edit`).
+  for presets and ports; `approve` that narrows a request.
+- **Editing envs in the UI:** presets, tools, `[deps]`, agents, ports, credentials and repos
+  (the UI shows them; changes go through `luoto edit`).
 - **Azure DevOps beyond git:** pull requests through its REST API (`az repos pr`), with writes
   allowlisted as for GitHub, and Git LFS objects, which it serves from blob storage.
 - **Agent credentials on the command line:** `luoto agent add claude --credential
@@ -75,6 +75,9 @@ port 22. Left for later:
   `deno.json`, `Pipfile`, `pdm.lock`, `.sdkmanrc`).
 - **A toolchain matrix in CI.** The verified toolchains were run by hand; a job per toolchain,
   from `luoto init` to a build or test run in the env, keeps them working.
+- **Containers in an env:** podman or docker inside the dev container, for builds and tests
+  that start containers (testcontainers, compose), with image pulls through the gate. Needs a
+  check of what gVisor allows and what a nested runtime opens up.
 - **Runtimes a dependency needs.** A pyspark project needs Java and often says so only in its
   README. Suggest the runtime from known dependencies (pyspark → Java) at `init`.
 - **GitHub Copilot CLI, verified.** It ships untested: the token goes to the

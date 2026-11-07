@@ -46,9 +46,13 @@ repository of a second GitHub owner, open the pull request over REST:
   (npm, PyPI, crates, Maven, …) need their own presets. A blocked download is a host to
   request (below), never a reason to switch to an unofficial mirror or binary.
 - CLI tools installed for the user (`npm i -g`, `pipx install`) land in `~/.local/bin` and
-  persist. System packages (`sudo apt-get install …`) work but vanish when the container is
-  recreated: tell the user to add the ones the project needs to `[deps] system` in the env's
-  config (`luoto edit -e <env>` on the host), which reinstalls them on `luoto up`.
+  persist. A system package of your own (`sudo apt-get install …`) vanishes when the container
+  is recreated. For one the project needs, or a toolchain it doesn't pin, ask the user to keep
+  it in the env (MCP: `sandbox_request_install`); approved, it is installed and comes back with
+  every recreated container:
+
+      sandbox request --package postgresql-client --reason "<why>" --wait
+      sandbox request --tool node@24 --reason "<why>" --wait
 
 ## When something is blocked
 

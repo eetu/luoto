@@ -83,8 +83,13 @@ export type Rule = {
 
 export type CompiledRule = Rule & { id: string; origin: string };
 
+/** Software the sandbox asks to keep in the env (`[deps] system`, `[tools]`). */
+export type Install =
+  { kind: "package"; name: string } | { kind: "tool"; name: string; version: string };
+
 export type AccessRequest = {
   id: number;
+  /** Empty for an install request. */
   host: string;
   access: AccessLevel;
   paths?: string[];

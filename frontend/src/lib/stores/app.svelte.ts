@@ -6,6 +6,7 @@ import type {
   AccessRequest,
   EnvDetail,
   HostSummary,
+  Install,
   LuotoEvent,
   Meta,
   Overview,
@@ -210,6 +211,11 @@ export function startSync(): () => void {
     clearInterval(overviewTimer);
     clearInterval(envTimer);
   };
+}
+
+/** What an install request asks for: `postgresql-client`, `node 24 (mise)`. */
+export function installLabel(i: Install): string {
+  return i.kind === "package" ? i.name : `${i.name} ${i.version} (mise)`;
 }
 
 export function ago(ts?: string | null): string {

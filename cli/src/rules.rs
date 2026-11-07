@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result, bail};
 use chrono::{TimeDelta, Utc};
-use luoto_shared::api::{AccessRequest, RequestStatus};
+use luoto_shared::api::{AccessRequest, Install, RequestStatus};
 use luoto_shared::ctl::GateCtl;
 use luoto_shared::policy::{Access, AccessLevel, Mode, Rule, RuleOrigin, Severity, validate_rule};
 
@@ -222,6 +222,47 @@ pub fn approve(
         },
     )?;
     Ok(rule)
+}
+
+/// Grant a pending install request: the package or toolchain joins the env's config, so every
+/// recreated container gets it too, and is installed now. The request is approved either way;
+/// its note tells the sandbox whether the install worked. What happened, for people.
+pub fn approve_install(ctx: &Ctx, name: &str, req: &AccessRequest) -> Result<String> {
+    if req.status != RequestStatus::Pending {
+        bail!("request #{} is already {:?}", req.id, req.status);
+    }
+    let Some(install) = &req.install else {
+        bail!("request #{} asks for access, not an install", req.id);
+    };
+    install.check().map_err(anyhow::Error::msg)?;
+    let mut f = EnvFile::load(&ctx.paths, name)?;
+    match install {
+        Install::Package { name } => f.add_system_package(name)?,
+        Install::Tool { name, version } => f.set_in_table("tools", name, version)?,
+    }
+    let what = crate::text::display(&install.describe());
+    let result = (|| {
+        let p = crate::env::plan(ctx, name)?;
+        let home = p
+            .state
+            .as_ref()
+            .map_or("/home/dev".to_string(), |s| s.home().to_string());
+        crate::deps::ensure(ctx, name, &p.cfg, &home)
+    })();
+    let note = match &result {
+        Ok(()) => "installed; the env's config keeps it".to_string(),
+        Err(e) => format!("added to the env's config, but installing failed: {e:#}"),
+    };
+    ctl::gate::<AccessRequest>(
+        &ctx.rt,
+        name,
+        &GateCtl::Resolve {
+            id: req.id,
+            approved: true,
+            note: Some(note.clone()),
+        },
+    )?;
+    Ok(format!("approved: {what}: {note}"))
 }
 
 pub fn reject(ctx: &Ctx, name: &str, id: u64, note: Option<String>) -> Result<AccessRequest> {
