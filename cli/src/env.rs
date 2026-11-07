@@ -449,8 +449,30 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         }
     }
     let repos = repos::seed(ctx, env, &p.cfg.workspace, &seeded_repos);
+    let cloned = repos.iter().any(|n| {
+        !seeded_repos.contains(n)
+            && p.cfg
+                .workspace
+                .repos
+                .get(n)
+                .is_some_and(|r| r.url.is_some())
+    });
     if repos != state.repos {
         EnvState::update(&ctx.paths, env, |s| s.repos = repos)?;
+    }
+    // New clones bring files of their own: the presets and toolchains they suggest, offered
+    // as `luoto init` offers a folder's.
+    if cloned {
+        match deps::detect_in_env(ctx, env) {
+            Ok(found) => {
+                let heading = format!("the repos cloned into `{env}` suggest:");
+                if crate::init::offer(ctx, env, &found, &heading, false)? {
+                    sync::reapply(ctx, env)?;
+                    p = plan(ctx, env)?;
+                }
+            }
+            Err(e) => eprintln!("warning: the cloned repos weren't read ({e:#})"),
+        }
     }
     if let Err(e) = deps::ensure(ctx, env, &p.cfg, state.home()) {
         eprintln!(

@@ -42,6 +42,9 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
 - **Agent credentials on the command line:** `--credential oauth_token=op://…` on
   `luoto agent add` and `luoto init` writes the credential without the prompt; the reference
   must resolve.
+- **Presets from cloned repos:** after `up` clones repos, it offers the presets and default
+  toolchains their files suggest, as `luoto init` does for a folder; it adds them only on your
+  yes. `luoto init` again on an env no longer adds them without a terminal.
 - **`sandbox request --preset npm`** (MCP: `preset` in `sandbox_request_access`) asks for one of
   luoto's presets; approving adds it to the env and opens its hosts at once.
 - **`luoto agent rm`** drops an agent from an env's config and its hosts from the policy.

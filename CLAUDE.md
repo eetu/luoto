@@ -51,7 +51,8 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   (`tools`) or hosts the user confirmed. Never install from the host side, and never grant a
   host just because sandbox output named it. `luoto init` again on a running env reads the
   same files inside it (`deps::detect_in_env`: size-capped, printed through
-  `text::display`) and adds presets only after the user confirms.
+  `text::display`) and adds presets only after the user confirms; `up` offers the same after
+  it clones repos.
 - Git hosts read repo paths in any case and a remote keeps the case it was cloned with, so
   their rules and injections set `ignore_case`. Remote rewrites are one file,
   `Compiled::git_config`, written to `/run/luoto/gitconfig` at `up`.

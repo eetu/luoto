@@ -560,8 +560,9 @@ fn redetect(ctx: &Ctx, name: &str, dir: &Path, o: &InitOpts) -> Result<ExitCode>
 }
 
 /// Offer what detection found and the env's config lacks: presets, and default toolchains
-/// for runtimes, package managers and task runners the project doesn't pin. Only adds; what
-/// is in the config stays. Whether the config changed.
+/// for runtimes, package managers and task runners the project doesn't pin. Only adds, and
+/// only with `yes` or a yes on a terminal (the files can be the sandbox's); without one it
+/// lists them. Whether the config changed.
 pub fn offer(
     ctx: &Ctx,
     name: &str,
@@ -596,10 +597,11 @@ pub fn offer(
             crate::text::display(&t.source)
         );
     }
-    if !yes
-        && std::io::stdin().is_terminal()
-        && ask(&format!("Add them to `{name}`? [Y/n]"), 'y') == 'n'
-    {
+    if !yes && !crate::prompt::interactive() {
+        println!("  `luoto init --yes` in the env's folder adds them");
+        return Ok(false);
+    }
+    if !yes && ask(&format!("Add them to `{name}`? [Y/n]"), 'y') == 'n' {
         println!("nothing changed");
         return Ok(false);
     }
