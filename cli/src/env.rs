@@ -413,7 +413,14 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     let dev = start_dev(ctx, env, &p, &state, &ids, gate != Launch::AlreadyRunning)?;
     // Containers that were already running passed the self-test when they started.
     let restarted = gate != Launch::AlreadyRunning || dev != Launch::AlreadyRunning;
-    after_start(ctx, env, &p, &state, restarted && !opts.no_selftest)?;
+    after_start(
+        ctx,
+        env,
+        &p,
+        &state,
+        restarted && !opts.no_selftest,
+        opts.quiet,
+    )?;
 
     if fresh_work || !state.seeded {
         let dir = workspace::canonical(p.cfg.workspace.dir.as_deref().with_context(|| {
@@ -438,7 +445,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         p = plan(ctx, env)?;
         if start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)? != Launch::AlreadyRunning {
             start_dev(ctx, env, &p, &state, &ids, true)?;
-            after_start(ctx, env, &p, &state, !opts.no_selftest)?;
+            after_start(ctx, env, &p, &state, !opts.no_selftest, opts.quiet)?;
         } else {
             sync::write_runtime_env(ctx, env, &p.compiled)?;
         }
@@ -746,7 +753,14 @@ fn start_dev(
 
 /// Once both containers run: the self-test when `selftest`, then the runtime env, the login
 /// name, home files and SSH access.
-fn after_start(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, selftest: bool) -> Result<()> {
+fn after_start(
+    ctx: &Ctx,
+    env: &str,
+    p: &Plan,
+    state: &EnvState,
+    selftest: bool,
+    quiet: bool,
+) -> Result<()> {
     // Isolation first: secrets, dotfiles and the SSH key enter only a container that passed.
     if selftest {
         check_isolation(ctx, env)?;
@@ -771,7 +785,7 @@ fn after_start(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, selftest: bool)
     }
     // Home files may have replaced an agent's config, and with it luoto's entries there; an
     // agent with options gets them on every start.
-    let copied = personal::apply(ctx, env, &p.cfg, state.home()) > 0;
+    let copied = personal::apply(ctx, env, &p.cfg, state.home(), quiet) > 0;
     for (name, opts) in &p.cfg.agents.0 {
         let Some(a) = luoto_shared::profiles::agent(name) else {
             continue;
