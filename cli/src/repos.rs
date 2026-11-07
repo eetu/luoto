@@ -1353,8 +1353,12 @@ mod tests {
         assert!(check_folder(Some(&inner.display().to_string()), &canon).is_err());
         let other = tempfile::tempdir().unwrap();
         assert!(check_folder(Some(&root_s), &other.path().canonicalize().unwrap()).is_ok());
-        // The root as `dir` arrives, canonical (`\\?\C:\` on Windows).
-        let top = Path::new("/").canonicalize().unwrap();
+        // The root of home's drive, canonical as `dir` arrives (`\\?\C:\` on Windows).
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
+        let top = home.ancestors().last().unwrap().canonicalize().unwrap();
         assert!(check_folder(None, &top).is_err());
     }
 
