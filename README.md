@@ -273,6 +273,13 @@ write = true
 [sandbox_secrets]             # deliberately exposed to code in the sandbox (env vars)
 DATABASE_URL = "op://Dev/local-db/url"
 
+[env]                         # plain environment variables in the env's shells
+RUST_LOG = "debug"
+
+[resources]                   # the dev container's share of the VM; not with gVisor on podman
+cpus = 4
+memory = "8g"
+
 [deps]                        # installed in the env on `up`
 system = ["postgresql-client"]                  # apt / apk / dnf, whichever the image has
 run = ["git config --global pull.rebase true"]  # as you, in your home; keep them repeatable
