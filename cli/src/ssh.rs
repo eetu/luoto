@@ -176,7 +176,7 @@ fn block(ctx: &Ctx, env: &str, user: &str) -> Result<String> {
     Ok(format!(
         "Host {}\n  User {user}\n  ProxyCommand {proxy}\n  IdentityFile \"{}\"\n  IdentitiesOnly yes\n  \
          StrictHostKeyChecking accept-new\n  UserKnownHostsFile \"{}\"\n  ForwardAgent no\n  ForwardX11 no\n  \
-         PermitLocalCommand no\n  Tunnel no\n",
+         PermitLocalCommand no\n  Tunnel no\n  GatewayPorts no\n",
         names::dev(env),
         dir(ctx).join("id_ed25519").display(),
         dir(ctx).join("known_hosts").display()

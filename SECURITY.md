@@ -113,7 +113,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   (unless `server_tools = true`); the other providers' are not.
 - **Container or VM escape.** An exploit that escapes gVisor (or a plain container) lands in
   luoto's VM as the env's own unprivileged IDs; one more kernel exploit there reaches the other
-  envs and the vault, which share the VM. On Linux there is no VM: gVisor is the boundary to
+  envs and the vault, which share the VM, and through podman's network helper also the
+  services on your machine's loopback, and the helper's API, which can publish a port on your
+  machine. On Linux there is no VM: gVisor is the boundary to
   the host, so install `runsc`. With Docker, an escape lands in Docker's VM, which shares your
   folders (on Linux, on the host).
 - **Forwarded ports.** A server in the sandbox on ports 1024–32767 is reachable at localhost

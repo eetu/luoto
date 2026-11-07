@@ -82,6 +82,8 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   repo's credential goes on its smart-HTTP and LFS paths only.
 - **Private addresses:** `luoto allow --private` and `private = true` never reach loopback,
   cloud metadata or luoto's own networks.
+- **Loopback only:** luoto's SSH config sets `GatewayPorts no`, so an editor's port forwards
+  stay on localhost, and a published port's relay refuses the vault network.
 
 ## 0.2.2 (2026-11-06)
 
