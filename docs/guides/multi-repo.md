@@ -39,7 +39,7 @@ branch = "develop"              # default: the remote's
 ## From a launchpad
 
 A launchpad is a repository that holds a `luoto.toml` listing the remotes, and usually a
-`mise.toml` with the toolchains: [examples/launchpad](examples/launchpad/). A clone of it and
+`mise.toml` with the toolchains: [examples/launchpad](../examples/launchpad/). A clone of it and
 `luoto init` give every developer the same env:
 
 ```console

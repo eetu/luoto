@@ -64,8 +64,8 @@ Add CSV export to the reports page (issue #142).
 $ luoto run -e web --agent claude --prompt-file task.md --down
 ```
 
-In a multi-repo env the same prompt can change several repos and open a pull request in each
-(`docs/multi-repo.md`).
+In a [multi-repo env](multi-repo.md) the same prompt can change several repos and open a pull
+request in each.
 
 **On a schedule.** cron (or a CI runner with luoto set up) runs it like any command; keep the
 command in a script, as cron treats `%` specially.
@@ -98,5 +98,5 @@ Keep a required review in the branch protection: auto-merge then means "merged a
 person approves and CI is green". Without one, code the sandbox wrote reaches `main` with
 only CI checking it, and the code that wrote it could be a compromised dependency in the env,
 which is what luoto is there to stop. CI runs that code with the repository's secrets
-either way, as for any branch pushed from the env ([ROADMAP.md](../ROADMAP.md): pushes to a
+either way, as for any branch pushed from the env ([ROADMAP.md](../../ROADMAP.md): pushes to a
 fork).

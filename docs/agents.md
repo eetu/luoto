@@ -15,8 +15,9 @@ Gemini API key is untested); installed only for OpenCode and Codex; untested for
 `agents`, and `up` installs it inside the env, never on your machine. `up` installs every agent
 listed there, or in the accepted `luoto.toml`, that the env lacks, so `agents = ["claude"]` in
 a team's `luoto.toml` gives everyone Claude Code; for one with no credential it first asks
-how it authenticates, as `agent add` does, and writes the answer into the env's config. The install gets its download hosts only for
-that run, as expiring rules; `luoto egress` shows them. Then luoto:
+how it authenticates, as `agent add` does, and writes the answer into the env's config. The
+install gets its download hosts only for that run, as expiring rules; `luoto egress` shows
+them. Then luoto:
 
 - links its user-level instructions to the luoto briefing (`/opt/luoto/AGENTS.md`), which
   tells it that egress is filtered and how to ask you for access;
@@ -24,24 +25,8 @@ that run, as expiring rules; `luoto egress` shows them. Then luoto:
   requests;
 - sets the variables that turn off its auto-update and telemetry where it has them.
 
-An agent's model and effort can be set per env, in `luoto.toml` for a team, or for every env
-in `config.toml` (the closer setting wins):
-
-```toml
-[agents.claude]
-model = "opus"        # an alias or a model name
-effort = "medium"     # Claude: low, medium, high, xhigh; Codex adds minimal
-```
-
-luoto writes them into the agent's own user settings on `up`, so they are the default and
-`/model` or `/effort` in a session still changes them until the next `up`. Claude Code and
-Codex take both, OpenCode takes `model`; a profile's `[settings.<option>]` says where each
-goes.
-
-Scripts and setups without a terminal give the credential on the command line instead of the
-prompt: `luoto agent add claude --credential oauth_token=op://Private/claude/token`, or
-`luoto init --agent claude --credential …`. It takes `KIND=REF`, `PROVIDER.KIND=REF` where
-two agents' providers share a kind, or `login_inside`; the reference must resolve.
+Model and effort, credentials without the prompt and your own settings in every env:
+[guides/agent-settings.md](guides/agent-settings.md).
 
 `--yolo` maps to the agent's own flag for skipping permission prompts, where it has one. The
 sandbox is the boundary, so the prompts guard nothing luoto doesn't.
@@ -105,56 +90,9 @@ use prompts to improve its products, until its Google Cloud project has billing.
   keeps a refresh token in the env.
 - The briefing goes in as managed instructions (`/etc/claude-code/CLAUDE.md`).
 - Its first start skips onboarding (text style, security notes), the auto mode notice and the
-  question whether to trust `/workspace` and the folders in it: luoto answers them in `~/.claude.json`, as the
-  sandbox is the boundary. The text style stays yours: `"theme": "auto"` (or `dark`, `light`)
-  in `~/.config/luoto/home/.claude/settings.json`.
-
-### Commits without AI attribution
-
-Claude Code adds a `Co-Authored-By` trailer to commits and a "Generated with Claude Code" line
-to pull requests. `attribution` in its settings turns both off, but only by changing what
-Claude is told; a model can still write them. A `PreToolUse` hook enforces it: it refuses
-such a commit or pull request and Claude writes it again. In
-`~/.config/luoto/home/.claude/`, copied into every env on `up`:
-
-```json
-{
-  "attribution": { "commit": "", "pr": "" },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh \"$HOME/.claude/hooks/no-ai-attribution.sh\""
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-`hooks/no-ai-attribution.sh`:
-
-```sh
-#!/bin/sh
-# Refuse a commit or pull request that carries AI attribution; exit 2 tells Claude why.
-input=$(cat)
-case $input in
-  *"git commit"* | *"gh pr create"* | *"gh pr edit"* | *"/pulls"*) ;;
-  *) exit 0 ;;
-esac
-if printf "%s" "$input" |
-  grep -qiE "co-authored-by:[^\"]*(claude|anthropic|noreply@openai)|generated with \[?(claude|codex)"; then
-  echo "Leave out AI attribution: no Co-Authored-By trailer for an AI and no \"Generated with\" line." >&2
-  exit 2
-fi
-```
-
-A line in `CLAUDE.md` beside them says the same, so Claude rarely needs the hook. A commit
-message read from a file (`git commit -F`) passes the hook unseen.
+  question whether to trust `/workspace` and the folders in it: luoto answers them in
+  `~/.claude.json`, as the sandbox is the boundary. Commits and pull requests without its AI
+  attribution: [guides/agent-settings.md](guides/agent-settings.md#commits-without-ai-attribution).
 
 ## OpenCode
 

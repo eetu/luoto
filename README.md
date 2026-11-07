@@ -185,14 +185,16 @@ flag for it), since the sandbox is the boundary. After that first run the comman
 for one of its providers under `[credentials.<provider>]`; the gate adds it to every request and
 the sandbox sees only a placeholder. [docs/agents.md](docs/agents.md#credentials) covers where
 to get one, how the prompt keeps it, and logins inside the sandbox, with the hosts and
-verification status of each agent. `luoto agent list` shows agents and providers.
+verification status of each agent. `luoto agent list` shows agents and providers. Model,
+effort, your own agent settings and commits without AI attribution:
+[docs/guides/agent-settings.md](docs/guides/agent-settings.md).
 
 Without a terminal, `luoto run --agent claude --prompt "…"` runs one prompt: it brings the env
 up (asking nothing), runs the agent in its non-interactive mode and prints its answer (or
 writes it with `--output FILE`), exiting with the agent's code; `--down` stops the env after.
 A cron job or CI step can run it; pull requests it opens go through the gate as any other.
-[docs/headless.md](docs/headless.md) has examples, what an unattended run needs, and how to let
-GitHub merge its pull requests.
+[docs/guides/headless.md](docs/guides/headless.md) has examples, what an unattended run needs,
+and how to let GitHub merge its pull requests.
 
 | agent                         | command    | credential                                                  |
 | ----------------------------- | ---------- | ----------------------------------------------------------- |
@@ -454,7 +456,7 @@ branch = "develop"
 checkout replace its `api` in your env. In the env, the repos are listed in the folder's
 `.git/info/exclude`, so they stay out of its `git status`.
 
-[docs/multi-repo.md](docs/multi-repo.md) has the three ways to set one up (command line,
+[docs/guides/multi-repo.md](docs/guides/multi-repo.md) has the three ways to set one up (command line,
 launchpad, both) and a [launchpad example](docs/examples/launchpad/).
 
 ## Shell
