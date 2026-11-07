@@ -5,8 +5,9 @@ takes and where to get one, which hosts it reaches, what it is denied on purpose
 still unverified. The profiles themselves are TOML files in
 [`shared/agents`](../shared/agents) and [`shared/providers`](../shared/providers).
 
-Status: run with a real account for Claude Code and Antigravity CLI; installed only for
-OpenCode and Codex; untested for Copilot CLI ([ROADMAP.md](../ROADMAP.md)).
+Status: run with a real account for Claude Code and Antigravity CLI (its login inside; a
+Gemini API key is untested); installed only for OpenCode and Codex; untested for Copilot CLI
+([ROADMAP.md](../ROADMAP.md)).
 
 ## How an agent is set up
 

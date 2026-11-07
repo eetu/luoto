@@ -60,8 +60,6 @@ port 22. Left for later:
 - **A key per env,** derived by the vault from a root secret in your store (nothing on disk),
   its public key added as a deploy key so it reaches one repo.
 - **`ssh.github.com:443`**, for networks that block port 22.
-- **SSH remotes of other forges (GitLab, Bitbucket) rewritten to HTTPS**, each with its own
-  credential kind, where repo scoping and the push guard matter more than the key.
 - **An SSH proxy in the gate**, if repo scoping and the push guard over SSH prove necessary:
   the gate ends the session, logs in with the vault's key and allows only `git-upload-pack`,
   `git-receive-pack` and `git-lfs-authenticate` on configured repos.
@@ -86,7 +84,7 @@ port 22. Left for later:
   without `applyTo` frontmatter, and its telemetry hosts (left denied).
 - **Antigravity CLI with a Gemini API key** the gate holds: the `gemini` provider plus
   `modelProvider: "gemini"` in `~/.gemini/config/settings.json`, with no Google session in
-  the env.
+  the env. Its login inside is verified; the key route needs a run with API credits.
 
 ## Configuration
 
