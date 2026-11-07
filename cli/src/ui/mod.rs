@@ -37,6 +37,8 @@ pub struct Ui {
 }
 
 pub fn serve(port: u16, open_browser: bool) -> Result<ExitCode> {
+    // What the UI starts (an `up`) must not wait on this terminal.
+    crate::prompt::never_ask();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

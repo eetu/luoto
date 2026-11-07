@@ -667,6 +667,122 @@ impl EnvFile {
         self.save()
     }
 
+    /// `[credentials]`, created when missing.
+    fn credentials_table(&mut self) -> Result<&mut dyn toml_edit::TableLike> {
+        let path = self.path.display().to_string();
+        self.doc
+            .entry("credentials")
+            .or_insert_with(|| {
+                let mut t = toml_edit::Table::new();
+                t.set_implicit(true);
+                toml_edit::Item::Table(t)
+            })
+            .as_table_like_mut()
+            .with_context(|| format!("`credentials` in {path} is not a table"))
+    }
+
+    /// Add `repos` (`owner/repo`) to the GitHub credential that lists a repo of `owner`
+    /// already, whose token must then reach them, or that has `token` itself (one token for
+    /// several owners), or else as a new credential with `token`: `[credentials.github]` for
+    /// the first, `[[credentials.github]]` once there are more. `read` puts them in
+    /// `read_repos`.
+    pub fn add_github_repos(
+        &mut self,
+        owner: &str,
+        token: Option<&str>,
+        repos: &[String],
+        read: bool,
+    ) -> Result<()> {
+        let key = if read { "read_repos" } else { "repos" };
+        let has_owner = |t: &toml_edit::Table| {
+            token.is_some() && t.get("token").and_then(|v| v.as_str()) == token
+                || ["repos", "read_repos"].iter().any(|k| {
+                    t.get(k).and_then(|i| i.as_array()).is_some_and(|a| {
+                        a.iter().filter_map(|v| v.as_str()).any(|r| {
+                            r.split('/')
+                                .next()
+                                .is_some_and(|o| o.eq_ignore_ascii_case(owner))
+                        })
+                    })
+                })
+        };
+        let new = |token: Option<&str>| -> Result<toml_edit::Table> {
+            let token = token.context("a new GitHub credential needs its token")?;
+            let mut t = toml_edit::Table::new();
+            t["token"] = toml_edit::value(token);
+            Ok(t)
+        };
+        let creds = self.credentials_table()?;
+        let table: &mut toml_edit::Table = match creds.get_mut("github") {
+            None => {
+                creds.insert("github", toml_edit::Item::Table(new(token)?));
+                creds
+                    .get_mut("github")
+                    .and_then(|i| i.as_table_mut())
+                    .context("credentials.github")?
+            }
+            Some(toml_edit::Item::Table(t)) if has_owner(t) => t,
+            Some(toml_edit::Item::Table(t)) => {
+                let mut list = toml_edit::ArrayOfTables::new();
+                list.push(t.clone());
+                list.push(new(token)?);
+                *creds.get_mut("github").context("credentials.github")? =
+                    toml_edit::Item::ArrayOfTables(list);
+                creds
+                    .get_mut("github")
+                    .and_then(|i| i.as_array_of_tables_mut())
+                    .and_then(|a| a.iter_mut().last())
+                    .context("credentials.github")?
+            }
+            Some(toml_edit::Item::ArrayOfTables(list)) => {
+                let found = list.iter().position(has_owner);
+                let at = match found {
+                    Some(i) => i,
+                    None => {
+                        list.push(new(token)?);
+                        list.len() - 1
+                    }
+                };
+                list.get_mut(at).context("credentials.github")?
+            }
+            Some(_) => bail!(
+                "`credentials.github` in {} is written inline; add the repos by hand",
+                self.path.display()
+            ),
+        };
+        push_unique(table, key, repos);
+        self.save()
+    }
+
+    /// Add `repos` (`org/project/repo`) to `[credentials.azure_devops]`, created with `token`
+    /// when missing. `read` puts them in `read_repos`.
+    pub fn add_azure_repos(
+        &mut self,
+        token: Option<&str>,
+        repos: &[String],
+        read: bool,
+    ) -> Result<()> {
+        let key = if read { "read_repos" } else { "repos" };
+        let path = self.path.display().to_string();
+        let creds = self.credentials_table()?;
+        if creds.get("azure_devops").is_none() {
+            let token = token.context("a new Azure DevOps credential needs its token")?;
+            let mut t = toml_edit::Table::new();
+            t["token"] = toml_edit::value(token);
+            creds.insert("azure_devops", toml_edit::Item::Table(t));
+        }
+        let table = creds
+            .get_mut("azure_devops")
+            .and_then(|i| i.as_table_mut())
+            .with_context(|| {
+                format!(
+                    "`credentials.azure_devops` in {path} is written inline; add the repos by hand"
+                )
+            })?;
+        push_unique(table, key, repos);
+        self.save()
+    }
+
     pub fn set_list(&mut self, key: &str, values: &[String]) -> Result<()> {
         let mut arr = toml_edit::Array::new();
         for v in values {
@@ -721,6 +837,23 @@ impl EnvFile {
     pub fn prune_expired(&mut self) -> Result<usize> {
         let now = chrono::Utc::now();
         self.retain_rules(|r| !r.expired(now))
+    }
+}
+
+/// Append `values` missing from the string array `key` of `table`, creating it.
+fn push_unique(table: &mut toml_edit::Table, key: &str, values: &[String]) {
+    if table.get(key).and_then(|i| i.as_array()).is_none() {
+        table[key] = toml_edit::value(toml_edit::Array::new());
+    }
+    if let Some(arr) = table.get_mut(key).and_then(|i| i.as_array_mut()) {
+        for v in values {
+            if !arr
+                .iter()
+                .any(|x| x.as_str().is_some_and(|x| x.eq_ignore_ascii_case(v)))
+            {
+                arr.push(v.as_str());
+            }
+        }
     }
 }
 
@@ -891,6 +1024,57 @@ oauth_token = "op://Private/claude/token"
                 .unwrap()
                 .contains("[[credentials.github]]")
         );
+    }
+
+    #[test]
+    fn git_credentials_are_written_per_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        std::fs::write(&path, SAMPLE).unwrap();
+        let mut f = EnvFile::parse(path.clone(), SAMPLE).unwrap();
+        // A repo of an owner the App covers joins it.
+        f.add_github_repos("eetu", None, &["eetu/bar".into()], false)
+            .unwrap();
+        assert_eq!(f.cfg.credentials.github.0.len(), 1);
+        assert!(f.cfg.credentials.github.covers("eetu/bar", true));
+        // Another owner's gets a credential of its own; the table becomes an array.
+        f.add_github_repos(
+            "acme",
+            Some("op://v/acme/token"),
+            &["acme/web".into()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(f.cfg.credentials.github.0.len(), 2);
+        assert!(f.cfg.credentials.github.covers("acme/web", false));
+        assert!(!f.cfg.credentials.github.covers("acme/web", true));
+        f.add_github_repos("acme", None, &["acme/api".into()], false)
+            .unwrap();
+        assert_eq!(f.cfg.credentials.github.0[1].repos, ["acme/api"]);
+        // The same token for a third owner joins the credential that has it.
+        f.add_github_repos(
+            "acme-oss",
+            Some("op://v/acme/token"),
+            &["acme-oss/ds".into()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(f.cfg.credentials.github.0.len(), 2);
+        assert_eq!(
+            f.cfg.credentials.github.0[1].repos,
+            ["acme/api", "acme-oss/ds"]
+        );
+        assert!(
+            f.add_github_repos("other", None, &["other/x".into()], false)
+                .is_err()
+        );
+        f.add_azure_repos(Some("op://v/ado/pat"), &["org/P/r".into()], false)
+            .unwrap();
+        f.add_azure_repos(None, &["org/P/s".into()], true).unwrap();
+        let ado = f.cfg.credentials.azure_devops.as_ref().unwrap();
+        assert_eq!((ado.repos.len(), ado.read_repos.len()), (1, 1));
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("[[credentials.github]]") && saved.contains("# my env"));
     }
 
     #[test]

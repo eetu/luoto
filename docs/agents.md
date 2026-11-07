@@ -10,9 +10,12 @@ OpenCode and Codex; untested for Copilot CLI ([ROADMAP.md](../ROADMAP.md)).
 
 ## How an agent is set up
 
-`luoto agent add <agent>` (or the first `luoto agent run <agent>`) installs the agent inside
-the env, never on your machine. The install gets its download hosts only for that run, as
-expiring rules; `luoto egress` shows them. Then luoto:
+`luoto agent add <agent>` (or the first `luoto agent run <agent>`) adds the agent to the env's
+`agents`, and `up` installs it inside the env, never on your machine. `up` installs every agent
+listed there, or in the accepted `luoto.toml`, that the env lacks, so `agents = ["claude"]` in
+a team's `luoto.toml` gives everyone Claude Code; for one with no credential it first asks
+how it authenticates, as `agent add` does, and writes the answer into the env's config. The install gets its download hosts only for
+that run, as expiring rules; `luoto egress` shows them. Then luoto:
 
 - links its user-level instructions to the luoto briefing (`/opt/luoto/AGENTS.md`), which
   tells it that egress is filtered and how to ask you for access;

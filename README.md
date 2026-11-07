@@ -173,8 +173,9 @@ asks you for access; only you can approve, on the host.
 
 ## Agents
 
-`luoto agent run <agent>` installs the agent on first run, applies the env's current config and
-starts the agent in `/workspace`; `--yolo` turns off its own permission prompts (OpenCode has no
+`luoto agent run <agent>` installs the agent on first run (`up` installs those listed in the
+env's `agents` or its `luoto.toml`), applies the env's current config and starts the agent in
+`/workspace`; `--yolo` turns off its own permission prompts (OpenCode has no
 flag for it), since the sandbox is the boundary. After that first run the command (`claude`,
 `codex`, …) also works in any env terminal, including an editor's. Each agent needs a credential
 for one of its providers under `[credentials.<provider>]`; the gate adds it to every request and

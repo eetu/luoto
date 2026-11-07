@@ -402,25 +402,17 @@ pub fn make_folder(p: &mut Proposal) -> Result<()> {
 }
 
 /// Create the proposed env: its folder, its config, and the answer to the folder's
-/// luoto.toml (`accept_project`). The agents the env gets, the accepted luoto.toml's
-/// included.
-pub fn create(
-    ctx: &Ctx,
-    p: &mut Proposal,
-    accept_project: bool,
-    quiet: bool,
-) -> Result<Vec<String>> {
+/// luoto.toml (`accept_project`).
+pub fn create(ctx: &Ctx, p: &mut Proposal, accept_project: bool, quiet: bool) -> Result<()> {
     make_folder(p)?;
     let name = &p.name;
     let f = EnvFile::create(&ctx.paths, name, &p.cfg)?;
     if !quiet {
         println!("created env `{name}` ({})", f.path.display());
     }
-    let mut agents = p.cfg.agents.clone();
-    if let Some((text, pc)) = &p.project {
+    if let Some((text, _)) = &p.project {
         if accept_project {
             project::accept(ctx, name, text)?;
-            config::extend_unique(&mut agents, pc.agents.iter().cloned());
         } else {
             project::forget(ctx, name, Some(text))?;
             if !quiet {
@@ -430,11 +422,12 @@ pub fn create(
             }
         }
     }
-    Ok(agents)
+    Ok(())
 }
 
-/// Start a new env and install its agents.
-pub fn start(ctx: &Ctx, name: &str, agents: &[String], quiet: bool) -> Result<()> {
+/// Start a new env: `up` asks for the credentials its agents and repos lack and installs the
+/// agents.
+pub fn start(ctx: &Ctx, name: &str, quiet: bool) -> Result<()> {
     env::up(
         ctx,
         name,
@@ -442,15 +435,15 @@ pub fn start(ctx: &Ctx, name: &str, agents: &[String], quiet: bool) -> Result<()
             quiet,
             ..Default::default()
         },
-    )?;
-    for a in agents {
-        crate::agents::install(ctx, name, a)?;
-    }
-    Ok(())
+    )
 }
 
 pub fn init(o: InitOpts) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
+    if o.yes {
+        // Nothing asks, `up` included: agents log in inside, repos get a hint.
+        crate::prompt::never_ask();
+    }
     // `init` again in an env's own folder: detect anew and offer what is missing.
     if o.name.is_none()
         && let Some(dir) = match &o.dir {
@@ -503,22 +496,18 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
         Some(_) => o.yes,
         None => false,
     };
-    let agents = create(&ctx, &mut p, accept_project, false)?;
+    create(&ctx, &mut p, accept_project, false)?;
     let name = p.name.clone();
-    if let Some(hint) = p
-        .cfg
-        .workspace
-        .dir
-        .as_deref()
-        .and_then(|d| origin_url(Path::new(d)))
-        .and_then(|u| credential_hint(&name, &u, &p.cfg.credentials))
-    {
-        println!("{hint}");
-    }
-    // Before `up`, so the env starts with them.
-    crate::agents::credentials(&ctx, &name, &agents, interactive)?;
-    if !o.no_up {
-        start(&ctx, &name, &agents, false)?;
+    if o.no_up {
+        // `up` asks for the credentials the repos lack; until then, say what they are.
+        let cfg = env::layered(&ctx, &name)?;
+        if let Some(hint) =
+            repos::credential_hint(&name, &repos::remotes(&cfg.workspace), &cfg.credentials)
+        {
+            println!("\n{hint}");
+        }
+    } else {
+        start(&ctx, &name, false)?;
     }
     if let Some((_, pc)) = p.project.as_ref().filter(|_| accept_project) {
         let cfg = EnvFile::load(&ctx.paths, &name)?.cfg;

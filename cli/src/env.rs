@@ -365,9 +365,20 @@ pub fn ensure_vm(ctx: &Ctx) -> Result<()> {
     machine::start(&ctx.rt.bin, false)
 }
 
+/// What the env's agents and repos need and its config doesn't say: asked on a terminal,
+/// before the gate starts, so it has the answers (`agents::ask_missing`,
+/// `repos::ask_missing`).
+fn ask_credentials(ctx: &Ctx, env: &str) -> Result<()> {
+    let cfg = layered(ctx, env)?;
+    crate::agents::ask_missing(ctx, env, &cfg)?;
+    repos::ask_missing(ctx, env, &cfg)?;
+    Ok(())
+}
+
 pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     ensure_vm(ctx)?;
     EnvFile::load(&ctx.paths, env)?.prune_expired()?;
+    ask_credentials(ctx, env)?;
     let image = env_image(ctx, &layered(ctx, env)?);
     let ids = ensure_images(ctx, &image)?;
     let state = state::ensure(ctx, env, &image)?;
@@ -419,6 +430,8 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         state.repos.clone()
     };
     if project::review(ctx, env)? {
+        // Its agents and repos may need credentials too.
+        ask_credentials(ctx, env)?;
         // The accepted settings reach the gate (policy, credentials, ports) and the runtime env.
         let image = p.image.clone();
         p = plan(ctx, env)?;
@@ -443,6 +456,10 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             "warning: deps not installed: {e:#}\n         \
              see `luoto egress -e {env} --denied --since 30m`; `luoto up -e {env}` retries"
         );
+    }
+    let agents: Vec<String> = p.cfg.agents.names().cloned().collect();
+    if let Err(e) = crate::agents::ensure(ctx, env, &agents, opts.quiet) {
+        eprintln!("warning: agents not installed: {e:#}\n         `luoto up -e {env}` retries");
     }
 
     crate::watch::spawn(ctx);
@@ -580,7 +597,8 @@ fn start_gate(
         bound.and_then(|()| sync::load_secrets(ctx, &p.compiled.vault_refs(), &format!("`{env}`")))
     {
         eprintln!(
-            "warning: credentials not unlocked ({e:#}); credentialed hosts return 403 until `luoto vault unlock`"
+            "warning: {e:#}\n         their hosts return 403 until the reference is fixed \
+             (`luoto edit -e {env}`) and `luoto vault unlock` loads it"
         );
     }
     Ok(launch)

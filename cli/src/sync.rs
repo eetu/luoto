@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use luoto_shared::ctl::{GateCtl, VaultCtl};
 use luoto_shared::policy::Rule;
@@ -31,7 +31,8 @@ pub fn bind_vault(ctx: &Ctx, env: &str, state: &EnvState, compiled: &Compiled) -
 }
 
 /// Load those of `refs` the vault is missing, prompting the user's secret store only for
-/// them; `whose` names them for the user.
+/// them; `whose` names them for the user. Each loads on its own: one that doesn't resolve
+/// (a typo in its reference) leaves the others working, and the error names it.
 pub fn load_secrets(ctx: &Ctx, refs: &BTreeSet<String>, whose: &str) -> Result<()> {
     let status = ctl::vault_status(&ctx.rt)?;
     let missing: BTreeSet<String> = refs
@@ -44,8 +45,27 @@ pub fn load_secrets(ctx: &Ctx, refs: &BTreeSet<String>, whose: &str) -> Result<(
             "unlocking {} secret(s) for {whose} from your secret store…",
             missing.len()
         );
-        let values = secrets::resolve_all(&ctx.global, &missing)?;
-        ctl::vault::<usize>(&ctx.rt, &VaultCtl::Load { secrets: values })?;
+        let mut values = BTreeMap::new();
+        let mut failed = Vec::new();
+        for r in &missing {
+            match secrets::resolve(&ctx.global, r) {
+                Ok(v) => {
+                    values.insert(r.clone(), v);
+                }
+                Err(e) => failed.push(format!("{r}: {e:#}")),
+            }
+        }
+        if !values.is_empty() {
+            ctl::vault::<usize>(&ctx.rt, &VaultCtl::Load { secrets: values })?;
+        }
+        if !failed.is_empty() {
+            bail!(
+                "{} of {} secret(s) not loaded, so the credentials using them stay locked: {}",
+                failed.len(),
+                missing.len(),
+                failed.join("; ")
+            );
+        }
     }
     Ok(())
 }

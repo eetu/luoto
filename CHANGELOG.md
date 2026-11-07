@@ -22,6 +22,17 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   requests get the credential that lists it, GraphQL the first one's. A single
   `[credentials.github]` stays as it is; a token that reaches several owners is one credential
   listing all their repos, and `up` offers a reference the config has before asking for another.
+- **`up` reconciles agents and credentials:** it installs the agents an env's config or its
+  `luoto.toml` lists when the env lacks them, so a team's `agents = ["claude"]` reaches
+  everyone; `init --agent`, `agent add` and `agent run` list the agent and leave the rest to
+  `up`. On a terminal, `up` first asks for what is missing: how an agent authenticates, and
+  an HTTPS credential for each GitHub owner and Azure DevOps organization whose repos none
+  covers (push or read only, kept in the keychain, 1Password or a reference). Repos answered
+  as public aren't asked about again; a removed credential is asked for anew. Without a
+  terminal, or with `init --yes`, agents log in inside and `up` prints the git credentials to
+  add. `luoto repo add` asks the same before it clones.
+- **The UI never waits on a terminal:** an `up` it starts asks nothing on the terminal running
+  `luoto ui`, where a changed `luoto.toml` could leave it waiting.
 - **Copies follow `.gitignore`:** from a git repository (the folder, a repo, or one inside),
   `up` copies what git doesn't ignore plus `.git`, so ignored secrets (`.env`, `*.tfvars`, state
   files, `.kube/`) stay on your machine. Other folders copy as before, now without

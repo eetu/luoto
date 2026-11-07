@@ -289,9 +289,8 @@ async fn create_env(Json(n): Json<NewEnv>) -> ApiResult<Value> {
         if let Some((text, _)) = &p.project {
             check_reviewed(text, reviewed.as_deref())?;
         }
-        let agents = init::create(&ctx, &mut p, true, true)?;
-        crate::agents::credentials(&ctx, &p.name, &agents, false)?;
-        init::start(&ctx, &p.name, &agents, true)?;
+        init::create(&ctx, &mut p, true, true)?;
+        init::start(&ctx, &p.name, true)?;
         Ok(json!({ "ok": true, "name": p.name }))
     })
     .await
