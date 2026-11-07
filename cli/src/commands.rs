@@ -112,7 +112,21 @@ pub fn pull(
         None => None,
     };
     let mut plans = Vec::new();
-    for t in pull_targets(&ctx, name, to, repo)? {
+    let targets = pull_targets(&ctx, name, to, repo)?;
+    let own: Vec<&str> = targets.iter().filter_map(|t| t.repo.as_deref()).collect();
+    let left: Vec<&str> = targets
+        .iter()
+        .flat_map(|t| &t.skip)
+        .map(String::as_str)
+        .filter(|n| !own.contains(n))
+        .collect();
+    if !left.is_empty() {
+        println!(
+            "left out: {} (`luoto pull --repo <name>` brings one)",
+            left.join(", ")
+        );
+    }
+    for t in targets {
         let plan = workspace::plan_pull(&ctx, name, &t, include_git)?;
         if let Some(r) = &plan.repo {
             println!("\nrepo {r}:");

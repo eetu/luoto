@@ -41,10 +41,24 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   settings endpoints can't route around the push guard; GraphQL mutations outside an
   allowlist are refused. Workflows/Actions/Secrets/Administration permissions are refused at
   configuration time. Configure branch rulesets on GitHub as well; the gate is a guard-rail.
+  GraphQL names no repository in its path, so with a token (not an App) it reaches what the
+  token does, `read_repos` and unlisted repositories included; only an App's minted token is
+  limited to the env's repositories.
 - **Azure DevOps writes.** The PAT goes only on the granted repositories' git paths, and pushes
   pass the same guard as on GitHub. A PAT reaches its whole organization, so the gate's paths
   are the only repository boundary; its REST API is not reachable. Configure branch policies
   in Azure DevOps as well.
+- **Other forges** (`[[credentials.git]]`). The token goes only on the granted repositories'
+  smart-HTTP and LFS paths, pushes pass the same guard, and push options (which can open merge
+  requests or skip CI) are refused. The forge's API is not reachable with it; the token's
+  scope at the forge is the boundary, so prefer a project or repository token. A pushed branch
+  runs the forge's CI as any branch does: keep CI secrets in protected variables. `ca` is
+  trusted for that host only. `private = true` lets the gate dial that host's private address,
+  never loopback, cloud metadata or luoto's own networks.
+- **Credentials coming back.** On a credentialed host the gate looks for the credential it
+  placed in the response's headers and the start of its body (all of a JSON body, from which
+  it removes the fields carrying it, as LFS servers echo it); a response that still carries it
+  is refused.
 - **Git over SSH.** The private key stays in the vault, which answers the env's ssh-agent: it
   signs only a public-key login (`SSH_MSG_USERAUTH_REQUEST`) for a session the server bound
   (`session-bind@openssh.com`) with a host key luoto pins or the credential names, and never a
@@ -57,7 +71,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   ignores in a repository, and never writes to the host; work leaves through git pushes or a
   reviewed `pull`. `pull` reviews changes, holds back risky files in any folder within the pull
   (compared case-insensitively, as macOS and Windows name them), refuses `.git` under any
-  spelling, names that collide by case, and paths and symlinks that leave the folder. With podman on macOS and Windows, envs run only in
+  spelling, names that collide by case, and paths and symlinks that leave the folder. A
+  pulled `.gitignore` decides what later copies leave out, so review its changes. With podman on macOS and Windows, envs run only in
   luoto's own VM, which mounts none of your folders (`luoto doctor` checks), so an escape
   doesn't reach your home directory.
 - **Isolation.** With podman, dev containers run on gVisor (in luoto's VM on macOS and

@@ -132,7 +132,8 @@ test("approving a request whose rule has risks shows them and resends with force
   await page.route(
     (url) => url.pathname === "/api/envs/web/requests/7/approve",
     (route, req) => {
-      const { force } = req.postDataJSON() as { force: boolean };
+      const { force, created } = req.postDataJSON() as { force: boolean; created: string };
+      expect(created).toBe(request.created);
       forced.push(force);
       return force
         ? route.fulfill({ json: { host: request.host, access: "write" } })

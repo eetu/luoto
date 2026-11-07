@@ -7,7 +7,8 @@ pub fn display(s: &str) -> String {
     escape(s, false)
 }
 
-/// [`display`] that keeps line breaks, for multi-line text such as an error with its causes.
+/// [`display`] that keeps line breaks and tabs, for multi-line text such as an error with its
+/// causes or an agent's answer.
 pub fn lines(s: &str) -> String {
     escape(s, true)
 }
@@ -15,7 +16,7 @@ pub fn lines(s: &str) -> String {
 fn escape(s: &str, keep_newlines: bool) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if keep_newlines && c == '\n' {
+        if keep_newlines && (c == '\n' || c == '\t') {
             out.push(c);
         } else if c.is_control() || is_format(c) {
             out.push_str(&format!("\\u{{{:x}}}", c as u32));

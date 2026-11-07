@@ -542,7 +542,8 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
 /// Offer what the project suggests now and the env's config lacks. The project is the env's
 /// own copy while it runs (work happens there), else the folder.
 fn redetect(ctx: &Ctx, name: &str, dir: &Path, o: &InitOpts) -> Result<ExitCode> {
-    let (found, source) = if ctx.rt.is_running(&names::dev(name)) {
+    let inside = ctx.rt.is_running(&names::dev(name));
+    let (found, source) = if inside {
         (
             crate::deps::detect_in_env(ctx, name)?,
             "its workspace".to_string(),
@@ -551,7 +552,7 @@ fn redetect(ctx: &Ctx, name: &str, dir: &Path, o: &InitOpts) -> Result<ExitCode>
         (detect::detect(dir), dir.display().to_string())
     };
     let heading = format!("env `{name}` exists; {source} now suggests:");
-    if !offer(ctx, name, &found, &heading, o.yes)? {
+    if !offer(ctx, name, &found, &heading, o.yes, inside)? {
         println!("env `{name}` already has what {source} suggests");
         return Ok(ExitCode::SUCCESS);
     }
@@ -563,14 +564,15 @@ fn redetect(ctx: &Ctx, name: &str, dir: &Path, o: &InitOpts) -> Result<ExitCode>
 
 /// Offer what detection found and the env's config lacks: presets, and default toolchains
 /// for runtimes, package managers and task runners the project doesn't pin. Only adds, and
-/// only with `yes` or a yes on a terminal (the files can be the sandbox's); without one it
-/// lists them. Whether the config changed.
+/// only with `yes` or a yes on a terminal; without one it lists them. Files read `inside` the
+/// env can be the sandbox's, so there Enter answers no. Whether the config changed.
 pub fn offer(
     ctx: &Ctx,
     name: &str,
     found: &detect::Detected,
     heading: &str,
     yes: bool,
+    inside: bool,
 ) -> Result<bool> {
     let mut file = EnvFile::load(&ctx.paths, name)?;
     let presets: Vec<&(String, String)> = found
@@ -603,7 +605,13 @@ pub fn offer(
         println!("  `luoto init --yes` in the env's folder adds them");
         return Ok(false);
     }
-    if !yes && ask(&format!("Add them to `{name}`? [Y/n]"), 'y') == 'n' {
+    let added = yes
+        || if inside {
+            crate::prompt::confirm(&format!("Add them to `{name}`?"))
+        } else {
+            ask(&format!("Add them to `{name}`? [Y/n]"), 'y') != 'n'
+        };
+    if !added {
         println!("nothing changed");
         return Ok(false);
     }

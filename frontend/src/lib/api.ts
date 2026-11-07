@@ -106,13 +106,17 @@ export const api = {
       `${env(name)}/events?minutes=${minutes}&host=${encodeURIComponent(host)}`,
     ),
   requests: (name: string) => request<AccessRequest[]>("GET", `${env(name)}/requests`),
-  approve: (name: string, id: number, ttl?: string, force = false) =>
-    request<Rule | { installed: string }>("POST", `${env(name)}/requests/${id}/approve`, {
+  // `created` names the request shown: the gate numbers requests anew when it restarts.
+  approve: (name: string, req: AccessRequest, ttl?: string, force = false) =>
+    request<Rule | { installed: string }>("POST", `${env(name)}/requests/${req.id}/approve`, {
+      created: req.created,
       ttl,
       force,
     }),
-  reject: (name: string, id: number) =>
-    request<AccessRequest>("POST", `${env(name)}/requests/${id}/reject`, {}),
+  reject: (name: string, req: AccessRequest) =>
+    request<AccessRequest>("POST", `${env(name)}/requests/${req.id}/reject`, {
+      created: req.created,
+    }),
   addRule: (name: string, rule: Rule, force = false) =>
     request<Rule>("POST", `${env(name)}/rules`, { rule, force }),
   deleteRule: (name: string, id: string) =>

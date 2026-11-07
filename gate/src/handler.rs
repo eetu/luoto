@@ -317,7 +317,28 @@ async fn handle_inner(
         Err(reason) => return deny(ev, DenyReason::Guard { reason }),
     };
 
+    // What the response must not carry back: every form of a credential put on the request.
+    let mut placed: Vec<String> = Vec::new();
     if policy.is_credentialed_host(&target.host) {
+        // TRACE echoes the request, credential included.
+        if method == "TRACE" {
+            let reason = DenyReason::Guard {
+                reason: format!("TRACE is not allowed to {}", target.host),
+            };
+            return deny(ev, reason);
+        }
+        // Java servers drop `;` parameters and resolve the `..` before them, and some decode
+        // an escaped slash: a path the rules read one way would reach another.
+        let lower = path.to_ascii_lowercase();
+        if path.contains(';') || lower.contains("%2f") || lower.contains("%5c") {
+            let reason = DenyReason::Guard {
+                reason: format!(
+                    "paths with `;` or an escaped slash are not allowed to {}",
+                    target.host
+                ),
+            };
+            return deny(ev, reason);
+        }
         // Over plain HTTP the credential would cross the network readable.
         if !target.tls && test_server(&state, &target.host).is_none() {
             let reason = DenyReason::Guard {
@@ -352,15 +373,26 @@ async fn handle_inner(
                         return failed(&state, ev, StatusCode::BAD_GATEWAY, msg);
                     }
                 };
-                if let Err(e) = apply(&mut parts, inj, &secret) {
-                    let msg = format!("credential `{}`: {e}", inj.binding);
-                    return failed(&state, ev, StatusCode::BAD_GATEWAY, msg);
+                match apply(&mut parts, inj, &secret) {
+                    Ok(forms) => placed.extend(forms),
+                    Err(e) => {
+                        let msg = format!("credential `{}`: {e}", inj.binding);
+                        return failed(&state, ev, StatusCode::BAD_GATEWAY, msg);
+                    }
                 }
                 used.push(inj.binding.clone());
             }
             used.dedup();
             ev.binding = Some(used.join(","));
         }
+    }
+    // Screening reads the response: ask for it uncompressed.
+    placed.retain(|p| p.len() >= 8);
+    if !placed.is_empty() {
+        parts.headers.insert(
+            http::header::ACCEPT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
     }
 
     if let Some(max) = max_body {
@@ -402,18 +434,141 @@ async fn handle_inner(
         ctx.put_back(&target, sender).await;
     }
 
-    let (mut rparts, rbody) = resp.into_parts();
+    let (mut rparts, mut rbody) = boxed_parts(resp);
     if status != StatusCode::SWITCHING_PROTOCOLS {
         strip_hop_by_hop(&mut rparts.headers, false);
+        if !placed.is_empty() {
+            rbody = match screen(&mut rparts.headers, rbody, &placed).await {
+                Ok(b) => b,
+                Err(reason) => return failed(&state, ev, StatusCode::BAD_GATEWAY, reason),
+            };
+        }
     }
     ev.verdict = Some(Verdict::Allow);
     ev.status = Some(status.as_u16());
     let state2 = state.clone();
-    let metered = Metered::new(boxed(rbody), move |down| {
+    let metered = Metered::new(rbody, move |down| {
         ev.bytes_down = Some(down);
         ev.bytes_up = Some(up_bytes.load(Ordering::Relaxed));
         ev.ms = Some(started.elapsed().as_millis() as u64);
         state2.events.emit(ev);
     });
     Response::from_parts(rparts, metered.boxed())
+}
+
+fn boxed_parts(resp: Response<Incoming>) -> (http::response::Parts, Body) {
+    let (parts, body) = resp.into_parts();
+    (parts, boxed(body))
+}
+
+/// The most of a response's start [`screen`] reads: a JSON one whole up to this, so an echo
+/// in it can be taken out (LFS batch answers), any other this far.
+const SCREEN_JSON: usize = 1 << 20;
+const SCREEN_HEAD: usize = 64 << 10;
+
+/// Keep a credential the gate put on a request from coming back in its response: refused in a
+/// header; taken out of a JSON body that echoes it (Gitea and GitLab copy the request's
+/// `Authorization` into their LFS batch answer, for the client to send on, and the gate adds
+/// it to that request itself); anything else that carries it is refused.
+async fn screen(
+    headers: &mut HeaderMap,
+    mut body: Body,
+    placed: &[String],
+) -> Result<Body, String> {
+    let carries = |b: &[u8]| {
+        placed
+            .iter()
+            .any(|p| b.windows(p.len()).any(|w| w == p.as_bytes()))
+    };
+    if headers.values().any(|v| carries(v.as_bytes())) {
+        return Err("the response carried the request's credential back".into());
+    }
+    let json = headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| t.contains("json"));
+    let limit = if json { SCREEN_JSON } else { SCREEN_HEAD };
+    let mut head = bytes::BytesMut::new();
+    let mut ended = false;
+    while head.len() < limit {
+        match body.frame().await {
+            Some(Ok(frame)) => {
+                if let Ok(data) = frame.into_data() {
+                    head.extend_from_slice(&data);
+                }
+            }
+            Some(Err(e)) => return Err(format!("reading the response: {e}")),
+            None => {
+                ended = true;
+                break;
+            }
+        }
+    }
+    if !carries(&head) {
+        return Ok(crate::body::prefixed(head.freeze(), body));
+    }
+    if json
+        && ended
+        && let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(&head)
+    {
+        redact(&mut v, &carries);
+        let out = serde_json::to_vec(&v).map_err(|e| e.to_string())?;
+        if !carries(&out) {
+            headers.insert(CONTENT_LENGTH, HeaderValue::from(out.len()));
+            return Ok(crate::body::full(out));
+        }
+    }
+    Err("the response carried the request's credential back".into())
+}
+
+/// Drop every object member whose string value `carries` the credential, and blank such
+/// strings in arrays.
+fn redact(v: &mut serde_json::Value, carries: &dyn Fn(&[u8]) -> bool) {
+    match v {
+        serde_json::Value::Object(m) => {
+            m.retain(|_, x| !x.as_str().is_some_and(|s| carries(s.as_bytes())));
+            for x in m.values_mut() {
+                redact(x, carries);
+            }
+        }
+        serde_json::Value::Array(a) => {
+            for x in a.iter_mut() {
+                if x.as_str().is_some_and(|s| carries(s.as_bytes())) {
+                    *x = serde_json::Value::String(String::new());
+                } else {
+                    redact(x, carries);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_echoed_credential_is_taken_out_of_json() {
+        // Gitea's LFS batch answer, with the request's Authorization copied in.
+        let mut v: serde_json::Value = serde_json::from_str(
+            r#"{"objects":[{"oid":"ab","actions":{"upload":{"href":"https://f/x.git/info/lfs/objects/ab",
+            "header":{"Authorization":"Basic ZGV2OnNlY3JldHRva2Vu","Accept":"x"}}}}],
+            "list":["Basic ZGV2OnNlY3JldHRva2Vu","ok"]}"#,
+        )
+        .unwrap();
+        let placed = [
+            "secrettoken".to_string(),
+            "ZGV2OnNlY3JldHRva2Vu".to_string(),
+        ];
+        let carries = |b: &[u8]| {
+            placed
+                .iter()
+                .any(|p| b.windows(p.len()).any(|w| w == p.as_bytes()))
+        };
+        redact(&mut v, &carries);
+        let out = serde_json::to_string(&v).unwrap();
+        assert!(!carries(out.as_bytes()), "{out}");
+        assert!(out.contains("\"Accept\":\"x\"") && out.contains("objects/ab"));
+    }
 }

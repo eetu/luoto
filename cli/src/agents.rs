@@ -1,6 +1,7 @@
 //! Coding agents inside envs: install (through short-lived egress grants), link the luoto
 //! briefing into the agent's global instructions, register the sandbox MCP server, run.
 
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
@@ -561,19 +562,49 @@ pub fn headless(
         &script,
     ])
     .stdin(Stdio::null());
-    let status = match output {
+    // The agent's output is the sandbox's text: written as it is, never run, and escaped on a
+    // terminal, where its escape sequences could otherwise drive it.
+    let err_tty = std::io::stderr().is_terminal();
+    cmd.stdout(Stdio::piped()).stderr(if err_tty {
+        Stdio::piped()
+    } else {
+        Stdio::inherit()
+    });
+    let mut child = cmd.spawn()?;
+    let errs = child
+        .stderr
+        .take()
+        .map(|e| std::thread::spawn(move || relay(e, &mut std::io::stderr(), true)));
+    let mut out = child.stdout.take().context("the agent's output")?;
+    let relayed = match output {
         Some(path) => {
-            let out = cmd.stderr(Stdio::inherit()).output()?;
-            // The agent's answer is the sandbox's text: written as it is, never run. A write
-            // that fails leaves it on stderr rather than lost.
-            if let Err(e) = std::fs::write(&out_file, &out.stdout) {
-                eprintln!("warning: {path} not written ({e}); the answer follows");
-                std::io::Write::write_all(&mut std::io::stderr(), &out.stdout)?;
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&out_file);
+            match file.map(|mut f| relay(&mut out, &mut f, false)) {
+                Ok(Ok(())) => Ok(()),
+                // A write that fails leaves the rest on stderr rather than lost.
+                Ok(Err(e)) | Err(e) => {
+                    eprintln!("warning: {path} not written whole ({e}); the rest follows");
+                    relay(&mut out, &mut std::io::stderr(), err_tty)
+                }
             }
-            out.status
         }
-        None => cmd.status()?,
+        None => relay(
+            &mut out,
+            &mut std::io::stdout().lock(),
+            std::io::stdout().is_terminal(),
+        ),
     };
+    if relayed.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait()?;
+    if let Some(t) = errs {
+        let _ = t.join();
+    }
+    relayed?;
     if down {
         match env::down(&ctx, env_name) {
             Ok(()) => eprintln!("env `{env_name}` stopped"),
@@ -583,6 +614,52 @@ pub fn headless(
     Ok(ExitCode::from(
         status.code().unwrap_or(1).clamp(0, 255) as u8
     ))
+}
+
+/// The most of an agent's answer `luoto run` writes.
+const ANSWER_CAP: usize = 64 << 20;
+
+/// Copy what the sandbox prints to `to`, up to [`ANSWER_CAP`]: escaped (`text::lines`) for a
+/// `terminal`, as it is elsewhere.
+fn relay(
+    mut from: impl std::io::Read,
+    to: &mut dyn std::io::Write,
+    terminal: bool,
+) -> std::io::Result<()> {
+    let mut buf = [0u8; 8192];
+    let mut pending = Vec::new();
+    let mut left = ANSWER_CAP;
+    loop {
+        let n = from.read(&mut buf)?;
+        let take = n.min(left);
+        if take < n && left > 0 {
+            eprintln!("warning: the output was cut at {} MiB", ANSWER_CAP >> 20);
+        }
+        left -= take;
+        if terminal {
+            pending.extend_from_slice(&buf[..take]);
+            // Whole lines, so a character split between reads is decoded whole.
+            let upto = if n == 0 || pending.len() > 1 << 16 {
+                pending.len()
+            } else {
+                pending
+                    .iter()
+                    .rposition(|b| *b == b'\n')
+                    .map_or(0, |i| i + 1)
+            };
+            if upto > 0 {
+                let text = String::from_utf8_lossy(&pending[..upto]);
+                to.write_all(crate::text::lines(&text).as_bytes())?;
+                to.flush()?;
+                pending.drain(..upto);
+            }
+        } else {
+            to.write_all(&buf[..take])?;
+        }
+        if n == 0 {
+            return to.flush();
+        }
+    }
 }
 
 /// `luoto agent rm`: drop the agent from the env's config, and its hosts from the policy of a

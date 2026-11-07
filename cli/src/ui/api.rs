@@ -9,7 +9,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use chrono::{TimeDelta, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use futures_util::Stream;
 use luoto_shared::api::{AccessRequest, RequestStatus};
 use luoto_shared::ctl::{GateStatus, VaultStatus};
@@ -491,11 +491,23 @@ async fn requests(Path(name): Path<String>) -> ApiResult<Vec<AccessRequest>> {
     .map(Json)
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct Decision {
+    /// When the request shown was filed: the gate numbers requests anew when it restarts, so
+    /// an id alone could name another request than the one reviewed.
+    created: DateTime<Utc>,
     ttl: Option<String>,
     #[serde(default)]
     force: bool,
+}
+
+/// The request with `id`, if it is the one filed at `created`.
+fn shown(ctx: &Ctx, name: &str, id: u64, created: DateTime<Utc>) -> anyhow::Result<AccessRequest> {
+    let req = rules::request(ctx, name, id)?;
+    if req.created != created {
+        anyhow::bail!("request #{id} is not the one shown; reload the requests");
+    }
+    Ok(req)
 }
 
 /// An approved request: the rule it became, or what an install request did.
@@ -512,7 +524,7 @@ async fn approve(
 ) -> ApiResult<Approved> {
     blocking(move || {
         let ctx = Ctx::load()?;
-        let req = rules::request(&ctx, &name, id)?;
+        let req = shown(&ctx, &name, id, d.created)?;
         if req.install.is_some() {
             return Ok(Approved::Installed {
                 installed: rules::approve_install(&ctx, &name, &req)?,
@@ -524,10 +536,22 @@ async fn approve(
     .map(Json)
 }
 
-async fn reject(Path((name, id)): Path<(String, u64)>) -> ApiResult<AccessRequest> {
-    blocking(move || rules::reject(&Ctx::load()?, &name, id, None))
-        .await
-        .map(Json)
+#[derive(Deserialize)]
+struct Shown {
+    created: DateTime<Utc>,
+}
+
+async fn reject(
+    Path((name, id)): Path<(String, u64)>,
+    Json(s): Json<Shown>,
+) -> ApiResult<AccessRequest> {
+    blocking(move || {
+        let ctx = Ctx::load()?;
+        shown(&ctx, &name, id, s.created)?;
+        rules::reject(&ctx, &name, id, None)
+    })
+    .await
+    .map(Json)
 }
 
 #[derive(Deserialize)]

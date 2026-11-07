@@ -34,9 +34,9 @@ pub struct Compiled {
     pub git_config: String,
     /// Pinned host keys of the hosts git over SSH may log in to (`/run/luoto/ssh_known_hosts`).
     pub known_hosts: String,
-    /// CA certificates (PEM) the gate trusts upstream besides the public roots: those of
-    /// self-hosted git hosts.
-    pub upstream_ca: String,
+    /// CA certificates (PEM) the gate trusts upstream besides the public roots, each for its
+    /// own host only: those of self-hosted git hosts.
+    pub upstream_cas: BTreeMap<String, String>,
     pub warnings: Vec<String>,
 }
 
@@ -150,7 +150,7 @@ pub fn compile(
         aliases,
         over_ssh(azure::SSH_HOST),
     ));
-    let (git, upstream_ca) = compile_git(&mut b, &cfg.credentials.git)?;
+    let (git, upstream_cas) = compile_git(&mut b, &cfg.credentials.git)?;
     for c in &cfg.credentials.git {
         let host = c.host.split(':').next().unwrap_or_default();
         if !over_ssh(host) {
@@ -213,7 +213,7 @@ pub fn compile(
         dev_env: b.dev_env,
         git_config: git_config(&b.rewrites),
         known_hosts,
-        upstream_ca,
+        upstream_cas,
         warnings: b.warnings,
     })
 }
@@ -550,14 +550,26 @@ fn split_repo(full: &str) -> Result<(String, String)> {
 
 /// Git paths of `owner/repo` on github.com, both URL forms; `write` adds pushes.
 fn github_git_paths(o: &str, r: &str, write: bool) -> Vec<String> {
-    let mut out = Vec::new();
-    for base in [format!("/{o}/{r}"), format!("/{o}/{r}.git")] {
-        out.push(format!("{base}/info/refs"));
-        out.push(format!("{base}/git-upload-pack"));
-        if write {
-            out.push(format!("{base}/git-receive-pack"));
-        }
-        out.push(format!("{base}/info/lfs/**"));
+    [format!("/{o}/{r}"), format!("/{o}/{r}.git")]
+        .iter()
+        .flat_map(|base| smart_http_paths(base, write))
+        .collect()
+}
+
+/// A repository's smart-HTTP paths under `base` (`/owner/repo`, `/owner/repo.git`): fetches,
+/// pushes when `write`, and of Git LFS the batch API, object downloads from the same host and
+/// the lock check a push makes. Exact paths, no `**`: a server that normalises a path its own
+/// way (`..;` on Java servers) can't be led from them to a push.
+pub fn smart_http_paths(base: &str, write: bool) -> Vec<String> {
+    let mut out = vec![
+        format!("{base}/info/refs"),
+        format!("{base}/git-upload-pack"),
+        format!("{base}/info/lfs/objects/batch"),
+        format!("{base}/info/lfs/objects/*"),
+    ];
+    if write {
+        out.push(format!("{base}/git-receive-pack"));
+        out.push(format!("{base}/info/lfs/locks/verify"));
     }
     out
 }
@@ -860,9 +872,12 @@ fn compile_github_one(
 /// listed repos' smart-HTTP paths, those paths allowed (fetches; pushes for `repos`, under
 /// the push guard), private addresses for a host on a private network. The guards, and the
 /// hosts' CA certificates for the gate's upstream TLS.
-fn compile_git(b: &mut Builder, creds: &[GitCred]) -> Result<(Vec<GitGuard>, String)> {
+fn compile_git(
+    b: &mut Builder,
+    creds: &[GitCred],
+) -> Result<(Vec<GitGuard>, BTreeMap<String, String>)> {
     let mut guards = Vec::new();
-    let mut pem = String::new();
+    let mut cas = BTreeMap::new();
     let mut hosts = BTreeSet::new();
     for (i, c) in creds.iter().enumerate() {
         let (host, port) =
@@ -929,13 +944,10 @@ fn compile_git(b: &mut Builder, creds: &[GitCred]) -> Result<(Vec<GitGuard>, Str
         let git_paths = |r: &str, write: bool| {
             let mut out = Vec::new();
             for base in [format!("/{r}"), format!("/{r}.git")] {
-                out.push(format!("{base}/info/refs"));
-                out.push(format!("{base}/git-upload-pack"));
-                if write {
-                    out.push(format!("{base}/git-receive-pack"));
-                }
-                out.push(format!("{base}/info/lfs/**"));
+                out.extend(smart_http_paths(&base, write));
             }
+            // GitLab serves LFS objects here.
+            out.push(format!("/{r}.git/gitlab-lfs/objects/*"));
             out
         };
         let paths: Vec<String> = repos
@@ -988,18 +1000,26 @@ fn compile_git(b: &mut Builder, creds: &[GitCred]) -> Result<(Vec<GitGuard>, Str
             let text = std::fs::read_to_string(&path).with_context(|| {
                 format!("credentials.git ({host}): read its CA {}", path.display())
             })?;
-            if !text.contains("-----BEGIN CERTIFICATE-----") {
+            // Only the certificates: a file that also holds a key keeps it here.
+            let certs: String = text
+                .split_inclusive("-----END CERTIFICATE-----")
+                .filter_map(|c| {
+                    let start = c.find("-----BEGIN CERTIFICATE-----")?;
+                    c.ends_with("-----END CERTIFICATE-----")
+                        .then(|| format!("{}\n", &c[start..]))
+                })
+                .collect();
+            if certs.is_empty() {
                 bail!(
                     "credentials.git ({host}): {} holds no PEM certificate",
                     path.display()
                 );
             }
-            pem.push_str(text.trim_end());
-            pem.push('\n');
+            cas.insert(host.clone(), certs);
         }
         b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     }
-    Ok((guards, pem))
+    Ok((guards, cas))
 }
 
 /// Azure DevOps: the PAT added as basic auth on the repos' git paths, those paths allowed
@@ -1464,7 +1484,7 @@ protected_branches = ["prod"]
         let ca = dir.path().join("ca.pem");
         std::fs::write(
             &ca,
-            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+            "-----BEGIN PRIVATE KEY-----\nKKKK\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
         )
         .unwrap();
         let text = format!(
@@ -1509,7 +1529,8 @@ ca = "{}"
                 .is_empty()
         );
         assert_eq!(p.git[0].repos, ["infra/platform/api"]);
-        assert!(c.upstream_ca.contains("BEGIN CERTIFICATE"));
+        assert!(c.upstream_cas["forge.internal"].contains("BEGIN CERTIFICATE"));
+        assert!(!c.upstream_cas["forge.internal"].contains("KEY"));
         assert!(c.git_config.contains("insteadOf = \"git@forge.internal:\""));
         assert!(c.git_config.contains("https://forge.internal:3000/"));
         assert!(

@@ -134,11 +134,18 @@ impl Install {
         }
     }
 
-    /// What it is, for people: `package postgresql-client`, `node 24 (mise)`.
+    /// What it is, for people: `package postgresql-client`, `node 24 (mise)`. A tool from a
+    /// mise backend that takes anyone's code (`ubi:`, `npm:`, `cargo:`, …), rather than mise's
+    /// registry or aqua's, says so: approved, it is installed in every container the env gets.
     pub fn describe(&self) -> String {
         match self {
             Install::Package { name } => format!("package {name}"),
-            Install::Tool { name, version } => format!("{name} {version} (mise)"),
+            Install::Tool { name, version } => match name.split_once(':') {
+                Some((backend, _)) if backend != "aqua" => {
+                    format!("{name} {version} (mise, an unvetted {backend} source)")
+                }
+                _ => format!("{name} {version} (mise)"),
+            },
             Install::Preset { name } => format!("the {name} preset"),
         }
     }

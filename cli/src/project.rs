@@ -169,7 +169,8 @@ fn validate(p: &ProjectConfig) -> Result<()> {
                 display(name)
             );
         }
-        crate::repos::check_url(&r.url).with_context(|| format!("luoto.toml: repos.{name}"))?;
+        crate::repos::check_project_url(&r.url)
+            .with_context(|| format!("luoto.toml: repos.{name}"))?;
         if let Some(b) = &r.branch {
             crate::repos::check_branch(b).with_context(|| format!("luoto.toml: repos.{name}"))?;
         }

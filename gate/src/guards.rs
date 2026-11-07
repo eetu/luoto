@@ -273,8 +273,19 @@ fn parse_ref_updates(buf: &[u8]) -> Result<Vec<RefUpdate>, Parse> {
         if buf.len() < pos + len {
             return Err(Parse::NeedMore);
         }
-        let line = &buf[pos + 4..pos + len];
-        let line = line.split(|b| *b == 0).next().unwrap_or(line);
+        let raw = &buf[pos + 4..pos + len];
+        let mut fields = raw.split(|b| *b == 0);
+        let line = fields.next().unwrap_or(raw);
+        // Push options reach the forge's own handlers past the ref checks: on GitLab they open
+        // and merge merge requests, set CI variables and skip secret scanning.
+        if fields.next().is_some_and(|caps| {
+            caps.split(|b| *b == b' ' || *b == b'\n')
+                .any(|c| c == b"push-options")
+        }) {
+            return Err(Parse::Invalid(
+                "push options are not allowed from the sandbox".into(),
+            ));
+        }
         let line = std::str::from_utf8(line)
             .map_err(|_| Parse::Invalid("non-UTF-8 ref update".into()))?
             .trim_end_matches('\n');
@@ -416,6 +427,20 @@ mod tests {
 
     const Z: &str = "0000000000000000000000000000000000000000";
     const A: &str = "1111111111111111111111111111111111111111";
+
+    #[test]
+    fn push_options_are_refused() {
+        let body = format!(
+            "{}0000",
+            pkt(&format!(
+                "{Z} {A} refs/heads/feature\0report-status push-options side-band-64k\n"
+            ))
+        );
+        assert!(matches!(
+            parse_ref_updates(body.as_bytes()),
+            Err(Parse::Invalid(m)) if m.contains("push options")
+        ));
+    }
 
     #[test]
     fn parses_and_checks_pushes() {

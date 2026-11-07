@@ -14,15 +14,17 @@
     if (!env || !req) return;
     if (req.install) {
       const label = req.install.kind === "preset" ? "approving…" : "installing…";
-      const done = await act(label, () => api.approve(env, id));
+      const shown = req;
+      const done = await act(label, () => api.approve(env, shown));
       if (done && "installed" in done) say(`#${id} ${done.installed}`);
       if (done) app.subject = { kind: "env" };
       return;
     }
     const host = req.host;
+    const shown = req;
     const rule = await act(
       "approving…",
-      () => api.approve(env, id, ttl ? `${ttl}m` : undefined, force),
+      () => api.approve(env, shown, ttl ? `${ttl}m` : undefined, force),
       `approved #${id}: ${host}`,
       (found) => (risks = found),
     );
@@ -35,7 +37,8 @@
   async function reject() {
     const env = app.env;
     if (!env || !req) return;
-    const ok = await act("rejecting…", () => api.reject(env, id), `rejected #${id}`);
+    const shown = req;
+    const ok = await act("rejecting…", () => api.reject(env, shown), `rejected #${id}`);
     if (ok) app.subject = { kind: "env" };
   }
 </script>

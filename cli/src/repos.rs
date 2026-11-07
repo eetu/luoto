@@ -97,14 +97,56 @@ fn remote_host(url: &str) -> Option<&str> {
 }
 
 pub fn check_url(url: &str) -> Result<()> {
-    if remote_host(url).is_none() {
+    let Some(host) = remote_host(url) else {
         bail!(
             "`{}` is not a remote luoto clones: `owner/repo` (GitHub), an https:// or ssh:// \
              URL, or user@host:path",
             display(url)
         );
+    };
+    if host.eq_ignore_ascii_case("github.com") && github_repo(url).is_none() {
+        bail!(
+            "`{}` names no GitHub repository (`owner/repo`)",
+            display(url)
+        );
+    }
+    if forge_host(host) == Some("Azure DevOps") && crate::azure::parse_url(url).is_none() {
+        bail!("`{}` names no Azure DevOps repository", display(url));
     }
     Ok(())
+}
+
+/// A remote a repository's `luoto.toml` may name: also a host by its name, not an address or
+/// `localhost`, which would point the env's git at your machine or network.
+pub fn check_project_url(url: &str) -> Result<()> {
+    check_url(url)?;
+    let host = remote_host(url).unwrap_or_default().to_ascii_lowercase();
+    if host.parse::<std::net::IpAddr>().is_ok()
+        || !host.contains('.')
+        || host.ends_with(".localhost")
+    {
+        bail!(
+            "`{}`: a luoto.toml names a remote's host by its name, not an address or a local name",
+            display(url)
+        );
+    }
+    Ok(())
+}
+
+/// The forge with a credential of its own that `host` belongs to, if any.
+fn forge_host(host: &str) -> Option<&'static str> {
+    let h = host.to_ascii_lowercase();
+    if h == "github.com" {
+        Some("GitHub")
+    } else if h == crate::azure::HOST
+        || h == crate::azure::SSH_HOST
+        || h == "vs-ssh.visualstudio.com"
+        || h.ends_with(".visualstudio.com")
+    {
+        Some("Azure DevOps")
+    } else {
+        None
+    }
 }
 
 pub fn check_branch(b: &str) -> Result<()> {
@@ -133,17 +175,22 @@ pub fn clone_url(url: &str) -> String {
 
 /// `owner/repo` when a remote is on GitHub.
 pub fn github_repo(url: &str) -> Option<String> {
-    let path = if let Some(p) = url.strip_prefix("https://github.com/") {
-        p
-    } else if let Some(p) = url
-        .strip_prefix("git@github.com:")
-        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
+    let at_github = |authority: &str| {
+        authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, h)| h)
+            .eq_ignore_ascii_case("github.com")
+    };
+    let path = if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("ssh://"))
     {
-        p
-    } else if !url.contains(':') {
-        url
+        let (authority, p) = rest.split_once('/')?;
+        at_github(authority).then_some(p)?
+    } else if let Some((authority, p)) = url.split_once(':') {
+        (!p.starts_with("//") && authority.contains('@') && at_github(authority)).then_some(p)?
     } else {
-        return None;
+        url
     };
     let path = path.trim_end_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
@@ -246,8 +293,12 @@ pub fn check_folder(root: Option<&str>, dir: &Path) -> Result<()> {
             );
         }
     }
-    if let Some(home) = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf())
-        && home.starts_with(dir)
+    // Canonical like `dir`: a symlinked home, and Windows' `\\?\` form.
+    if let Some(home) = directories::BaseDirs::new().map(|b| {
+        b.home_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| b.home_dir().to_path_buf())
+    }) && home.starts_with(dir)
     {
         bail!(
             "{} holds your home folder, which never goes into an env",
@@ -357,7 +408,24 @@ pub fn seed(ctx: &Ctx, env: &str, ws: &Workspace, done: &BTreeSet<String>) -> BT
             s.locked || s.envs.iter().any(|e| e.env == env && !e.missing.is_empty())
         });
     let mut added = Vec::new();
+    // An entry of the env's own folder by a repo's name would be taken for the repo, and
+    // `pull` would then leave it out of the folder.
+    let own: BTreeSet<String> = ws
+        .dir
+        .as_deref()
+        .and_then(|d| std::fs::read_dir(d).ok())
+        .into_iter()
+        .flatten()
+        .filter_map(|e| Some(e.ok()?.file_name().to_str()?.to_lowercase()))
+        .collect();
     for (name, r) in pending {
+        if own.contains(&name.to_lowercase()) {
+            eprintln!(
+                "warning: repo {name}: the env's folder has its own `{name}`, so the repo is left \
+                 out; give it another name"
+            );
+            continue;
+        }
         if found.contains(name) {
             println!(
                 "repo {name}: /workspace/{name} is there already (from the env's folder or an \
@@ -515,7 +583,9 @@ pub fn remotes(ws: &Workspace) -> Vec<String> {
 /// for HTTPS on another port), the host its SSH would log in to, and the repository path
 /// (`group/sub/repo`, no `.git`).
 fn other_remote(url: &str) -> Option<(String, String, String)> {
-    remote_host(url)?;
+    if forge_host(remote_host(url)?).is_some() {
+        return None;
+    }
     let (host, path) = if let Some(rest) = url.strip_prefix("https://") {
         let (authority, path) = rest.split_once('/')?;
         let hostport = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
@@ -784,8 +854,17 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
         }
         return Ok(false);
     }
+    // Repos a repository's luoto.toml named, not the env's own config: whoever writes that
+    // repository chose them, so nothing is granted for them on a bare Enter.
+    let own = uncovered(
+        &remotes(&EnvFile::load(&ctx.paths, env)?.cfg.workspace),
+        &cfg.credentials,
+    );
     let mut changed = false;
     for (forge, repos) in needs {
+        let from_project = repos
+            .iter()
+            .any(|r| !own.get(&forge).is_some_and(|o| o.contains(r)));
         let mut f = EnvFile::load(&ctx.paths, env)?;
         let shown = repos
             .iter()
@@ -798,16 +877,22 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
             Forge::Git(h) => ("git", h.clone()),
         };
         println!(
-            "\n{shown} on {forge_name} ({}): no credential covers it, so the env can fetch it only \
-             if it is public, and push to none.",
-            display(&account)
+            "\n{shown} on {forge_name} ({}){}: no credential covers it, so the env can fetch it \
+             only if it is public, and push to none.",
+            display(&account),
+            if from_project {
+                ", named by the project's luoto.toml"
+            } else {
+                ""
+            }
         );
         const PUSH: &str = "push and pull requests";
         const READ: &str = "read only (a private repo)";
         const PUBLIC: &str = "none: it is public, read only";
         const LATER: &str = "later: `luoto up` asks again";
-        let Some(pick) =
-            inquire::Select::new("Access:", vec![PUSH, READ, PUBLIC, LATER]).prompt_skippable()?
+        let Some(pick) = inquire::Select::new("Access:", vec![PUSH, READ, PUBLIC, LATER])
+            .with_starting_cursor(if from_project { 3 } else { 0 })
+            .prompt_skippable()?
         else {
             continue;
         };
@@ -855,7 +940,8 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
         };
         let token = if existing {
             println!(
-                "  added to the {forge_name} credential you have: its token must reach it too"
+                "  the {forge_name} credential you have now {} {shown} too, with its token",
+                if read { "reads" } else { "pushes to" }
             );
             None
         } else {
@@ -921,9 +1007,13 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
                         offer(owners.join(", "), &c.token);
                     }
                 }
-                Forge::Git(_) => {
+                // Another host's token would go to this host's server.
+                Forge::Git(h) => {
+                    let name = |x: &str| x.split(':').next().unwrap_or(x).to_ascii_lowercase();
                     for c in &f.cfg.credentials.git {
-                        offer(c.host.clone(), &c.token);
+                        if name(&c.host) == name(h) {
+                            offer(c.host.clone(), &c.token);
+                        }
                     }
                 }
                 Forge::Azure(_) => {}
@@ -1139,9 +1229,40 @@ mod tests {
             "git@github.com:--upload-pack=x",
             "https://github.com/acme/a b",
             "https://-x/a",
+            "https://github.com/acme/api/more",
+            "https://dev.azure.com/org/project/api",
             "",
         ] {
             assert!(check_url(u).is_err(), "{u}");
+        }
+    }
+
+    #[test]
+    fn github_is_found_in_any_spelling() {
+        for u in [
+            "https://GitHub.com/acme/api",
+            "https://me@github.com/acme/api.git",
+            "ssh://git@GITHUB.com/acme/api",
+            "git@github.com:acme/api",
+        ] {
+            assert_eq!(github_repo(u).as_deref(), Some("acme/api"), "{u}");
+            assert!(other_remote(u).is_none(), "{u}");
+        }
+        assert!(github_repo("https://github.example/acme/api").is_none());
+    }
+
+    #[test]
+    fn a_project_names_hosts_not_addresses() {
+        assert!(check_project_url("https://git.acme.example/a/b").is_ok());
+        assert!(check_project_url("acme/api").is_ok());
+        for u in [
+            "https://192.168.1.10/a/b",
+            "https://127.0.0.1:8080/a/b",
+            "https://localhost/a/b",
+            "https://forge/a/b",
+            "git@x.localhost:a/b",
+        ] {
+            assert!(check_project_url(u).is_err(), "{u}");
         }
     }
 

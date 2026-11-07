@@ -473,7 +473,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         match deps::detect_in_env(ctx, env) {
             Ok(found) => {
                 let heading = format!("the repos cloned into `{env}` suggest:");
-                if crate::init::offer(ctx, env, &found, &heading, false)? {
+                if crate::init::offer(ctx, env, &found, &heading, false, true)? {
                     sync::reapply(ctx, env)?;
                     p = plan(ctx, env)?;
                 }
@@ -577,10 +577,10 @@ fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
         ..Default::default()
     };
     // Read at start: a changed CA changes the spec, which recreates the gate.
-    if !p.compiled.upstream_ca.is_empty() {
+    if !p.compiled.upstream_cas.is_empty() {
         spec.env.push((
-            "LUOTO_UPSTREAM_CA_PEM".into(),
-            p.compiled.upstream_ca.clone(),
+            "LUOTO_UPSTREAM_CAS".into(),
+            serde_json::to_string(&p.compiled.upstream_cas).unwrap_or_default(),
         ));
     }
     spec

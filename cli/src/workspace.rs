@@ -384,9 +384,24 @@ fn collect(
         }
         return walk(src, rel, false, out, seen);
     };
+    // Whether each folder above a listed path is a real one: git lists what its index holds,
+    // and a folder since replaced by a symlink would lead the copy out of `src`.
+    let mut linked: HashMap<PathBuf, bool> = HashMap::new();
     for f in files {
         let r = rel.join(f.trim_end_matches('/'));
         if skip(&r) {
+            continue;
+        }
+        let through_link = r
+            .ancestors()
+            .skip(1)
+            .filter(|a| !a.as_os_str().is_empty())
+            .any(|a| {
+                *linked.entry(a.to_path_buf()).or_insert_with(|| {
+                    std::fs::symlink_metadata(src.join(a)).is_ok_and(|m| m.is_symlink())
+                })
+            });
+        if through_link {
             continue;
         }
         let Ok(meta) = std::fs::symlink_metadata(src.join(&r)) else {
@@ -636,7 +651,12 @@ pub fn pull_targets(
             Some(t) => t.clone(),
             None => root()?,
         },
-        skip: ws.repos.keys().cloned().collect(),
+        skip: ws
+            .repos
+            .keys()
+            .filter(|n| present.contains(*n))
+            .cloned()
+            .collect(),
     }];
     let own = ws
         .repos
@@ -1206,7 +1226,7 @@ mod tests {
                 ),
             ]),
         };
-        let present = BTreeSet::from(["api".to_string()]);
+        let present = BTreeSet::from(["api".to_string(), "web".to_string()]);
         let all = pull_targets(&ws, None, None, &present).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].dest, canon(root.path()));

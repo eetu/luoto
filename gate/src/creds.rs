@@ -154,15 +154,20 @@ impl VaultClient {
     }
 }
 
-/// Place `secret` on the request as the injection says.
-pub fn apply(parts: &mut Parts, inj: &Injection, secret: &str) -> Result<(), String> {
+/// Place `secret` on the request as the injection says. Returns the forms it can come back
+/// in (the secret, and the value as placed), which the response must not carry
+/// ([`crate::handler`] screens it).
+pub fn apply(parts: &mut Parts, inj: &Injection, secret: &str) -> Result<Vec<String>, String> {
+    let mut placed = vec![secret.to_string()];
     match &inj.place {
         Placement::Header { name, format } => {
             let name = HeaderName::try_from(name.as_str()).map_err(|e| e.to_string())?;
-            let mut value = HeaderValue::from_str(&format.replace("{secret}", secret))
+            let formatted = format.replace("{secret}", secret);
+            let mut value = HeaderValue::from_str(&formatted)
                 .map_err(|_| "credential is not a valid header value".to_string())?;
             value.set_sensitive(true);
             parts.headers.insert(name, value);
+            placed.push(formatted);
         }
         Placement::Basic { username } => {
             let encoded =
@@ -171,6 +176,7 @@ pub fn apply(parts: &mut Parts, inj: &Injection, secret: &str) -> Result<(), Str
                 .map_err(|_| "credential is not a valid header value".to_string())?;
             value.set_sensitive(true);
             parts.headers.insert(http::header::AUTHORIZATION, value);
+            placed.push(encoded);
         }
         Placement::Query { param } => {
             let path = parts.uri.path().to_string();
@@ -184,12 +190,13 @@ pub fn apply(parts: &mut Parts, inj: &Injection, secret: &str) -> Result<(), Str
                 .map(str::to_string)
                 .collect();
             pairs.push(format!("{param}={}", urlencode(secret)));
+            placed.push(urlencode(secret));
             parts.uri = format!("{path}?{}", pairs.join("&"))
                 .parse()
                 .map_err(|e: http::uri::InvalidUri| e.to_string())?;
         }
     }
-    Ok(())
+    Ok(placed)
 }
 
 fn urlencode(s: &str) -> String {

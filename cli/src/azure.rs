@@ -36,16 +36,7 @@ impl Repo {
         let mut paths = Vec::new();
         for base in bases {
             for b in [base.clone(), format!("{base}.git")] {
-                for end in [
-                    "info/refs",
-                    "git-upload-pack",
-                    "git-receive-pack",
-                    "info/lfs/**",
-                ] {
-                    if write || end != "git-receive-pack" {
-                        paths.push(format!("{b}/{end}"));
-                    }
-                }
+                paths.extend(crate::compile::smart_http_paths(&b, write));
             }
         }
         paths
@@ -459,7 +450,7 @@ mod tests {
         let p = repo("o", "Proj", "proj").git_paths(true);
         assert!(p.contains(&"/o/Proj/_git/proj/info/refs".to_string()));
         assert!(p.contains(&"/o/_git/proj.git/git-receive-pack".to_string()));
-        assert_eq!(repo("o", "P", "r").git_paths(true).len(), 8);
+        assert_eq!(repo("o", "P", "r").git_paths(true).len(), 12);
         assert!(
             !repo("o", "P", "r")
                 .git_paths(false)

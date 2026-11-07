@@ -45,6 +45,9 @@ pub struct State {
     requests: Mutex<Requests>,
     pub fake_ips: Mutex<FakeIps>,
     pub client_tls: Arc<ClientConfig>,
+    /// For a host with its own CA (a self-hosted forge): the public roots and that CA, which no
+    /// other host's certificate may chain to.
+    pub host_tls: std::collections::HashMap<String, Arc<ClientConfig>>,
 }
 
 impl State {
@@ -63,7 +66,17 @@ impl State {
         };
         let vault = read_json::<VaultSettings>(&dir.join("vault.json"))?
             .map(|v| Arc::new(VaultClient::new(v.url, v.token)));
-        let client_tls = Arc::new(upstream_tls(&cfg)?);
+        let client_tls = Arc::new(upstream_tls(&cfg, None)?);
+        let host_tls = cfg
+            .upstream_cas
+            .iter()
+            .map(|(host, pem)| {
+                Ok((
+                    host.to_ascii_lowercase(),
+                    Arc::new(upstream_tls(&cfg, Some(pem.as_bytes()))?),
+                ))
+            })
+            .collect::<Result<_>>()?;
         Ok(Arc::new(State {
             events: Emitter::new(cfg.env.clone()),
             policy: RwLock::new(Arc::new(policy)),
@@ -72,6 +85,7 @@ impl State {
             requests: Mutex::new(Requests::default()),
             fake_ips: Mutex::new(FakeIps::new()),
             client_tls,
+            host_tls,
             cfg,
         }))
     }
@@ -159,14 +173,14 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn upstream_tls(cfg: &Config) -> Result<ClientConfig> {
+fn upstream_tls(cfg: &Config, extra: Option<&[u8]>) -> Result<ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut pems = Vec::new();
     if let Some(path) = &cfg.upstream_ca {
         pems.push(std::fs::read(path).with_context(|| format!("read {}", path.display()))?);
     }
-    pems.extend(cfg.upstream_ca_pem.iter().map(|p| p.as_bytes().to_vec()));
+    pems.extend(extra.map(<[u8]>::to_vec));
     for pem in &pems {
         for cert in rustls_pki_types::pem::PemObject::pem_slice_iter(pem) {
             let cert: rustls_pki_types::CertificateDer<'static> = cert?;

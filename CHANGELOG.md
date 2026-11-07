@@ -8,16 +8,17 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   put repositories at `/workspace/<name>`: a host folder, copied in and pulled back to it, or a
   remote (`owner/repo`, an https or ssh URL), cloned in the env through the gate on `up`.
   luoto commands in a repo's folder act on its env. The UI lists an env's repos.
-- **Repos in `luoto.toml`:** `[repos.<name>] url = …` gives a team the same set of remotes; the
-  env's own repo of a name replaces the file's.
+- **Repos in `luoto.toml`:** `[repos.<name>] url = …` gives a team the same set of remotes (by
+  host name, not address); the env's own repo of a name replaces the file's. When `up` asks
+  for their credentials, Enter answers "later".
 - **Pull:** each copied-in repo goes back to its own folder; cloned ones stay out unless named
   with `--repo`. Risky files count in any folder within the pull, so a nested repository's
   `.git`, `.envrc` or `.vscode` is held back like the top folder's.
 - **Detection** (`luoto init`, toolchain installs on `up`) reads the repositories in the
   folder, which git in the folder doesn't list.
 - **Read-only repos:** `read_repos` in `[credentials.github]` and `[credentials.azure_devops]`
-  are fetched and read through the gate, never pushed to or written; a GitHub App mints a
-  read-only token for them.
+  are fetched through the gate, never pushed to; a GitHub App mints a read-only token for
+  them. With a token, GraphQL reaches what the token does.
 - **A GitHub credential per owner:** `[[credentials.github]]`, once per account. Each repo's
   requests get the credential that lists it, GraphQL the first one that may write;
   `[credentials.github]` is the form for one. A token that reaches several owners is one credential listing all their
@@ -39,14 +40,15 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
 - **Packages and toolchains on request:** `sandbox request --package <name>` and
   `--tool <tool>@<version>` (MCP: `sandbox_request_install`) ask you to keep software in the
   env. `luoto approve` (or the UI) installs it and writes it into `[deps] system` or `[tools]`,
-  so a recreated container gets it again; the sandbox learns whether the install worked.
+  so a recreated container gets it again; the sandbox learns whether the install worked. A
+  tool from a mise backend anyone publishes to (`ubi:`, `npm:`, …) is marked unvetted.
 - **Agent credentials on the command line:** `--credential oauth_token=op://…` on
   `luoto agent add` and `luoto init` writes the credential without the prompt; the reference
   must resolve.
 - **Headless runs:** `luoto run --agent claude --prompt "…"` brings the env up asking nothing,
   runs the agent's non-interactive mode and prints its answer (`--output FILE` writes it,
-  `--down` stops the env after), exiting with the agent's code. Claude Code, Codex, OpenCode
-  and Copilot CLI have one.
+  `--down` stops the env after), exiting with the agent's code; on a terminal its output is
+  escaped. Claude Code, Codex, OpenCode and Copilot CLI have one.
 - **Presets from cloned repos:** after `up` clones repos, it offers the presets and default
   toolchains their files suggest, as `luoto init` does for a folder; it adds them only on your
   yes, as `luoto init` on a running env does.
@@ -67,6 +69,17 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   `up` copies what git doesn't ignore plus `.git`, so ignored secrets (`.env`, `*.tfvars`, state
   files, `.kube/`) stay on your machine. Other folders copy all but heavy directories and
   `.terraform`, which holds the host's provider binaries.
+
+### Security
+
+- **Credentials coming back:** on a credentialed host the gate refuses a response that carries
+  the credential it placed, in its headers or the start of its body; from a JSON body (an LFS
+  server's answer) it removes the fields that carry it.
+- **Pushes:** push options are refused; at a forge they can open merge requests or skip CI.
+- **Credentialed paths:** paths with `;` or an encoded `/` or `\`, and `TRACE`, are refused; a
+  repo's credential goes on its smart-HTTP and LFS paths only.
+- **Private addresses:** `luoto allow --private` and `private = true` never reach loopback,
+  cloud metadata or luoto's own networks.
 
 ## 0.2.2 (2026-11-06)
 
