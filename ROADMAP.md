@@ -33,10 +33,8 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   need the files as they change. The sandbox can then write where host tools act on their own
   (`.git/config` and hooks, `.envrc`, editor and pre-commit configs), so it comes with an
   audit of those files.
-- **Headless runs:** `luoto run` starts an env from a folder and its config, runs an agent on a
-  prompt (an audit, fixes opened as pull requests until review agrees, a value computed from a
-  data set) and hands back its result as a file or on stdout, then stops; for scheduled or
-  triggered jobs. Pull requests and merges stay behind the gate's write rules.
+- **Jobs around `luoto run`:** schedules and triggers in luoto itself (today cron or CI runs
+  it), a run that loops until a review agrees, and Antigravity's headless mode.
 - **More commands:** `fork` (copy an env), `push` (a reviewed copy-in), `reset-home`.
 - **Notifications** for access requests (UI and OS); `sandbox request` for ports; `approve`
   that narrows a request.

@@ -1,6 +1,7 @@
 description = "Claude Code"
 command = "claude"
 yolo = ["--dangerously-skip-permissions"]
+headless = ["-p", "--dangerously-skip-permissions", "--output-format", "text", "{prompt}"]
 providers = ["anthropic"]
 install = ["curl -fsSL https://claude.ai/install.sh | bash"]
 install_hosts = ["claude.ai", "downloads.claude.ai", "storage.googleapis.com"]

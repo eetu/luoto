@@ -136,6 +136,24 @@ enum Cmd {
         #[arg(long)]
         open: bool,
     },
+    /// Run an agent on one prompt without a terminal: its answer on stdout (or in --output)
+    /// and its exit code, for scripts and scheduled jobs. Brings the env up first, asking
+    /// nothing.
+    Run {
+        #[arg(long, add = ArgValueCandidates::new(complete::agents))]
+        agent: String,
+        /// The prompt (else --prompt-file, else stdin).
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long, value_name = "FILE")]
+        prompt_file: Option<String>,
+        /// Write the agent's answer to this file here instead of stdout.
+        #[arg(long, value_name = "FILE")]
+        output: Option<String>,
+        /// Stop the env when the run ends.
+        #[arg(long)]
+        down: bool,
+    },
     /// Run, add or list coding agents.
     Agent {
         #[command(subcommand)]
@@ -354,6 +372,24 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Shell { cmd } => connect::shell(&env()?, &cmd),
         Cmd::Open { with } => connect::open(&env()?, with.as_deref()),
         Cmd::Forward { port, open } => connect::forward(&env()?, &port, open),
+        Cmd::Run {
+            agent,
+            prompt,
+            prompt_file,
+            output,
+            down,
+        } => {
+            let prompt = match (prompt, prompt_file) {
+                (Some(p), _) => p,
+                (None, Some(f)) => std::fs::read_to_string(workspace::expand(&f))
+                    .map_err(|e| anyhow::anyhow!("read {f}: {e}"))?,
+                (None, None) if !std::io::stdin().is_terminal() => {
+                    std::io::read_to_string(std::io::stdin())?
+                }
+                (None, None) => anyhow::bail!("give the prompt: --prompt, --prompt-file or stdin"),
+            };
+            agents::headless(&env()?, &agent, &prompt, output.as_deref(), down)
+        }
         Cmd::Agent { action } => match action {
             AgentCmd::Run { agent, yolo, args } => agents::run(&env()?, &agent, yolo, &args),
             AgentCmd::Rm { agent } => agents::rm(&env()?, &agent),

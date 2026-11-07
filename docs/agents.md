@@ -222,9 +222,10 @@ message read from a file (`git commit -F`) passes the hook unseen.
 
 An agent is a file in `shared/agents/`: `command`, the `yolo` flags, `providers`, the
 `install` commands and their `install_hosts`, `tools` it needs from mise, `env`, `briefing`
-paths, the `mcp` registration kind, `[[first_run]]` answers to its first-start questions (a
-value at a path in a JSON config of the home), and `[[rule]]`s for hosts it reads besides its
-provider.
+paths, the `mcp` registration kind, its `headless` command line for `luoto run` (`{prompt}`
+where the prompt goes), `[[first_run]]` answers to its first-start questions (a value at a
+path in a JSON config of the home), `[settings.<option>]` for `model` and `effort`, and
+`[[rule]]`s for hosts it reads besides its provider.
 A provider is a file in `shared/providers/`: its `host` (and `also` hosts with their paths),
 the credential kinds and how each is placed, `[[deny]]`d endpoints, and `login_hosts` for a
 login inside. Presets and rules use exact hosts; the profile tests reject risky wildcards.

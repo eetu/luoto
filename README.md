@@ -187,6 +187,11 @@ the sandbox sees only a placeholder. [docs/agents.md](docs/agents.md#credentials
 to get one, how the prompt keeps it, and logins inside the sandbox, with the hosts and
 verification status of each agent. `luoto agent list` shows agents and providers.
 
+Without a terminal, `luoto run --agent claude --prompt "…"` runs one prompt: it brings the env
+up (asking nothing), runs the agent in its non-interactive mode and prints its answer (or
+writes it with `--output FILE`), exiting with the agent's code; `--down` stops the env after.
+A cron job or CI step can run it; pull requests it opens go through the gate as any other.
+
 | agent                         | command    | credential                                                  |
 | ----------------------------- | ---------- | ----------------------------------------------------------- |
 | Claude Code                   | `claude`   | Claude subscription token (`claude setup-token`) or API key |

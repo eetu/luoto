@@ -129,6 +129,10 @@ pub struct Agent {
     /// boundary instead).
     #[serde(default)]
     pub yolo: Vec<String>,
+    /// Its command line for one prompt without a terminal (`luoto run`), `{prompt}` where the
+    /// prompt goes; it answers on stdout and asks for no permission.
+    #[serde(default)]
+    pub headless: Vec<String>,
     /// Providers this agent can use; suggested when adding the agent.
     #[serde(default)]
     pub providers: Vec<String>,

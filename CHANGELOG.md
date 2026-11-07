@@ -42,6 +42,10 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
 - **Agent credentials on the command line:** `--credential oauth_token=op://…` on
   `luoto agent add` and `luoto init` writes the credential without the prompt; the reference
   must resolve.
+- **Headless runs:** `luoto run --agent claude --prompt "…"` brings the env up asking nothing,
+  runs the agent's non-interactive mode and prints its answer (`--output FILE` writes it,
+  `--down` stops the env after), exiting with the agent's code. Claude Code, Codex, OpenCode
+  and Copilot CLI have one.
 - **Presets from cloned repos:** after `up` clones repos, it offers the presets and default
   toolchains their files suggest, as `luoto init` does for a folder; it adds them only on your
   yes. `luoto init` again on an env no longer adds them without a terminal.

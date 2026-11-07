@@ -469,6 +469,80 @@ pub fn add(env_name: &str, agent: &str, credential: Option<&str>) -> Result<Exit
     Ok(ExitCode::SUCCESS)
 }
 
+/// `luoto run`: one prompt, no terminal. Lists the agent if the env doesn't, brings the env up
+/// (as a child whose output goes to stderr, with nothing to answer on), then runs the agent's
+/// headless command line: its answer on stdout or in `output`, its exit code returned.
+pub fn headless(
+    env_name: &str,
+    agent: &str,
+    prompt: &str,
+    output: Option<&str>,
+    down: bool,
+) -> Result<ExitCode> {
+    use std::process::Stdio;
+    let ctx = Ctx::load()?;
+    let a = profile(agent)?;
+    if a.headless.is_empty() {
+        bail!("{} has no headless mode in luoto", a.description);
+    }
+    let prompt = prompt.trim();
+    if prompt.is_empty() || prompt.len() > 100_000 {
+        bail!("the prompt is empty or longer than 100 kB");
+    }
+    list_agent(&ctx, env_name, agent)?;
+    let progress = Stdio::from(std::io::stderr());
+    let up = std::process::Command::new(std::env::current_exe()?)
+        .args(["up", "-e", env_name])
+        .stdin(Stdio::null())
+        .stdout(progress)
+        .status()?;
+    if !up.success() {
+        bail!("`luoto up -e {env_name}` failed");
+    }
+    if !has_credential(&EnvFile::load(&ctx.paths, env_name)?.cfg, &a) {
+        bail!("{}", credential_help(&a, env_name));
+    }
+    let argv: Vec<String> = std::iter::once(sh_quote(&a.command))
+        .chain(
+            a.headless
+                .iter()
+                .map(|x| sh_quote(&x.replace("{prompt}", prompt))),
+        )
+        .collect();
+    let script = format!("exec {}", argv.join(" "));
+    let dev = names::dev(env_name);
+    let mut cmd = ctx.rt.command();
+    cmd.args([
+        "exec",
+        "-u",
+        UID,
+        "-w",
+        "/workspace",
+        dev.as_str(),
+        "sh",
+        "-c",
+        crate::connect::LOGIN,
+        &script,
+    ])
+    .stdin(Stdio::null());
+    let status = match output {
+        Some(path) => {
+            let out = cmd.stderr(Stdio::inherit()).output()?;
+            // The agent's answer is the sandbox's text: written as it is, never run.
+            std::fs::write(crate::workspace::expand(path), &out.stdout)?;
+            out.status
+        }
+        None => cmd.status()?,
+    };
+    if down {
+        env::down(&ctx, env_name)?;
+        eprintln!("env `{env_name}` stopped");
+    }
+    Ok(ExitCode::from(
+        status.code().unwrap_or(1).clamp(0, 255) as u8
+    ))
+}
+
 /// `luoto agent rm`: drop the agent from the env's config, and its hosts from the policy of a
 /// running env. Its install and sessions stay in the env's home.
 pub fn rm(env_name: &str, agent: &str) -> Result<ExitCode> {
