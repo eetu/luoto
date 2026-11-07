@@ -1017,6 +1017,25 @@ impl EnvFile {
         self.save()
     }
 
+    /// Drop `name` from the env's agents, in whichever form the file writes them.
+    pub fn remove_agent(&mut self, name: &str) -> Result<()> {
+        if let Some(item) = self.doc.get_mut("agents") {
+            if let Some(arr) = item.as_array_mut() {
+                arr.retain(|v| v.as_str() != Some(name));
+            } else if let Some(t) = item.as_table_like_mut() {
+                t.remove(name);
+            }
+        }
+        let empty = self.doc.get("agents").is_some_and(|i| {
+            i.as_array().is_some_and(|a| a.is_empty())
+                || i.as_table_like().is_some_and(|t| t.is_empty())
+        });
+        if empty {
+            self.doc.remove("agents");
+        }
+        self.save()
+    }
+
     /// Add `name` to the env's agents, in the form the file writes them.
     pub fn add_agent(&mut self, name: &str) -> Result<()> {
         let path = self.path.display().to_string();
@@ -1421,6 +1440,12 @@ oauth_token = "op://Private/claude/token"
                 "{text}"
             );
             assert!(f.cfg.agents.contains("codex"));
+            f.remove_agent("codex").unwrap();
+            assert!(!f.cfg.agents.contains("codex"));
+            assert!(
+                !std::fs::read_to_string(&path).unwrap().contains("codex"),
+                "{text}"
+            );
         }
     }
 

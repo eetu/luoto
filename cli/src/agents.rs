@@ -469,6 +469,31 @@ pub fn add(env_name: &str, agent: &str, credential: Option<&str>) -> Result<Exit
     Ok(ExitCode::SUCCESS)
 }
 
+/// `luoto agent rm`: drop the agent from the env's config, and its hosts from the policy of a
+/// running env. Its install and sessions stay in the env's home.
+pub fn rm(env_name: &str, agent: &str) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    let a = profile(agent)?;
+    let mut f = EnvFile::load(&ctx.paths, env_name)?;
+    if !f.cfg.agents.contains(agent) {
+        if env::layered(&ctx, env_name)?.agents.contains(agent) {
+            bail!(
+                "{agent} comes from the team's luoto.toml; `luoto project ignore` stops applying \
+                 that file"
+            );
+        }
+        bail!("env `{env_name}` has no agent `{agent}`");
+    }
+    f.remove_agent(agent)?;
+    sync::reapply(&ctx, env_name)?;
+    println!(
+        "removed {} from env `{env_name}`; its files stay in the env's home (`{}` in \
+         ~/.local/bin), and its [credentials] stay in the config",
+        a.description, a.command
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
 /// `luoto agent run`: as `agent add` when the env doesn't have the agent ready, then run it.
 pub fn run(env_name: &str, agent: &str, yolo: bool, args: &[String]) -> Result<ExitCode> {
     let ctx = Ctx::load()?;

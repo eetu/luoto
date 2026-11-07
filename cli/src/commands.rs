@@ -407,33 +407,59 @@ fn fmt_request(r: &AccessRequest) -> String {
     )
 }
 
-pub fn requests(name: Option<&str>) -> Result<ExitCode> {
-    let ctx = Ctx::load()?;
+/// The pending requests of `name`, or of every env, each with its env.
+fn pending(ctx: &Ctx, name: Option<&str>) -> Result<Vec<(String, AccessRequest)>> {
     let envs = match name {
         Some(n) => vec![n.to_string()],
         None => config::list_envs(&ctx.paths)?,
     };
     let states = ctx.rt.states().unwrap_or_default();
-    let mut any = false;
+    let mut out = Vec::new();
     for e in envs {
-        for r in rules::requests(&ctx, &e, &states)? {
-            if r.status != RequestStatus::Pending {
-                continue;
+        for r in rules::requests(ctx, &e, &states)? {
+            if r.status == RequestStatus::Pending {
+                out.push((e.clone(), r));
             }
-            any = true;
-            println!(
-                "{e} #{}  {}\n   approve: luoto approve -e {e} {}   reject: luoto reject -e {e} {}",
-                r.id,
-                fmt_request(&r),
-                r.id,
-                r.id
-            );
         }
     }
-    if !any {
-        println!("no pending requests");
+    Ok(out)
+}
+
+fn print_request(e: &str, r: &AccessRequest) {
+    println!(
+        "{e} #{}  {}\n   approve: luoto approve -e {e} {}   reject: luoto reject -e {e} {}",
+        r.id,
+        fmt_request(r),
+        r.id,
+        r.id
+    );
+}
+
+pub fn requests(name: Option<&str>, watch: bool) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    let now = pending(&ctx, name)?;
+    for (e, r) in &now {
+        print_request(e, r);
     }
-    Ok(ExitCode::SUCCESS)
+    if !watch {
+        if now.is_empty() {
+            println!("no pending requests");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!("watching for requests (Ctrl-C stops)…");
+    let mut seen: std::collections::HashSet<(String, u64)> =
+        now.into_iter().map(|(e, r)| (e, r.id)).collect();
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        for (e, r) in pending(&ctx, name).unwrap_or_default() {
+            if seen.insert((e.clone(), r.id)) {
+                // The terminal's bell: a request waits for you.
+                print!("\x07");
+                print_request(&e, &r);
+            }
+        }
+    }
 }
 
 pub fn approve(name: &str, id: u64, ttl: Option<&str>, yes: bool, force: bool) -> Result<ExitCode> {

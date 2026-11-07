@@ -169,8 +169,12 @@ enum Cmd {
     Allow(rules::AllowOpts),
     /// Remove rules by id or host.
     Revoke { rule: String },
-    /// List access requests filed from inside envs (all envs unless one is picked).
-    Requests,
+    /// List requests filed from inside envs (all envs unless one is picked).
+    Requests {
+        /// Keep watching, and print each new request as it comes.
+        #[arg(long)]
+        watch: bool,
+    },
     /// Approve an access request (adds a rule).
     Approve {
         id: u64,
@@ -228,6 +232,12 @@ enum AgentCmd {
         yolo: bool,
         #[arg(last = true)]
         args: Vec<String>,
+    },
+    /// Remove an agent from the env's config; its files stay in the env's home.
+    #[command(visible_alias = "remove")]
+    Rm {
+        #[arg(add = ArgValueCandidates::new(complete::agents))]
+        agent: String,
     },
     /// Install an agent in the env and add it to the config.
     Add {
@@ -346,6 +356,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Forward { port, open } => connect::forward(&env()?, &port, open),
         Cmd::Agent { action } => match action {
             AgentCmd::Run { agent, yolo, args } => agents::run(&env()?, &agent, yolo, &args),
+            AgentCmd::Rm { agent } => agents::rm(&env()?, &agent),
             AgentCmd::Add { agent, credential } => {
                 agents::add(&env()?, &agent, credential.as_deref())
             }
@@ -376,13 +387,13 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         ),
         Cmd::Allow(o) => c::allow(&env()?, o),
         Cmd::Revoke { rule } => c::revoke(&env()?, &rule),
-        Cmd::Requests => {
+        Cmd::Requests { watch } => {
             // No env picked and none here: every env's requests.
             let picked = match env_arg.as_deref() {
                 Some(_) => Some(env()?),
                 None => env().ok(),
             };
-            c::requests(picked.as_deref())
+            c::requests(picked.as_deref(), watch)
         }
         Cmd::Approve {
             id,
