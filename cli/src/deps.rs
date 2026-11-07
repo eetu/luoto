@@ -61,7 +61,7 @@ pub fn merged(global: &Deps, env: &Deps) -> Deps {
 /// `[tools]`, the env's `[tools]`.
 pub fn tools_for(ctx: &Ctx, cfg: &EnvConfig) -> BTreeMap<String, toml::Value> {
     let mut t = BTreeMap::new();
-    for a in cfg.agents.iter().filter_map(|a| profiles::agent(a)) {
+    for a in cfg.agents.names().filter_map(|a| profiles::agent(a)) {
         for (k, v) in a.tools {
             t.insert(k, toml::Value::String(v));
         }

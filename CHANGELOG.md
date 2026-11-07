@@ -35,6 +35,13 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   as public aren't asked about again; a removed credential is asked for anew. Without a
   terminal, or with `init --yes`, agents log in inside and `up` prints the git credentials to
   add. `luoto repo add` asks the same before it clones.
+- **Agent model and effort:** `[agents.claude] model = "opus"`, `effort = "medium"` in an
+  env's config, its `luoto.toml`, or `config.toml` for every env that has the agent; `up`
+  writes them into the agent's settings as the default a session can change. `agents = [...]`
+  keeps working.
+- **Claude Code starts at its prompt:** luoto answers its first-start questions (onboarding,
+  trusting `/workspace`) in the env, as the sandbox is the boundary; an agent profile lists
+  such answers under `[[first_run]]`. The text style stays `theme` in your own settings.
 - **The UI never waits on a terminal:** an `up` it starts asks nothing on the terminal running
   `luoto ui`, where a changed `luoto.toml` could leave it waiting.
 - **Copies follow `.gitignore`:** from a git repository (the folder, a repo, or one inside),

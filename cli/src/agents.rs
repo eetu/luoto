@@ -324,7 +324,12 @@ fn ready(ctx: &Ctx, env_name: &str) -> Result<()> {
 /// Link the luoto briefing into the agent's instructions and register the sandbox MCP server.
 /// A merge into the agent's own config files, so `up` repeats it after copying home files
 /// that may have replaced those files.
-pub fn register(ctx: &Ctx, env_name: &str, a: &profiles::Agent) -> Result<()> {
+pub fn register(
+    ctx: &Ctx,
+    env_name: &str,
+    a: &profiles::Agent,
+    opts: &crate::config::AgentOpts,
+) -> Result<()> {
     let mut args = vec![
         "exec".to_string(),
         "-u".into(),
@@ -340,6 +345,21 @@ pub fn register(ctx: &Ctx, env_name: &str, a: &profiles::Agent) -> Result<()> {
     for b in &a.briefing {
         args.push("--briefing".into());
         args.push(b.clone());
+    }
+    for set in &a.first_run {
+        args.push("--set".into());
+        args.push(serde_json::to_string(set)?);
+    }
+    for (key, value) in opts.values() {
+        if let Some(s) = a.settings.get(key) {
+            let set = profiles::JsonSet {
+                file: s.file.clone(),
+                path: s.path.clone(),
+                value: serde_json::Value::String(value.to_string()),
+            };
+            args.push("--set".into());
+            args.push(serde_json::to_string(&set)?);
+        }
     }
     ctx.rt.run(&args)?;
     Ok(())

@@ -153,6 +153,36 @@ pub struct Agent {
     /// How to register the sandbox MCP server (`claude`, `opencode`, `codex`, `copilot`, `agy`).
     #[serde(default)]
     pub mcp: Option<String>,
+    /// Answers to what the agent asks on its first start, set in its JSON config: in a
+    /// sandbox, its trust questions guard nothing the sandbox doesn't.
+    #[serde(default, rename = "first_run")]
+    pub first_run: Vec<JsonSet>,
+    /// Where each option an env can give the agent (`model`, `effort`) goes in its own
+    /// config: written at `up`, under anything the user chooses in a session.
+    #[serde(default)]
+    pub settings: BTreeMap<String, AgentSetting>,
+}
+
+/// Where one agent option goes: a key path in a config file of the home (JSON, or TOML for a
+/// `.toml` file), and the values it takes when the agent limits them.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSetting {
+    pub file: String,
+    pub path: Vec<String>,
+    #[serde(default)]
+    pub values: Vec<String>,
+}
+
+/// One value set in a config file (JSON, or TOML for a `.toml` file), at a path of keys,
+/// keeping everything else there.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct JsonSet {
+    /// `~/…` for the dev user's home.
+    pub file: String,
+    pub path: Vec<String>,
+    pub value: serde_json::Value,
 }
 
 /// An editor `luoto open` connects to an env. Every editor reaches the env over SSH through

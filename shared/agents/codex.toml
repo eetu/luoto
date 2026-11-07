@@ -7,3 +7,12 @@ install_hosts = ["registry.npmjs.org"]
 tools = { node = "lts" }
 briefing = ["~/.codex/AGENTS.md"]
 mcp = "codex"
+
+[settings.model]
+file = "~/.codex/config.toml"
+path = ["model"]
+
+[settings.effort]
+file = "~/.codex/config.toml"
+path = ["model_reasoning_effort"]
+values = ["minimal", "low", "medium", "high", "xhigh"]

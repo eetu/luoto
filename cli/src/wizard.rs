@@ -57,7 +57,7 @@ pub fn customize(p: &mut Proposal, global: &GlobalConfig) -> Result<()> {
     pick_presets(p)?;
     toolchains(p)?;
     pick_agents(&mut p.cfg)?;
-    for name in p.cfg.agents.clone() {
+    for name in p.cfg.agents.names().cloned().collect::<Vec<_>>() {
         if let Some(a) = profiles::agent(&name)
             && let Some((provider, entries)) = credential(&p.cfg, &a, global)?
         {
@@ -202,7 +202,7 @@ fn pick_agents(cfg: &mut EnvConfig) -> Result<()> {
         .with_formatter(&shorts)
         .prompt_skippable()?
     {
-        cfg.agents = chosen.into_iter().map(|c| c.value).collect();
+        cfg.agents = crate::config::Agents::from_names(chosen.into_iter().map(|c| c.value));
     }
     Ok(())
 }

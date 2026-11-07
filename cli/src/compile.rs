@@ -106,13 +106,14 @@ pub fn compile(
         b.dev_env.extend(p.env);
     }
 
-    for name in &cfg.agents {
+    for (name, opts) in &cfg.agents.0 {
         let Some(a) = profiles::agent(name) else {
             bail!(
                 "unknown agent `{name}` (known: {})",
                 profiles::agent_names().collect::<Vec<_>>().join(", ")
             );
         };
+        check_agent_opts(&a, name, opts)?;
         for (i, r) in a.rules.into_iter().enumerate() {
             b.rule(format!("agent-{name}-{i}"), &format!("agent:{name}"), r);
         }
@@ -215,6 +216,44 @@ pub fn compile(
         upstream_ca,
         warnings: b.warnings,
     })
+}
+
+/// An agent's options are ones its profile takes, with values it accepts.
+pub fn check_agent_opts(
+    a: &profiles::Agent,
+    name: &str,
+    opts: &crate::config::AgentOpts,
+) -> Result<()> {
+    for (key, value) in opts.values() {
+        let Some(s) = a.settings.get(key) else {
+            let takes: Vec<&str> = a.settings.keys().map(String::as_str).collect();
+            bail!(
+                "agents.{name}: {} has no `{key}` option{}",
+                a.description,
+                if takes.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (it takes {})", takes.join(", "))
+                }
+            );
+        };
+        let plain = !value.is_empty()
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-:/@[]".contains(&b));
+        if !plain || (!s.values.is_empty() && !s.values.iter().any(|v| v == value)) {
+            bail!(
+                "agents.{name}.{key}: `{}` is not {}",
+                crate::text::display(value),
+                if s.values.is_empty() {
+                    "a name".to_string()
+                } else {
+                    format!("one of {}", s.values.join(", "))
+                }
+            );
+        }
+    }
+    Ok(())
 }
 
 /// A model provider: `[credentials.<provider>] <auth_kind> = "<ref>"` or `login_inside = true`,
@@ -1502,6 +1541,35 @@ ca = "{}"
                 .iter()
                 .any(|w| w.contains("two credentials use env:T"))
         );
+    }
+
+    #[test]
+    fn agent_options_are_the_profiles() {
+        assert!(
+            compile(
+                "t",
+                &cfg("[agents.claude]\nmodel = \"opus\"\neffort = \"medium\""),
+                GATE,
+                &[]
+            )
+            .is_ok()
+        );
+        assert!(
+            compile(
+                "t",
+                &cfg("[agents.claude]\nmodel = \"sonnet[1m]\""),
+                GATE,
+                &[]
+            )
+            .is_ok()
+        );
+        for bad in [
+            "[agents.claude]\neffort = \"max\"",
+            "[agents.claude]\nmodel = \"x; rm\"",
+            "[agents.opencode]\neffort = \"high\"",
+        ] {
+            assert!(compile("t", &cfg(bad), GATE, &[]).is_err(), "{bad}");
+        }
     }
 
     #[test]

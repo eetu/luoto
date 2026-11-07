@@ -201,7 +201,7 @@ from a newer luoto.
 
 ```toml
 presets = ["debian", "github", "toolchains", "npm"]   # see shared/presets/
-agents = ["claude"]
+agents = ["claude"]           # or, with options: [agents.claude] model = "opus", effort = "high"
 ports = [5173]                # published by the gate itself (servers listening on all interfaces)
 # isolation = "container"     # default gVisor; this shares the VM's kernel, builds ~1.6× faster
 # idle_stop = "2h"            # default 30m; "off" disables
@@ -265,8 +265,9 @@ run = ["git config --global pull.rebase true"]  # as you, in your home; keep the
 hosts = ["dl.k8s.io"]         # extra hosts readable only while installs run
 ```
 
-`config.toml` takes `[tools]`, `[deps]`, `idle_stop` and `auto_forward` too, for every env; an
-env's own come on top.
+`config.toml` takes `[tools]`, `[deps]`, `idle_stop` and `auto_forward` too, for every env, and
+`[agents.<name>]` options (`model`, `effort`) for every env that has that agent; an env's own,
+and its `luoto.toml`'s, come on top.
 
 Secret refs: `op://…` (1Password CLI, desktop or service account), `vault://mount/path#field`
 (OpenBao / HashiCorp Vault), `keyring:service/account` (OS keychain), `env:NAME`, `file:path`.

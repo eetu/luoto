@@ -80,6 +80,9 @@ enum Cmd {
         mcp: Option<String>,
         #[arg(long = "briefing")]
         briefing: Vec<String>,
+        /// A value to set in a JSON config, as JSON: `{"file": "~/…", "path": […], "value": …}`.
+        #[arg(long = "set")]
+        set: Vec<String>,
     },
     /// Verify isolation from inside (run by `luoto up` and `luoto doctor`).
     Selftest {
@@ -113,7 +116,7 @@ fn main() -> ExitCode {
         Cmd::Relay { port } => relay(port),
         Cmd::Mcp => mcp::serve(),
         Cmd::SshAgent { socket } => ssh_agent::serve(&socket).map(|()| ExitCode::SUCCESS),
-        Cmd::AgentSetup { mcp, briefing } => agent_setup::run(mcp.as_deref(), &briefing),
+        Cmd::AgentSetup { mcp, briefing, set } => agent_setup::run(mcp.as_deref(), &briefing, &set),
         Cmd::Selftest { json, probe } => return selftest::run(json, probe.as_deref()),
     };
     match result {

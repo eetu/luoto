@@ -38,8 +38,8 @@ pub struct ProjectConfig {
     pub allow: Vec<Rule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<u16>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agents: Vec<String>,
+    #[serde(default, skip_serializing_if = "crate::config::Agents::is_empty")]
+    pub agents: crate::config::Agents,
     #[serde(default)]
     pub deps: Deps,
     #[serde(default)]
@@ -112,10 +112,11 @@ fn validate(p: &ProjectConfig) -> Result<()> {
             bail!("luoto.toml: unknown preset `{}`", display(n));
         }
     }
-    for a in &p.agents {
-        if profiles::agent(a).is_none() {
-            bail!("luoto.toml: unknown agent `{}`", display(a));
-        }
+    for (name, opts) in &p.agents.0 {
+        let Some(a) = profiles::agent(name) else {
+            bail!("luoto.toml: unknown agent `{}`", display(name));
+        };
+        crate::compile::check_agent_opts(&a, name, opts).context("luoto.toml")?;
     }
     for r in &p.allow {
         if let Some(i) = rule_error(r, RuleOrigin::Sandbox) {
@@ -264,7 +265,7 @@ fn declined(ctx: &Ctx, env: &str, text: &str) -> bool {
 /// Put the project's settings under the env's own: lists merge, the env's scalars win.
 pub fn layer(cfg: &mut EnvConfig, p: &ProjectConfig) {
     extend_unique(&mut cfg.presets, p.presets.iter().cloned());
-    extend_unique(&mut cfg.agents, p.agents.iter().cloned());
+    cfg.agents.layer_under(&p.agents);
     extend_unique(&mut cfg.ports, p.ports.iter().copied());
     if cfg.image.is_none() {
         cfg.image = p.image.clone();
@@ -356,7 +357,25 @@ fn items(p: &ProjectConfig) -> Vec<(&'static str, String)> {
             .map(|h| format!("{} (read)", display(h)))
             .collect(),
     );
-    add("agents", p.agents.iter().map(|s| display(s)).collect());
+    add(
+        "agents",
+        p.agents
+            .0
+            .iter()
+            .map(|(n, o)| {
+                let opts: Vec<String> = o
+                    .values()
+                    .iter()
+                    .map(|(k, v)| format!("{k} {}", display(v)))
+                    .collect();
+                if opts.is_empty() {
+                    display(n)
+                } else {
+                    format!("{} ({})", display(n), opts.join(", "))
+                }
+            })
+            .collect(),
+    );
     add("system", p.deps.system.iter().map(|s| display(s)).collect());
     add(
         "run",

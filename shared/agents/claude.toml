@@ -8,6 +8,37 @@ env = { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", DISABLE_AUTOUPDATER = "1
 briefing = []
 mcp = "claude"
 
+# Its first start asks for a text style, shows security notes and notices, then asks whether
+# to trust the workspace; the sandbox is the boundary, and the workspace is the user's own
+# project. The text style is the user's choice: `theme` in
+# ~/.config/luoto/home/.claude/settings.json.
+[[first_run]]
+file = "~/.claude.json"
+path = ["hasCompletedOnboarding"]
+value = true
+
+[[first_run]]
+file = "~/.claude.json"
+path = ["projects", "/workspace", "hasTrustDialogAccepted"]
+value = true
+
+# The one-time notice that auto mode became the default permission mode.
+[[first_run]]
+file = "~/.claude.json"
+path = ["hasSeenAutoDefaultNotice"]
+value = true
+
+# What `[agents.claude]` sets in an env (`model`, `effort`): Claude's user settings, under a
+# `/model` or `/effort` chosen in a session.
+[settings.model]
+file = "~/.claude/settings.json"
+path = ["model"]
+
+[settings.effort]
+file = "~/.claude/settings.json"
+path = ["effortLevel"]
+values = ["low", "medium", "high", "xhigh"]
+
 # First-run onboarding checks that the OAuth host answers, whatever the auth kind.
 [[rule]]
 host = "platform.claude.com"

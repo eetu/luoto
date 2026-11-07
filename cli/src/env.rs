@@ -278,6 +278,7 @@ pub fn layered(ctx: &Ctx, env: &str) -> Result<EnvConfig> {
     if let Some((_, p)) = project::accepted(ctx, env) {
         project::layer(&mut cfg, &p);
     }
+    cfg.agents.fill_options(&ctx.global.agents);
     Ok(cfg)
 }
 
@@ -746,17 +747,17 @@ fn after_start(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, selftest: bool)
     if state.user != user {
         EnvState::update(&ctx.paths, env, |s| s.user = user)?;
     }
-    if personal::apply(ctx, env, &p.cfg, state.home()) > 0 {
-        // Home files may have replaced an agent's config, and with it luoto's entry there.
-        for a in p
-            .cfg
-            .agents
-            .iter()
-            .filter_map(|n| luoto_shared::profiles::agent(n))
+    // Home files may have replaced an agent's config, and with it luoto's entries there; an
+    // agent with options gets them on every start.
+    let copied = personal::apply(ctx, env, &p.cfg, state.home()) > 0;
+    for (name, opts) in &p.cfg.agents.0 {
+        let Some(a) = luoto_shared::profiles::agent(name) else {
+            continue;
+        };
+        if (copied || !opts.is_empty())
+            && let Err(e) = crate::agents::register(ctx, env, &a, opts)
         {
-            if let Err(e) = crate::agents::register(ctx, env, &a) {
-                eprintln!("warning: {} not set up for luoto ({e:#})", a.description);
-            }
+            eprintln!("warning: {} not set up for luoto ({e:#})", a.description);
         }
     }
     if let Err(e) = ssh::authorize(ctx, env) {

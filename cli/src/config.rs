@@ -52,6 +52,10 @@ pub struct GlobalConfig {
     /// Installed in every env on `up`, before the env's own `[deps]`.
     #[serde(default, skip_serializing_if = "is_default")]
     pub deps: Deps,
+    /// Default options for agents (`[agents.claude] model = "opus"`), wherever an env has
+    /// the agent; its luoto.toml and its own config take precedence. Adds no agent to an env.
+    #[serde(default, skip_serializing_if = "Agents::is_empty")]
+    pub agents: Agents,
     #[serde(default)]
     pub sources: Sources,
 }
@@ -384,8 +388,8 @@ pub struct EnvConfig {
     pub workspace: Workspace,
     #[serde(default)]
     pub presets: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Agents::is_empty")]
+    pub agents: Agents,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<u16>,
     #[serde(default, skip_serializing_if = "is_default")]
@@ -418,6 +422,141 @@ pub struct EnvConfig {
     pub tools: BTreeMap<String, toml::Value>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub deps: Deps,
+}
+
+/// What can be chosen for an agent (its profile's `settings` say where each goes in its own
+/// config): the default for its sessions, which a session can still change.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentOpts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl AgentOpts {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The options set, by name.
+    pub fn values(&self) -> Vec<(&'static str, &str)> {
+        [("model", &self.model), ("effort", &self.effort)]
+            .into_iter()
+            .filter_map(|(k, v)| Some((k, v.as_deref()?)))
+            .collect()
+    }
+
+    fn fill_from(&mut self, lower: &AgentOpts) {
+        if self.model.is_none() {
+            self.model = lower.model.clone();
+        }
+        if self.effort.is_none() {
+            self.effort = lower.effort.clone();
+        }
+    }
+}
+
+/// The agents of an env: `agents = ["claude"]`, or `[agents.claude]` tables with options
+/// (`model`, `effort`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Agents(pub Vec<(String, AgentOpts)>);
+
+impl Agents {
+    pub fn from_names(names: impl IntoIterator<Item = String>) -> Self {
+        let mut out = Agents::default();
+        for n in names {
+            out.push(&n);
+        }
+        out
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &String> {
+        self.0.iter().map(|(n, _)| n)
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.iter().any(|(n, _)| n == name)
+    }
+
+    pub fn get(&self, name: &str) -> Option<&AgentOpts> {
+        self.0.iter().find(|(n, _)| n == name).map(|(_, o)| o)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn push(&mut self, name: &str) {
+        if !self.contains(name) {
+            self.0.push((name.to_string(), AgentOpts::default()));
+        }
+    }
+
+    /// Lay `lower` (the accepted luoto.toml) under these: its agents join, and its options fill
+    /// what these leave unset.
+    pub fn layer_under(&mut self, lower: &Agents) {
+        for (name, opts) in &lower.0 {
+            match self.0.iter_mut().find(|(n, _)| n == name) {
+                Some((_, own)) => own.fill_from(opts),
+                None => self.0.push((name.clone(), opts.clone())),
+            }
+        }
+    }
+}
+
+impl Agents {
+    /// Options from `defaults` (config.toml's) for the agents these have, where unset; it
+    /// adds no agent.
+    pub fn fill_options(&mut self, defaults: &Agents) {
+        for (name, own) in &mut self.0 {
+            if let Some(d) = defaults.get(name) {
+                own.fill_from(d);
+            }
+        }
+    }
+}
+
+impl Serialize for Agents {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        if self.0.iter().all(|(_, o)| o.is_empty()) {
+            return s.collect_seq(self.names());
+        }
+        let mut m = s.serialize_map(Some(self.0.len()))?;
+        for (n, o) in &self.0 {
+            m.serialize_entry(n, o)?;
+        }
+        m.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Agents {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Agents;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a list of agents, or [agents.<name>] tables")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut s: A) -> Result<Agents, A::Error> {
+                let mut out = Agents::default();
+                while let Some(n) = s.next_element::<String>()? {
+                    out.push(&n);
+                }
+                Ok(out)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<Agents, A::Error> {
+                let mut out = Agents::default();
+                while let Some((n, o)) = m.next_entry::<String, AgentOpts>()? {
+                    out.0.push((n, o));
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_any(V)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
@@ -878,6 +1017,32 @@ impl EnvFile {
         self.save()
     }
 
+    /// Add `name` to the env's agents, in the form the file writes them.
+    pub fn add_agent(&mut self, name: &str) -> Result<()> {
+        let path = self.path.display().to_string();
+        match self.doc.get_mut("agents") {
+            None => {
+                let mut arr = toml_edit::Array::new();
+                arr.push(name);
+                self.doc["agents"] = toml_edit::value(arr);
+            }
+            Some(item) => {
+                if let Some(arr) = item.as_array_mut() {
+                    if !arr.iter().any(|v| v.as_str() == Some(name)) {
+                        arr.push(name);
+                    }
+                } else if let Some(t) = item.as_table_like_mut() {
+                    if t.get(name).is_none() {
+                        t.insert(name, toml_edit::table());
+                    }
+                } else {
+                    bail!("`agents` in {path} is neither a list nor tables");
+                }
+            }
+        }
+        self.save()
+    }
+
     pub fn set_list(&mut self, key: &str, values: &[String]) -> Result<()> {
         let mut arr = toml_edit::Array::new();
         for v in values {
@@ -1170,6 +1335,72 @@ oauth_token = "op://Private/claude/token"
         assert_eq!((ado.repos.len(), ado.read_repos.len()), (1, 1));
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("[[credentials.github]]") && saved.contains("# my env"));
+    }
+
+    #[test]
+    fn agents_are_a_list_or_tables_with_options() {
+        let list: EnvConfig = toml::from_str("agents = [\"claude\", \"codex\"]").unwrap();
+        assert_eq!(list.agents.names().count(), 2);
+        assert!(toml::to_string(&list).unwrap().contains("agents = ["));
+        let tables: EnvConfig =
+            toml::from_str("[agents.claude]\nmodel = \"opus\"\n\n[agents.codex]\n").unwrap();
+        assert_eq!(
+            tables.agents.get("claude").unwrap().model.as_deref(),
+            Some("opus")
+        );
+        assert!(tables.agents.contains("codex"));
+        assert!(
+            toml::to_string(&tables)
+                .unwrap()
+                .contains("[agents.claude]")
+        );
+        assert!(toml::from_str::<EnvConfig>("[agents.claude]\nmodle = \"x\"").is_err());
+
+        // luoto.toml's agents join; config.toml's give options, never agents.
+        let mut own = tables.agents.clone();
+        own.layer_under(&Agents(vec![(
+            "claude".into(),
+            AgentOpts {
+                model: Some("sonnet".into()),
+                effort: Some("high".into()),
+            },
+        )]));
+        own.layer_under(&Agents::from_names(["opencode".to_string()]));
+        let claude = own.get("claude").unwrap();
+        assert_eq!(
+            (claude.model.as_deref(), claude.effort.as_deref()),
+            (Some("opus"), Some("high"))
+        );
+        assert!(own.contains("opencode"));
+        let global: GlobalConfig =
+            toml::from_str("[agents.codex]\neffort = \"low\"\n[agents.copilot]\nmodel = \"x\"")
+                .unwrap();
+        own.fill_options(&global.agents);
+        assert_eq!(own.get("codex").unwrap().effort.as_deref(), Some("low"));
+        assert!(!own.contains("copilot"));
+    }
+
+    #[test]
+    fn agents_are_added_in_the_files_form() {
+        let dir = tempfile::tempdir().unwrap();
+        for (text, want) in [
+            (
+                "agents = [\"claude\"]\n",
+                "agents = [\"claude\", \"codex\"]",
+            ),
+            ("[agents.claude]\nmodel = \"opus\"\n", "[agents.codex]"),
+            ("presets = []\n", "agents = [\"codex\"]"),
+        ] {
+            let path = dir.path().join("t.toml");
+            std::fs::write(&path, text).unwrap();
+            let mut f = EnvFile::parse(path.clone(), text).unwrap();
+            f.add_agent("codex").unwrap();
+            assert!(
+                std::fs::read_to_string(&path).unwrap().contains(want),
+                "{text}"
+            );
+            assert!(f.cfg.agents.contains("codex"));
+        }
     }
 
     #[test]

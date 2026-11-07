@@ -153,7 +153,7 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
         workspace,
         presets,
         tools,
-        agents: o.agents.clone(),
+        agents: config::Agents::from_names(o.agents.clone()),
         ports: o.ports.clone(),
         isolation: o.isolation,
         ..Default::default()
@@ -285,7 +285,8 @@ fn print_proposal(p: &Proposal) {
         );
     }
     if !p.cfg.agents.is_empty() {
-        println!("  agents     {}", p.cfg.agents.join(", "));
+        let names: Vec<&str> = p.cfg.agents.names().map(String::as_str).collect();
+        println!("  agents     {}", names.join(", "));
     }
     for (provider, entries) in &p.cfg.credentials.providers {
         let how: Vec<String> = entries
