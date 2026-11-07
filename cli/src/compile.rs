@@ -11,14 +11,15 @@ use luoto_shared::creds::{
     default_github_api,
 };
 use luoto_shared::policy::{
-    Access, AccessLevel, AzureGuard, BodyDeny, CompiledRule, DenyRule, GithubGuard, InternalName,
-    Mode, Policy, Rule, RuleOrigin, rule_error,
+    Access, AccessLevel, AzureGuard, BodyDeny, CompiledRule, DenyRule, GitGuard, GithubGuard,
+    InternalName, Mode, Policy, Rule, RuleOrigin, rule_error,
 };
 use luoto_shared::{forges, presets, profiles};
 
 use crate::azure;
 use crate::config::{
-    AzureDevopsCred, CustomCred, EnvConfig, GithubCred, ProviderValue, SshCred, extend_unique,
+    AzureDevopsCred, CustomCred, EnvConfig, GitCred, GithubCred, ProviderValue, SshCred,
+    extend_unique,
 };
 
 pub struct Compiled {
@@ -33,6 +34,9 @@ pub struct Compiled {
     pub git_config: String,
     /// Pinned host keys of the hosts git over SSH may log in to (`/run/luoto/ssh_known_hosts`).
     pub known_hosts: String,
+    /// CA certificates (PEM) the gate trusts upstream besides the public roots, each for its
+    /// own host only: those of self-hosted git hosts.
+    pub upstream_cas: BTreeMap<String, String>,
     pub warnings: Vec<String>,
 }
 
@@ -87,6 +91,7 @@ pub fn compile(
     aliases: &[(String, String)],
 ) -> Result<Compiled> {
     let mut b = Builder::default();
+    crate::repos::check(&cfg.workspace)?;
 
     for name in &cfg.presets {
         let Some(p) = presets::get(name) else {
@@ -101,13 +106,14 @@ pub fn compile(
         b.dev_env.extend(p.env);
     }
 
-    for name in &cfg.agents {
+    for (name, opts) in &cfg.agents.0 {
         let Some(a) = profiles::agent(name) else {
             bail!(
                 "unknown agent `{name}` (known: {})",
                 profiles::agent_names().collect::<Vec<_>>().join(", ")
             );
         };
+        check_agent_opts(&a, name, opts)?;
         for (i, r) in a.rules.into_iter().enumerate() {
             b.rule(format!("agent-{name}-{i}"), &format!("agent:{name}"), r);
         }
@@ -120,12 +126,7 @@ pub fn compile(
     for (cname, c) in &cfg.credentials.custom {
         compile_custom(&mut b, cname, c)?;
     }
-    let github = cfg
-        .credentials
-        .github
-        .as_ref()
-        .map(|gh| compile_github(&mut b, gh))
-        .transpose()?;
+    let github = compile_github(&mut b, &cfg.credentials.github.0)?;
 
     let (ssh_hosts, known_hosts) = compile_ssh(&mut b, cfg.credentials.ssh.as_ref())?;
     let over_ssh = |h: &str| ssh_hosts.iter().any(|s| s == h);
@@ -149,6 +150,15 @@ pub fn compile(
         aliases,
         over_ssh(azure::SSH_HOST),
     ));
+    let (git, upstream_cas) = compile_git(&mut b, &cfg.credentials.git)?;
+    for c in &cfg.credentials.git {
+        let host = c.host.split(':').next().unwrap_or_default();
+        if !over_ssh(host) {
+            for from in [format!("git@{host}:"), format!("ssh://git@{host}/")] {
+                b.rewrites.push((format!("https://{}/", c.host), from));
+            }
+        }
+    }
 
     for (i, r) in cfg.allow.iter().enumerate() {
         if let Some(e) = rule_error(r, RuleOrigin::Host) {
@@ -176,6 +186,7 @@ pub fn compile(
         injections: b.injections,
         github,
         azure_devops,
+        git,
         internal_names: gate_ip
             .map(|ip| InternalName {
                 name: luoto_shared::GATE_HOST.into(),
@@ -202,8 +213,47 @@ pub fn compile(
         dev_env: b.dev_env,
         git_config: git_config(&b.rewrites),
         known_hosts,
+        upstream_cas,
         warnings: b.warnings,
     })
+}
+
+/// An agent's options are ones its profile takes, with values it accepts.
+pub fn check_agent_opts(
+    a: &profiles::Agent,
+    name: &str,
+    opts: &crate::config::AgentOpts,
+) -> Result<()> {
+    for (key, value) in opts.values() {
+        let Some(s) = a.settings.get(key) else {
+            let takes: Vec<&str> = a.settings.keys().map(String::as_str).collect();
+            bail!(
+                "agents.{name}: {} has no `{key}` option{}",
+                a.description,
+                if takes.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (it takes {})", takes.join(", "))
+                }
+            );
+        };
+        let plain = !value.is_empty()
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-:/@[]".contains(&b));
+        if !plain || (!s.values.is_empty() && !s.values.iter().any(|v| v == value)) {
+            bail!(
+                "agents.{name}.{key}: `{}` is not {}",
+                crate::text::display(value),
+                if s.values.is_empty() {
+                    "a name".to_string()
+                } else {
+                    format!("one of {}", s.values.join(", "))
+                }
+            );
+        }
+    }
+    Ok(())
 }
 
 /// A model provider: `[credentials.<provider>] <auth_kind> = "<ref>"` or `login_inside = true`,
@@ -280,6 +330,7 @@ fn compile_provider(
                      `server_tools = true` under [credentials.{pname}]",
                     t.what
                 ),
+                ..Default::default()
             });
         }
     }
@@ -498,87 +549,86 @@ fn split_repo(full: &str) -> Result<(String, String)> {
     }
 }
 
-fn compile_github(b: &mut Builder, gh: &GithubCred) -> Result<GithubGuard> {
-    if gh.repos.is_empty() {
-        bail!(
-            "credentials.github: list the repos the env may write to (`repos = [\"owner/repo\"]`)"
+/// Git paths of `owner/repo` on github.com, both URL forms; `write` adds pushes.
+fn github_git_paths(o: &str, r: &str, write: bool) -> Vec<String> {
+    [format!("/{o}/{r}"), format!("/{o}/{r}.git")]
+        .iter()
+        .flat_map(|base| smart_http_paths(base, write))
+        .collect()
+}
+
+/// A repository's smart-HTTP paths under `base` (`/owner/repo`, `/owner/repo.git`): fetches,
+/// pushes when `write`, and of Git LFS the batch API, object downloads from the same host and
+/// the lock check a push makes. Exact paths, no `**`: a server that normalises a path its own
+/// way (`..;` on Java servers) can't be led from them to a push.
+pub fn smart_http_paths(base: &str, write: bool) -> Vec<String> {
+    let mut out = vec![
+        format!("{base}/info/refs"),
+        format!("{base}/git-upload-pack"),
+        format!("{base}/info/lfs/objects/batch"),
+        format!("{base}/info/lfs/objects/*"),
+    ];
+    if write {
+        out.push(format!("{base}/git-receive-pack"));
+        out.push(format!("{base}/info/lfs/locks/verify"));
+    }
+    out
+}
+
+/// Every `[[credentials.github]]` (one per account, as an org's token reaches only that org).
+/// Each repo's git and REST paths get the credential that lists it; `/graphql`, which names no
+/// repo, gets the first one that may write. One push guard covers them all, as strict as the
+/// strictest.
+fn compile_github(b: &mut Builder, creds: &[GithubCred]) -> Result<Option<GithubGuard>> {
+    if creds.is_empty() {
+        return Ok(None);
+    }
+    // GraphQL names no repo in its path, so it goes out with one credential: the first that
+    // may write, else the first; a read-only one mutates nothing.
+    let graphql = creds.iter().position(|c| !c.repos.is_empty()).unwrap_or(0);
+    let mut guard = GithubGuard {
+        graphql_mutations: if creds[graphql].repos.is_empty() {
+            Vec::new()
+        } else {
+            creds[graphql].graphql_mutations.clone()
+        },
+        allow_tags: creds.iter().all(|c| c.allow_tags),
+        ..Default::default()
+    };
+    let mut tokens: BTreeSet<&str> = BTreeSet::new();
+    for t in creds.iter().filter_map(|c| c.token.as_deref()) {
+        if !tokens.insert(t) {
+            b.warnings.push(format!(
+                "credentials.github: two credentials use {t}; one listing all their repos lets \
+                 GraphQL (`gh pr create`) reach every one of them"
+            ));
+        }
+    }
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    for (i, gh) in creds.iter().enumerate() {
+        let name = if i == 0 {
+            "github".to_string()
+        } else {
+            format!("github-{}", i + 1)
+        };
+        let write = compile_github_one(b, gh, &name, i == graphql)?;
+        for (o, r) in gh
+            .repos
+            .iter()
+            .chain(&gh.read_repos)
+            .map(|r| split_repo(r))
+            .collect::<Result<Vec<_>>>()?
+        {
+            if !seen.insert((o.clone(), r.clone())) {
+                bail!("credentials.github: {o}/{r} is listed twice");
+            }
+        }
+        guard.repos.extend(write);
+        extend_unique(
+            &mut guard.protected_branches,
+            gh.protected_branches.iter().cloned(),
         );
     }
-    for p in gh.permissions.keys() {
-        if FORBIDDEN_GITHUB_PERMISSIONS.contains(&p.as_str()) {
-            bail!(
-                "credentials.github: permission `{p}` is refused — it would let the sandbox reach CI secrets or account settings"
-            );
-        }
-    }
-    let repos: Vec<(String, String)> = gh
-        .repos
-        .iter()
-        .map(|r| split_repo(r))
-        .collect::<Result<_>>()?;
-    let spec = match (&gh.app_id, &gh.private_key, &gh.token) {
-        (Some(app_id), Some(key), None) => {
-            let Some(installation_id) = gh.installation_id else {
-                bail!("credentials.github: installation_id is required with app_id");
-            };
-            let mut permissions = gh.permissions.clone();
-            if permissions.is_empty() {
-                permissions.insert("contents".into(), "write".into());
-                permissions.insert("pull_requests".into(), "write".into());
-            }
-            permissions
-                .entry("metadata".into())
-                .or_insert_with(|| "read".into());
-            BindingSpec::GithubApp {
-                app_id: app_id.clone(),
-                installation_id,
-                key_ref: key.clone(),
-                repos: repos.iter().map(|(_, r)| r.clone()).collect(),
-                permissions,
-                api_base: gh.api_base.clone().unwrap_or_else(default_github_api),
-            }
-        }
-        (None, None, Some(token)) => BindingSpec::Static {
-            secret_ref: token.clone(),
-        },
-        _ => {
-            bail!("credentials.github: set either app_id + installation_id + private_key, or token")
-        }
-    };
-    b.bindings.insert("github".into(), spec);
-
-    let mut git_paths = Vec::new();
-    let mut api_paths = vec!["/graphql".to_string()];
-    for (o, r) in &repos {
-        for base in [format!("/{o}/{r}"), format!("/{o}/{r}.git")] {
-            git_paths.push(format!("{base}/info/refs"));
-            git_paths.push(format!("{base}/git-upload-pack"));
-            git_paths.push(format!("{base}/git-receive-pack"));
-            git_paths.push(format!("{base}/info/lfs/**"));
-        }
-        api_paths.push(format!("/repos/{o}/{r}"));
-        api_paths.push(format!("/repos/{o}/{r}/**"));
-    }
-    // GitHub reads owner and repo in any case, and a remote keeps the case it was cloned with.
-    b.injections.push(Injection {
-        binding: "github".into(),
-        host: forges::GITHUB.into(),
-        paths: git_paths.clone(),
-        place: Placement::Basic {
-            username: "x-access-token".into(),
-        },
-        ignore_case: true,
-    });
-    b.injections.push(Injection {
-        binding: "github".into(),
-        host: forges::GITHUB_API.into(),
-        paths: api_paths,
-        place: Placement::Header {
-            name: "authorization".into(),
-            format: "Bearer {secret}".into(),
-        },
-        ignore_case: true,
-    });
     if !b.has_read(forges::GITHUB) {
         b.rule("github-read".into(), "github", Rule::read(forges::GITHUB));
     }
@@ -589,50 +639,6 @@ fn compile_github(b: &mut Builder, gh: &GithubCred) -> Result<GithubGuard> {
             Rule::read(forges::GITHUB_API),
         );
     }
-    b.rule(
-        "github-git".into(),
-        "github",
-        Rule {
-            host: forges::GITHUB.into(),
-            access: Access::Methods(vec!["GET".into(), "POST".into()]),
-            paths: git_paths,
-            ignore_case: true,
-            ..Default::default()
-        },
-    );
-    // REST writes are an allowlist: pull requests, reviews and issues. Branch content goes
-    // through git-receive-pack, where the push guard checks every ref; the contents, git-data,
-    // merge, ref, release and settings endpoints would bypass it.
-    let mut write_paths = vec!["/graphql".to_string()];
-    for (o, r) in &repos {
-        for path in [
-            "pulls",
-            "pulls/*",
-            "pulls/*/comments",
-            "pulls/*/comments/*/replies",
-            "pulls/*/reviews",
-            "pulls/*/requested_reviewers",
-            "pulls/comments/*",
-            "issues",
-            "issues/*",
-            "issues/*/comments",
-            "issues/*/labels",
-            "issues/comments/*",
-        ] {
-            write_paths.push(format!("/repos/{o}/{r}/{path}"));
-        }
-    }
-    b.rule(
-        "github-api-write".into(),
-        "github",
-        Rule {
-            host: forges::GITHUB_API.into(),
-            access: Access::Methods(vec!["POST".into(), "PATCH".into()]),
-            paths: write_paths,
-            ignore_case: true,
-            ..Default::default()
-        },
-    );
     let write = vec!["POST".into(), "PUT".into(), "PATCH".into(), "DELETE".into()];
     for (paths, reason) in [
         (
@@ -680,36 +686,368 @@ fn compile_github(b: &mut Builder, gh: &GithubCred) -> Result<GithubGuard> {
     b.dev_env
         .insert("GITHUB_TOKEN".into(), GH_PLACEHOLDER.into());
     b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+    Ok(Some(guard))
+}
 
-    Ok(GithubGuard {
-        repos: repos.iter().map(|(o, r)| format!("{o}/{r}")).collect(),
-        protected_branches: gh.protected_branches.clone(),
-        graphql_mutations: gh.graphql_mutations.clone(),
-        allow_tags: gh.allow_tags,
-    })
+/// One GitHub credential as binding `name`: its `repos` read and written (pushes, pull
+/// requests, issues), its `read_repos` fetched and read only. An App mints a separate
+/// read-only token for those, so not even GraphQL can write there. Returns the written
+/// repos, `owner/repo` lowercase.
+fn compile_github_one(
+    b: &mut Builder,
+    gh: &GithubCred,
+    name: &str,
+    graphql: bool,
+) -> Result<Vec<String>> {
+    if gh.repos.is_empty() && gh.read_repos.is_empty() {
+        bail!(
+            "credentials.github: list the repos the env may write to (`repos = [\"owner/repo\"]`) \
+             or only read (`read_repos`)"
+        );
+    }
+    for p in gh.permissions.keys() {
+        if FORBIDDEN_GITHUB_PERMISSIONS.contains(&p.as_str()) {
+            bail!(
+                "credentials.github: permission `{p}` is refused — it would let the sandbox reach CI secrets or account settings"
+            );
+        }
+    }
+    let parse = |list: &[String]| -> Result<Vec<(String, String)>> {
+        list.iter().map(|r| split_repo(r)).collect()
+    };
+    let (repos, read_repos) = (parse(&gh.repos)?, parse(&gh.read_repos)?);
+    let read_name = if repos.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}-read")
+    };
+    match (&gh.app_id, &gh.private_key, &gh.token) {
+        (Some(app_id), Some(key), None) => {
+            let Some(installation_id) = gh.installation_id else {
+                bail!("credentials.github: installation_id is required with app_id");
+            };
+            let mut permissions = gh.permissions.clone();
+            if permissions.is_empty() {
+                permissions.insert("contents".into(), "write".into());
+                permissions.insert("pull_requests".into(), "write".into());
+            }
+            permissions
+                .entry("metadata".into())
+                .or_insert_with(|| "read".into());
+            let app = |repos: &[(String, String)], permissions| BindingSpec::GithubApp {
+                app_id: app_id.clone(),
+                installation_id,
+                key_ref: key.clone(),
+                repos: repos.iter().map(|(_, r)| r.clone()).collect(),
+                permissions,
+                api_base: gh.api_base.clone().unwrap_or_else(default_github_api),
+            };
+            if !repos.is_empty() {
+                b.bindings
+                    .insert(name.into(), app(&repos, permissions.clone()));
+            }
+            if !read_repos.is_empty() {
+                let read = permissions
+                    .keys()
+                    .map(|k| (k.clone(), "read".to_string()))
+                    .collect();
+                b.bindings.insert(read_name.clone(), app(&read_repos, read));
+            }
+        }
+        (None, None, Some(token)) => {
+            // One token: its scope at GitHub decides what GraphQL can write; the gate keeps
+            // git and REST writes to `repos`.
+            b.bindings.insert(
+                name.into(),
+                BindingSpec::Static {
+                    secret_ref: token.clone(),
+                },
+            );
+        }
+        _ => {
+            bail!("credentials.github: set either app_id + installation_id + private_key, or token")
+        }
+    }
+    let read_binding = if gh.token.is_some() {
+        name.to_string()
+    } else {
+        read_name
+    };
+    let mut git_paths = Vec::new();
+    for (list, binding, write) in [
+        (&repos, name.to_string(), true),
+        (&read_repos, read_binding, false),
+    ] {
+        if list.is_empty() {
+            continue;
+        }
+        let paths: Vec<String> = list
+            .iter()
+            .flat_map(|(o, r)| github_git_paths(o, r, write))
+            .collect();
+        let mut api_paths: Vec<String> = list
+            .iter()
+            .flat_map(|(o, r)| [format!("/repos/{o}/{r}"), format!("/repos/{o}/{r}/**")])
+            .collect();
+        if graphql && (write || repos.is_empty()) {
+            api_paths.insert(0, "/graphql".to_string());
+        }
+        // GitHub reads owner and repo in any case, and a remote keeps the case it was cloned
+        // with.
+        b.injections.push(Injection {
+            binding: binding.clone(),
+            host: forges::GITHUB.into(),
+            paths: paths.clone(),
+            place: Placement::Basic {
+                username: "x-access-token".into(),
+            },
+            ignore_case: true,
+        });
+        b.injections.push(Injection {
+            binding,
+            host: forges::GITHUB_API.into(),
+            paths: api_paths,
+            place: Placement::Header {
+                name: "authorization".into(),
+                format: "Bearer {secret}".into(),
+            },
+            ignore_case: true,
+        });
+        git_paths.extend(paths);
+    }
+    b.rule(
+        format!("{name}-git"),
+        "github",
+        Rule {
+            host: forges::GITHUB.into(),
+            access: Access::Methods(vec!["GET".into(), "POST".into()]),
+            paths: git_paths,
+            ignore_case: true,
+            ..Default::default()
+        },
+    );
+    // REST writes are an allowlist: pull requests, reviews and issues. Branch content goes
+    // through git-receive-pack, where the push guard checks every ref; the contents, git-data,
+    // merge, ref, release and settings endpoints would bypass it.
+    // GraphQL reads are POSTs too; the guard decides which mutations pass.
+    let mut write_paths = if graphql {
+        vec!["/graphql".to_string()]
+    } else {
+        Vec::new()
+    };
+    for (o, r) in &repos {
+        for path in [
+            "pulls",
+            "pulls/*",
+            "pulls/*/comments",
+            "pulls/*/comments/*/replies",
+            "pulls/*/reviews",
+            "pulls/*/requested_reviewers",
+            "pulls/comments/*",
+            "issues",
+            "issues/*",
+            "issues/*/comments",
+            "issues/*/labels",
+            "issues/comments/*",
+        ] {
+            write_paths.push(format!("/repos/{o}/{r}/{path}"));
+        }
+    }
+    if !write_paths.is_empty() {
+        b.rule(
+            format!("{name}-api-write"),
+            "github",
+            Rule {
+                host: forges::GITHUB_API.into(),
+                access: Access::Methods(vec!["POST".into(), "PATCH".into()]),
+                paths: write_paths,
+                ignore_case: true,
+                ..Default::default()
+            },
+        );
+    }
+    Ok(repos.iter().map(|(o, r)| format!("{o}/{r}")).collect())
+}
+
+/// `[[credentials.git]]`, git over HTTPS on any other host: its token as basic auth on the
+/// listed repos' smart-HTTP paths, those paths allowed (fetches; pushes for `repos`, under
+/// the push guard), private addresses for a host on a private network. The guards, and the
+/// hosts' CA certificates for the gate's upstream TLS.
+fn compile_git(
+    b: &mut Builder,
+    creds: &[GitCred],
+) -> Result<(Vec<GitGuard>, BTreeMap<String, String>)> {
+    let mut guards = Vec::new();
+    let mut cas = BTreeMap::new();
+    let mut hosts = BTreeSet::new();
+    for (i, c) in creds.iter().enumerate() {
+        let (host, port) =
+            match c.host.rsplit_once(':') {
+                Some((h, p)) => (
+                    h.to_ascii_lowercase(),
+                    Some(p.parse::<u16>().with_context(|| {
+                        format!("credentials.git: `{}` has no valid port", c.host)
+                    })?),
+                ),
+                None => (c.host.to_ascii_lowercase(), None),
+            };
+        let plain = !host.is_empty()
+            && !host.starts_with(['-', '.'])
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-.".contains(&b));
+        if !plain {
+            bail!("credentials.git: `{}` is not a host name", c.host);
+        }
+        if host == forges::GITHUB || host == forges::AZURE_DEVOPS {
+            bail!(
+                "credentials.git: {host} has a credential of its own, [credentials.{}]",
+                if host == forges::GITHUB {
+                    "github"
+                } else {
+                    "azure_devops"
+                }
+            );
+        }
+        if !hosts.insert(host.clone()) {
+            bail!("credentials.git: {host} is listed twice; one credential per host");
+        }
+        if c.repos.is_empty() && c.read_repos.is_empty() {
+            bail!(
+                "credentials.git ({host}): list the repos the env may push to (`repos`) or only \
+                 fetch (`read_repos`)"
+            );
+        }
+        if !c.repos.is_empty() && c.token.is_none() {
+            bail!("credentials.git ({host}): pushing to `repos` takes a `token`");
+        }
+        let parse = |list: &[String]| -> Result<Vec<String>> {
+            list.iter()
+                .map(|r| {
+                    let r = r.trim_matches('/');
+                    let r = r.strip_suffix(".git").unwrap_or(r);
+                    let ok = !r.is_empty()
+                        && r.split('/').all(|s| {
+                            !s.is_empty()
+                                && s != "."
+                                && s != ".."
+                                && s.bytes()
+                                    .all(|b| b.is_ascii_alphanumeric() || b"._~%+-".contains(&b))
+                        });
+                    if !ok {
+                        bail!("credentials.git ({host}): `{r}` is not a repository path");
+                    }
+                    Ok(r.to_string())
+                })
+                .collect()
+        };
+        let (repos, read_repos) = (parse(&c.repos)?, parse(&c.read_repos)?);
+        let git_paths = |r: &str, write: bool| {
+            let mut out = Vec::new();
+            for base in [format!("/{r}"), format!("/{r}.git")] {
+                out.extend(smart_http_paths(&base, write));
+            }
+            // GitLab serves LFS objects here.
+            out.push(format!("/{r}.git/gitlab-lfs/objects/*"));
+            out
+        };
+        let paths: Vec<String> = repos
+            .iter()
+            .flat_map(|r| git_paths(r, true))
+            .chain(read_repos.iter().flat_map(|r| git_paths(r, false)))
+            .collect();
+        let id = format!("git-{}", i + 1);
+        if let Some(token) = &c.token {
+            b.bindings.insert(
+                id.clone(),
+                BindingSpec::Static {
+                    secret_ref: token.clone(),
+                },
+            );
+            // Forges read repository paths in any case.
+            b.injections.push(Injection {
+                binding: id.clone(),
+                host: host.clone(),
+                paths: paths.clone(),
+                place: Placement::Basic {
+                    username: c.username.clone(),
+                },
+                ignore_case: true,
+            });
+        }
+        b.rule(
+            id,
+            "git",
+            Rule {
+                host: host.clone(),
+                port,
+                access: Access::Methods(vec!["GET".into(), "POST".into()]),
+                paths,
+                ignore_case: true,
+                allow_private: c.private,
+                ..Default::default()
+            },
+        );
+        if !repos.is_empty() {
+            guards.push(GitGuard {
+                host: host.clone(),
+                repos: repos.iter().map(|r| r.to_ascii_lowercase()).collect(),
+                protected_branches: c.protected_branches.clone(),
+                allow_tags: c.allow_tags,
+            });
+        }
+        if let Some(ca) = &c.ca {
+            let path = crate::workspace::expand(ca);
+            let text = std::fs::read_to_string(&path).with_context(|| {
+                format!("credentials.git ({host}): read its CA {}", path.display())
+            })?;
+            // Only the certificates: a file that also holds a key keeps it here.
+            let certs: String = text
+                .split_inclusive("-----END CERTIFICATE-----")
+                .filter_map(|c| {
+                    let start = c.find("-----BEGIN CERTIFICATE-----")?;
+                    c.ends_with("-----END CERTIFICATE-----")
+                        .then(|| format!("{}\n", &c[start..]))
+                })
+                .collect();
+            if certs.is_empty() {
+                bail!(
+                    "credentials.git ({host}): {} holds no PEM certificate",
+                    path.display()
+                );
+            }
+            cas.insert(host.clone(), certs);
+        }
+        b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+    }
+    Ok((guards, cas))
 }
 
 /// Azure DevOps: the PAT added as basic auth on the repos' git paths, those paths allowed
 /// (case-insensitively, as Azure DevOps reads them) and the push guard. The guard, and the
 /// repos for the remote rewrites ([`azure::rewrites`]).
 fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Vec<azure::Repo>)> {
-    if c.repos.is_empty() {
+    if c.repos.is_empty() && c.read_repos.is_empty() {
         bail!(
-            "credentials.azure_devops: list the repos the env may use (`repos = [\"org/project/repo\"]`)"
+            "credentials.azure_devops: list the repos the env may use (`repos = [\"org/project/repo\"]`, or `read_repos` for fetch only)"
         );
     }
-    let repos: Vec<azure::Repo> = c
-        .repos
-        .iter()
-        .map(|r| azure::parse_repo(r))
-        .collect::<Result<_>>()?;
+    let parse = |list: &[String]| -> Result<Vec<azure::Repo>> {
+        list.iter().map(|r| azure::parse_repo(r)).collect()
+    };
+    let (writable, readable) = (parse(&c.repos)?, parse(&c.read_repos)?);
+    let repos: Vec<azure::Repo> = writable.iter().chain(&readable).cloned().collect();
     b.bindings.insert(
         "azure_devops".into(),
         BindingSpec::Static {
             secret_ref: c.token.clone(),
         },
     );
-    let paths: Vec<String> = repos.iter().flat_map(azure::Repo::git_paths).collect();
+    let paths: Vec<String> = writable
+        .iter()
+        .flat_map(|r| r.git_paths(true))
+        .chain(readable.iter().flat_map(|r| r.git_paths(false)))
+        .collect();
     b.injections.push(Injection {
         binding: "azure_devops".into(),
         host: azure::HOST.into(),
@@ -730,9 +1068,103 @@ fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Ve
             ..Default::default()
         },
     );
+    // Pull requests over REST, for the repos the env may write: read, open, comment, and
+    // change a title, description, draft state or target. The bodies are an allowlist, so
+    // completing one (a merge), auto-complete and votes stay with people, as a merge does on
+    // GitHub; branch content goes only through the push guard.
+    let mut reads = Vec::new();
+    let mut posts = Vec::new();
+    let mut patches = Vec::new();
+    for r in &writable {
+        let base = r.api_base();
+        reads.extend([
+            base.clone(),
+            format!("{base}/pullrequests"),
+            format!("{base}/pullrequests/**"),
+        ]);
+        posts.extend([
+            format!("{base}/pullrequests"),
+            format!("{base}/pullrequests/*/threads"),
+            format!("{base}/pullrequests/*/threads/*/comments"),
+        ]);
+        patches.push(format!("{base}/pullrequests/*"));
+    }
+    if !writable.is_empty() {
+        b.injections.push(Injection {
+            binding: "azure_devops".into(),
+            host: azure::HOST.into(),
+            paths: reads.iter().chain(&posts).cloned().collect(),
+            place: Placement::Basic {
+                username: String::new(),
+            },
+            ignore_case: true,
+        });
+        for (id, methods, paths) in [
+            ("azure-api-read", vec!["GET"], &reads),
+            ("azure-api-post", vec!["POST"], &posts),
+            ("azure-api-patch", vec!["PATCH"], &patches),
+        ] {
+            b.rule(
+                id.into(),
+                "azure_devops",
+                Rule {
+                    host: azure::HOST.into(),
+                    access: Access::Methods(methods.iter().map(|m| m.to_string()).collect()),
+                    paths: paths.clone(),
+                    ignore_case: true,
+                    ..Default::default()
+                },
+            );
+        }
+        b.denies.push(DenyRule {
+            host: azure::HOST.into(),
+            paths: vec![
+                "/*/*/_apis/git/repositories/*/pullrequests/*/reviewers".into(),
+                "/*/*/_apis/git/repositories/*/pullrequests/*/reviewers/**".into(),
+            ],
+            methods: vec!["POST".into(), "PUT".into(), "PATCH".into(), "DELETE".into()],
+            reason: "votes on pull requests are cast by people".into(),
+        });
+        let keys = |k: &[&str]| k.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        let pr_paths: Vec<String> = writable
+            .iter()
+            .map(|r| format!("{}/pullrequests", r.api_base()))
+            .collect();
+        b.body_denies.push(BodyDeny {
+            host: azure::HOST.into(),
+            paths: pr_paths,
+            ignore_case: true,
+            only_keys: keys(&[
+                "sourceRefName",
+                "targetRefName",
+                "title",
+                "description",
+                "isDraft",
+                "reviewers",
+                "workItemRefs",
+                "labels",
+            ]),
+            reason: "a pull request opened from the sandbox takes a title, description, \
+                     branches, draft state, reviewers, work items and labels; completing it \
+                     stays with you"
+                .into(),
+            ..Default::default()
+        });
+        b.body_denies.push(BodyDeny {
+            host: azure::HOST.into(),
+            paths: patches.clone(),
+            methods: vec!["PATCH".into()],
+            ignore_case: true,
+            only_keys: keys(&["title", "description", "isDraft", "targetRefName"]),
+            reason: "the sandbox may change a pull request's title, description, draft state \
+                     and target; completing it (or auto-complete) stays with you"
+                .into(),
+            ..Default::default()
+        });
+    }
     b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     let guard = AzureGuard {
-        repos: repos.iter().map(azure::Repo::key).collect(),
+        repos: writable.iter().map(azure::Repo::key).collect(),
         protected_branches: c.protected_branches.clone(),
         allow_tags: c.allow_tags,
     };
@@ -767,6 +1199,80 @@ mod tests {
             },
             Utc::now(),
         )
+    }
+
+    #[test]
+    fn azure_devops_pull_requests_go_through_rest_but_are_completed_by_people() {
+        use luoto_shared::policy::JsonBody;
+        let text = r#"
+[credentials.azure_devops]
+token = "op://v/ado/pat"
+repos = ["invinite/InviniteInfra/azure-devops-agent"]
+read_repos = ["invinite/InviniteInfra/lib"]
+"#;
+        let c = compile("t", &cfg(text), GATE, &alias()).unwrap();
+        let p = &c.policy;
+        let base = "/invinite/InviniteInfra/_apis/git/repositories/azure-devops-agent";
+        let allowed = |method: &str, path: &str| {
+            matches!(
+                decide(p, "dev.azure.com", method, path),
+                Decision::Allow { .. }
+            )
+        };
+        for (method, path) in [
+            ("POST", format!("{base}/pullrequests")),
+            ("POST", format!("{base}/pullRequests")),
+            ("GET", format!("{base}/pullrequests/12")),
+            ("PATCH", format!("{base}/pullRequests/12")),
+            ("POST", format!("{base}/pullrequests/12/threads")),
+            ("POST", format!("{base}/pullrequests/12/threads/3/comments")),
+        ] {
+            assert!(allowed(method, &path), "{method} {path}");
+            assert_eq!(p.injections_for("dev.azure.com", &path).len(), 1, "{path}");
+        }
+        for (method, path) in [
+            ("PUT", format!("{base}/pullrequests/12/reviewers/me")),
+            ("POST", format!("{base}/pushes")),
+            (
+                "POST",
+                "/invinite/InviniteInfra/_apis/git/repositories/lib/pullrequests".into(),
+            ),
+            ("POST", "/invinite/_apis/projects".into()),
+        ] {
+            assert!(!allowed(method, &path), "{method} {path}");
+        }
+        assert!(
+            p.injections_for(
+                "dev.azure.com",
+                "/invinite/InviniteInfra/_apis/git/repositories/lib/pullrequests"
+            )
+            .is_empty()
+        );
+        let refused = |method: &str, path: &str, body: &str| {
+            let json = JsonBody::parse(body.as_bytes()).unwrap();
+            p.body_denies
+                .iter()
+                .any(|d| d.applies("dev.azure.com", method, path) && d.asks(&json))
+        };
+        let create = format!("{base}/PullRequests");
+        let one = format!("{base}/pullrequests/12");
+        assert!(!refused(
+            "POST",
+            &create,
+            r#"{"sourceRefName":"refs/heads/f","targetRefName":"refs/heads/main","title":"t"}"#
+        ));
+        assert!(refused(
+            "POST",
+            &create,
+            r#"{"title":"t","completionOptions":{}}"#
+        ));
+        assert!(!refused("PATCH", &one, r#"{"description":"d"}"#));
+        assert!(refused("PATCH", &one, r#"{"status":"completed"}"#));
+        assert!(refused(
+            "PATCH",
+            &one.to_uppercase(),
+            r#"{"autoCompleteSetBy":{"id":"x"}}"#
+        ));
     }
 
     #[test]
@@ -1020,6 +1526,265 @@ repos = ["Eetu/Foo"]
     }
 
     #[test]
+    fn read_repos_are_fetched_never_written() {
+        let c = compile(
+            "t",
+            &cfg(r#"
+[credentials.github]
+app_id = "1"
+installation_id = 2
+private_key = "op://v/app/key"
+repos = ["acme/web"]
+read_repos = ["acme/lib"]
+
+[credentials.azure_devops]
+token = "op://v/ado/pat"
+read_repos = ["org/Infra/agent"]
+"#),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        let p = &c.policy;
+        let allowed =
+            |host, method, path| matches!(decide(p, host, method, path), Decision::Allow { .. });
+        assert!(allowed(
+            "github.com",
+            "POST",
+            "/acme/lib.git/git-upload-pack"
+        ));
+        assert!(!allowed(
+            "github.com",
+            "POST",
+            "/acme/lib.git/git-receive-pack"
+        ));
+        assert!(allowed(
+            "github.com",
+            "POST",
+            "/acme/web.git/git-receive-pack"
+        ));
+        assert!(!allowed("api.github.com", "POST", "/repos/acme/lib/pulls"));
+        assert!(allowed("api.github.com", "POST", "/repos/acme/web/pulls"));
+        let binding = |path| p.injections_for("github.com", path)[0].binding.clone();
+        assert_eq!(binding("/acme/web.git/info/refs"), "github");
+        assert_eq!(binding("/acme/lib.git/info/refs"), "github-read");
+        let BindingSpec::GithubApp {
+            permissions, repos, ..
+        } = &c.bindings["github-read"]
+        else {
+            panic!("an App token for the read repos");
+        };
+        assert_eq!(repos, &["lib"]);
+        assert!(permissions.values().all(|v| v == "read"));
+        assert_eq!(p.github.as_ref().unwrap().repos, ["acme/web"]);
+        assert!(allowed(
+            "dev.azure.com",
+            "POST",
+            "/org/Infra/_git/agent/git-upload-pack"
+        ));
+        assert!(!allowed(
+            "dev.azure.com",
+            "POST",
+            "/org/Infra/_git/agent/git-receive-pack"
+        ));
+        assert!(p.azure_devops.as_ref().unwrap().repos.is_empty());
+    }
+
+    #[test]
+    fn each_github_owner_gets_its_own_credential() {
+        let c = compile(
+            "t",
+            &cfg(r#"
+[[credentials.github]]
+token = "op://v/fi/token"
+repos = ["invinite-fi/upcloud-dev"]
+protected_branches = ["main"]
+
+[[credentials.github]]
+token = "op://v/open/token"
+repos = ["inviniteopen/upcloud-web"]
+protected_branches = ["prod"]
+"#),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        let p = &c.policy;
+        let binding = |host, path| {
+            p.injections_for(host, path)
+                .iter()
+                .map(|i| i.binding.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            binding("github.com", "/invinite-fi/upcloud-dev/info/refs"),
+            ["github"]
+        );
+        assert_eq!(
+            binding("github.com", "/inviniteopen/upcloud-web/info/refs"),
+            ["github-2"]
+        );
+        assert_eq!(
+            binding("api.github.com", "/repos/inviniteopen/upcloud-web/pulls"),
+            ["github-2"]
+        );
+        assert_eq!(binding("api.github.com", "/graphql"), ["github"]);
+        for path in [
+            "/repos/invinite-fi/upcloud-dev/pulls",
+            "/repos/inviniteopen/upcloud-web/pulls",
+        ] {
+            assert!(matches!(
+                decide(p, "api.github.com", "POST", path),
+                Decision::Allow { .. }
+            ));
+        }
+        let guard = p.github.as_ref().unwrap();
+        assert_eq!(guard.repos.len(), 2);
+        assert_eq!(guard.protected_branches, ["main", "prod"]);
+        let twice = cfg(
+            "[[credentials.github]]\ntoken = \"env:A\"\nrepos = [\"a/x\"]\n[[credentials.github]]\ntoken = \"env:B\"\nread_repos = [\"A/X\"]\n",
+        );
+        assert!(compile("t", &twice, GATE, &[]).is_err());
+    }
+
+    #[test]
+    fn any_git_host_gets_its_token_on_its_repos_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca.pem");
+        std::fs::write(
+            &ca,
+            "-----BEGIN PRIVATE KEY-----\nKKKK\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let text = format!(
+            r#"
+[[credentials.git]]
+host = "forge.internal:3000"
+token = "op://v/forge/token"
+username = "dev"
+repos = ["Infra/Platform/api"]
+read_repos = ["infra/lib"]
+private = true
+ca = '{}'
+"#,
+            ca.display()
+        );
+        let c = compile("t", &cfg(&text), GATE, &[]).unwrap();
+        let p = &c.policy;
+        let allowed = |method, path| {
+            matches!(
+                p.decide(
+                    &RequestInfo {
+                        host: "forge.internal",
+                        port: 3000,
+                        method,
+                        path,
+                        websocket: false,
+                        content_length: Some(10),
+                    },
+                    Utc::now(),
+                ),
+                Decision::Allow { .. }
+            )
+        };
+        assert!(allowed("POST", "/infra/platform/api.git/git-receive-pack"));
+        assert!(allowed("GET", "/infra/lib.git/info/refs"));
+        assert!(!allowed("POST", "/infra/lib.git/git-receive-pack"));
+        assert!(!allowed("GET", "/other/repo.git/info/refs"));
+        let inj = p.injections_for("forge.internal", "/Infra/Platform/api/info/refs");
+        assert!(matches!(&inj[0].place, Placement::Basic { username } if username == "dev"));
+        assert!(
+            p.injections_for("forge.internal", "/other/repo/info/refs")
+                .is_empty()
+        );
+        assert_eq!(p.git[0].repos, ["infra/platform/api"]);
+        assert!(c.upstream_cas["forge.internal"].contains("BEGIN CERTIFICATE"));
+        assert!(!c.upstream_cas["forge.internal"].contains("KEY"));
+        assert!(c.git_config.contains("insteadOf = \"git@forge.internal:\""));
+        assert!(c.git_config.contains("https://forge.internal:3000/"));
+        assert!(
+            p.rules
+                .iter()
+                .any(|r| r.rule.allow_private && r.rule.port == Some(3000))
+        );
+        for bad in [
+            "[[credentials.git]]\nhost = \"github.com\"\ntoken = \"env:T\"\nrepos = [\"a/b\"]",
+            "[[credentials.git]]\nhost = \"x.example\"\nrepos = [\"a/b\"]",
+            "[[credentials.git]]\nhost = \"x.example\"\ntoken = \"env:T\"\nrepos = [\"a/../b\"]",
+        ] {
+            assert!(compile("t", &cfg(bad), GATE, &[]).is_err(), "{bad}");
+        }
+        // Public repos: fetched, no credential.
+        let public = cfg("[[credentials.git]]\nhost = \"codeberg.org\"\nread_repos = [\"o/r\"]");
+        let c = compile("t", &public, GATE, &[]).unwrap();
+        assert!(c.policy.injections.is_empty() && c.policy.git.is_empty());
+    }
+
+    #[test]
+    fn graphql_goes_with_the_first_credential_that_writes() {
+        let c = compile(
+            "t",
+            &cfg("[[credentials.github]]\ntoken = \"env:R\"\nread_repos = [\"a/x\"]\n[[credentials.github]]\ntoken = \"env:W\"\nrepos = [\"b/y\"]\n"),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        let p = &c.policy;
+        let graphql: Vec<&str> = p
+            .injections_for("api.github.com", "/graphql")
+            .iter()
+            .map(|i| i.binding.as_str())
+            .collect();
+        assert_eq!(graphql, ["github-2"]);
+        assert!(!p.github.as_ref().unwrap().graphql_mutations.is_empty());
+    }
+
+    #[test]
+    fn a_token_shared_by_two_credentials_is_pointed_out() {
+        let c = compile(
+            "t",
+            &cfg("[[credentials.github]]\ntoken = \"env:T\"\nrepos = [\"a/x\"]\n[[credentials.github]]\ntoken = \"env:T\"\nrepos = [\"b/y\"]\n"),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("two credentials use env:T"))
+        );
+    }
+
+    #[test]
+    fn agent_options_are_the_profiles() {
+        assert!(
+            compile(
+                "t",
+                &cfg("[agents.claude]\nmodel = \"opus\"\neffort = \"medium\""),
+                GATE,
+                &[]
+            )
+            .is_ok()
+        );
+        assert!(
+            compile(
+                "t",
+                &cfg("[agents.claude]\nmodel = \"sonnet[1m]\""),
+                GATE,
+                &[]
+            )
+            .is_ok()
+        );
+        for bad in [
+            "[agents.claude]\neffort = \"max\"",
+            "[agents.claude]\nmodel = \"x; rm\"",
+            "[agents.opencode]\neffort = \"high\"",
+        ] {
+            assert!(compile("t", &cfg(bad), GATE, &[]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn refuses_dangerous_github_permissions() {
         let err = compile(
             "t",
@@ -1065,11 +1830,11 @@ oauth_token = "op://p/claude/token"
         assert!(c.bindings.contains_key("anthropic.oauth_token"));
         let fetch = r#"{"tools":[{"type":"web_fetch_20260209"}]}"#;
         let json = luoto_shared::policy::JsonBody::parse(fetch.as_bytes()).unwrap();
-        assert!(
-            p.body_denies
-                .iter()
-                .any(|d| d.applies("api.anthropic.com", "/v1/messages") && d.asks(&json))
-        );
+        assert!(p.body_denies.iter().any(|d| d.applies(
+            "api.anthropic.com",
+            "POST",
+            "/v1/messages"
+        ) && d.asks(&json)));
     }
 
     #[test]

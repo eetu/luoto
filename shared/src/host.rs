@@ -238,6 +238,32 @@ fn is_private_v6(ip: Ipv6Addr) -> bool {
         || ip.to_ipv4().is_some_and(|v4| ip.segments()[..6] == [0; 6] && is_private_v4(v4))
 }
 
+/// Addresses the gate never dials, even for a rule that allows private ones: itself
+/// (loopback, unspecified), cloud metadata, multicast, luoto's own vault and env networks
+/// (10.212.0.0/16, 10.213.0.0/16) and the gate's fake addresses.
+pub fn is_never_dialed(ip: IpAddr) -> bool {
+    let v4 = match ip {
+        IpAddr::V4(v4) => v4,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4,
+            None => {
+                return v6.is_unspecified()
+                    || v6.is_loopback()
+                    || v6.is_multicast()
+                    || v6 == Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254);
+            }
+        },
+    };
+    let o = v4.octets();
+    v4.is_unspecified()
+        || v4.is_loopback()
+        || v4.is_multicast()
+        || v4.is_broadcast()
+        || o == [169, 254, 169, 254]
+        || (o[0] == 10 && (o[1] == 212 || o[1] == 213))
+        || (o[0] == 198 && (o[1] & 0xfe) == 18)
+}
+
 /// A request path as the gate matches and forwards it. Percent-encoded unreserved characters
 /// (`%66` for `f`, `%2e` for `.`) are decoded, since RFC 3986 makes them the same path. A path
 /// with a dot segment, an empty segment or a backslash, in any spelling, is refused: servers
@@ -393,6 +419,26 @@ mod tests {
         assert_ne!(wildcard_risk("*.trycloudflare.com"), WildcardRisk::None);
         assert_eq!(wildcard_risk("*.sentry.io"), WildcardRisk::MultiTenant);
         assert_eq!(wildcard_risk("*.mycompany.dev"), WildcardRisk::None);
+    }
+
+    #[test]
+    fn some_addresses_stay_closed_to_private_rules() {
+        for ip in [
+            "127.0.0.1",
+            "0.0.0.0",
+            "169.254.169.254",
+            "10.212.1.1",
+            "10.213.7.2",
+            "198.18.0.5",
+            "::1",
+            "::ffff:127.0.0.1",
+            "fd00:ec2::254",
+        ] {
+            assert!(is_never_dialed(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["10.1.2.3", "192.168.127.254", "169.254.1.2", "fd12::1"] {
+            assert!(!is_never_dialed(ip.parse().unwrap()), "{ip}");
+        }
     }
 
     #[test]

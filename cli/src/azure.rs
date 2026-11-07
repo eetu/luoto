@@ -26,8 +26,18 @@ impl Repo {
         format!("{}/{}/{}", self.org, self.project, self.name).to_ascii_lowercase()
     }
 
-    /// Its smart-HTTP and LFS paths on `dev.azure.com`, in both URL forms.
-    pub fn git_paths(&self) -> Vec<String> {
+    /// Its REST API base on `dev.azure.com`, by name (the REST API also takes the repo's
+    /// ID, which luoto doesn't know).
+    pub fn api_base(&self) -> String {
+        format!(
+            "/{}/{}/_apis/git/repositories/{}",
+            self.org, self.project, self.name
+        )
+    }
+
+    /// Its smart-HTTP and LFS paths on `dev.azure.com`, in both URL forms; `write` adds
+    /// pushes.
+    pub fn git_paths(&self, write: bool) -> Vec<String> {
         let mut bases = vec![format!("/{}/{}/_git/{}", self.org, self.project, self.name)];
         if self.project.eq_ignore_ascii_case(&self.name) {
             bases.push(format!("/{}/_git/{}", self.org, self.name));
@@ -35,14 +45,7 @@ impl Repo {
         let mut paths = Vec::new();
         for base in bases {
             for b in [base.clone(), format!("{base}.git")] {
-                for end in [
-                    "info/refs",
-                    "git-upload-pack",
-                    "git-receive-pack",
-                    "info/lfs/**",
-                ] {
-                    paths.push(format!("{b}/{end}"));
-                }
+                paths.extend(crate::compile::smart_http_paths(&b, write));
             }
         }
         paths
@@ -261,11 +264,19 @@ pub fn rewrites(
 
 /// SSH host aliases from `~/.ssh/config` that the project's own remotes use for Azure DevOps
 /// (`git@my-azure:v3/org/…`), as (organization as the remote writes it, alias): read from the
-/// folder's `.git/config` and `.gitmodules`. The env has no SSH config, so these are
-/// rewritten like the standard hosts.
+/// `.git/config` and `.gitmodules` of the folder and its repos' folders, and from the remotes
+/// its repos clone. The env has no SSH config, so these are rewritten like the standard hosts.
 pub fn aliases(workspace: &crate::config::Workspace) -> Vec<(String, String)> {
-    let mut urls: Vec<String> = Vec::new();
-    if let Some(dir) = &workspace.dir {
+    let mut urls: Vec<String> = workspace
+        .repos
+        .values()
+        .filter_map(|r| r.url.clone())
+        .collect();
+    let folders = workspace
+        .dir
+        .iter()
+        .chain(workspace.repos.values().filter_map(|r| r.dir.as_ref()));
+    for dir in folders {
         let dir = std::path::Path::new(dir);
         for f in [dir.join(".git").join("config"), dir.join(".gitmodules")] {
             let Ok(text) = std::fs::read_to_string(f) else {
@@ -435,6 +446,7 @@ mod tests {
         .unwrap();
         let ws = crate::config::Workspace {
             dir: Some(dir.path().display().to_string()),
+            ..Default::default()
         };
         assert_eq!(
             aliases(&ws),
@@ -444,9 +456,15 @@ mod tests {
 
     #[test]
     fn paths_cover_both_url_forms() {
-        let p = repo("o", "Proj", "proj").git_paths();
+        let p = repo("o", "Proj", "proj").git_paths(true);
         assert!(p.contains(&"/o/Proj/_git/proj/info/refs".to_string()));
         assert!(p.contains(&"/o/_git/proj.git/git-receive-pack".to_string()));
-        assert_eq!(repo("o", "P", "r").git_paths().len(), 8);
+        assert_eq!(repo("o", "P", "r").git_paths(true).len(), 12);
+        assert!(
+            !repo("o", "P", "r")
+                .git_paths(false)
+                .iter()
+                .any(|p| p.ends_with("receive-pack"))
+        );
     }
 }

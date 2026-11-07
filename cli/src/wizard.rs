@@ -57,7 +57,7 @@ pub fn customize(p: &mut Proposal, global: &GlobalConfig) -> Result<()> {
     pick_presets(p)?;
     toolchains(p)?;
     pick_agents(&mut p.cfg)?;
-    for name in p.cfg.agents.clone() {
+    for name in p.cfg.agents.names().cloned().collect::<Vec<_>>() {
         if let Some(a) = profiles::agent(&name)
             && let Some((provider, entries)) = credential(&p.cfg, &a, global)?
         {
@@ -202,7 +202,7 @@ fn pick_agents(cfg: &mut EnvConfig) -> Result<()> {
         .with_formatter(&shorts)
         .prompt_skippable()?
     {
-        cfg.agents = chosen.into_iter().map(|c| c.value).collect();
+        cfg.agents = crate::config::Agents::from_names(chosen.into_iter().map(|c| c.value));
     }
     Ok(())
 }
@@ -244,6 +244,8 @@ enum Auth {
 /// Where a credential of a known kind is kept.
 #[derive(Clone, Copy, PartialEq)]
 enum Source {
+    /// A reference the config has already, for another account (index into `known`).
+    Known(usize),
     InKeychain,
     PasteKeychain,
     Paste1Password,
@@ -350,10 +352,43 @@ pub fn credential(
     };
     let how = &p.auth[&kind];
     println!("  {}", how.how);
-    let svc = crate::names::instance();
+    let title = format!("luoto {provider_name} {kind}");
     let acct = format!("{provider_name}.{kind}");
-    let mut options = Vec::new();
-    if keychain_has(&acct) {
+    let Some(reference) = secret(&how.label, &acct, &title, later, &[], global)? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        provider_name,
+        BTreeMap::from([(kind, ProviderValue::Ref(reference))]),
+    )))
+}
+
+/// Where a secret (`label`, e.g. "GitHub token") is kept, as a reference the host resolves:
+/// one of `known` (references the config has for other accounts, as (what for, reference),
+/// offered first so one token can serve several), the keychain entry `acct` of luoto's
+/// service, pasted into the keychain or into 1Password (item `title`), or a reference to where
+/// it is already. `None` for later (`later` says what happens then) or when skipped.
+pub fn secret(
+    label: &str,
+    acct: &str,
+    title: &str,
+    later: &str,
+    known: &[(String, String)],
+    global: &GlobalConfig,
+) -> Result<Option<String>> {
+    let svc = crate::names::instance();
+    let mut options: Vec<Choice<Source>> = known
+        .iter()
+        .enumerate()
+        .map(|(i, (what, r))| {
+            choice(
+                Source::Known(i),
+                format!("the one for {what}"),
+                format!("the same as for {what} ({r})"),
+            )
+        })
+        .collect();
+    if keychain_has(acct) {
         options.push(choice(
             Source::InKeychain,
             "the one in your keychain",
@@ -380,20 +415,21 @@ pub fn credential(
         ),
         choice(Source::Later, "later", later),
     ]);
-    let Some(source) = Select::new(&format!("The {}:", how.label), options)
+    let Some(source) = Select::new(&format!("The {label}:"), options)
         .with_formatter(&short)
         .prompt_skippable()?
     else {
         return Ok(None);
     };
-    let reference = match source.value {
+    Ok(Some(match source.value {
+        Source::Known(i) => known[i].1.clone(),
         Source::Later => return Ok(None),
         Source::InKeychain => format!("keyring:{svc}/{acct}"),
         Source::PasteKeychain => {
-            let Some(secret) = paste(&how.label)? else {
+            let Some(secret) = paste(label)? else {
                 return Ok(None);
             };
-            let free = free_account(&acct, keychain_taken)?;
+            let free = free_account(acct, keychain_taken)?;
             keyring::Entry::new(svc, &free)
                 .and_then(|e| e.set_password(&secret))
                 .context("store the secret in the OS keychain")?;
@@ -408,7 +444,7 @@ pub fn credential(
             format!("keyring:{svc}/{free}")
         }
         Source::Paste1Password => {
-            let Some(secret) = paste(&how.label)? else {
+            let Some(secret) = paste(label)? else {
                 return Ok(None);
             };
             let Some(vault) =
@@ -416,24 +452,29 @@ pub fn credential(
             else {
                 return Ok(None);
             };
-            let title = format!("luoto {provider_name} {kind}");
             let note = format!(
-                "{}. luoto hands it to its gate, which adds it to requests; the sandbox never \
-                 sees it.",
-                how.label
+                "{label}. luoto hands it to its gate, which adds it to requests; the sandbox \
+                 never sees it."
             );
-            let r = secrets::op_save(global, &vault, &title, &secret, &note)?;
+            let r = secrets::op_save(global, &vault, title, &secret, &note)?;
             println!("saved in 1Password ({vault}) as \"{title}\": {r}");
             r
         }
         Source::Reference => {
-            let Some(r) = Text::new(&format!("Reference to the {}:", how.label))
+            // Resolved once here (the value is dropped), so a typo shows now rather than as a
+            // locked credential at `up`.
+            let global = global.clone();
+            let Some(r) = Text::new(&format!("Reference to the {label}:"))
                 .with_placeholder("op://<vault>/<item>/<field>")
-                .with_validator(|s: &str| {
-                    Ok(match secrets::check_ref(s.trim()) {
-                        Ok(()) => Validation::Valid,
-                        Err(e) => Validation::Invalid(e.to_string().into()),
-                    })
+                .with_help_message("checked against your secret store; Esc for later")
+                .with_validator(move |s: &str| {
+                    let s = s.trim();
+                    Ok(
+                        match secrets::check_ref(s).and_then(|()| secrets::resolve(&global, s)) {
+                            Ok(_) => Validation::Valid,
+                            Err(e) => Validation::Invalid(format!("{e:#}").into()),
+                        },
+                    )
                 })
                 .prompt_skippable()?
             else {
@@ -441,11 +482,7 @@ pub fn credential(
             };
             r.trim().to_string()
         }
-    };
-    Ok(Some((
-        provider_name,
-        BTreeMap::from([(kind, ProviderValue::Ref(reference))]),
-    )))
+    }))
 }
 
 /// A hidden paste, trimmed; `None` when skipped.

@@ -61,7 +61,7 @@ pub fn merged(global: &Deps, env: &Deps) -> Deps {
 /// `[tools]`, the env's `[tools]`.
 pub fn tools_for(ctx: &Ctx, cfg: &EnvConfig) -> BTreeMap<String, toml::Value> {
     let mut t = BTreeMap::new();
-    for a in cfg.agents.iter().filter_map(|a| profiles::agent(a)) {
+    for a in cfg.agents.names().filter_map(|a| profiles::agent(a)) {
         for (k, v) in a.tools {
             t.insert(k, toml::Value::String(v));
         }
@@ -137,7 +137,8 @@ fn mise_conf(tools: &BTreeMap<String, toml::Value>) -> Result<String> {
 }
 
 /// The workspace's files, relative: from git in a work tree (.gitignore keeps dependencies
-/// out), else from `find`.
+/// out), else from `find`; and those of each repository directly in it (the env's repos),
+/// which git in the folder doesn't list.
 fn workspace_files(ctx: &Ctx, dev: &str) -> Vec<String> {
     let mut prune = String::from("-name '.*' ! -name .");
     for d in SKIP_DIRS {
@@ -149,10 +150,17 @@ fn workspace_files(ctx: &Ctx, dev: &str) -> Vec<String> {
            git ls-files --cached --others --exclude-standard
          else
            find . -maxdepth {} \\( {prune} \\) -prune -o -type f -print | sed 's|^\\./||'
-         fi",
+         fi
+         for d in */; do
+           [ -e \"$d.git\" ] || continue
+           git -C \"$d\" ls-files --cached --others --exclude-standard |
+             while IFS= read -r f; do printf '%s%s\\n' \"$d\" \"$f\"; done
+         done
+         true",
         DEPTH + 1
     );
-    ctx.rt
+    let mut files: Vec<String> = ctx
+        .rt
         .run([
             "exec",
             "-u",
@@ -166,8 +174,13 @@ fn workspace_files(ctx: &Ctx, dev: &str) -> Vec<String> {
         ])
         .unwrap_or_default()
         .lines()
+        // git lists a repository in the folder as `name/`; its files come from its own git.
+        .filter(|l| !l.ends_with('/'))
         .map(str::to_string)
-        .collect()
+        .collect();
+    files.sort();
+    files.dedup();
+    files
 }
 
 /// What `ensure` reads of the env, framed as `workspace::read_files` frames files: mise's path,

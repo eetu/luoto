@@ -136,7 +136,10 @@ hour if you like:
 
 An agent that needs a host asks with `sandbox request`; only you can approve it, on your
 machine (`luoto approve`, which asks you to accept the rule's risks like `luoto allow` does;
-`--force` accepts them without asking).
+`--force` accepts them without asking). It asks the same way for a system package or a
+toolchain the env should keep (`sandbox request --package postgresql-client`,
+`--tool node@24`): approving installs it and writes it into the env's `[deps] system` or
+`[tools]`, so a recreated container has it too.
 
 ### 6. Bring files back and stop
 
@@ -152,34 +155,47 @@ Commands act on the env of the current folder; `-e NAME` picks another (`luoto s
 | you want                                                                                             | run                                                                                                                                |
 | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | an env for a folder (copied in)                                                                      | `luoto init [DIR]`                                                                                                                 |
+| related repositories beside it (a host folder, or a remote cloned in the env)                        | `luoto init --repo ~/dev/api --repo acme/web`<br>`luoto repo add acme/lib`<br>`luoto repo list`                                    |
 | a new project (the folder is created)                                                                | `luoto init ~/dev/new-app`                                                                                                         |
 | to review, apply or ignore the team's `luoto.toml`                                                   | `luoto project`<br>`luoto project apply`<br>`luoto project ignore`                                                                 |
 | your editor, or a shell                                                                              | `luoto open`<br>`luoto open --with code`<br>`luoto shell`                                                                          |
 | to see what the sandbox tried to reach                                                               | `luoto egress --since 10m`<br>`luoto egress --denied`<br>`luoto egress --follow`                                                   |
 | to allow a host (read-only unless `--write`)                                                         | `luoto allow docs.rs --ttl 1h`<br>`luoto allow api.example.com --write --path '/v1/**'`<br>`luoto allow grpc.example.com --tunnel` |
 | to see or remove rules                                                                               | `luoto status`<br>`luoto revoke <id-or-host>`                                                                                      |
-| to answer access requests from inside                                                                | `luoto requests`<br>`luoto approve 3 --ttl 1h`<br>`luoto reject 3`                                                                 |
+| to answer access requests from inside                                                                | `luoto requests` (`--watch` waits)<br>`luoto approve 3 --ttl 1h`<br>`luoto reject 3`                                               |
 | an agent (installed on first run)                                                                    | `luoto agent run claude --yolo`<br>`luoto agent list`                                                                              |
 | a dev server in your browser                                                                         | run it: its port is forwarded to localhost here<br>`luoto forward 8080:5173` (to another local port)                               |
 | your work out: push from the env (with a GitHub, Azure DevOps or SSH credential), or copy files back | `git push`<br>`luoto pull`                                                                                                         |
 | image or config changes applied (volumes are kept)                                                   | `luoto up --recreate`                                                                                                              |
 | to stop an env, or delete it with its volumes and config (your folder stays)                         | `luoto down`<br>`luoto rm`                                                                                                         |
 | the env back after a reboot or an idle stop (unlocks the vault if needed)                            | `luoto up`<br>`luoto vault unlock`                                                                                                 |
+| a secret you rotated in your secret store, in use                                                    | `luoto vault reload` (`-e <env>` for one env's)                                                                                    |
 | to check isolation                                                                                   | `luoto doctor`                                                                                                                     |
 
 Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host> --reason …`
-asks you for access; only you can approve, on the host.
+asks you for access (`--preset npm` for a registry's hosts at once; `--package <name>` or
+`--tool <tool>@<version>` for software to keep); only you can approve, on the host.
 
 ## Agents
 
-`luoto agent run <agent>` installs the agent on first run, applies the env's current config and
-starts the agent in `/workspace`; `--yolo` turns off its own permission prompts (OpenCode has no
+`luoto agent run <agent>` installs the agent on first run (`up` installs those listed in the
+env's `agents` or its `luoto.toml`), applies the env's current config and starts the agent in
+`/workspace`; `--yolo` turns off its own permission prompts (OpenCode has no
 flag for it), since the sandbox is the boundary. After that first run the command (`claude`,
 `codex`, …) also works in any env terminal, including an editor's. Each agent needs a credential
 for one of its providers under `[credentials.<provider>]`; the gate adds it to every request and
 the sandbox sees only a placeholder. [docs/agents.md](docs/agents.md#credentials) covers where
 to get one, how the prompt keeps it, and logins inside the sandbox, with the hosts and
-verification status of each agent. `luoto agent list` shows agents and providers.
+verification status of each agent. `luoto agent list` shows agents and providers. Model,
+effort, your own agent settings and commits without AI attribution:
+[docs/guides/agent-settings.md](docs/guides/agent-settings.md).
+
+Without a terminal, `luoto run --agent claude --prompt "…"` runs one prompt: it brings the env
+up (asking nothing), runs the agent in its non-interactive mode and prints its answer (or
+writes it with `--output FILE`), exiting with the agent's code; `--down` stops the env after.
+A cron job or CI step can run it; pull requests it opens go through the gate as any other.
+[docs/guides/headless.md](docs/guides/headless.md) has examples, what an unattended run needs,
+and how to let GitHub merge its pull requests.
 
 | agent                         | command    | credential                                                  |
 | ----------------------------- | ---------- | ----------------------------------------------------------- |
@@ -199,7 +215,7 @@ from a newer luoto.
 
 ```toml
 presets = ["debian", "github", "toolchains", "npm"]   # see shared/presets/
-agents = ["claude"]
+agents = ["claude"]           # with options: [agents.claude] tables (docs/guides/agent-settings.md)
 ports = [5173]                # published by the gate itself (servers listening on all interfaces)
 # isolation = "container"     # default gVisor; this shares the VM's kernel, builds ~1.6× faster
 # idle_stop = "2h"            # default 30m; "off" disables
@@ -220,14 +236,24 @@ expires = "2026-12-01T00:00:00Z"
 app_id = "123456"             # (or `token = "<ref>"` for a fine-grained token)
 installation_id = 7890123
 private_key = "op://Dev/luoto-github-app/private key"
-repos = ["owner/repo"]
+repos = ["owner/repo"]        # read and write: pushes, pull requests
+read_repos = ["owner/lib"]    # fetched and read only (an App mints a read-only token for them)
 permissions = { contents = "write", pull_requests = "write" }
 protected_branches = ["main"]
 
 [credentials.azure_devops]    # Azure DevOps git over HTTPS
 token = "op://Dev/ado/pat"    # a PAT with Code (Read & write)
 repos = ["myorg/Project/repo"]   # `org/project/repo`, or the clone URL
+# read_repos = ["myorg/Project/lib"]   # fetched only
 protected_branches = ["main"]
+
+[[credentials.git]]           # git over HTTPS on any other host: GitLab, Forgejo, Gitea, …
+host = "gitlab.example.com"   # `host:port` for another port
+token = "op://Dev/gitlab/token"
+username = "oauth2"           # sent with the token: GitLab takes oauth2; Forgejo, the token's owner
+repos = ["group/api"]         # pushes, under the same guard; `read_repos` to fetch only
+# private = true              # a self-hosted one on a private network
+# ca = "~/certs/corp-ca.pem"  # the internal CA its certificate is signed by
 
 [credentials.ssh]             # git over SSH: the vault keeps the key and signs logins
 key = "op://Private/github-ssh/private key?ssh-format=openssh"
@@ -247,14 +273,22 @@ write = true
 [sandbox_secrets]             # deliberately exposed to code in the sandbox (env vars)
 DATABASE_URL = "op://Dev/local-db/url"
 
+[env]                         # plain environment variables in the env's shells
+RUST_LOG = "debug"
+
+[resources]                   # the dev container's share of the VM; not with gVisor on podman
+cpus = 4
+memory = "8g"
+
 [deps]                        # installed in the env on `up`
 system = ["postgresql-client"]                  # apt / apk / dnf, whichever the image has
 run = ["git config --global pull.rebase true"]  # as you, in your home; keep them repeatable
 hosts = ["dl.k8s.io"]         # extra hosts readable only while installs run
 ```
 
-`config.toml` takes `[tools]`, `[deps]`, `idle_stop` and `auto_forward` too, for every env; an
-env's own come on top.
+`config.toml` takes `[tools]`, `[deps]`, `idle_stop` and `auto_forward` too, for every env, and
+`[agents.<name>]` options (`model`, `effort`) for every env that has that agent; an env's own,
+and its `luoto.toml`'s, come on top.
 
 Secret refs: `op://…` (1Password CLI, desktop or service account), `vault://mount/path#field`
 (OpenBao / HashiCorp Vault), `keyring:service/account` (OS keychain), `env:NAME`, `file:path`.
@@ -267,11 +301,23 @@ sandbox never sees it.
 
 A GitHub App for luoto needs only repository permissions such as Contents and Pull requests;
 luoto refuses Workflows, Actions, Secrets and Administration ([why](SECURITY.md#what-holds-the-line)).
+A token or App installation reaches one owner's repos; for another owner's, write
+`[[credentials.github]]` once per owner instead of `[credentials.github]`. Each repo's requests
+get the credential that lists it, and GraphQL (`gh pr create`) the first one that may write,
+so the others open pull requests over REST (`gh api repos/<owner>/<repo>/pulls`).
 
 An Azure DevOps credential lets the env fetch and push its repos over HTTPS. Remotes keep
 working as they are: SSH ones (`git@ssh.dev.azure.com:v3/…`, or a host alias from your
 `~/.ssh/config` that the folder's remotes use) and `*.visualstudio.com` ones are rewritten to
-`https://dev.azure.com` in the env. Pull requests are opened in Azure DevOps itself.
+`https://dev.azure.com` in the env. Pull requests for the repos in `repos` go over its REST
+API by the repository's name (`…/_apis/git/repositories/<repo>/pullrequests`): opened,
+commented on, their title, description, draft state and target changed; completing them, and
+votes, stay with you. `az repos pr` addresses repos by ID, which the gate doesn't match.
+
+A `[[credentials.git]]` works with any forge, as git speaks the same protocol to all: the gate
+adds the token to the listed repos' git requests only and guards pushes as on GitHub. It
+covers git, not the forge's API (merge requests), which a `[credentials.custom]` can reach.
+Without a token it lists public repos to fetch. Its host's SSH remotes go over HTTPS with it.
 
 An SSH credential lets git use SSH remotes as they are, to `hosts` on port 22 only. GitHub SSH
 remotes go to HTTPS when github.com isn't in `hosts`, as do Azure DevOps ones with an Azure
@@ -350,7 +396,8 @@ credentials = ["anthropic"]
 sandbox_secrets = ["DATABASE_URL"]
 ```
 
-It also takes `image` and `agents`; toolchains belong in `mise.toml`. Layering:
+It also takes `image`, `agents` and the team's repositories (`[repos.<name>]`,
+[below](#several-repositories)); toolchains belong in `mise.toml`. Layering:
 `config.toml` < the accepted `luoto.toml` < the env's own config.
 
 Anyone who can write the repository writes this file, code in the sandbox included, so it
@@ -368,14 +415,59 @@ only proposes:
 ## Folders
 
 Every env belongs to a folder, and gets a copy of it: the first `up` puts the folder, git
-history included, into the env, and the sandbox never writes to your folder. Development
-happens inside, in Zed or VS Code attached to the env, and work leaves as git pushes (with a
-`[credentials.github]` or `[credentials.azure_devops]` for the repo, or `[credentials.ssh]`
-for an SSH remote; `luoto init` prints the one that fits the folder's origin on GitHub or
-Azure DevOps). `luoto pull` brings files back when you need them on the host: it lists changed
-files, skips risky ones unless you pass `--include-risky`, refuses paths or symlinks that leave
+history included, into the env, and the sandbox never writes to your folder. From a git
+repository it copies what git doesn't ignore, so ignored files such as `.env`, `*.tfvars` or
+state files stay on your machine. Development happens inside, in Zed or VS Code attached to
+the env, and work leaves as git pushes (with a `[credentials.github]`,
+`[credentials.azure_devops]` or `[[credentials.git]]` for the repo, or `[credentials.ssh]` for
+an SSH remote; `up` asks for the ones the env's remotes need). `luoto pull` brings files back when you need them on the host: it lists changed
+files, skips risky ones (in the folder or any folder within it, such as a repository's own
+`.git` or `.envrc`) unless you pass `--include-risky`, refuses paths or symlinks that leave
 the folder, and never writes through host symlinks. `.git` and heavy directories
 (`node_modules`, `target`, …) are skipped.
+
+## Several repositories
+
+An env can hold related repositories beside its folder, each at `/workspace/<name>`, so an
+agent sees them together and changes them in one session:
+
+```console
+$ luoto init ~/dev/platform --repo ~/dev/api --repo acme/web
+```
+
+- A folder (`~/dev/api`) is copied in like the env's own, and `luoto pull` writes it back
+  there. luoto commands run in that folder act on this env.
+- A remote (`acme/web` on GitHub, an https or ssh URL) is cloned in the env, through the gate,
+  on the next `up`. Its work leaves by git push; `luoto pull --repo web` copies it into the
+  env's folder.
+- `luoto repo add|rm|list` changes an existing env; a repo added while the env runs is copied
+  or cloned at once.
+
+A public GitHub repo needs only the `github` preset. Private ones and pushes take HTTPS
+credentials, which `up` asks for on a terminal (and prints without one): each lists the repos
+it may write (`repos`) or only read (`read_repos`), and the gate refuses pushes to protected
+branches. SSH remotes use them as they are. `[credentials.ssh]` works too, but a key reaches
+every repo its account can.
+
+The env's folder can be a repository of its own whose `luoto.toml` lists the team's repos, so
+a clone of it and `luoto init` give every developer the same set:
+
+```toml
+# luoto.toml
+[repos.api]
+url = "acme/api"
+
+[repos.web]
+url = "git@github.com:acme/web.git"
+branch = "develop"
+```
+
+`luoto.toml` names remotes only, never your folders; `luoto repo add ~/dev/api` makes your own
+checkout replace its `api` in your env. In the env, the repos are listed in the folder's
+`.git/info/exclude`, so they stay out of its `git status`.
+
+[docs/guides/multi-repo.md](docs/guides/multi-repo.md) has the three ways to set one up (command line,
+launchpad, both) and a [launchpad example](docs/examples/launchpad/).
 
 ## Shell
 

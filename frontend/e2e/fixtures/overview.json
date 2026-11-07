@@ -7,7 +7,8 @@
       "error": null,
       "gate": "running",
       "name": "web",
-      "pending": 0
+      "pending": 0,
+      "repos": []
     }
   ],
   "instance": "luoto",

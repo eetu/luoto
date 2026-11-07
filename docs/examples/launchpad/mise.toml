@@ -1,0 +1,5 @@
+# Toolchains for every repo under the launchpad (mise reads a folder's parents too); a repo's
+# own version files take precedence.
+[tools]
+node = "24"
+terraform = "1"

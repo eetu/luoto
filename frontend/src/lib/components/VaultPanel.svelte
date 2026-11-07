@@ -1,8 +1,15 @@
 <script lang="ts">
   import { api } from "$lib/api";
-  import { act, app } from "$lib/stores/app.svelte";
+  import { act, app, say } from "$lib/stores/app.svelte";
 
   const v = $derived(app.overview?.vault ?? null);
+
+  async function reload() {
+    const r = await act("reading secrets again… (your secret store may ask)", api.reloadVault);
+    if (!r) return;
+    const failed = r.failed.length ? `; not read: ${r.failed.join("; ")}` : "";
+    say(`read ${r.read}: ${r.changed} changed${failed}`, r.failed.length > 0);
+  }
 </script>
 
 <div class="panel">
@@ -26,6 +33,12 @@
             () => api.vault("unlock"),
             "vault unlocked",
           )}>unlock</button
+      >
+      <button
+        class="btn"
+        title="after rotating a secret in your secret store"
+        onclick={() => void reload()}
+        disabled={v.locked}>reload</button
       >
       <button
         class="btn"

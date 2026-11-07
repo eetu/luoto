@@ -5,20 +5,28 @@ takes and where to get one, which hosts it reaches, what it is denied on purpose
 still unverified. The profiles themselves are TOML files in
 [`shared/agents`](../shared/agents) and [`shared/providers`](../shared/providers).
 
-Status: run with a real account for Claude Code and Antigravity CLI; installed only for
-OpenCode and Codex; untested for Copilot CLI ([ROADMAP.md](../ROADMAP.md)).
+Status: run with a real account for Claude Code and Antigravity CLI (its login inside; a
+Gemini API key is untested); installed only for OpenCode and Codex; untested for Copilot CLI
+([ROADMAP.md](../ROADMAP.md)).
 
 ## How an agent is set up
 
-`luoto agent add <agent>` (or the first `luoto agent run <agent>`) installs the agent inside
-the env, never on your machine. The install gets its download hosts only for that run, as
-expiring rules; `luoto egress` shows them. Then luoto:
+`luoto agent add <agent>` (or the first `luoto agent run <agent>`) adds the agent to the env's
+`agents`, and `up` installs it inside the env, never on your machine. `up` installs every agent
+listed there, or in the accepted `luoto.toml`, that the env lacks, so `agents = ["claude"]` in
+a team's `luoto.toml` gives everyone Claude Code; for one with no credential it first asks
+how it authenticates, as `agent add` does, and writes the answer into the env's config. The
+install gets its download hosts only for that run, as expiring rules; `luoto egress` shows
+them. Then luoto:
 
 - links its user-level instructions to the luoto briefing (`/opt/luoto/AGENTS.md`), which
   tells it that egress is filtered and how to ask you for access;
 - registers the sandbox MCP server (`sandbox mcp`), so it can read the policy and file access
   requests;
 - sets the variables that turn off its auto-update and telemetry where it has them.
+
+Model and effort, credentials without the prompt and your own settings in every env:
+[guides/agent-settings.md](guides/agent-settings.md).
 
 `--yolo` maps to the agent's own flag for skipping permission prompts, where it has one. The
 sandbox is the boundary, so the prompts guard nothing luoto doesn't.
@@ -81,6 +89,10 @@ use prompts to improve its products, until its Google Cloud project has billing.
 - `login_inside = true` under `[credentials.anthropic]` logs in with full scopes instead, and
   keeps a refresh token in the env.
 - The briefing goes in as managed instructions (`/etc/claude-code/CLAUDE.md`).
+- Its first start skips onboarding (text style, security notes), the auto mode notice and the
+  question whether to trust `/workspace` and the folders in it: luoto answers them in
+  `~/.claude.json`, as the sandbox is the boundary. Commits and pull requests without its AI
+  attribution: [guides/agent-settings.md](guides/agent-settings.md#commits-without-ai-attribution).
 
 ## OpenCode
 
@@ -148,7 +160,10 @@ use prompts to improve its products, until its Google Cloud project has billing.
 
 An agent is a file in `shared/agents/`: `command`, the `yolo` flags, `providers`, the
 `install` commands and their `install_hosts`, `tools` it needs from mise, `env`, `briefing`
-paths, the `mcp` registration kind, and `[[rule]]`s for hosts it reads besides its provider.
+paths, the `mcp` registration kind, its `headless` command line for `luoto run` (`{prompt}`
+where the prompt goes), `[[first_run]]` answers to its first-start questions (a value at a
+path in a JSON config of the home), `[settings.<option>]` for `model` and `effort`, and
+`[[rule]]`s for hosts it reads besides its provider.
 A provider is a file in `shared/providers/`: its `host` (and `also` hosts with their paths),
 the credential kinds and how each is placed, `[[deny]]`d endpoints, and `login_hosts` for a
 login inside. Presets and rules use exact hosts; the profile tests reject risky wildcards.

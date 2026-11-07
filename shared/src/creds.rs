@@ -66,6 +66,8 @@ pub const AUTH_HEADERS: &[&str] = &[
     "x-api-key",
     "api-key",
     "x-goog-api-key",
+    "private-token",
+    "job-token",
     "cookie",
 ];
 

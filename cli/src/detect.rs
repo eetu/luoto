@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use luoto_shared::presets;
@@ -198,12 +198,52 @@ fn join(dir: &str, file: &str) -> String {
 
 /// What a folder on the host says about itself.
 pub fn detect(root: &Path) -> Detected {
-    let files = git_files(root).unwrap_or_else(|| walk_files(root));
-    let texts = read_paths(&files)
-        .into_iter()
-        .filter_map(|rel| read_host(&root.join(&rel)).map(|text| (rel, text)))
-        .collect();
+    detect_roots(&[(String::new(), root.to_path_buf())])
+}
+
+/// Detection over folders read as one tree, each `(name, folder)` with its files under
+/// `name/` (`""` for the project's folder): the repos of a multi-repo env.
+pub fn detect_roots(roots: &[(String, PathBuf)]) -> Detected {
+    let mut files = Vec::new();
+    let mut texts = HashMap::new();
+    for (name, root) in roots {
+        let own = host_files(root);
+        for rel in read_paths(&own) {
+            if let Some(text) = read_host(&root.join(&rel)) {
+                texts.insert(join(name, &rel), text);
+            }
+        }
+        files.extend(own.iter().map(|f| join(name, f)));
+    }
     detect_tree(&Listed { files, texts })
+}
+
+/// A folder's files: from git in a work tree, else from a walk; plus those of the
+/// repositories directly in it (a folder that holds a project's repos), which git in the
+/// folder doesn't list.
+fn host_files(root: &Path) -> Vec<String> {
+    let Some(mut files) = git_files(root) else {
+        return walk_files(root);
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return files;
+    };
+    for e in entries.filter_map(Result::ok) {
+        let Ok(name) = e.file_name().into_string() else {
+            continue;
+        };
+        if e.file_type().is_ok_and(|t| t.is_dir())
+            && !name.starts_with('.')
+            && !SKIP_DIRS.contains(&name.as_str())
+            && e.path().join(".git").exists()
+            && let Some(nested) = git_files(&e.path())
+        {
+            let prefix = format!("{name}/");
+            files.retain(|f| !f.starts_with(&prefix));
+            files.extend(nested.into_iter().map(|f| join(&name, &f)));
+        }
+    }
+    files
 }
 
 /// A regular file's text, at most `READ_CAP` bytes. Never through a symlink: a repository can
@@ -286,9 +326,10 @@ pub fn pin_dirs<'a>(files: impl Iterator<Item = &'a str>) -> BTreeSet<String> {
     dirs
 }
 
-/// Tracked and untracked-but-not-ignored files, when `root` is a git work tree. Run with
-/// fsmonitor off, so a repository's config can't make this start a program.
-fn git_files(root: &Path) -> Option<Vec<String>> {
+/// Tracked and untracked-but-not-ignored files, when `root` is a git work tree; a repository
+/// inside it is one entry, `name/`. Run with fsmonitor off, so a repository's config can't
+/// make this start a program.
+pub fn git_files(root: &Path) -> Option<Vec<String>> {
     let out = Command::new("git")
         .args(["-c", "core.fsmonitor=false", "-C"])
         .arg(root)

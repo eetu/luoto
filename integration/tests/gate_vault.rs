@@ -745,6 +745,10 @@ async fn model_apis_get_no_request_that_has_them_reach_the_network() {
         .respond_with(ResponseTemplate::new(200))
         .mount(&upstream)
         .await;
+    Mock::given(method("PATCH"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
     let env = Env::start(&[("api.model.test", *upstream.address())]);
     env.apply(Policy {
         rules: vec![rule(
@@ -753,14 +757,25 @@ async fn model_apis_get_no_request_that_has_them_reach_the_network() {
             Access::Level(AccessLevel::Write),
             &[],
         )],
-        body_denies: vec![BodyDeny {
-            host: "api.model.test".into(),
-            paths: vec!["/v1/messages".into()],
-            keys: vec!["mcp_servers".into()],
-            tool_types: vec!["web_fetch".into()],
-            reason: "server tools are off".into(),
-            ..Default::default()
-        }],
+        body_denies: vec![
+            BodyDeny {
+                host: "api.model.test".into(),
+                paths: vec!["/v1/messages".into()],
+                keys: vec!["mcp_servers".into()],
+                tool_types: vec!["web_fetch".into()],
+                reason: "server tools are off".into(),
+                ..Default::default()
+            },
+            BodyDeny {
+                host: "api.model.test".into(),
+                paths: vec!["/prs/*".into()],
+                methods: vec!["PATCH".into()],
+                ignore_case: true,
+                only_keys: vec!["title".into()],
+                reason: "completing stays with people".into(),
+                ..Default::default()
+            },
+        ],
         ..Default::default()
     });
     let post = |path: &str, headers: &[(&str, &str)], body: &str| {
@@ -803,6 +818,17 @@ async fn model_apis_get_no_request_that_has_them_reach_the_network() {
     let r = post("/v1/messages/count_tokens", &[], r#"{"mcp_servers":[]}"#);
     assert_eq!(r.status, 200, "{}", r.head);
     assert_eq!(upstream.received_requests().await.unwrap().len(), 2);
+
+    // Other methods' bodies, when a deny names them; matched in any case, keys allowlisted.
+    let patch = |path: &str, body: &str| {
+        let url = format!("http://api.model.test{path}");
+        env.request("PATCH", &url, &[], body.as_bytes())
+    };
+    let r = patch("/PRS/1", r#"{"status":"completed"}"#);
+    assert!(r.status == 403 && r.body.contains("people"), "{}", r.head);
+    let r = patch("/prs/1", r#"{"title":"t"}"#);
+    assert_eq!(r.status, 200, "{}", r.head);
+    assert_eq!(upstream.received_requests().await.unwrap().len(), 3);
 }
 
 /// A TCP server that echoes what it reads, one thread per connection.

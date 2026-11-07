@@ -1,6 +1,7 @@
 description = "OpenCode"
 command = "opencode"
 providers = ["anthropic", "openai", "openrouter", "gemini"]
+headless = ["run", "{prompt}"]
 # The installer puts the binary in ~/.opencode/bin and only edits shell rc files.
 install = [
   "curl -fsSL https://opencode.ai/install | bash",
@@ -12,6 +13,11 @@ briefing = ["~/.config/opencode/AGENTS.md"]
 mcp = "opencode"
 
 # Model catalogue.
+
+[settings.model]
+file = "~/.config/opencode/opencode.json"
+path = ["model"]
+
 [[rule]]
 host = "models.dev"
 

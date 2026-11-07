@@ -9,7 +9,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use chrono::{TimeDelta, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use futures_util::Stream;
 use luoto_shared::api::{AccessRequest, RequestStatus};
 use luoto_shared::ctl::{GateStatus, VaultStatus};
@@ -92,6 +92,8 @@ struct EnvRow {
     dev: String,
     gate: String,
     dir: Option<String>,
+    /// Repositories beside the folder (`repos.rs`).
+    repos: Vec<crate::repos::Listed>,
     pending: usize,
     denied_recent: usize,
     error: Option<String>,
@@ -124,11 +126,16 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
                 Ok(f) => (f.cfg.workspace.dir, None),
                 Err(e) => (None, Some(format!("{e:#}"))),
             };
+            let (repos, error) = match crate::repos::listed(&ctx, &name) {
+                Ok(r) => (r, error),
+                Err(e) => (Vec::new(), error.or(Some(format!("{e:#}")))),
+            };
             envs.push(EnvRow {
                 name,
                 dev,
                 gate,
                 dir,
+                repos,
                 pending,
                 denied_recent,
                 error,
@@ -285,9 +292,9 @@ async fn create_env(Json(n): Json<NewEnv>) -> ApiResult<Value> {
         if let Some((text, _)) = &p.project {
             check_reviewed(text, reviewed.as_deref())?;
         }
-        let agents = init::create(&ctx, &mut p, true, true)?;
-        crate::agents::credentials(&ctx, &p.name, &agents, false)?;
-        init::start(&ctx, &p.name, &agents, true)?;
+        init::create(&ctx, &mut p, true, true)?;
+        crate::agents::login_inside_unless_set(&ctx, &p.name)?;
+        init::start(&ctx, &p.name, true)?;
         Ok(json!({ "ok": true, "name": p.name }))
     })
     .await
@@ -334,14 +341,30 @@ async fn project_action(
     .map(Json)
 }
 
-async fn pull_plan(Path(name): Path<String>) -> ApiResult<workspace::PullPlan> {
-    blocking(move || {
-        let ctx = Ctx::load()?;
-        let dest = commands::pull_dest(&ctx, &name)?;
-        workspace::plan_pull(&ctx, &name, &dest, false)
-    })
-    .await
-    .map(Json)
+/// Every folder a pull writes, and one digest over them that applying checks.
+#[derive(Serialize)]
+struct PullPlans {
+    plans: Vec<workspace::PullPlan>,
+    digest: String,
+}
+
+fn pull_plans(ctx: &Ctx, name: &str) -> anyhow::Result<PullPlans> {
+    let plans = commands::pull_targets(ctx, name, None, None)?
+        .iter()
+        .map(|t| workspace::plan_pull(ctx, name, t, false))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let digest = plans
+        .iter()
+        .map(|p| p.digest.as_str())
+        .collect::<Vec<_>>()
+        .join(":");
+    Ok(PullPlans { plans, digest })
+}
+
+async fn pull_plan(Path(name): Path<String>) -> ApiResult<PullPlans> {
+    blocking(move || pull_plans(&Ctx::load()?, &name))
+        .await
+        .map(Json)
 }
 
 #[derive(Deserialize)]
@@ -354,12 +377,16 @@ struct PullApply {
 async fn pull_apply(Path(name): Path<String>, Json(a): Json<PullApply>) -> ApiResult<Value> {
     blocking(move || {
         let ctx = Ctx::load()?;
-        let dest = commands::pull_dest(&ctx, &name)?;
-        let plan = workspace::plan_pull(&ctx, &name, &dest, false)?;
-        if plan.digest != a.digest {
+        let all = pull_plans(&ctx, &name)?;
+        if all.digest != a.digest {
             anyhow::bail!("the env's files changed since you reviewed them; review again");
         }
-        let (written, skipped) = workspace::apply_pull(&plan, a.include_risky)?;
+        let (mut written, mut skipped) = (0, 0);
+        for plan in &all.plans {
+            let (w, s) = workspace::apply_pull(plan, a.include_risky)?;
+            written += w;
+            skipped += s;
+        }
         Ok(json!({ "written": written, "skipped": skipped }))
     })
     .await
@@ -464,30 +491,67 @@ async fn requests(Path(name): Path<String>) -> ApiResult<Vec<AccessRequest>> {
     .map(Json)
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct Decision {
+    /// When the request shown was filed: the gate numbers requests anew when it restarts, so
+    /// an id alone could name another request than the one reviewed.
+    created: DateTime<Utc>,
     ttl: Option<String>,
     #[serde(default)]
     force: bool,
 }
 
+/// The request with `id`, if it is the one filed at `created`.
+fn shown(ctx: &Ctx, name: &str, id: u64, created: DateTime<Utc>) -> anyhow::Result<AccessRequest> {
+    let req = rules::request(ctx, name, id)?;
+    if req.created != created {
+        anyhow::bail!("request #{id} is not the one shown; reload the requests");
+    }
+    Ok(req)
+}
+
+/// An approved request: the rule it became, or what an install request did.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum Approved {
+    Rule(Rule),
+    Installed { installed: String },
+}
+
 async fn approve(
     Path((name, id)): Path<(String, u64)>,
     Json(d): Json<Decision>,
-) -> ApiResult<Rule> {
+) -> ApiResult<Approved> {
     blocking(move || {
         let ctx = Ctx::load()?;
-        let req = rules::request(&ctx, &name, id)?;
-        rules::approve(&ctx, &name, &req, d.ttl.as_deref(), d.force)
+        let req = shown(&ctx, &name, id, d.created)?;
+        if req.install.is_some() {
+            return Ok(Approved::Installed {
+                installed: rules::approve_install(&ctx, &name, &req)?,
+            });
+        }
+        rules::approve(&ctx, &name, &req, d.ttl.as_deref(), d.force).map(Approved::Rule)
     })
     .await
     .map(Json)
 }
 
-async fn reject(Path((name, id)): Path<(String, u64)>) -> ApiResult<AccessRequest> {
-    blocking(move || rules::reject(&Ctx::load()?, &name, id, None))
-        .await
-        .map(Json)
+#[derive(Deserialize)]
+struct Shown {
+    created: DateTime<Utc>,
+}
+
+async fn reject(
+    Path((name, id)): Path<(String, u64)>,
+    Json(s): Json<Shown>,
+) -> ApiResult<AccessRequest> {
+    blocking(move || {
+        let ctx = Ctx::load()?;
+        shown(&ctx, &name, id, s.created)?;
+        rules::reject(&ctx, &name, id, None)
+    })
+    .await
+    .map(Json)
 }
 
 #[derive(Deserialize)]
@@ -552,6 +616,14 @@ async fn vault_action(Path(action): Path<String>) -> ApiResult<Value> {
             "unlock" => {
                 let n = sync::unlock_all(&ctx)?;
                 Ok(json!({ "envs": n }))
+            }
+            "reload" => {
+                let refs = ctl::vault_status(&ctx.rt)?
+                    .loaded_refs
+                    .into_iter()
+                    .collect();
+                let r = sync::reload(&ctx, &refs)?;
+                Ok(json!({ "read": r.read, "changed": r.changed, "failed": r.failed }))
             }
             "lock" => {
                 let failed = sync::lock_all(&ctx)?;

@@ -10,7 +10,7 @@ import type {
   Overview,
   ProjectStatus,
   Proposal,
-  PullPlan,
+  PullPlans,
   Rule,
   SelftestReport,
   SetupInfo,
@@ -106,10 +106,17 @@ export const api = {
       `${env(name)}/events?minutes=${minutes}&host=${encodeURIComponent(host)}`,
     ),
   requests: (name: string) => request<AccessRequest[]>("GET", `${env(name)}/requests`),
-  approve: (name: string, id: number, ttl?: string, force = false) =>
-    request<Rule>("POST", `${env(name)}/requests/${id}/approve`, { ttl, force }),
-  reject: (name: string, id: number) =>
-    request<AccessRequest>("POST", `${env(name)}/requests/${id}/reject`, {}),
+  // `created` names the request shown: the gate numbers requests anew when it restarts.
+  approve: (name: string, req: AccessRequest, ttl?: string, force = false) =>
+    request<Rule | { installed: string }>("POST", `${env(name)}/requests/${req.id}/approve`, {
+      created: req.created,
+      ttl,
+      force,
+    }),
+  reject: (name: string, req: AccessRequest) =>
+    request<AccessRequest>("POST", `${env(name)}/requests/${req.id}/reject`, {
+      created: req.created,
+    }),
   addRule: (name: string, rule: Rule, force = false) =>
     request<Rule>("POST", `${env(name)}/rules`, { rule, force }),
   deleteRule: (name: string, id: string) =>
@@ -117,13 +124,15 @@ export const api = {
   action: (name: string, action: "up" | "down" | "rebuild") =>
     request<unknown>("POST", `${env(name)}/${action}`, {}),
   selftest: (name: string) => request<SelftestReport>("POST", `${env(name)}/selftest`, {}),
-  pullPlan: (name: string) => request<PullPlan>("GET", `${env(name)}/pull`),
+  pullPlan: (name: string) => request<PullPlans>("GET", `${env(name)}/pull`),
   pull: (name: string, digest: string, includeRisky: boolean) =>
     request<{ written: number; skipped: number }>("POST", `${env(name)}/pull`, {
       digest,
       include_risky: includeRisky,
     }),
   vault: (action: "unlock" | "lock") => request<unknown>("POST", `/vault/${action}`, {}),
+  reloadVault: () =>
+    request<{ read: number; changed: number; failed: string[] }>("POST", "/vault/reload", {}),
 };
 
 /** Follow the live event stream (fetch-based SSE, so the token can travel in a header). */

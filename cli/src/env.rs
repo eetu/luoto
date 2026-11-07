@@ -18,7 +18,7 @@ use crate::paths::Paths;
 use crate::runtime::{Flavor, RunSpec, Runtime};
 use crate::state::{self, EnvState};
 use crate::{
-    azure, ca, ctl, deps, machine, names, personal, project, secrets, ssh, sync, workspace,
+    azure, ca, ctl, deps, machine, names, personal, project, repos, secrets, ssh, sync, workspace,
 };
 
 pub const UID: &str = "1000";
@@ -278,6 +278,7 @@ pub fn layered(ctx: &Ctx, env: &str) -> Result<EnvConfig> {
     if let Some((_, p)) = project::accepted(ctx, env) {
         project::layer(&mut cfg, &p);
     }
+    cfg.agents.fill_options(&ctx.global.agents);
     Ok(cfg)
 }
 
@@ -365,9 +366,20 @@ pub fn ensure_vm(ctx: &Ctx) -> Result<()> {
     machine::start(&ctx.rt.bin, false)
 }
 
+/// What the env's agents and repos need and its config doesn't say: asked on a terminal,
+/// before the gate starts, so it has the answers (`agents::ask_missing`,
+/// `repos::ask_missing`).
+fn ask_credentials(ctx: &Ctx, env: &str) -> Result<()> {
+    let cfg = layered(ctx, env)?;
+    crate::agents::ask_missing(ctx, env, &cfg)?;
+    repos::ask_missing(ctx, env, &cfg)?;
+    Ok(())
+}
+
 pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     ensure_vm(ctx)?;
     EnvFile::load(&ctx.paths, env)?.prune_expired()?;
+    ask_credentials(ctx, env)?;
     let image = env_image(ctx, &layered(ctx, env)?);
     let ids = ensure_images(ctx, &image)?;
     let state = state::ensure(ctx, env, &image)?;
@@ -401,24 +413,39 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     let dev = start_dev(ctx, env, &p, &state, &ids, gate != Launch::AlreadyRunning)?;
     // Containers that were already running passed the self-test when they started.
     let restarted = gate != Launch::AlreadyRunning || dev != Launch::AlreadyRunning;
-    after_start(ctx, env, &p, &state, restarted && !opts.no_selftest)?;
+    after_start(
+        ctx,
+        env,
+        &p,
+        &state,
+        restarted && !opts.no_selftest,
+        opts.quiet,
+    )?;
 
     if fresh_work || !state.seeded {
         let dir = workspace::canonical(p.cfg.workspace.dir.as_deref().with_context(|| {
             format!("env `{env}` has no folder: set `[workspace] dir` (`luoto edit -e {env}`)")
         })?)?;
         println!("copying {} into the env…", dir.display());
-        let n = workspace::push(ctx, env, &dir)?;
+        let n = workspace::push(ctx, env, &dir, None)?;
         println!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
         EnvState::update(&ctx.paths, env, |s| s.seeded = true)?;
     }
+    // A new volume holds none of the repos, whatever the host remembers.
+    let seeded_repos = if fresh_work {
+        Default::default()
+    } else {
+        state.repos.clone()
+    };
     if project::review(ctx, env)? {
+        // Its agents and repos may need credentials too.
+        ask_credentials(ctx, env)?;
         // The accepted settings reach the gate (policy, credentials, ports) and the runtime env.
         let image = p.image.clone();
         p = plan(ctx, env)?;
         if start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)? != Launch::AlreadyRunning {
             start_dev(ctx, env, &p, &state, &ids, true)?;
-            after_start(ctx, env, &p, &state, !opts.no_selftest)?;
+            after_start(ctx, env, &p, &state, !opts.no_selftest, opts.quiet)?;
         } else {
             sync::write_runtime_env(ctx, env, &p.compiled)?;
         }
@@ -428,11 +455,41 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             );
         }
     }
+    let repos = repos::seed(ctx, env, &p.cfg.workspace, &seeded_repos);
+    let cloned = repos.iter().any(|n| {
+        !seeded_repos.contains(n)
+            && p.cfg
+                .workspace
+                .repos
+                .get(n)
+                .is_some_and(|r| r.url.is_some())
+    });
+    if repos != state.repos {
+        EnvState::update(&ctx.paths, env, |s| s.repos = repos)?;
+    }
+    // New clones bring files of their own: the presets and toolchains they suggest, offered
+    // as `luoto init` offers a folder's.
+    if cloned {
+        match deps::detect_in_env(ctx, env) {
+            Ok(found) => {
+                let heading = format!("the repos cloned into `{env}` suggest:");
+                if crate::init::offer(ctx, env, &found, &heading, false, true)? {
+                    sync::reapply(ctx, env)?;
+                    p = plan(ctx, env)?;
+                }
+            }
+            Err(e) => eprintln!("warning: the cloned repos weren't read ({e:#})"),
+        }
+    }
     if let Err(e) = deps::ensure(ctx, env, &p.cfg, state.home()) {
         eprintln!(
             "warning: deps not installed: {e:#}\n         \
              see `luoto egress -e {env} --denied --since 30m`; `luoto up -e {env}` retries"
         );
+    }
+    let agents: Vec<String> = p.cfg.agents.names().cloned().collect();
+    if let Err(e) = crate::agents::ensure(ctx, env, &agents, opts.quiet) {
+        eprintln!("warning: agents not installed: {e:#}\n         `luoto up -e {env}` retries");
     }
 
     crate::watch::spawn(ctx);
@@ -467,8 +524,9 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     Ok(())
 }
 
-fn gate_spec(ctx: &Ctx, env: &str, cfg: &EnvConfig, a: &names::Addrs) -> RunSpec {
-    RunSpec {
+fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
+    let cfg = &p.cfg;
+    let mut spec = RunSpec {
         name: names::gate(env),
         image: ctx.image("gate"),
         hostname: Some(format!("{env}-gate")),
@@ -517,7 +575,15 @@ fn gate_spec(ctx: &Ctx, env: &str, cfg: &EnvConfig, a: &names::Addrs) -> RunSpec
         restart: Some("on-failure".into()),
         labels: labels(env, "gate"),
         ..Default::default()
+    };
+    // Read at start: a changed CA changes the spec, which recreates the gate.
+    if !p.compiled.upstream_cas.is_empty() {
+        spec.env.push((
+            "LUOTO_UPSTREAM_CAS".into(),
+            serde_json::to_string(&p.compiled.upstream_cas).unwrap_or_default(),
+        ));
     }
+    spec
 }
 
 /// Start the gate from its image `image_id` (recreated when its spec changed), give it the
@@ -532,7 +598,7 @@ fn start_gate(
 ) -> Result<Launch> {
     let rt = &ctx.rt;
     let a = names::addrs(state.octet);
-    let launch = start_or_create(ctx, &gate_spec(ctx, env, &p.cfg, &a), image_id, true)?;
+    let launch = start_or_create(ctx, &gate_spec(ctx, env, p, &a), image_id, true)?;
     let gs = wait_until(Duration::from_secs(20), || ctl::gate_status(rt, env).ok()).with_context(
         || {
             format!(
@@ -570,7 +636,8 @@ fn start_gate(
         bound.and_then(|()| sync::load_secrets(ctx, &p.compiled.vault_refs(), &format!("`{env}`")))
     {
         eprintln!(
-            "warning: credentials not unlocked ({e:#}); credentialed hosts return 403 until `luoto vault unlock`"
+            "warning: {e:#}\n         their hosts return 403 until the reference is fixed \
+             (`luoto edit -e {env}`) and `luoto vault unlock` loads it"
         );
     }
     Ok(launch)
@@ -686,7 +753,14 @@ fn start_dev(
 
 /// Once both containers run: the self-test when `selftest`, then the runtime env, the login
 /// name, home files and SSH access.
-fn after_start(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, selftest: bool) -> Result<()> {
+fn after_start(
+    ctx: &Ctx,
+    env: &str,
+    p: &Plan,
+    state: &EnvState,
+    selftest: bool,
+    quiet: bool,
+) -> Result<()> {
     // Isolation first: secrets, dotfiles and the SSH key enter only a container that passed.
     if selftest {
         check_isolation(ctx, env)?;
@@ -709,17 +783,17 @@ fn after_start(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, selftest: bool)
     if state.user != user {
         EnvState::update(&ctx.paths, env, |s| s.user = user)?;
     }
-    if personal::apply(ctx, env, &p.cfg, state.home()) > 0 {
-        // Home files may have replaced an agent's config, and with it luoto's entry there.
-        for a in p
-            .cfg
-            .agents
-            .iter()
-            .filter_map(|n| luoto_shared::profiles::agent(n))
+    // Home files may have replaced an agent's config, and with it luoto's entries there; an
+    // agent with options gets them on every start.
+    let copied = personal::apply(ctx, env, &p.cfg, state.home(), quiet) > 0;
+    for (name, opts) in &p.cfg.agents.0 {
+        let Some(a) = luoto_shared::profiles::agent(name) else {
+            continue;
+        };
+        if (copied || !opts.is_empty())
+            && let Err(e) = crate::agents::register(ctx, env, &a, opts)
         {
-            if let Err(e) = crate::agents::register(ctx, env, &a) {
-                eprintln!("warning: {} not set up for luoto ({e:#})", a.description);
-            }
+            eprintln!("warning: {} not set up for luoto ({e:#})", a.description);
         }
     }
     if let Err(e) = ssh::authorize(ctx, env) {

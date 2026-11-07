@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use hyper::client::conn::http1::{self, SendRequest};
 use hyper_util::rt::TokioIo;
-use luoto_shared::host::is_private;
+use luoto_shared::host::{is_never_dialed, is_private};
 use luoto_shared::policy::DenyReason;
 use rustls_pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -68,7 +68,10 @@ pub async fn dial_tcp(
             return Err(DialError::Failed(format!("{host} has no addresses")));
         }
         // Any private record taints the name: mixed answers are a rebinding trick.
-        if !allow_private && addrs.iter().any(|a| is_private(a.ip())) {
+        if addrs
+            .iter()
+            .any(|a| is_never_dialed(a.ip()) || (!allow_private && is_private(a.ip())))
+        {
             return Err(DialError::Denied(DenyReason::PrivateAddress));
         }
         addrs
@@ -107,7 +110,11 @@ pub async fn dial(
     }
     let name = ServerName::try_from(host.to_string())
         .map_err(|_| DialError::Failed(format!("invalid TLS name {host}")))?;
-    let connector = TlsConnector::from(Arc::clone(&state.client_tls));
+    let tls = state
+        .host_tls
+        .get(&host.to_ascii_lowercase())
+        .unwrap_or(&state.client_tls);
+    let connector = TlsConnector::from(Arc::clone(tls));
     let stream = tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(name, tcp))
         .await
         .map_err(|_| DialError::Failed(format!("TLS handshake with {host} timed out")))?

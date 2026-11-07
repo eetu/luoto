@@ -25,6 +25,7 @@ mod ports;
 mod project;
 mod prompt;
 mod release;
+mod repos;
 mod rules;
 mod runtime;
 mod secrets;
@@ -90,6 +91,9 @@ enum Cmd {
         /// Recreate the dev container (the workspace and home volumes are kept).
         #[arg(long)]
         recreate: bool,
+        /// Leave out the summary of how to reach the env (`luoto run` starts it so).
+        #[arg(long, hide = true)]
+        quiet: bool,
     },
     /// Stop the env (volumes and config are kept).
     Down,
@@ -135,16 +139,44 @@ enum Cmd {
         #[arg(long)]
         open: bool,
     },
+    /// Run an agent on one prompt without a terminal: its answer on stdout (or in --output)
+    /// and its exit code, for scripts and scheduled jobs. Brings the env up first, asking
+    /// nothing.
+    Run {
+        #[arg(long, add = ArgValueCandidates::new(complete::agents))]
+        agent: String,
+        /// The prompt (else --prompt-file, else stdin).
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long, value_name = "FILE")]
+        prompt_file: Option<String>,
+        /// Write the agent's answer to this file here instead of stdout.
+        #[arg(long, value_name = "FILE")]
+        output: Option<String>,
+        /// Stop the env when the run ends.
+        #[arg(long)]
+        down: bool,
+    },
     /// Run, add or list coding agents.
     Agent {
         #[command(subcommand)]
         action: AgentCmd,
     },
-    /// Copy changed files from the env back to its folder (reviewed first).
+    /// Repositories beside the env's folder, each at /workspace/<name>: list, add, remove.
+    Repo {
+        #[command(subcommand)]
+        action: Option<RepoCmd>,
+    },
+    /// Copy changed files from the env back to its folder, and its repos copied in from
+    /// folders back to theirs (reviewed first).
     Pull {
-        /// Write here instead of the env's folder.
+        /// Write here instead of the env's folder (or the `--repo`'s).
         #[arg(long)]
         to: Option<String>,
+        /// Only this repo: to its host folder, or else (a clone) the same name in the env's
+        /// folder.
+        #[arg(long)]
+        repo: Option<String>,
         /// Also write files host tools act on (git hooks/config, .envrc, .vscode, …).
         #[arg(long)]
         include_risky: bool,
@@ -158,8 +190,12 @@ enum Cmd {
     Allow(rules::AllowOpts),
     /// Remove rules by id or host.
     Revoke { rule: String },
-    /// List access requests filed from inside envs (all envs unless one is picked).
-    Requests,
+    /// List requests filed from inside envs (all envs unless one is picked).
+    Requests {
+        /// Keep watching, and print each new request as it comes.
+        #[arg(long)]
+        watch: bool,
+    },
     /// Approve an access request (adds a rule).
     Approve {
         id: u64,
@@ -218,14 +254,46 @@ enum AgentCmd {
         #[arg(last = true)]
         args: Vec<String>,
     },
+    /// Remove an agent from the env's config; its files stay in the env's home.
+    #[command(visible_alias = "remove")]
+    Rm {
+        #[arg(add = ArgValueCandidates::new(complete::agents))]
+        agent: String,
+    },
     /// Install an agent in the env and add it to the config.
     Add {
         #[arg(add = ArgValueCandidates::new(complete::agents))]
         agent: String,
+        /// Its credential without the prompt: `KIND=REF` (`oauth_token=op://…`),
+        /// `PROVIDER.KIND=REF`, or `login_inside`; replaces the one the env has.
+        #[arg(long, value_name = "KIND=REF")]
+        credential: Option<String>,
     },
     /// List known agents and providers.
     #[command(visible_alias = "ls")]
     List,
+}
+
+#[derive(Subcommand)]
+enum RepoCmd {
+    /// The env's repos and where each comes from.
+    #[command(visible_alias = "ls")]
+    List,
+    /// Add a host folder (copied in) or a remote (cloned in the env), at /workspace/<name>.
+    Add {
+        /// A folder (starts with `/`, `~` or `.`, or exists), else a remote: `owner/repo` on
+        /// GitHub, an https or ssh URL, or user@host:path.
+        #[arg(value_name = "FOLDER|REMOTE")]
+        source: String,
+        /// Its folder in the workspace (default: the last part of the path or URL).
+        #[arg(long)]
+        name: Option<String>,
+        /// The branch a clone checks out (default: the remote's).
+        #[arg(long)]
+        branch: Option<String>,
+    },
+    /// Remove a repo from the env's config; its copy in the env stays.
+    Rm { name: String },
 }
 
 #[derive(Subcommand)]
@@ -248,6 +316,9 @@ enum VaultCmd {
     Unlock,
     /// Wipe secrets from the vault and every gate.
     Lock,
+    /// Read the secrets again (after rotating one in your secret store): all the vault holds,
+    /// or with `-e` the env's.
+    Reload,
 }
 
 fn main() -> ExitCode {
@@ -285,8 +356,9 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Up {
             no_selftest,
             recreate,
+            quiet,
         } => match env() {
-            Ok(name) => c::up(&name, !no_selftest, recreate),
+            Ok(name) => c::up(&name, !no_selftest, recreate, quiet),
             // A folder without an env: offer to set one up (init shows it and asks first).
             Err(_) if env_arg.is_none() && std::io::stdin().is_terminal() => {
                 println!("No env for this folder yet.\n");
@@ -307,26 +379,64 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Shell { cmd } => connect::shell(&env()?, &cmd),
         Cmd::Open { with } => connect::open(&env()?, with.as_deref()),
         Cmd::Forward { port, open } => connect::forward(&env()?, &port, open),
+        Cmd::Run {
+            agent,
+            prompt,
+            prompt_file,
+            output,
+            down,
+        } => {
+            let prompt = match (prompt, prompt_file) {
+                (Some(p), _) => p,
+                (None, Some(f)) => std::fs::read_to_string(workspace::expand(&f))
+                    .map_err(|e| anyhow::anyhow!("read {f}: {e}"))?,
+                (None, None) if !std::io::stdin().is_terminal() => {
+                    std::io::read_to_string(std::io::stdin())?
+                }
+                (None, None) => anyhow::bail!("give the prompt: --prompt, --prompt-file or stdin"),
+            };
+            agents::headless(&env()?, &agent, &prompt, output.as_deref(), down)
+        }
         Cmd::Agent { action } => match action {
             AgentCmd::Run { agent, yolo, args } => agents::run(&env()?, &agent, yolo, &args),
-            AgentCmd::Add { agent } => agents::add(&env()?, &agent),
+            AgentCmd::Rm { agent } => agents::rm(&env()?, &agent),
+            AgentCmd::Add { agent, credential } => {
+                agents::add(&env()?, &agent, credential.as_deref())
+            }
             AgentCmd::List => agents::list(),
+        },
+        Cmd::Repo { action } => match action.unwrap_or(RepoCmd::List) {
+            RepoCmd::List => repos::list(&env()?),
+            RepoCmd::Add {
+                source,
+                name,
+                branch,
+            } => repos::add(&env()?, &source, name.as_deref(), branch.as_deref()),
+            RepoCmd::Rm { name } => repos::rm(&env()?, &name),
         },
         Cmd::Pull {
             to,
+            repo,
             include_risky,
             include_git,
             yes,
-        } => c::pull(&env()?, to.as_deref(), include_risky, include_git, yes),
+        } => c::pull(
+            &env()?,
+            to.as_deref(),
+            repo.as_deref(),
+            include_risky,
+            include_git,
+            yes,
+        ),
         Cmd::Allow(o) => c::allow(&env()?, o),
         Cmd::Revoke { rule } => c::revoke(&env()?, &rule),
-        Cmd::Requests => {
+        Cmd::Requests { watch } => {
             // No env picked and none here: every env's requests.
             let picked = match env_arg.as_deref() {
                 Some(_) => Some(env()?),
                 None => env().ok(),
             };
-            c::requests(picked.as_deref())
+            c::requests(picked.as_deref(), watch)
         }
         Cmd::Approve {
             id,
@@ -352,6 +462,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             VaultCmd::Status => c::vault_status(),
             VaultCmd::Unlock => c::unlock(),
             VaultCmd::Lock => c::lock(),
+            VaultCmd::Reload => c::reload(env_arg.as_deref()),
         },
         Cmd::SshProxy { env: e } => connect::ssh_proxy(&e),
         Cmd::Watch => watch::watch(),

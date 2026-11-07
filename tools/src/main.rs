@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use luoto_shared::api::{
-    AccessRequest, CheckQuery, CheckResult, NewAccessRequest, RequestStatus, SandboxStatus,
+    AccessRequest, CheckQuery, CheckResult, Install, NewAccessRequest, RequestStatus, SandboxStatus,
 };
 use luoto_shared::policy::AccessLevel;
 
@@ -43,10 +43,24 @@ enum Cmd {
         #[arg(short = 'X', long, default_value = "GET")]
         method: String,
     },
-    /// Ask the user (on the host) to allow a host. Only the user can approve.
+    /// Ask the user (on the host) to allow a host, or to install a system package or a
+    /// toolchain in the env for good. Only the user can approve.
     Request {
         /// Host (`docs.rs`) or URL (`https://docs.rs/serde`).
-        target: String,
+        #[arg(required_unless_present_any = ["package", "tool", "preset"])]
+        target: Option<String>,
+        /// A system package (apt, apk or dnf) the env should have; approved, it is installed
+        /// now and again whenever the container is recreated.
+        #[arg(long, conflicts_with_all = ["target", "tool", "write", "paths"])]
+        package: Option<String>,
+        /// A toolchain mise installs, as TOOL@VERSION (`node@24`, `cargo:ripgrep@latest`),
+        /// kept in the env's config like a package.
+        #[arg(long, value_name = "TOOL@VERSION", conflicts_with_all = ["target", "write", "paths"])]
+        tool: Option<String>,
+        /// One of luoto's presets (`npm`, `pypi`, …) for a registry or service, instead of its
+        /// hosts one by one.
+        #[arg(long, conflicts_with_all = ["target", "package", "tool", "write", "paths"])]
+        preset: Option<String>,
         /// Ask for write access (any method) instead of read-only.
         #[arg(long)]
         write: bool,
@@ -80,6 +94,9 @@ enum Cmd {
         mcp: Option<String>,
         #[arg(long = "briefing")]
         briefing: Vec<String>,
+        /// A value to set in a JSON config, as JSON: `{"file": "~/…", "path": […], "value": …}`.
+        #[arg(long = "set")]
+        set: Vec<String>,
     },
     /// Verify isolation from inside (run by `luoto up` and `luoto doctor`).
     Selftest {
@@ -98,13 +115,19 @@ fn main() -> ExitCode {
         Cmd::Check { url, method } => check(&url, &method),
         Cmd::Request {
             target,
+            package,
+            tool,
+            preset,
             write,
             paths,
             reason,
             wait,
             timeout,
         } => request(
-            &target,
+            target.as_deref(),
+            package,
+            tool.as_deref(),
+            preset,
             write,
             paths,
             &reason,
@@ -113,7 +136,7 @@ fn main() -> ExitCode {
         Cmd::Relay { port } => relay(port),
         Cmd::Mcp => mcp::serve(),
         Cmd::SshAgent { socket } => ssh_agent::serve(&socket).map(|()| ExitCode::SUCCESS),
-        Cmd::AgentSetup { mcp, briefing } => agent_setup::run(mcp.as_deref(), &briefing),
+        Cmd::AgentSetup { mcp, briefing, set } => agent_setup::run(mcp.as_deref(), &briefing, &set),
         Cmd::Selftest { json, probe } => return selftest::run(json, probe.as_deref()),
     };
     match result {
@@ -187,20 +210,21 @@ pub fn render_status(s: &SandboxStatus) -> String {
         .filter(|r| r.status == RequestStatus::Pending)
         .collect();
     if !pending.is_empty() {
-        out.push_str("\npending access requests (the user approves on the host):\n");
+        out.push_str("\npending requests (the user approves on the host):\n");
         for r in pending {
             out.push_str(&format!(
-                "  #{} {} {:?} — {}\n",
+                "  #{} {} — {}\n",
                 r.id,
-                r.host,
-                r.access,
+                what(r),
                 approve_hint(&s.env, r.id)
             ));
         }
     }
     out.push_str(&format!(
         "\nNeed more access? sandbox request <host> [--write] --reason \"…\" --wait\n\
-         The user can also grant it on the host: luoto allow -e {} <host> [--write] [--ttl 1h]\n",
+         The user can also grant it on the host: luoto allow -e {} <host> [--write] [--ttl 1h]\n\
+         A system package or toolchain to keep: sandbox request --package <name> | --tool node@24 \
+         --reason \"…\" --wait\n",
         s.env
     ));
     out
@@ -242,10 +266,19 @@ fn approve_hint(env: &str, id: u64) -> String {
     format!("luoto approve -e {env} {id}")
 }
 
-const fn level(r: &AccessRequest) -> &'static str {
-    match r.access {
-        AccessLevel::Write => "write",
-        AccessLevel::Read => "read",
+/// What a request asks for, for people.
+fn what(r: &AccessRequest) -> String {
+    match &r.install {
+        Some(i @ Install::Preset { .. }) => i.describe(),
+        Some(i) => format!("install {}", i.describe()),
+        None => format!(
+            "{} access to {}",
+            match r.access {
+                AccessLevel::Write => "write",
+                AccessLevel::Read => "read",
+            },
+            r.host
+        ),
     }
 }
 
@@ -255,7 +288,8 @@ pub struct Outcome {
     pub waited: Option<Duration>,
 }
 
-/// File a request for the user to decide on the host; with `wait`, poll for the decision.
+/// File a request for access to a host for the user to decide on the host; with `wait`, poll
+/// for the decision.
 pub fn request_access(
     target: &str,
     write: bool,
@@ -263,16 +297,49 @@ pub fn request_access(
     reason: &str,
     wait: Option<Duration>,
 ) -> Result<Outcome> {
-    let new = NewAccessRequest {
-        host: luoto_shared::host::host_of(target).to_string(),
-        access: if write {
-            AccessLevel::Write
-        } else {
-            AccessLevel::Read
+    file(
+        NewAccessRequest {
+            host: luoto_shared::host::host_of(target).to_string(),
+            access: if write {
+                AccessLevel::Write
+            } else {
+                AccessLevel::Read
+            },
+            paths,
+            reason: reason.to_string(),
+            install: None,
         },
-        paths,
-        reason: reason.to_string(),
+        wait,
+    )
+}
+
+/// File a request to install software in the env (see [`request_access`]).
+pub fn request_install(install: Install, reason: &str, wait: Option<Duration>) -> Result<Outcome> {
+    file(
+        NewAccessRequest {
+            host: String::new(),
+            access: AccessLevel::Read,
+            paths: Vec::new(),
+            reason: reason.to_string(),
+            install: Some(install),
+        },
+        wait,
+    )
+}
+
+/// `TOOL@VERSION` as a mise toolchain request; a bare tool means its latest version.
+pub fn parse_tool(s: &str) -> Install {
+    let (name, version) = match s.rsplit_once('@') {
+        Some((n, v)) if !n.is_empty() => (n, v),
+        _ => (s, "latest"),
     };
+    Install::Tool {
+        name: name.to_string(),
+        version: version.to_string(),
+    }
+}
+
+fn file(new: NewAccessRequest, wait: Option<Duration>) -> Result<Outcome> {
     let mut request: AccessRequest = gate::post_json("/_sandbox/requests", &new)?;
     if let Some(timeout) = wait {
         eprintln!(
@@ -297,10 +364,9 @@ pub fn request_access(
 
 fn describe_filed(r: &AccessRequest) -> String {
     format!(
-        "Request #{} filed: {} access to {}.\nAsk the user to approve it on the host:  {}   (or in `luoto ui`)",
+        "Request #{} filed: {}.\nAsk the user to approve it on the host:  {}   (or in `luoto ui`)",
         r.id,
-        level(r),
-        r.host,
+        what(r),
         approve_hint(&env_name(), r.id)
     )
 }
@@ -308,9 +374,18 @@ fn describe_filed(r: &AccessRequest) -> String {
 pub fn describe(o: &Outcome) -> String {
     let r = &o.request;
     match (r.status, o.waited) {
-        (RequestStatus::Approved, _) => {
-            format!("Request #{} approved: {} is reachable now.", r.id, r.host)
-        }
+        (RequestStatus::Approved, _) => match &r.install {
+            Some(i) => format!(
+                "Request #{} approved: {}{}",
+                r.id,
+                i.describe(),
+                r.note
+                    .as_ref()
+                    .map(|n| format!(" — {n}"))
+                    .unwrap_or_else(|| " is in the env now.".into())
+            ),
+            None => format!("Request #{} approved: {} is reachable now.", r.id, r.host),
+        },
         (RequestStatus::Rejected, _) => format!(
             "Request #{} was rejected by the user{}.",
             r.id,
@@ -330,14 +405,24 @@ pub fn describe(o: &Outcome) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn request(
-    target: &str,
+    target: Option<&str>,
+    package: Option<String>,
+    tool: Option<&str>,
+    preset: Option<String>,
     write: bool,
     paths: Vec<String>,
     reason: &str,
     wait: Option<Duration>,
 ) -> Result<ExitCode> {
-    let o = request_access(target, write, paths, reason, wait)?;
+    let o = match (target, package, tool, preset) {
+        (_, Some(name), _, _) => request_install(Install::Package { name }, reason, wait)?,
+        (_, _, Some(t), _) => request_install(parse_tool(t), reason, wait)?,
+        (_, _, _, Some(name)) => request_install(Install::Preset { name }, reason, wait)?,
+        (Some(t), None, None, None) => request_access(t, write, paths, reason, wait)?,
+        (None, None, None, None) => anyhow::bail!("name a host, --preset, --package or --tool"),
+    };
     println!("{}", describe(&o));
     Ok(match (o.request.status, o.waited) {
         (RequestStatus::Rejected, _) => ExitCode::from(1),

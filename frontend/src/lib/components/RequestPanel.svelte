@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api } from "$lib/api";
   import Risks from "$lib/components/Risks.svelte";
-  import { act, ago, app, TTLS } from "$lib/stores/app.svelte";
+  import { act, ago, app, installLabel, say, TTLS } from "$lib/stores/app.svelte";
 
   let { id }: { id: number } = $props();
 
@@ -12,10 +12,19 @@
   async function approve(force: boolean) {
     const env = app.env;
     if (!env || !req) return;
+    if (req.install) {
+      const label = req.install.kind === "preset" ? "approving…" : "installing…";
+      const shown = req;
+      const done = await act(label, () => api.approve(env, shown));
+      if (done && "installed" in done) say(`#${id} ${done.installed}`);
+      if (done) app.subject = { kind: "env" };
+      return;
+    }
     const host = req.host;
+    const shown = req;
     const rule = await act(
       "approving…",
-      () => api.approve(env, id, ttl ? `${ttl}m` : undefined, force),
+      () => api.approve(env, shown, ttl ? `${ttl}m` : undefined, force),
       `approved #${id}: ${host}`,
       (found) => (risks = found),
     );
@@ -28,14 +37,48 @@
   async function reject() {
     const env = app.env;
     if (!env || !req) return;
-    const ok = await act("rejecting…", () => api.reject(env, id), `rejected #${id}`);
+    const shown = req;
+    const ok = await act("rejecting…", () => api.reject(env, shown), `rejected #${id}`);
     if (ok) app.subject = { kind: "env" };
   }
 </script>
 
 <div class="panel">
-  <p class="label">access request #{id}</p>
-  {#if req}
+  <p class="label">{req?.install ? "install request" : "access request"} #{id}</p>
+  {#if req?.install}
+    <h2>{installLabel(req.install)}</h2>
+    <dl>
+      <dt>kind</dt>
+      <dd>
+        {req.install.kind === "package"
+          ? "system package (apt, apk or dnf)"
+          : req.install.kind === "preset"
+            ? "preset: a registry's or service's hosts"
+            : "toolchain installed by mise"}
+      </dd>
+      <dt>filed</dt>
+      <dd>{ago(req.created)}</dd>
+      <dt>status</dt>
+      <dd>{req.status}{req.note ? `: ${req.note}` : ""}</dd>
+    </dl>
+    <div class="untrusted">
+      <p class="label">reason — written by code in the sandbox, not by you</p>
+      <p class="reason">{req.reason}</p>
+    </div>
+    <p class="muted">
+      {req.install.kind === "preset"
+        ? "Approved, its hosts open now and the env's config keeps the preset."
+        : "Approved, it is installed now and kept in the env's config, so a recreated container gets it too."}
+    </p>
+    {#if req.status === "pending"}
+      <div class="actions">
+        <button class="btn primary" onclick={() => void approve(false)} disabled={!!app.busy}
+          >{req.install.kind === "preset" ? "approve" : "approve and install"}</button
+        >
+        <button class="btn" onclick={reject} disabled={!!app.busy}>reject</button>
+      </div>
+    {/if}
+  {:else if req}
     <h2>{req.host}</h2>
     <dl>
       <dt>access</dt>

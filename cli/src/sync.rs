@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use luoto_shared::ctl::{GateCtl, VaultCtl};
 use luoto_shared::policy::Rule;
@@ -31,7 +31,8 @@ pub fn bind_vault(ctx: &Ctx, env: &str, state: &EnvState, compiled: &Compiled) -
 }
 
 /// Load those of `refs` the vault is missing, prompting the user's secret store only for
-/// them; `whose` names them for the user.
+/// them; `whose` names them for the user. Each loads on its own: one that doesn't resolve
+/// (a typo in its reference) leaves the others working, and the error names it.
 pub fn load_secrets(ctx: &Ctx, refs: &BTreeSet<String>, whose: &str) -> Result<()> {
     let status = ctl::vault_status(&ctx.rt)?;
     let missing: BTreeSet<String> = refs
@@ -44,8 +45,27 @@ pub fn load_secrets(ctx: &Ctx, refs: &BTreeSet<String>, whose: &str) -> Result<(
             "unlocking {} secret(s) for {whose} from your secret store…",
             missing.len()
         );
-        let values = secrets::resolve_all(&ctx.global, &missing)?;
-        ctl::vault::<usize>(&ctx.rt, &VaultCtl::Load { secrets: values })?;
+        let mut values = BTreeMap::new();
+        let mut failed = Vec::new();
+        for r in &missing {
+            match secrets::resolve(&ctx.global, r) {
+                Ok(v) => {
+                    values.insert(r.clone(), v);
+                }
+                Err(e) => failed.push(format!("{r}: {e:#}")),
+            }
+        }
+        if !values.is_empty() {
+            ctl::vault::<usize>(&ctx.rt, &VaultCtl::Load { secrets: values })?;
+        }
+        if !failed.is_empty() {
+            bail!(
+                "{} of {} secret(s) not loaded, so the credentials using them stay locked: {}",
+                failed.len(),
+                missing.len(),
+                failed.join("; ")
+            );
+        }
     }
     Ok(())
 }
@@ -100,15 +120,22 @@ pub fn lock_all(ctx: &Ctx) -> Result<Vec<String>> {
     if let Err(e) = ctl::vault::<bool>(&ctx.rt, &VaultCtl::Lock) {
         failed.push(format!("vault: {e:#}"));
     }
+    failed.extend(flush_gates(ctx)?);
+    Ok(failed)
+}
+
+/// Drop every running gate's cached credentials, so what the vault holds applies at once.
+/// The gates that couldn't be reached.
+fn flush_gates(ctx: &Ctx) -> Result<Vec<String>> {
     let states = match ctx.rt.states() {
         Ok(s) => s,
         Err(e) => {
-            failed.push(format!(
+            return Ok(vec![format!(
                 "gates: none flushed, the runtime could not list them ({e:#})"
-            ));
-            return Ok(failed);
+            )]);
         }
     };
+    let mut failed = Vec::new();
     for e in config::list_envs(&ctx.paths)? {
         if states.running(&names::gate(&e))
             && let Err(err) = ctl::gate::<bool>(&ctx.rt, &e, &GateCtl::FlushCredentials)
@@ -119,6 +146,44 @@ pub fn lock_all(ctx: &Ctx) -> Result<Vec<String>> {
         }
     }
     Ok(failed)
+}
+
+/// What [`reload`] did.
+pub struct Reloaded {
+    pub read: usize,
+    pub changed: usize,
+    /// The references that couldn't be read, and the gates that weren't flushed.
+    pub failed: Vec<String>,
+}
+
+/// Read `refs` from the secret store again (a token rotated there) and give the vault those
+/// that changed; the gates then drop their cached copies. A reference that can't be read
+/// keeps the value the vault has.
+pub fn reload(ctx: &Ctx, refs: &BTreeSet<String>) -> Result<Reloaded> {
+    let mut values = BTreeMap::new();
+    let mut failed = Vec::new();
+    for r in refs {
+        match secrets::resolve(&ctx.global, r) {
+            Ok(v) => {
+                values.insert(r.clone(), v);
+            }
+            Err(e) => failed.push(format!("{r}: {e:#}")),
+        }
+    }
+    let read = values.len();
+    let changed = if values.is_empty() {
+        0
+    } else {
+        ctl::vault::<usize>(&ctx.rt, &VaultCtl::Load { secrets: values })?
+    };
+    if changed > 0 {
+        failed.extend(flush_gates(ctx)?);
+    }
+    Ok(Reloaded {
+        read,
+        changed,
+        failed,
+    })
 }
 
 /// Recompile every env, re-register bindings and load all secrets (after a VM reboot), with

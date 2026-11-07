@@ -132,7 +132,8 @@ test("approving a request whose rule has risks shows them and resends with force
   await page.route(
     (url) => url.pathname === "/api/envs/web/requests/7/approve",
     (route, req) => {
-      const { force } = req.postDataJSON() as { force: boolean };
+      const { force, created } = req.postDataJSON() as { force: boolean; created: string };
+      expect(created).toBe(request.created);
       forced.push(force);
       return force
         ? route.fulfill({ json: { host: request.host, access: "write" } })
@@ -148,4 +149,42 @@ test("approving a request whose rule has risks shows them and resends with force
   await page.getByRole("button", { name: "approve anyway" }).click();
 
   await expect.poll(() => forced).toEqual([false, true]);
+});
+
+test("selected requests are approved together, each as it was shown", async ({ page }) => {
+  await mockApi(page);
+  const created = new Date().toISOString();
+  const requests = [
+    { id: 3, host: "a.example", access: "read", reason: "docs", status: "pending", created },
+    {
+      id: 4,
+      host: "",
+      access: "read",
+      reason: "tests need it",
+      status: "pending",
+      created,
+      install: { kind: "package", name: "jq" },
+    },
+  ];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: requests }),
+  );
+  const sent: { id: string; body: unknown }[] = [];
+  await page.route(
+    (url) => /^\/api\/envs\/web\/requests\/\d+\/approve$/.test(url.pathname),
+    (route, req) => {
+      sent.push({ id: new URL(req.url()).pathname.split("/")[5], body: req.postDataJSON() });
+      return route.fulfill({ json: { installed: "installed" } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("checkbox", { name: "select all" }).check();
+  await page.getByRole("button", { name: "approve 2" }).click();
+
+  await expect.poll(() => sent.length).toBe(2);
+  expect(sent[0]).toMatchObject({ id: "3", body: { created, ttl: "60m" } });
+  expect(sent[1]).toMatchObject({ id: "4", body: { created } });
+  expect((sent[1].body as { ttl?: string }).ttl).toBeUndefined();
 });

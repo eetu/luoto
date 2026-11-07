@@ -1,8 +1,8 @@
 //! Guards that read a request body: forge write guard-rails (the ref updates at the start of
-//! a git push to GitHub or Azure DevOps, GitHub GraphQL documents that mutate outside an
-//! allowlist) and model API requests that ask the provider to reach the network. Server-side
-//! rulesets remain the real enforcement for forges; these keep a compromised sandbox from the
-//! obvious moves.
+//! a git push to GitHub, Azure DevOps or any `[[credentials.git]]` host, GitHub GraphQL
+//! documents that mutate outside an allowlist) and model API requests that ask the provider to
+//! reach the network. Server-side rulesets remain the real enforcement for forges; these keep
+//! a compromised sandbox from the obvious moves.
 
 use bytes::BytesMut;
 use graphql_parser::query::{Definition, OperationDefinition, Selection};
@@ -10,7 +10,7 @@ use http::HeaderMap;
 use http::header::CONTENT_ENCODING;
 use http_body_util::BodyExt;
 use luoto_shared::forges;
-use luoto_shared::policy::{AzureGuard, BodyDeny, GithubGuard, JsonBody, Policy};
+use luoto_shared::policy::{AzureGuard, BodyDeny, GitGuard, GithubGuard, JsonBody, Policy};
 
 use crate::body::{Body, collect_limited, full, prefixed};
 
@@ -29,16 +29,16 @@ pub async fn check(
     headers: &HeaderMap,
     body: Body,
 ) -> Result<Body, String> {
-    if method != "POST" {
-        return Ok(body);
-    }
     let denies: Vec<&BodyDeny> = policy
         .body_denies
         .iter()
-        .filter(|d| d.applies(host, path))
+        .filter(|d| d.applies(host, method, path))
         .collect();
     if !denies.is_empty() {
         return check_json(&denies, headers, body).await;
+    }
+    if method != "POST" {
+        return Ok(body);
     }
     // Git hosts route paths without regard to case, as their rules match them.
     if path.to_ascii_lowercase().ends_with("/git-receive-pack") {
@@ -57,7 +57,16 @@ pub async fn check(
                 PushRules::from(g),
             ))
         } else {
-            None
+            policy
+                .git
+                .iter()
+                .find(|g| g.host.eq_ignore_ascii_case(host))
+                .map(|g| {
+                    (
+                        git_repo_of(path).is_some_and(|r| g.repos.contains(&r)),
+                        PushRules::from(g),
+                    )
+                })
         };
         if let Some((granted, rules)) = push {
             return guard_push(headers, body, granted, rules).await;
@@ -76,8 +85,9 @@ pub async fn check(
     Ok(body)
 }
 
-/// A model API request whose body may ask the provider to reach the network: read whole
-/// (a body the check can't read is refused) and forwarded unless it asks.
+/// A request whose body may ask for what the env doesn't allow (a model API reaching the
+/// network, a pull request completed): read whole (a body the check can't read is refused)
+/// and forwarded unless it asks.
 async fn check_json(denies: &[&BodyDeny], headers: &HeaderMap, body: Body) -> Result<Body, String> {
     if headers
         .get(CONTENT_ENCODING)
@@ -161,6 +171,15 @@ impl<'a> From<&'a GithubGuard> for PushRules<'a> {
     }
 }
 
+impl<'a> From<&'a GitGuard> for PushRules<'a> {
+    fn from(g: &'a GitGuard) -> Self {
+        PushRules {
+            protected_branches: &g.protected_branches,
+            allow_tags: g.allow_tags,
+        }
+    }
+}
+
 impl<'a> From<&'a AzureGuard> for PushRules<'a> {
     fn from(g: &'a AzureGuard) -> Self {
         PushRules {
@@ -197,6 +216,19 @@ fn repo_of(path: &str) -> Option<String> {
         owner.to_ascii_lowercase(),
         repo.to_ascii_lowercase()
     ))
+}
+
+/// The repository path (lowercase, no `.git`) of a push on any git host: what comes before
+/// `/git-receive-pack`, as deep as the forge nests groups (`group/sub/repo`).
+fn git_repo_of(path: &str) -> Option<String> {
+    let lower = path.trim_start_matches('/').to_ascii_lowercase();
+    let repo = lower.strip_suffix("/git-receive-pack")?;
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    let plain = !repo.is_empty()
+        && !repo
+            .split('/')
+            .any(|s| s.is_empty() || s == "." || s == "..");
+    plain.then(|| repo.to_string())
 }
 
 /// `org/project/repo` (lowercase, no `.git`) from an Azure DevOps smart-HTTP path:
@@ -242,8 +274,19 @@ fn parse_ref_updates(buf: &[u8]) -> Result<Vec<RefUpdate>, Parse> {
         if buf.len() < pos + len {
             return Err(Parse::NeedMore);
         }
-        let line = &buf[pos + 4..pos + len];
-        let line = line.split(|b| *b == 0).next().unwrap_or(line);
+        let raw = &buf[pos + 4..pos + len];
+        let mut fields = raw.split(|b| *b == 0);
+        let line = fields.next().unwrap_or(raw);
+        // Push options reach the forge's own handlers past the ref checks: on GitLab they open
+        // and merge merge requests, set CI variables and skip secret scanning.
+        if fields.next().is_some_and(|caps| {
+            caps.split(|b| *b == b' ' || *b == b'\n')
+                .any(|c| c == b"push-options")
+        }) {
+            return Err(Parse::Invalid(
+                "push options are not allowed from the sandbox".into(),
+            ));
+        }
         let line = std::str::from_utf8(line)
             .map_err(|_| Parse::Invalid("non-UTF-8 ref update".into()))?
             .trim_end_matches('\n');
@@ -345,6 +388,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn any_git_host_names_its_repo_before_receive_pack() {
+        assert_eq!(
+            git_repo_of("/Group/Sub/Repo.git/git-receive-pack").as_deref(),
+            Some("group/sub/repo")
+        );
+        assert_eq!(git_repo_of("/o/r/git-receive-pack").as_deref(), Some("o/r"));
+        assert_eq!(git_repo_of("/o/../r/git-receive-pack"), None);
+        assert_eq!(git_repo_of("/git-receive-pack"), None);
+        assert_eq!(git_repo_of("/o/r/info/refs"), None);
+    }
+
+    #[test]
     fn azure_paths_name_organization_project_and_repo() {
         assert_eq!(
             azure_repo_of("/Invinite/AppServices/_git/Pseudo-Registry/git-receive-pack").as_deref(),
@@ -373,6 +428,20 @@ mod tests {
 
     const Z: &str = "0000000000000000000000000000000000000000";
     const A: &str = "1111111111111111111111111111111111111111";
+
+    #[test]
+    fn push_options_are_refused() {
+        let body = format!(
+            "{}0000",
+            pkt(&format!(
+                "{Z} {A} refs/heads/feature\0report-status push-options side-band-64k\n"
+            ))
+        );
+        assert!(matches!(
+            parse_ref_updates(body.as_bytes()),
+            Err(Parse::Invalid(m)) if m.contains("push options")
+        ));
+    }
 
     #[test]
     fn parses_and_checks_pushes() {

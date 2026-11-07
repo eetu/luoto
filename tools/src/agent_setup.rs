@@ -1,5 +1,6 @@
-//! `sandbox agent-setup`: point an agent's user-level instructions at the luoto briefing and
-//! register the sandbox MCP server in its config, without clobbering what the user has.
+//! `sandbox agent-setup`: point an agent's user-level instructions at the luoto briefing,
+//! register the sandbox MCP server and answer its first-run questions in its config, without
+//! clobbering what the user has.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -74,6 +75,38 @@ fn merge_json(path: &Path, keys: &[&str], value: Value) -> Result<()> {
     Ok(())
 }
 
+/// [`merge_json`] for a TOML file (Codex's config), keeping its comments and layout.
+fn merge_toml(path: &Path, keys: &[&str], value: Value) -> Result<()> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("{} is not TOML", path.display()))?;
+    let value: toml_edit::Value = match value {
+        Value::String(s) => s.into(),
+        Value::Bool(b) => b.into(),
+        Value::Number(n) if n.is_i64() => n.as_i64().unwrap_or_default().into(),
+        Value::Number(n) => n.as_f64().unwrap_or_default().into(),
+        other => bail!("{other} has no TOML form here"),
+    };
+    let Some((last, parents)) = keys.split_last() else {
+        bail!("no key to set in {}", path.display());
+    };
+    let mut table = doc.as_table_mut();
+    for k in parents {
+        table = table
+            .entry(k)
+            .or_insert_with(toml_edit::table)
+            .as_table_mut()
+            .with_context(|| format!("{} has an unexpected shape", path.display()))?;
+    }
+    table[*last] = toml_edit::Item::Value(value);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, doc.to_string())?;
+    Ok(())
+}
+
 fn register_mcp(kind: &str) -> Result<()> {
     let h = home()?;
     match kind {
@@ -117,12 +150,57 @@ fn register_mcp(kind: &str) -> Result<()> {
     }
 }
 
-pub fn run(mcp: Option<&str>, briefing: &[String]) -> Result<ExitCode> {
+/// One `--set`: a value at a path of keys in a JSON file of the dev user's home.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonSet {
+    file: String,
+    path: Vec<String>,
+    value: Value,
+}
+
+pub fn run(mcp: Option<&str>, briefing: &[String], set: &[String]) -> Result<ExitCode> {
     for b in briefing {
         link_briefing(&expand(b)?)?;
     }
     if let Some(kind) = mcp {
         register_mcp(kind)?;
     }
+    for s in set {
+        let j: JsonSet = serde_json::from_str(s).context("--set takes {file, path, value}")?;
+        if !j.file.starts_with("~/") || j.file.contains("..") {
+            bail!("--set writes only in the home folder (got {})", j.file);
+        }
+        let keys: Vec<&str> = j.path.iter().map(String::as_str).collect();
+        let path = expand(&j.file)?;
+        if path.extension().is_some_and(|e| e == "toml") {
+            merge_toml(&path, &keys, j.value)?;
+        } else {
+            merge_json(&path, &keys, j.value)?;
+        }
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toml_settings_keep_the_rest_of_the_file() {
+        let path = std::env::temp_dir().join(format!("luoto-test-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "# mine\napproval_policy = \"never\"\n\n[mcp_servers.luoto-sandbox]\ncommand = \"x\"\n",
+        )
+        .unwrap();
+        merge_toml(&path, &["model"], json!("gpt-5.5")).unwrap();
+        merge_toml(&path, &["model_reasoning_effort"], json!("high")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+        assert_eq!(doc["model"].as_str(), Some("gpt-5.5"));
+        assert_eq!(doc["model_reasoning_effort"].as_str(), Some("high"));
+        assert!(text.starts_with("# mine") && text.contains("[mcp_servers.luoto-sandbox]"));
+    }
 }

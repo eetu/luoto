@@ -12,6 +12,7 @@ use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx, UpOptions};
 use crate::prompt::confirm;
 use crate::rules::{self, AllowOpts};
+use crate::state::EnvState;
 use crate::{ctl, events, machine, names, project, sync, workspace};
 
 /// Show, accept or drop the project's luoto.toml settings for an env.
@@ -79,58 +80,94 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
     Ok(ExitCode::SUCCESS)
 }
 
-/// The env's own folder, where `pull` writes unless told otherwise.
-pub fn pull_dest(ctx: &Ctx, name: &str) -> Result<PathBuf> {
-    let dir = EnvFile::load(&ctx.paths, name)?
-        .cfg
-        .workspace
-        .dir
-        .with_context(|| {
-            format!("env `{name}` has no folder to pull into (`luoto pull --to <dir>` picks one)")
-        })?;
-    workspace::canonical(&dir)
+/// What `pull` writes where (`workspace::pull_targets`), from the env's config.
+pub fn pull_targets(
+    ctx: &Ctx,
+    name: &str,
+    to: Option<PathBuf>,
+    repo: Option<&str>,
+) -> Result<Vec<workspace::PullTarget>> {
+    let ws = env::layered(ctx, name)?.workspace;
+    let present = EnvState::load(&ctx.paths, name)?
+        .map(|s| s.repos)
+        .unwrap_or_default();
+    workspace::pull_targets(&ws, to, repo, &present)
 }
 
 pub fn pull(
     name: &str,
     to: Option<&str>,
+    repo: Option<&str>,
     include_risky: bool,
     include_git: bool,
     yes: bool,
 ) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     crate::connect::ensure_running(&ctx, name)?;
-    let dest = match to {
+    let to = match to {
         Some(t) => {
             std::fs::create_dir_all(workspace::expand(t))?;
-            workspace::canonical(t)?
+            Some(workspace::canonical(t)?)
         }
-        None => pull_dest(&ctx, name)?,
+        None => None,
     };
-    let plan = workspace::plan_pull(&ctx, name, &dest, include_git)?;
-    workspace::describe(&plan, &mut std::io::stdout())?;
-    if plan.entries.is_empty() {
+    let mut plans = Vec::new();
+    let targets = pull_targets(&ctx, name, to, repo)?;
+    let own: Vec<&str> = targets.iter().filter_map(|t| t.repo.as_deref()).collect();
+    let left: Vec<&str> = targets
+        .iter()
+        .flat_map(|t| &t.skip)
+        .map(String::as_str)
+        .filter(|n| !own.contains(n))
+        .collect();
+    if !left.is_empty() {
+        println!(
+            "left out: {} (`luoto pull --repo <name>` brings one)",
+            left.join(", ")
+        );
+    }
+    for t in targets {
+        let plan = workspace::plan_pull(&ctx, name, &t, include_git)?;
+        if let Some(r) = &plan.repo {
+            println!("\nrepo {r}:");
+        }
+        workspace::describe(&plan, &mut std::io::stdout())?;
+        plans.push(plan);
+    }
+    let changed = |p: &workspace::PullPlan| {
+        p.entries
+            .iter()
+            .filter(|e| include_risky || e.risky.is_none())
+            .count()
+    };
+    if plans.iter().all(|p| p.entries.is_empty()) {
         println!("nothing to pull");
         return Ok(ExitCode::SUCCESS);
     }
-    let writable = plan
-        .entries
-        .iter()
-        .filter(|e| include_risky || e.risky.is_none())
-        .count();
+    let writable: usize = plans.iter().map(changed).sum();
     if writable == 0 {
         println!("only risky files changed; re-run with --include-risky after reviewing them");
         return Ok(ExitCode::SUCCESS);
     }
+    let dirs: Vec<&str> = plans
+        .iter()
+        .filter(|p| changed(p) > 0)
+        .map(|p| p.dir.as_str())
+        .collect();
     if !yes
         && !confirm(&format!(
             "Write {writable} file(s) into {}?",
-            dest.display()
+            dirs.join(", ")
         ))
     {
         bail!("nothing written (use --yes to skip the prompt)");
     }
-    let (written, skipped) = workspace::apply_pull(&plan, include_risky)?;
+    let (mut written, mut skipped) = (0, 0);
+    for plan in &plans {
+        let (w, s) = workspace::apply_pull(plan, include_risky)?;
+        written += w;
+        skipped += s;
+    }
     println!(
         "wrote {written} file(s){}",
         if skipped > 0 {
@@ -142,7 +179,7 @@ pub fn pull(
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn up(name: &str, selftest: bool, recreate: bool) -> Result<ExitCode> {
+pub fn up(name: &str, selftest: bool, recreate: bool, quiet: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     if recreate {
         env::remove_dev(&ctx, name)?;
@@ -152,7 +189,7 @@ pub fn up(name: &str, selftest: bool, recreate: bool) -> Result<ExitCode> {
         name,
         &UpOptions {
             no_selftest: !selftest,
-            quiet: false,
+            quiet,
         },
     )?;
     Ok(ExitCode::SUCCESS)
@@ -362,46 +399,85 @@ pub fn revoke(name: &str, rule: &str) -> Result<ExitCode> {
 
 /// What the sandbox asked for and why, escaped: the sandbox wrote all of it.
 fn fmt_request(r: &AccessRequest) -> String {
+    let what = match &r.install {
+        Some(i @ luoto_shared::api::Install::Preset { .. }) => format!(
+            "{}, kept in the env's config",
+            crate::text::display(&i.describe())
+        ),
+        Some(i) => format!(
+            "install {}, kept in the env's config",
+            crate::text::display(&i.describe())
+        ),
+        None => format!(
+            "{} {:?}{}",
+            crate::text::display(&r.host),
+            r.access,
+            if r.paths.is_empty() {
+                String::new()
+            } else {
+                format!(" paths {}", crate::text::display(&r.paths.join(",")))
+            }
+        ),
+    };
     format!(
-        "{} {:?}{}\n   reason (written by the sandbox, untrusted): {:?}",
-        crate::text::display(&r.host),
-        r.access,
-        if r.paths.is_empty() {
-            String::new()
-        } else {
-            format!(" paths {}", crate::text::display(&r.paths.join(",")))
-        },
+        "{what}\n   reason (written by the sandbox, untrusted): {:?}",
         r.reason
     )
 }
 
-pub fn requests(name: Option<&str>) -> Result<ExitCode> {
-    let ctx = Ctx::load()?;
+/// The pending requests of `name`, or of every env, each with its env.
+fn pending(ctx: &Ctx, name: Option<&str>) -> Result<Vec<(String, AccessRequest)>> {
     let envs = match name {
         Some(n) => vec![n.to_string()],
         None => config::list_envs(&ctx.paths)?,
     };
     let states = ctx.rt.states().unwrap_or_default();
-    let mut any = false;
+    let mut out = Vec::new();
     for e in envs {
-        for r in rules::requests(&ctx, &e, &states)? {
-            if r.status != RequestStatus::Pending {
-                continue;
+        for r in rules::requests(ctx, &e, &states)? {
+            if r.status == RequestStatus::Pending {
+                out.push((e.clone(), r));
             }
-            any = true;
-            println!(
-                "{e} #{}  {}\n   approve: luoto approve -e {e} {}   reject: luoto reject -e {e} {}",
-                r.id,
-                fmt_request(&r),
-                r.id,
-                r.id
-            );
         }
     }
-    if !any {
-        println!("no pending requests");
+    Ok(out)
+}
+
+fn print_request(e: &str, r: &AccessRequest) {
+    println!(
+        "{e} #{}  {}\n   approve: luoto approve -e {e} {}   reject: luoto reject -e {e} {}",
+        r.id,
+        fmt_request(r),
+        r.id,
+        r.id
+    );
+}
+
+pub fn requests(name: Option<&str>, watch: bool) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    let now = pending(&ctx, name)?;
+    for (e, r) in &now {
+        print_request(e, r);
     }
-    Ok(ExitCode::SUCCESS)
+    if !watch {
+        if now.is_empty() {
+            println!("no pending requests");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!("watching for requests (Ctrl-C stops)…");
+    let mut seen: std::collections::HashSet<(String, u64)> =
+        now.into_iter().map(|(e, r)| (e, r.id)).collect();
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        for (e, r) in pending(&ctx, name).unwrap_or_default() {
+            if seen.insert((e.clone(), r.id)) {
+                // The terminal's bell: a request waits for you.
+                print!("\x07");
+                print_request(&e, &r);
+            }
+        }
+    }
 }
 
 pub fn approve(name: &str, id: u64, ttl: Option<&str>, yes: bool, force: bool) -> Result<ExitCode> {
@@ -410,6 +486,10 @@ pub fn approve(name: &str, id: u64, ttl: Option<&str>, yes: bool, force: bool) -
     println!("request #{id}: {}", fmt_request(&req));
     if !yes && !confirm("Approve?") {
         bail!("not approved (use --yes to skip the prompt)");
+    }
+    if req.install.is_some() {
+        println!("{}", rules::approve_install(&ctx, name, &req)?);
+        return Ok(ExitCode::SUCCESS);
     }
     let rule = rules::accepting_risks(force, |force| rules::approve(&ctx, name, &req, ttl, force))?;
     println!("approved: {} {}", rule.host, rule.access.describe());
@@ -587,6 +667,40 @@ pub fn unlock() -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let n = sync::unlock_all(&ctx)?;
     println!("vault unlocked; {n} env(s) registered");
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn reload(env: Option<&str>) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    let refs = match env {
+        Some(e) => {
+            let name = workspace::resolve(&ctx.paths, Some(e))?;
+            env::plan(&ctx, &name)?.compiled.vault_refs()
+        }
+        None => crate::ctl::vault_status(&ctx.rt)?
+            .loaded_refs
+            .into_iter()
+            .collect(),
+    };
+    if refs.is_empty() {
+        println!("the vault holds no secrets to read again (`luoto vault unlock` loads them)");
+        return Ok(ExitCode::SUCCESS);
+    }
+    eprintln!("reading {} secret(s) from your secret store…", refs.len());
+    let r = sync::reload(&ctx, &refs)?;
+    println!(
+        "read {}: {} changed{}",
+        r.read,
+        r.changed,
+        if r.changed > 0 { ", in use now" } else { "" }
+    );
+    if !r.failed.is_empty() {
+        eprintln!(
+            "not read (their old values stay):\n  {}",
+            r.failed.join("\n  ")
+        );
+        return Ok(ExitCode::FAILURE);
+    }
     Ok(ExitCode::SUCCESS)
 }
 

@@ -14,11 +14,13 @@ use crate::env::{Ctx, UID};
 use crate::names;
 
 /// Into the dev user's `home`. Returns how many files from the home folder were copied.
-pub fn apply(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> usize {
+pub fn apply(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str, quiet: bool) -> usize {
     if let Some(shell) = preferred_shell(ctx, cfg) {
         match set_shell(ctx, env, &shell) {
-            Ok(Some(path)) => println!("login shell: {}", crate::text::display(&path)),
-            Ok(None) => {}
+            Ok(Some(path)) if !quiet => {
+                println!("login shell: {}", crate::text::display(&path))
+            }
+            Ok(_) => {}
             Err(e) => eprintln!("warning: login shell not changed ({e:#})"),
         }
     }
@@ -28,10 +30,12 @@ pub fn apply(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> usize {
     match copy_home(ctx, env, home) {
         Ok(0) => 0,
         Ok(n) => {
-            println!(
-                "copied {n} file(s) from {} into the env's home",
-                ctx.paths.home_files().display()
-            );
+            if !quiet {
+                println!(
+                    "copied {n} file(s) from {} into the env's home",
+                    ctx.paths.home_files().display()
+                );
+            }
             n
         }
         Err(e) => {

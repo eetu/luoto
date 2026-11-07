@@ -29,7 +29,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Path matching.** A path is matched and forwarded in one canonical form; dot segments, empty
   segments and backslashes are refused.
 - **Secrets.** Root secrets live only in the vault's memory, loaded from the host's secret
-  store at unlock and wiped by `luoto vault lock` or a VM restart. Each gate authenticates to the
+  store at unlock and wiped by `luoto vault lock` or a VM restart. `luoto vault reload` reads
+  them again; one an upstream refuses (401) is read again on its own, at most every 10
+  minutes, when its source needs no one (the keychain, a 1Password service account, `file:`,
+  Vault). Each gate authenticates to the
   vault with its own token and receives only its env's bindings, as short-lived values
   (GitHub installation tokens restricted to the env's repositories and permissions). On a
   credentialed host the gate removes any credential the client sent before injecting its own,
@@ -41,10 +44,26 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   settings endpoints can't route around the push guard; GraphQL mutations outside an
   allowlist are refused. Workflows/Actions/Secrets/Administration permissions are refused at
   configuration time. Configure branch rulesets on GitHub as well; the gate is a guard-rail.
-- **Azure DevOps writes.** The PAT goes only on the granted repositories' git paths, and pushes
-  pass the same guard as on GitHub. A PAT reaches its whole organization, so the gate's paths
-  are the only repository boundary; its REST API is not reachable. Configure branch policies
-  in Azure DevOps as well.
+  GraphQL names no repository in its path, so with a token (not an App) it reaches what the
+  token does, `read_repos` and unlisted repositories included; only an App's minted token is
+  limited to the env's repositories.
+- **Azure DevOps writes.** The PAT goes only on the granted repositories' git paths and their
+  pull requests' REST paths, and pushes pass the same guard as on GitHub. A pull request's
+  body is an allowlist of fields (title, description, branches, draft, reviewers, work items,
+  labels), so completing one (a merge) or setting auto-complete is refused, as are votes. A PAT
+  reaches its whole organization, so the gate's paths are the only repository boundary; the
+  rest of its REST API is not reachable. Configure branch policies in Azure DevOps as well.
+- **Other forges** (`[[credentials.git]]`). The token goes only on the granted repositories'
+  smart-HTTP and LFS paths, pushes pass the same guard, and push options (which can open merge
+  requests or skip CI) are refused. The forge's API is not reachable with it; the token's
+  scope at the forge is the boundary, so prefer a project or repository token. A pushed branch
+  runs the forge's CI as any branch does: keep CI secrets in protected variables. `ca` is
+  trusted for that host only. `private = true` lets the gate dial that host's private address,
+  never loopback, cloud metadata or luoto's own networks.
+- **Credentials coming back.** On a credentialed host the gate looks for the credential it
+  placed in the response's headers and the start of its body (all of a JSON body, from which
+  it removes the fields carrying it, as LFS servers echo it); a response that still carries it
+  is refused.
 - **Git over SSH.** The private key stays in the vault, which answers the env's ssh-agent: it
   signs only a public-key login (`SSH_MSG_USERAUTH_REQUEST`) for a session the server bound
   (`session-bind@openssh.com`) with a host key luoto pins or the credential names, and never a
@@ -52,12 +71,15 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   or use it for anything but those hosts. The gate passes the session through unread, so
   neither the repository nor the push guard applies there: what the key reaches at the forge
   is the boundary. Prefer a deploy key; use HTTPS credentials where repo scoping matters.
-- **Filesystem.** The sandbox sees only its env's folder. It gets a copy and never writes to
-  the host; work leaves through git pushes or a reviewed `pull`. `pull` reviews changes, holds
-  back risky files (compared case-insensitively, as macOS and Windows name them), refuses
-  `.git` under any spelling, names that collide by case, and paths and symlinks that leave the
-  folder. With podman on macOS and Windows, envs run only in luoto's own VM, which mounts none
-  of your folders (`luoto doctor` checks), so an escape doesn't reach your home directory.
+- **Filesystem.** The sandbox sees only its env's folder and the folders of the repos you add
+  to it (a repository's `luoto.toml` names remotes only). It gets a copy, without what git
+  ignores in a repository, and never writes to the host; work leaves through git pushes or a
+  reviewed `pull`. `pull` reviews changes, holds back risky files in any folder within the pull
+  (compared case-insensitively, as macOS and Windows name them), refuses `.git` under any
+  spelling, names that collide by case, and paths and symlinks that leave the folder. A
+  pulled `.gitignore` decides what later copies leave out, so review its changes. With podman on macOS and Windows, envs run only in
+  luoto's own VM, which mounts none of your folders (`luoto doctor` checks), so an escape
+  doesn't reach your home directory.
 - **Isolation.** With podman, dev containers run on gVisor (in luoto's VM on macOS and
   Windows; on Linux once `runsc` is installed): the sandbox's system calls reach gVisor's
   user-space kernel, not the VM's or the host's. In luoto's VM each env's dev container has its
@@ -96,7 +118,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   (unless `server_tools = true`); the other providers' are not.
 - **Container or VM escape.** An exploit that escapes gVisor (or a plain container) lands in
   luoto's VM as the env's own unprivileged IDs; one more kernel exploit there reaches the other
-  envs and the vault, which share the VM. On Linux there is no VM: gVisor is the boundary to
+  envs and the vault, which share the VM, and through podman's network helper also the
+  services on your machine's loopback, and the helper's API, which can publish a port on your
+  machine. On Linux there is no VM: gVisor is the boundary to
   the host, so install `runsc`. With Docker, an escape lands in Docker's VM, which shares your
   folders (on Linux, on the host).
 - **Forwarded ports.** A server in the sandbox on ports 1024–32767 is reachable at localhost
@@ -116,7 +140,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   checked to stay in the folder as written, but it can lead through another link (one on the
   host, or one the same pull writes) that points elsewhere.
 - **Social engineering.** Access requests are written by code in the sandbox. Read the host
-  and access, not the reason.
+  and access, not the reason. An install request names a package or toolchain the gate has
+  checked to be a plain name; approving it runs that package's install scripts as root inside
+  the env (still the sandbox), and its downloads take the env's usual presets and install
+  windows.
 - **Images.** Release images are pinned by digest in the binary; images from
   `luoto setup --build` are as trustworthy as your source tree.
 - **Install windows.** The project's version files, which the sandbox controls, decide which

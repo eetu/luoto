@@ -78,6 +78,18 @@ pub fn resolve(global: &GlobalConfig, r: &str) -> Result<String> {
     bail!("unknown secret ref scheme (use op://, vault://, keyring:, env: or file:)")
 }
 
+/// Whether reading `r` needs no one at the machine: not the 1Password app, which asks for
+/// Touch ID, and not `env:`, which a background process holds as it started. Only these are
+/// read again on their own when an upstream refuses them.
+pub fn unattended(global: &GlobalConfig, r: &str) -> bool {
+    if r.starts_with("op://") {
+        return global.sources.op.mode.as_deref() == Some("service-account");
+    }
+    ["keyring:", "file:", "vault://"]
+        .iter()
+        .any(|p| r.starts_with(p))
+}
+
 /// A `file:` ref's path. Only absolute and `~/` paths: a relative one would resolve against
 /// whichever folder luoto happens to run in.
 fn file_path(p: &str) -> Result<PathBuf> {

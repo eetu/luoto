@@ -52,6 +52,10 @@ pub struct GlobalConfig {
     /// Installed in every env on `up`, before the env's own `[deps]`.
     #[serde(default, skip_serializing_if = "is_default")]
     pub deps: Deps,
+    /// Default options for agents (`[agents.claude] model = "opus"`), wherever an env has
+    /// the agent; its luoto.toml and its own config take precedence. Adds no agent to an env.
+    #[serde(default, skip_serializing_if = "Agents::is_empty")]
+    pub agents: Agents,
     #[serde(default)]
     pub sources: Sources,
 }
@@ -111,6 +115,27 @@ pub struct Workspace {
     /// first `up`; `luoto pull` writes back to it. Every env has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
+    /// Repositories beside the folder, each at `/workspace/<name>` (`repos.rs`), over the
+    /// accepted luoto.toml's of the same name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub repos: BTreeMap<String, Repo>,
+}
+
+/// A repository in the workspace: a host folder copied in, or a remote cloned in the env.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Repo {
+    /// A host folder (absolute), copied in on the env's next `up`; `luoto pull` writes back
+    /// to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// A remote cloned inside the env, through the gate, on its next `up`: `owner/repo` on
+    /// GitHub, an `https://` or `ssh://` URL, or `user@host:path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The branch a clone checks out (default: the remote's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -138,9 +163,13 @@ pub struct GithubCred {
     /// Ref to a fine-grained PAT, instead of an App.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    /// `owner/repo` the env may write to.
+    /// `owner/repo` the env may read and write: push (protected branches refused) and pull
+    /// requests.
     #[serde(default)]
     pub repos: Vec<String>,
+    /// `owner/repo` the env may only fetch and read (a private one needs it here).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_repos: Vec<String>,
     #[serde(default)]
     pub permissions: BTreeMap<String, String>,
     #[serde(default = "default_protected")]
@@ -184,10 +213,51 @@ pub struct AzureDevopsCred {
     /// `org/project/repo` (or a clone URL) the env may fetch and push.
     #[serde(default)]
     pub repos: Vec<String>,
+    /// Repos the env may only fetch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_repos: Vec<String>,
     #[serde(default = "default_protected")]
     pub protected_branches: Vec<String>,
     #[serde(default)]
     pub allow_tags: bool,
+}
+
+/// Git over HTTPS on any other host (GitLab, Forgejo, Gitea, Bitbucket, GitHub Enterprise
+/// Server): a token the gate adds to the listed repos' git requests as basic auth, and the
+/// push guard on them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct GitCred {
+    /// `git.example.com`, or `git.example.com:3000` for another port.
+    pub host: String,
+    /// Ref to the token; none for public repos it only fetches (`read_repos`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// The user name sent with the token (GitLab takes `oauth2`; Forgejo and Gitea, the
+    /// token's owner).
+    #[serde(default = "default_git_user")]
+    pub username: String,
+    /// Repository paths as their URLs write them (`group/sub/repo`) the env may fetch and push.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
+    /// Repository paths the env may only fetch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_repos: Vec<String>,
+    #[serde(default = "default_protected")]
+    pub protected_branches: Vec<String>,
+    #[serde(default)]
+    pub allow_tags: bool,
+    /// The host is on a private network (its addresses are private), as self-hosted ones are.
+    #[serde(default)]
+    pub private: bool,
+    /// A CA certificate (PEM file on this machine) the host's TLS certificate is signed by,
+    /// for a host with an internal CA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca: Option<String>,
+}
+
+fn default_git_user() -> String {
+    "oauth2".into()
 }
 
 /// A custom header credential for any API.
@@ -217,14 +287,77 @@ fn default_format() -> String {
     "Bearer {secret}".into()
 }
 
+/// `[credentials.github]`, or `[[credentials.github]]` once per account: a token or an App
+/// installation reaches one owner's repos.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GithubCreds(pub Vec<GithubCred>);
+
+impl GithubCreds {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Whether one of them lists `owner/repo`, to write (`write`) or at all.
+    pub fn covers(&self, repo: &str, write: bool) -> bool {
+        self.0.iter().any(|c| {
+            c.repos
+                .iter()
+                .chain(c.read_repos.iter().filter(|_| !write))
+                .any(|r| r.eq_ignore_ascii_case(repo))
+        })
+    }
+}
+
+impl Serialize for GithubCreds {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self.0.as_slice() {
+            [one] => one.serialize(s),
+            many => many.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GithubCreds {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::value::{MapAccessDeserializer, SeqAccessDeserializer};
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = GithubCreds;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a [credentials.github] table, or [[credentials.github]] tables")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                m: A,
+            ) -> Result<GithubCreds, A::Error> {
+                Ok(GithubCreds(vec![GithubCred::deserialize(
+                    MapAccessDeserializer::new(m),
+                )?]))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                s: A,
+            ) -> Result<GithubCreds, A::Error> {
+                Ok(GithubCreds(Vec::deserialize(SeqAccessDeserializer::new(
+                    s,
+                ))?))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Credentials {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub github: Option<GithubCred>,
+    #[serde(default, skip_serializing_if = "GithubCreds::is_empty")]
+    pub github: GithubCreds,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure_devops: Option<AzureDevopsCred>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<SshCred>,
+    /// `[[credentials.git]]`, one per host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git: Vec<GitCred>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub custom: BTreeMap<String, CustomCred>,
     /// Provider credentials (`anthropic`, `openai`, …): auth kind → secret ref, or
@@ -255,8 +388,8 @@ pub struct EnvConfig {
     pub workspace: Workspace,
     #[serde(default)]
     pub presets: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Agents::is_empty")]
+    pub agents: Agents,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<u16>,
     #[serde(default, skip_serializing_if = "is_default")]
@@ -289,6 +422,141 @@ pub struct EnvConfig {
     pub tools: BTreeMap<String, toml::Value>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub deps: Deps,
+}
+
+/// What can be chosen for an agent (its profile's `settings` say where each goes in its own
+/// config): the default for its sessions, which a session can still change.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentOpts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl AgentOpts {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The options set, by name.
+    pub fn values(&self) -> Vec<(&'static str, &str)> {
+        [("model", &self.model), ("effort", &self.effort)]
+            .into_iter()
+            .filter_map(|(k, v)| Some((k, v.as_deref()?)))
+            .collect()
+    }
+
+    fn fill_from(&mut self, lower: &AgentOpts) {
+        if self.model.is_none() {
+            self.model = lower.model.clone();
+        }
+        if self.effort.is_none() {
+            self.effort = lower.effort.clone();
+        }
+    }
+}
+
+/// The agents of an env: `agents = ["claude"]`, or `[agents.claude]` tables with options
+/// (`model`, `effort`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Agents(pub Vec<(String, AgentOpts)>);
+
+impl Agents {
+    pub fn from_names(names: impl IntoIterator<Item = String>) -> Self {
+        let mut out = Agents::default();
+        for n in names {
+            out.push(&n);
+        }
+        out
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &String> {
+        self.0.iter().map(|(n, _)| n)
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.iter().any(|(n, _)| n == name)
+    }
+
+    pub fn get(&self, name: &str) -> Option<&AgentOpts> {
+        self.0.iter().find(|(n, _)| n == name).map(|(_, o)| o)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn push(&mut self, name: &str) {
+        if !self.contains(name) {
+            self.0.push((name.to_string(), AgentOpts::default()));
+        }
+    }
+
+    /// Lay `lower` (the accepted luoto.toml) under these: its agents join, and its options fill
+    /// what these leave unset.
+    pub fn layer_under(&mut self, lower: &Agents) {
+        for (name, opts) in &lower.0 {
+            match self.0.iter_mut().find(|(n, _)| n == name) {
+                Some((_, own)) => own.fill_from(opts),
+                None => self.0.push((name.clone(), opts.clone())),
+            }
+        }
+    }
+}
+
+impl Agents {
+    /// Options from `defaults` (config.toml's) for the agents these have, where unset; it
+    /// adds no agent.
+    pub fn fill_options(&mut self, defaults: &Agents) {
+        for (name, own) in &mut self.0 {
+            if let Some(d) = defaults.get(name) {
+                own.fill_from(d);
+            }
+        }
+    }
+}
+
+impl Serialize for Agents {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        if self.0.iter().all(|(_, o)| o.is_empty()) {
+            return s.collect_seq(self.names());
+        }
+        let mut m = s.serialize_map(Some(self.0.len()))?;
+        for (n, o) in &self.0 {
+            m.serialize_entry(n, o)?;
+        }
+        m.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Agents {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Agents;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a list of agents, or [agents.<name>] tables")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut s: A) -> Result<Agents, A::Error> {
+                let mut out = Agents::default();
+                while let Some(n) = s.next_element::<String>()? {
+                    out.push(&n);
+                }
+                Ok(out)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<Agents, A::Error> {
+                let mut out = Agents::default();
+                while let Some((n, o)) = m.next_entry::<String, AgentOpts>()? {
+                    out.0.push((n, o));
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_any(V)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
@@ -538,6 +806,268 @@ impl EnvFile {
         self.save()
     }
 
+    /// `[workspace.repos]`, created when missing.
+    fn repos_table(&mut self) -> Result<&mut dyn toml_edit::TableLike> {
+        let path = self.path.display().to_string();
+        let ws = self
+            .doc
+            .entry("workspace")
+            .or_insert_with(toml_edit::table)
+            .as_table_like_mut()
+            .with_context(|| format!("`workspace` in {path} is not a table"))?;
+        ws.entry("repos")
+            .or_insert_with(|| {
+                let mut t = toml_edit::Table::new();
+                t.set_implicit(true);
+                toml_edit::Item::Table(t)
+            })
+            .as_table_like_mut()
+            .with_context(|| format!("`workspace.repos` in {path} is not a table"))
+    }
+
+    /// Write `[workspace.repos.<name>]`, replacing any it had.
+    pub fn set_repo(&mut self, name: &str, repo: &Repo) -> Result<()> {
+        let table = toml_edit::ser::to_document(repo)
+            .context("serialize repo")?
+            .as_table()
+            .clone();
+        self.repos_table()?
+            .insert(name, toml_edit::Item::Table(table));
+        self.save()
+    }
+
+    pub fn remove_repo(&mut self, name: &str) -> Result<()> {
+        let repos = self.repos_table()?;
+        repos.remove(name);
+        if repos.is_empty()
+            && let Some(ws) = self
+                .doc
+                .get_mut("workspace")
+                .and_then(|w| w.as_table_like_mut())
+        {
+            ws.remove("repos");
+        }
+        self.save()
+    }
+
+    /// `[credentials]`, created when missing.
+    fn credentials_table(&mut self) -> Result<&mut dyn toml_edit::TableLike> {
+        let path = self.path.display().to_string();
+        self.doc
+            .entry("credentials")
+            .or_insert_with(|| {
+                let mut t = toml_edit::Table::new();
+                t.set_implicit(true);
+                toml_edit::Item::Table(t)
+            })
+            .as_table_like_mut()
+            .with_context(|| format!("`credentials` in {path} is not a table"))
+    }
+
+    /// Add `repos` (`owner/repo`) to the GitHub credential that lists a repo of `owner`
+    /// already, whose token must then reach them, or that has `token` itself (one token for
+    /// several owners), or else as a new credential with `token`: `[credentials.github]` for
+    /// the first, `[[credentials.github]]` once there are more. `read` puts them in
+    /// `read_repos`.
+    pub fn add_github_repos(
+        &mut self,
+        owner: &str,
+        token: Option<&str>,
+        repos: &[String],
+        read: bool,
+    ) -> Result<()> {
+        let key = if read { "read_repos" } else { "repos" };
+        let has_owner = |t: &toml_edit::Table| {
+            token.is_some() && t.get("token").and_then(|v| v.as_str()) == token
+                || ["repos", "read_repos"].iter().any(|k| {
+                    t.get(k).and_then(|i| i.as_array()).is_some_and(|a| {
+                        a.iter().filter_map(|v| v.as_str()).any(|r| {
+                            r.split('/')
+                                .next()
+                                .is_some_and(|o| o.eq_ignore_ascii_case(owner))
+                        })
+                    })
+                })
+        };
+        let new = |token: Option<&str>| -> Result<toml_edit::Table> {
+            let token = token.context("a new GitHub credential needs its token")?;
+            let mut t = toml_edit::Table::new();
+            t["token"] = toml_edit::value(token);
+            Ok(t)
+        };
+        let creds = self.credentials_table()?;
+        let table: &mut toml_edit::Table = match creds.get_mut("github") {
+            None => {
+                creds.insert("github", toml_edit::Item::Table(new(token)?));
+                creds
+                    .get_mut("github")
+                    .and_then(|i| i.as_table_mut())
+                    .context("credentials.github")?
+            }
+            Some(toml_edit::Item::Table(t)) if has_owner(t) => t,
+            Some(toml_edit::Item::Table(t)) => {
+                let mut list = toml_edit::ArrayOfTables::new();
+                list.push(t.clone());
+                list.push(new(token)?);
+                *creds.get_mut("github").context("credentials.github")? =
+                    toml_edit::Item::ArrayOfTables(list);
+                creds
+                    .get_mut("github")
+                    .and_then(|i| i.as_array_of_tables_mut())
+                    .and_then(|a| a.iter_mut().last())
+                    .context("credentials.github")?
+            }
+            Some(toml_edit::Item::ArrayOfTables(list)) => {
+                let found = list.iter().position(has_owner);
+                let at = match found {
+                    Some(i) => i,
+                    None => {
+                        list.push(new(token)?);
+                        list.len() - 1
+                    }
+                };
+                list.get_mut(at).context("credentials.github")?
+            }
+            Some(_) => bail!(
+                "`credentials.github` in {} is written inline; add the repos by hand",
+                self.path.display()
+            ),
+        };
+        push_unique(table, key, repos);
+        self.save()
+    }
+
+    /// Add repository paths to the `[[credentials.git]]` of `new.host`, or add `new` (with
+    /// them) when there is none. `read` puts them in `read_repos`.
+    pub fn add_git_repos(&mut self, new: &GitCred, repos: &[String], read: bool) -> Result<()> {
+        let key = if read { "read_repos" } else { "repos" };
+        let path = self.path.display().to_string();
+        let creds = self.credentials_table()?;
+        if creds.get("git").is_none() {
+            creds.insert(
+                "git",
+                toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()),
+            );
+        }
+        let list = creds
+            .get_mut("git")
+            .and_then(|i| i.as_array_of_tables_mut())
+            .with_context(|| {
+                format!("`credentials.git` in {path} is not [[credentials.git]] tables")
+            })?;
+        let found = list.iter().position(|t| {
+            t.get("host")
+                .and_then(|h| h.as_str())
+                .is_some_and(|h| h.eq_ignore_ascii_case(&new.host))
+        });
+        let at = match found {
+            Some(i) => i,
+            None => {
+                let mut t = toml_edit::Table::new();
+                t["host"] = toml_edit::value(new.host.as_str());
+                if let Some(token) = &new.token {
+                    t["token"] = toml_edit::value(token.as_str());
+                    t["username"] = toml_edit::value(new.username.as_str());
+                }
+                if new.private {
+                    t["private"] = toml_edit::value(true);
+                }
+                if let Some(ca) = &new.ca {
+                    t["ca"] = toml_edit::value(ca.as_str());
+                }
+                list.push(t);
+                list.len() - 1
+            }
+        };
+        let table = list.get_mut(at).context("credentials.git")?;
+        if found.is_some() && table.get("token").is_none() && new.token.is_some() {
+            table["token"] = toml_edit::value(new.token.as_deref().unwrap_or_default());
+            table["username"] = toml_edit::value(new.username.as_str());
+            if new.private && table.get("private").is_none() {
+                table["private"] = toml_edit::value(true);
+            }
+            if let Some(ca) = new.ca.as_deref().filter(|_| table.get("ca").is_none()) {
+                table["ca"] = toml_edit::value(ca);
+            }
+        }
+        push_unique(table, key, repos);
+        self.save()
+    }
+
+    /// Add `repos` (`org/project/repo`) to `[credentials.azure_devops]`, created with `token`
+    /// when missing. `read` puts them in `read_repos`.
+    pub fn add_azure_repos(
+        &mut self,
+        token: Option<&str>,
+        repos: &[String],
+        read: bool,
+    ) -> Result<()> {
+        let key = if read { "read_repos" } else { "repos" };
+        let path = self.path.display().to_string();
+        let creds = self.credentials_table()?;
+        if creds.get("azure_devops").is_none() {
+            let token = token.context("a new Azure DevOps credential needs its token")?;
+            let mut t = toml_edit::Table::new();
+            t["token"] = toml_edit::value(token);
+            creds.insert("azure_devops", toml_edit::Item::Table(t));
+        }
+        let table = creds
+            .get_mut("azure_devops")
+            .and_then(|i| i.as_table_mut())
+            .with_context(|| {
+                format!(
+                    "`credentials.azure_devops` in {path} is written inline; add the repos by hand"
+                )
+            })?;
+        push_unique(table, key, repos);
+        self.save()
+    }
+
+    /// Drop `name` from the env's agents, in whichever form the file writes them.
+    pub fn remove_agent(&mut self, name: &str) -> Result<()> {
+        if let Some(item) = self.doc.get_mut("agents") {
+            if let Some(arr) = item.as_array_mut() {
+                arr.retain(|v| v.as_str() != Some(name));
+            } else if let Some(t) = item.as_table_like_mut() {
+                t.remove(name);
+            }
+        }
+        let empty = self.doc.get("agents").is_some_and(|i| {
+            i.as_array().is_some_and(|a| a.is_empty())
+                || i.as_table_like().is_some_and(|t| t.is_empty())
+        });
+        if empty {
+            self.doc.remove("agents");
+        }
+        self.save()
+    }
+
+    /// Add `name` to the env's agents, in the form the file writes them.
+    pub fn add_agent(&mut self, name: &str) -> Result<()> {
+        let path = self.path.display().to_string();
+        match self.doc.get_mut("agents") {
+            None => {
+                let mut arr = toml_edit::Array::new();
+                arr.push(name);
+                self.doc["agents"] = toml_edit::value(arr);
+            }
+            Some(item) => {
+                if let Some(arr) = item.as_array_mut() {
+                    if !arr.iter().any(|v| v.as_str() == Some(name)) {
+                        arr.push(name);
+                    }
+                } else if let Some(t) = item.as_table_like_mut() {
+                    if t.get(name).is_none() {
+                        t.insert(name, toml_edit::table());
+                    }
+                } else {
+                    bail!("`agents` in {path} is neither a list nor tables");
+                }
+            }
+        }
+        self.save()
+    }
+
     pub fn set_list(&mut self, key: &str, values: &[String]) -> Result<()> {
         let mut arr = toml_edit::Array::new();
         for v in values {
@@ -556,6 +1086,27 @@ impl EnvFile {
             .as_table_like_mut()
             .with_context(|| format!("`{table}` is not a table"))?
             .insert(key, toml_edit::value(value));
+        self.save()
+    }
+
+    /// Add a package to `[deps] system`.
+    pub fn add_system_package(&mut self, name: &str) -> Result<()> {
+        if !self.doc.contains_key("deps") {
+            self.doc["deps"] = toml_edit::table();
+        }
+        let deps = self.doc["deps"]
+            .as_table_like_mut()
+            .context("`deps` is not a table")?;
+        if deps.get("system").is_none() {
+            deps.insert("system", toml_edit::value(toml_edit::Array::new()));
+        }
+        let arr = deps
+            .get_mut("system")
+            .and_then(|i| i.as_array_mut())
+            .context("`deps.system` is not a list")?;
+        if !arr.iter().any(|v| v.as_str() == Some(name)) {
+            arr.push(name);
+        }
         self.save()
     }
 
@@ -592,6 +1143,23 @@ impl EnvFile {
     pub fn prune_expired(&mut self) -> Result<usize> {
         let now = chrono::Utc::now();
         self.retain_rules(|r| !r.expired(now))
+    }
+}
+
+/// Append `values` missing from the string array `key` of `table`, creating it.
+fn push_unique(table: &mut toml_edit::Table, key: &str, values: &[String]) {
+    if table.get(key).and_then(|i| i.as_array()).is_none() {
+        table[key] = toml_edit::value(toml_edit::Array::new());
+    }
+    if let Some(arr) = table.get_mut(key).and_then(|i| i.as_array_mut()) {
+        for v in values {
+            if !arr
+                .iter()
+                .any(|x| x.as_str().is_some_and(|x| x.eq_ignore_ascii_case(v)))
+            {
+                arr.push(v.as_str());
+            }
+        }
     }
 }
 
@@ -655,12 +1223,7 @@ oauth_token = "op://Private/claude/token"
         std::fs::write(&path, SAMPLE).unwrap();
         let mut f = EnvFile::parse(path.clone(), SAMPLE).unwrap();
         assert_eq!(
-            f.cfg
-                .credentials
-                .github
-                .as_ref()
-                .unwrap()
-                .protected_branches,
+            f.cfg.credentials.github.0[0].protected_branches,
             vec!["main", "master"]
         );
         assert_eq!(
@@ -705,6 +1268,191 @@ oauth_token = "op://Private/claude/token"
         assert_eq!(hosts, ["b.example", "d.example"]);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.starts_with("# my env") && !saved.contains("a.example"));
+    }
+
+    #[test]
+    fn repos_are_added_and_removed_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        std::fs::write(&path, SAMPLE).unwrap();
+        let mut f = EnvFile::parse(path.clone(), SAMPLE).unwrap();
+        let web = Repo {
+            url: Some("acme/web".into()),
+            branch: Some("dev".into()),
+            ..Default::default()
+        };
+        f.set_repo("web", &web).unwrap();
+        f.set_repo(
+            "api",
+            &Repo {
+                dir: Some("/home/me/api".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("[workspace.repos.web]") && saved.contains("# my env"));
+        assert_eq!(f.cfg.workspace.dir.as_deref(), Some("/home/me/foo"));
+        assert_eq!(f.cfg.workspace.repos["web"], web);
+        f.remove_repo("web").unwrap();
+        f.remove_repo("api").unwrap();
+        assert!(f.cfg.workspace.repos.is_empty());
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("workspace.repos")
+        );
+    }
+
+    #[test]
+    fn github_credentials_are_one_table_or_several() {
+        let one: EnvConfig =
+            toml::from_str("[credentials.github]\ntoken = \"env:T\"\nrepos = [\"o/r\"]\n").unwrap();
+        assert_eq!(one.credentials.github.0.len(), 1);
+        let two: EnvConfig = toml::from_str(
+            "[[credentials.github]]\ntoken = \"env:A\"\nrepos = [\"a/r\"]\n[[credentials.github]]\ntoken = \"env:B\"\nread_repos = [\"b/r\"]\n",
+        )
+        .unwrap();
+        assert!(two.credentials.github.covers("B/R", false));
+        assert!(!two.credentials.github.covers("b/r", true));
+        let typo = toml::from_str::<EnvConfig>(
+            "[credentials.github]\ntoken = \"env:T\"\nrepo = [\"o/r\"]\n",
+        );
+        assert!(typo.unwrap_err().to_string().contains("repo"));
+        // Written back in the form it was read.
+        assert!(
+            toml::to_string(&one)
+                .unwrap()
+                .contains("[credentials.github]")
+        );
+        assert!(
+            toml::to_string(&two)
+                .unwrap()
+                .contains("[[credentials.github]]")
+        );
+    }
+
+    #[test]
+    fn git_credentials_are_written_per_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        std::fs::write(&path, SAMPLE).unwrap();
+        let mut f = EnvFile::parse(path.clone(), SAMPLE).unwrap();
+        // A repo of an owner the App covers joins it.
+        f.add_github_repos("eetu", None, &["eetu/bar".into()], false)
+            .unwrap();
+        assert_eq!(f.cfg.credentials.github.0.len(), 1);
+        assert!(f.cfg.credentials.github.covers("eetu/bar", true));
+        // Another owner's gets a credential of its own; the table becomes an array.
+        f.add_github_repos(
+            "acme",
+            Some("op://v/acme/token"),
+            &["acme/web".into()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(f.cfg.credentials.github.0.len(), 2);
+        assert!(f.cfg.credentials.github.covers("acme/web", false));
+        assert!(!f.cfg.credentials.github.covers("acme/web", true));
+        f.add_github_repos("acme", None, &["acme/api".into()], false)
+            .unwrap();
+        assert_eq!(f.cfg.credentials.github.0[1].repos, ["acme/api"]);
+        // The same token for a third owner joins the credential that has it.
+        f.add_github_repos(
+            "acme-oss",
+            Some("op://v/acme/token"),
+            &["acme-oss/ds".into()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(f.cfg.credentials.github.0.len(), 2);
+        assert_eq!(
+            f.cfg.credentials.github.0[1].repos,
+            ["acme/api", "acme-oss/ds"]
+        );
+        assert!(
+            f.add_github_repos("other", None, &["other/x".into()], false)
+                .is_err()
+        );
+        f.add_azure_repos(Some("op://v/ado/pat"), &["org/P/r".into()], false)
+            .unwrap();
+        f.add_azure_repos(None, &["org/P/s".into()], true).unwrap();
+        let ado = f.cfg.credentials.azure_devops.as_ref().unwrap();
+        assert_eq!((ado.repos.len(), ado.read_repos.len()), (1, 1));
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("[[credentials.github]]") && saved.contains("# my env"));
+    }
+
+    #[test]
+    fn agents_are_a_list_or_tables_with_options() {
+        let list: EnvConfig = toml::from_str("agents = [\"claude\", \"codex\"]").unwrap();
+        assert_eq!(list.agents.names().count(), 2);
+        assert!(toml::to_string(&list).unwrap().contains("agents = ["));
+        let tables: EnvConfig =
+            toml::from_str("[agents.claude]\nmodel = \"opus\"\n\n[agents.codex]\n").unwrap();
+        assert_eq!(
+            tables.agents.get("claude").unwrap().model.as_deref(),
+            Some("opus")
+        );
+        assert!(tables.agents.contains("codex"));
+        assert!(
+            toml::to_string(&tables)
+                .unwrap()
+                .contains("[agents.claude]")
+        );
+        assert!(toml::from_str::<EnvConfig>("[agents.claude]\nmodle = \"x\"").is_err());
+
+        // luoto.toml's agents join; config.toml's give options, never agents.
+        let mut own = tables.agents.clone();
+        own.layer_under(&Agents(vec![(
+            "claude".into(),
+            AgentOpts {
+                model: Some("sonnet".into()),
+                effort: Some("high".into()),
+            },
+        )]));
+        own.layer_under(&Agents::from_names(["opencode".to_string()]));
+        let claude = own.get("claude").unwrap();
+        assert_eq!(
+            (claude.model.as_deref(), claude.effort.as_deref()),
+            (Some("opus"), Some("high"))
+        );
+        assert!(own.contains("opencode"));
+        let global: GlobalConfig =
+            toml::from_str("[agents.codex]\neffort = \"low\"\n[agents.copilot]\nmodel = \"x\"")
+                .unwrap();
+        own.fill_options(&global.agents);
+        assert_eq!(own.get("codex").unwrap().effort.as_deref(), Some("low"));
+        assert!(!own.contains("copilot"));
+    }
+
+    #[test]
+    fn agents_are_added_in_the_files_form() {
+        let dir = tempfile::tempdir().unwrap();
+        for (text, want) in [
+            (
+                "agents = [\"claude\"]\n",
+                "agents = [\"claude\", \"codex\"]",
+            ),
+            ("[agents.claude]\nmodel = \"opus\"\n", "[agents.codex]"),
+            ("presets = []\n", "agents = [\"codex\"]"),
+        ] {
+            let path = dir.path().join("t.toml");
+            std::fs::write(&path, text).unwrap();
+            let mut f = EnvFile::parse(path.clone(), text).unwrap();
+            f.add_agent("codex").unwrap();
+            assert!(
+                std::fs::read_to_string(&path).unwrap().contains(want),
+                "{text}"
+            );
+            assert!(f.cfg.agents.contains("codex"));
+            f.remove_agent("codex").unwrap();
+            assert!(!f.cfg.agents.contains("codex"));
+            assert!(
+                !std::fs::read_to_string(&path).unwrap().contains("codex"),
+                "{text}"
+            );
+        }
     }
 
     #[test]

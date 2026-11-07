@@ -1,23 +1,28 @@
 //! The background watcher: one per config dir, started by `up`, `down` and commands that work
 //! in an env. Every 2 s it forwards the ports running envs listen on (see `ports`); every
+//! 30 s it reads again the credentials upstreams refused, from sources that need no one; every
 //! minute it stops envs that have been idle for `idle_stop` (see `idle`), and luoto's VM once
 //! no env has run for that long. It exits when nothing is left to watch, or when the luoto
 //! binary changes, so a new version starts its own.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx};
-use crate::{idle, machine, names, ports};
+use crate::{events, idle, machine, names, ports, secrets, sync};
 
 const TICK: Duration = Duration::from_secs(2);
 const IDLE_EVERY: Duration = Duration::from_secs(60);
+const CREDS_EVERY: Duration = Duration::from_secs(30);
+/// How soon a refused credential is read again: code in the sandbox can make an upstream
+/// refuse one at will.
+const REREAD_AFTER: Duration = Duration::from_secs(600);
 
 /// Start the watcher in the background; a second one exits at once (it holds a lock).
 pub fn spawn(ctx: &Ctx) {
@@ -76,6 +81,9 @@ pub fn watch() -> Result<ExitCode> {
     let mut idle_since: HashMap<String, Instant> = HashMap::new();
     let mut idle_checked = Instant::now();
     let mut no_env_since: Option<Instant> = None;
+    let mut creds_checked = Instant::now();
+    let mut creds_since: HashMap<String, DateTime<Utc>> = HashMap::new();
+    let mut reread: HashMap<String, Instant> = HashMap::new();
     loop {
         std::thread::sleep(TICK);
         // A new luoto takes over once nothing is forwarded: leaving now would cut the
@@ -152,6 +160,11 @@ pub fn watch() -> Result<ExitCode> {
         forwards.retain(|k, _| wanted.contains(k));
         refused.retain(|k| wanted.contains(k));
 
+        if creds_checked.elapsed() >= CREDS_EVERY {
+            creds_checked = Instant::now();
+            reread_refused(&ctx, &running, &mut creds_since, &mut reread);
+        }
+
         if idle_checked.elapsed() < IDLE_EVERY {
             continue;
         }
@@ -175,5 +188,75 @@ pub fn watch() -> Result<ExitCode> {
                 Err(e) => println!("{} could not stop `{name}`: {e:#}", Utc::now()),
             }
         }
+    }
+}
+
+/// Credentials an upstream refused (401) since the last look: read again from the secret
+/// store when that needs no one there (`secrets::unattended`), else named in the log for
+/// `luoto vault reload`. Each reference at most once per [`REREAD_AFTER`].
+fn reread_refused(
+    ctx: &Ctx,
+    running: &[String],
+    since: &mut HashMap<String, DateTime<Utc>>,
+    tried: &mut HashMap<String, Instant>,
+) {
+    let mut due = BTreeSet::new();
+    for name in running {
+        let now = Utc::now();
+        // A minute's overlap for the VM's clock; a 401 seen twice meets the limit.
+        let from = *since.get(name).unwrap_or(&now) - TimeDelta::minutes(1);
+        let Ok(evs) = events::gate_events(&ctx.rt, name, Some(&from.to_rfc3339())) else {
+            continue;
+        };
+        since.insert(name.clone(), now);
+        let refused: BTreeSet<&str> = evs
+            .iter()
+            .filter(|e| e.status == Some(401))
+            .filter_map(|e| e.binding.as_deref())
+            .flat_map(|b| b.split(','))
+            .collect();
+        if refused.is_empty() {
+            continue;
+        }
+        let Ok(plan) = env::plan(ctx, name) else {
+            continue;
+        };
+        for b in refused {
+            let Some(spec) = plan.compiled.bindings.get(b) else {
+                continue;
+            };
+            let r = spec.secret_ref();
+            if tried.get(r).is_some_and(|t| t.elapsed() < REREAD_AFTER) {
+                continue;
+            }
+            tried.insert(r.to_string(), Instant::now());
+            if secrets::unattended(&ctx.global, r) {
+                due.insert(r.to_string());
+            } else {
+                println!(
+                    "{} `{name}`: an upstream refused credential `{b}` ({r}); if it changed, \
+                     `luoto vault reload` reads it again",
+                    Utc::now()
+                );
+            }
+        }
+    }
+    if due.is_empty() {
+        return;
+    }
+    let refs: Vec<&str> = due.iter().map(String::as_str).collect();
+    match sync::reload(ctx, &due) {
+        Ok(r) => {
+            println!(
+                "{} read refused secret(s) again ({}): {} changed",
+                Utc::now(),
+                refs.join(", "),
+                r.changed
+            );
+            for f in r.failed {
+                println!("{}   not read: {f}", Utc::now());
+            }
+        }
+        Err(e) => println!("{} refused secrets not read again: {e:#}", Utc::now()),
     }
 }

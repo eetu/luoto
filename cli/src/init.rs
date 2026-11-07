@@ -12,7 +12,7 @@ use crate::config::{self, EnvConfig, EnvFile, Workspace};
 use crate::env::{self, Ctx, UpOptions};
 use crate::paths::Paths;
 use crate::prompt::{ask, confirm};
-use crate::{complete, detect, names, project, workspace};
+use crate::{complete, detect, names, project, repos, workspace};
 
 #[derive(Default, clap::Args)]
 pub struct InitOpts {
@@ -34,9 +34,17 @@ pub struct InitOpts {
     /// Coding agents to set up (repeatable): claude, opencode, codex, copilot, agy.
     #[arg(long = "agent", add = ArgValueCandidates::new(complete::agents))]
     pub agents: Vec<String>,
+    /// An agent's credential without the prompt (repeatable): `KIND=REF`
+    /// (`oauth_token=op://…`), `PROVIDER.KIND=REF`, or `login_inside`.
+    #[arg(long = "credential", value_name = "KIND=REF")]
+    pub credentials: Vec<String>,
     /// Dev-server ports to publish on 127.0.0.1 (repeatable).
     #[arg(long = "port")]
     pub ports: Vec<u16>,
+    /// A repository beside the folder, at `/workspace/<name>` (repeatable): a host folder,
+    /// copied in, or a remote (`owner/repo` on GitHub, an https or ssh URL), cloned in the env.
+    #[arg(long = "repo", value_name = "FOLDER|REMOTE")]
+    pub repos: Vec<String>,
     /// `gvisor` (default once `luoto setup` installed it): the env gets its own user-space
     /// kernel. `container`: it shares the VM's kernel, with builds about 1.6× faster.
     #[arg(long, value_enum)]
@@ -73,8 +81,32 @@ pub struct Proposal {
 /// Defaults plus what the folder says about itself; explicit options replace both. Touches
 /// nothing on disk.
 pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
-    let (name, workspace) = new_workspace(paths, o.dir.as_deref(), o.name.as_deref())?;
+    let (name, mut workspace) = new_workspace(paths, o.dir.as_deref(), o.name.as_deref())?;
     let dir = std::path::PathBuf::from(workspace.dir.as_deref().unwrap_or_default());
+    for spec in &o.repos {
+        let src = repos::parse_source(spec)?;
+        let repo_name = repos::default_name(&src)?;
+        let repo = match src {
+            repos::Source::Folder(d) => {
+                repos::check_folder(workspace.dir.as_deref(), &d)?;
+                config::Repo {
+                    dir: Some(d.display().to_string()),
+                    ..Default::default()
+                }
+            }
+            repos::Source::Remote(u) => config::Repo {
+                url: Some(u),
+                ..Default::default()
+            },
+        };
+        if workspace.repos.insert(repo_name.clone(), repo).is_some() {
+            bail!(
+                "two --repo are named `{repo_name}`; add one with `luoto repo add … --name` \
+                 after init"
+            );
+        }
+    }
+    repos::check(&workspace)?;
     let new_folder = std::fs::read_dir(&dir).map_or(true, |mut d| d.next().is_none());
     let (project, project_error) = if o.no_project || new_folder {
         (None, None)
@@ -86,11 +118,18 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
             Err(e) => (None, Some(format!("{e:#}"))),
         }
     };
-    let found = if new_folder {
-        detect::Detected::default()
-    } else {
-        detect::detect(&dir)
-    };
+    // The folder and the host folders of its repos, each repo's files under its name.
+    let mut roots: Vec<(String, std::path::PathBuf)> = Vec::new();
+    if !new_folder {
+        roots.push((String::new(), dir.clone()));
+    }
+    roots.extend(
+        workspace
+            .repos
+            .iter()
+            .filter_map(|(n, r)| Some((n.clone(), r.dir.as_ref()?.into()))),
+    );
+    let found = detect::detect_roots(&roots);
     let presets = if o.presets.is_empty() {
         let mut p: Vec<String> = DEFAULT_PRESETS.iter().map(|s| s.to_string()).collect();
         config::extend_unique(&mut p, found.presets.iter().map(|(n, _)| n.clone()));
@@ -119,7 +158,7 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
         workspace,
         presets,
         tools,
-        agents: o.agents.clone(),
+        agents: config::Agents::from_names(o.agents.clone()),
         ports: o.ports.clone(),
         isolation: o.isolation,
         ..Default::default()
@@ -169,6 +208,42 @@ fn print_proposal(p: &Proposal) {
             "  workspace  new folder, created now: the env starts empty, and `luoto pull` fills the folder"
         );
     }
+    let mut repos: Vec<(String, String)> = ws
+        .repos
+        .iter()
+        .map(|(n, r)| {
+            let what = match (&r.dir, &r.url) {
+                (Some(d), _) => format!("{d} (copied in)"),
+                (None, Some(u)) => format!("{} (cloned in the env)", crate::text::display(u)),
+                _ => String::new(),
+            };
+            (n.clone(), what)
+        })
+        .collect();
+    if let Some((_, pc)) = &p.project {
+        repos.extend(
+            pc.repos
+                .iter()
+                .filter(|(n, _)| !ws.repos.keys().any(|o| o.eq_ignore_ascii_case(n)))
+                .map(|(n, r)| {
+                    (
+                        crate::text::display(n),
+                        format!(
+                            "{} (cloned in the env, from luoto.toml)",
+                            crate::text::display(&r.url)
+                        ),
+                    )
+                }),
+        );
+    }
+    if !repos.is_empty() {
+        let width = repos.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+        for (i, (n, what)) in repos.iter().enumerate() {
+            let label = if i == 0 { "repos" } else { "" };
+            println!("  {label:<10} {n:<width$}  {what}");
+        }
+        println!("{INDENT}each at /workspace/<name>");
+    }
     println!("  isolation  {}", isolation_text(p.cfg.isolation, p.gvisor));
     let presets: Vec<String> = p
         .cfg
@@ -215,7 +290,8 @@ fn print_proposal(p: &Proposal) {
         );
     }
     if !p.cfg.agents.is_empty() {
-        println!("  agents     {}", p.cfg.agents.join(", "));
+        let names: Vec<&str> = p.cfg.agents.names().map(String::as_str).collect();
+        println!("  agents     {}", names.join(", "));
     }
     for (provider, entries) in &p.cfg.credentials.providers {
         let how: Vec<String> = entries
@@ -308,6 +384,7 @@ pub fn new_workspace(
         name,
         Workspace {
             dir: Some(dir.display().to_string()),
+            ..Default::default()
         },
     ))
 }
@@ -331,25 +408,17 @@ pub fn make_folder(p: &mut Proposal) -> Result<()> {
 }
 
 /// Create the proposed env: its folder, its config, and the answer to the folder's
-/// luoto.toml (`accept_project`). The agents the env gets, the accepted luoto.toml's
-/// included.
-pub fn create(
-    ctx: &Ctx,
-    p: &mut Proposal,
-    accept_project: bool,
-    quiet: bool,
-) -> Result<Vec<String>> {
+/// luoto.toml (`accept_project`).
+pub fn create(ctx: &Ctx, p: &mut Proposal, accept_project: bool, quiet: bool) -> Result<()> {
     make_folder(p)?;
     let name = &p.name;
     let f = EnvFile::create(&ctx.paths, name, &p.cfg)?;
     if !quiet {
         println!("created env `{name}` ({})", f.path.display());
     }
-    let mut agents = p.cfg.agents.clone();
-    if let Some((text, pc)) = &p.project {
+    if let Some((text, _)) = &p.project {
         if accept_project {
             project::accept(ctx, name, text)?;
-            config::extend_unique(&mut agents, pc.agents.iter().cloned());
         } else {
             project::forget(ctx, name, Some(text))?;
             if !quiet {
@@ -359,11 +428,12 @@ pub fn create(
             }
         }
     }
-    Ok(agents)
+    Ok(())
 }
 
-/// Start a new env and install its agents.
-pub fn start(ctx: &Ctx, name: &str, agents: &[String], quiet: bool) -> Result<()> {
+/// Start a new env: `up` asks for the credentials its agents and repos lack and installs the
+/// agents.
+pub fn start(ctx: &Ctx, name: &str, quiet: bool) -> Result<()> {
     env::up(
         ctx,
         name,
@@ -371,15 +441,15 @@ pub fn start(ctx: &Ctx, name: &str, agents: &[String], quiet: bool) -> Result<()
             quiet,
             ..Default::default()
         },
-    )?;
-    for a in agents {
-        crate::agents::install(ctx, name, a)?;
-    }
-    Ok(())
+    )
 }
 
 pub fn init(o: InitOpts) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
+    if o.yes {
+        // Nothing asks, `up` included: agents log in inside, repos get a hint.
+        crate::prompt::never_ask();
+    }
     // `init` again in an env's own folder: detect anew and offer what is missing.
     if o.name.is_none()
         && let Some(dir) = match &o.dir {
@@ -432,22 +502,30 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
         Some(_) => o.yes,
         None => false,
     };
-    let agents = create(&ctx, &mut p, accept_project, false)?;
+    create(&ctx, &mut p, accept_project, false)?;
     let name = p.name.clone();
-    if let Some(hint) = p
-        .cfg
-        .workspace
-        .dir
-        .as_deref()
-        .and_then(|d| origin_url(Path::new(d)))
-        .and_then(|u| credential_hint(&name, &u, &p.cfg.credentials))
-    {
-        println!("{hint}");
+    if !o.credentials.is_empty() {
+        let agents: Vec<String> = env::layered(&ctx, &name)?.agents.names().cloned().collect();
+        crate::agents::set_credentials(&ctx, &name, &agents, &o.credentials).with_context(
+            || {
+                format!(
+                    "env `{name}` is created without it; `luoto agent add -e {name} <agent> \
+                 --credential …` sets it"
+                )
+            },
+        )?;
     }
-    // Before `up`, so the env starts with them.
-    crate::agents::credentials(&ctx, &name, &agents, interactive)?;
-    if !o.no_up {
-        start(&ctx, &name, &agents, false)?;
+    crate::agents::login_inside_unless_set(&ctx, &name)?;
+    if o.no_up {
+        // `up` asks for the credentials the repos lack; until then, say what they are.
+        let cfg = env::layered(&ctx, &name)?;
+        if let Some(hint) =
+            repos::credential_hint(&name, &repos::remotes(&cfg.workspace), &cfg.credentials)
+        {
+            println!("\n{hint}");
+        }
+    } else {
+        start(&ctx, &name, false)?;
     }
     if let Some((_, pc)) = p.project.as_ref().filter(|_| accept_project) {
         let cfg = EnvFile::load(&ctx.paths, &name)?.cfg;
@@ -464,7 +542,8 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
 /// Offer what the project suggests now and the env's config lacks. The project is the env's
 /// own copy while it runs (work happens there), else the folder.
 fn redetect(ctx: &Ctx, name: &str, dir: &Path, o: &InitOpts) -> Result<ExitCode> {
-    let (found, source) = if ctx.rt.is_running(&names::dev(name)) {
+    let inside = ctx.rt.is_running(&names::dev(name));
+    let (found, source) = if inside {
         (
             crate::deps::detect_in_env(ctx, name)?,
             "its workspace".to_string(),
@@ -473,7 +552,7 @@ fn redetect(ctx: &Ctx, name: &str, dir: &Path, o: &InitOpts) -> Result<ExitCode>
         (detect::detect(dir), dir.display().to_string())
     };
     let heading = format!("env `{name}` exists; {source} now suggests:");
-    if !offer(ctx, name, &found, &heading, o.yes)? {
+    if !offer(ctx, name, &found, &heading, o.yes, inside)? {
         println!("env `{name}` already has what {source} suggests");
         return Ok(ExitCode::SUCCESS);
     }
@@ -484,14 +563,16 @@ fn redetect(ctx: &Ctx, name: &str, dir: &Path, o: &InitOpts) -> Result<ExitCode>
 }
 
 /// Offer what detection found and the env's config lacks: presets, and default toolchains
-/// for runtimes, package managers and task runners the project doesn't pin. Only adds; what
-/// is in the config stays. Whether the config changed.
+/// for runtimes, package managers and task runners the project doesn't pin. Only adds, and
+/// only with `yes` or a yes on a terminal; without one it lists them. Files read `inside` the
+/// env can be the sandbox's, so there Enter answers no. Whether the config changed.
 pub fn offer(
     ctx: &Ctx,
     name: &str,
     found: &detect::Detected,
     heading: &str,
     yes: bool,
+    inside: bool,
 ) -> Result<bool> {
     let mut file = EnvFile::load(&ctx.paths, name)?;
     let presets: Vec<&(String, String)> = found
@@ -520,10 +601,17 @@ pub fn offer(
             crate::text::display(&t.source)
         );
     }
-    if !yes
-        && std::io::stdin().is_terminal()
-        && ask(&format!("Add them to `{name}`? [Y/n]"), 'y') == 'n'
-    {
+    if !yes && !crate::prompt::interactive() {
+        println!("  `luoto init --yes` in the env's folder adds them");
+        return Ok(false);
+    }
+    let added = yes
+        || if inside {
+            crate::prompt::confirm(&format!("Add them to `{name}`?"))
+        } else {
+            ask(&format!("Add them to `{name}`? [Y/n]"), 'y') != 'n'
+        };
+    if !added {
         println!("nothing changed");
         return Ok(false);
     }
@@ -551,7 +639,7 @@ pub fn print_needs(name: &str, needs: &[String]) {
 }
 
 /// The URL of a folder's `origin` remote, if any.
-fn origin_url(dir: &Path) -> Option<String> {
+pub fn origin_url(dir: &Path) -> Option<String> {
     let cfg = std::fs::read_to_string(dir.join(".git").join("config")).ok()?;
     let mut in_origin = false;
     for line in cfg.lines() {
@@ -571,72 +659,6 @@ fn origin_url(dir: &Path) -> Option<String> {
     None
 }
 
-/// `owner/repo` of a GitHub remote URL, HTTPS or SSH.
-fn github_repo(url: &str) -> Option<String> {
-    let path = url
-        .strip_prefix("https://github.com/")
-        .or_else(|| url.strip_prefix("git@github.com:"))
-        .or_else(|| url.strip_prefix("ssh://git@github.com/"))?;
-    let repo = path.trim_end_matches('/').trim_end_matches(".git");
-    (repo.split('/').count() == 2).then(|| repo.to_string())
-}
-
-/// `ssh://…` or scp-like `user@host:path`.
-fn is_ssh_url(url: &str) -> bool {
-    url.starts_with("ssh://") || (!url.contains("://") && url.contains(':'))
-}
-
-/// After `init`: the credential that lets the env fetch and push `origin`, in the form its URL
-/// uses, unless the env has one that would. An SSH remote stays SSH with `[credentials.ssh]`;
-/// with only the forge's HTTPS credential it goes to HTTPS, which works too.
-fn credential_hint(name: &str, url: &str, creds: &config::Credentials) -> Option<String> {
-    let (has, table, host, repo, token) = if let Some(repo) = github_repo(url) {
-        (
-            creds.github.is_some(),
-            "github",
-            "github.com",
-            crate::text::display(&repo),
-            "fine-grained PAT, or app_id + installation_id + private_key",
-        )
-    } else {
-        let (r, _) = crate::azure::parse_url(url)?;
-        let repo = format!(
-            "{}/{}/{}",
-            crate::text::display(&r.org),
-            crate::text::display(&crate::azure::decode(&r.project)),
-            crate::text::display(&crate::azure::decode(&r.name))
-        );
-        (
-            creds.azure_devops.is_some(),
-            "azure_devops",
-            "ssh.dev.azure.com",
-            repo,
-            "PAT with Code (Read & write)",
-        )
-    };
-    if has {
-        return None;
-    }
-    let edit = format!("`luoto edit -e {name}`");
-    if is_ssh_url(url) {
-        return creds.ssh.is_none().then(|| {
-            format!(
-                "To fetch and push {repo} over SSH, give the env a key ({edit}); the vault keeps it:\n\n  \
-                 [credentials.ssh]\n  \
-                 key = \"op://<vault>/<item>/private key?ssh-format=openssh\"   # a deploy key reaches only this repo\n  \
-                 hosts = [\"{host}\"]\n\n\
-                 luoto can't limit an SSH key to repos; [credentials.{table}] over HTTPS can."
-            )
-        });
-    }
-    Some(format!(
-        "To fetch and push {repo} from the env, give it a credential ({edit}):\n\n  \
-         [credentials.{table}]\n  \
-         token = \"op://<vault>/<item>/<field>\"   # {token}\n  \
-         repos = [\"{repo}\"]"
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -651,28 +673,7 @@ mod tests {
         )
         .unwrap();
         let url = origin_url(dir.path()).unwrap();
-        assert_eq!(github_repo(&url).as_deref(), Some("Eetu/luoto"));
-    }
-
-    #[test]
-    fn credential_hint_follows_the_remote_form() {
-        let none = config::Credentials::default();
-        let https = credential_hint("e", "https://github.com/o/r.git", &none).unwrap();
-        assert!(https.contains("[credentials.github]") && https.contains("repos = [\"o/r\"]"));
-        let ssh = credential_hint("e", "git@github.com:o/r.git", &none).unwrap();
-        assert!(ssh.contains("[credentials.ssh]") && ssh.contains("hosts = [\"github.com\"]"));
-        let ado = credential_hint("e", "git@ssh.dev.azure.com:v3/org/P/r", &none).unwrap();
-        assert!(ado.contains("hosts = [\"ssh.dev.azure.com\"]"));
-        assert!(credential_hint("e", "https://gitlab.com/o/r", &none).is_none());
-
-        // An HTTPS credential covers an SSH remote too (luoto sends it over HTTPS).
-        let github: config::Credentials =
-            toml::from_str("[github]\ntoken = \"env:T\"\nrepos = [\"o/r\"]").unwrap();
-        assert!(credential_hint("e", "git@github.com:o/r.git", &github).is_none());
-        let key: config::Credentials =
-            toml::from_str("[ssh]\nkey = \"env:K\"\nhosts = [\"github.com\"]").unwrap();
-        assert!(credential_hint("e", "git@github.com:o/r.git", &key).is_none());
-        assert!(credential_hint("e", "https://github.com/o/r", &key).is_some());
+        assert_eq!(repos::github_repo(&url).as_deref(), Some("Eetu/luoto"));
     }
 
     #[test]
