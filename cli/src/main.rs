@@ -233,6 +233,10 @@ enum AgentCmd {
     Add {
         #[arg(add = ArgValueCandidates::new(complete::agents))]
         agent: String,
+        /// Its credential without the prompt: `KIND=REF` (`oauth_token=op://…`),
+        /// `PROVIDER.KIND=REF`, or `login_inside`; replaces the one the env has.
+        #[arg(long, value_name = "KIND=REF")]
+        credential: Option<String>,
     },
     /// List known agents and providers.
     #[command(visible_alias = "ls")]
@@ -342,7 +346,9 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Forward { port, open } => connect::forward(&env()?, &port, open),
         Cmd::Agent { action } => match action {
             AgentCmd::Run { agent, yolo, args } => agents::run(&env()?, &agent, yolo, &args),
-            AgentCmd::Add { agent } => agents::add(&env()?, &agent),
+            AgentCmd::Add { agent, credential } => {
+                agents::add(&env()?, &agent, credential.as_deref())
+            }
             AgentCmd::List => agents::list(),
         },
         Cmd::Repo { action } => match action.unwrap_or(RepoCmd::List) {

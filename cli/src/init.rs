@@ -34,6 +34,10 @@ pub struct InitOpts {
     /// Coding agents to set up (repeatable): claude, opencode, codex, copilot, agy.
     #[arg(long = "agent", add = ArgValueCandidates::new(complete::agents))]
     pub agents: Vec<String>,
+    /// An agent's credential without the prompt (repeatable): `KIND=REF`
+    /// (`oauth_token=op://…`), `PROVIDER.KIND=REF`, or `login_inside`.
+    #[arg(long = "credential", value_name = "KIND=REF")]
+    pub credentials: Vec<String>,
     /// Dev-server ports to publish on 127.0.0.1 (repeatable).
     #[arg(long = "port")]
     pub ports: Vec<u16>,
@@ -499,6 +503,17 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
     };
     create(&ctx, &mut p, accept_project, false)?;
     let name = p.name.clone();
+    if !o.credentials.is_empty() {
+        let agents: Vec<String> = env::layered(&ctx, &name)?.agents.names().cloned().collect();
+        crate::agents::set_credentials(&ctx, &name, &agents, &o.credentials).with_context(
+            || {
+                format!(
+                    "env `{name}` is created without it; `luoto agent add -e {name} <agent> \
+                 --credential …` sets it"
+                )
+            },
+        )?;
+    }
     if o.no_up {
         // `up` asks for the credentials the repos lack; until then, say what they are.
         let cfg = env::layered(&ctx, &name)?;

@@ -47,10 +47,6 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   (the UI shows them; changes go through `luoto edit`).
 - **Azure DevOps beyond git:** pull requests through its REST API (`az repos pr`), with writes
   allowlisted as for GitHub, and Git LFS objects, which it serves from blob storage.
-- **Agent credentials on the command line:** `luoto agent add claude --credential
-  oauth_token=op://Private/claude/token` (and `init --agent … --credential …`) writes or
-  replaces `[credentials.<provider>]` without the prompt, for scripts and for pointing an env
-  at another secret later.
 
 ## Git over SSH
 

@@ -14,7 +14,7 @@ use crate::config::{EnvFile, ProviderValue};
 use crate::connect::exec_login;
 use crate::env::{self, Ctx, UID};
 use crate::text::sh_quote;
-use crate::{names, sync};
+use crate::{names, secrets, sync};
 
 pub fn list() -> Result<ExitCode> {
     println!("agents:");
@@ -374,11 +374,86 @@ fn list_agent(ctx: &Ctx, env_name: &str, agent: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// `luoto agent add`: list the agent in the env's config; `up` asks how it authenticates,
-/// installs it and says how it logs in.
-pub fn add(env_name: &str, agent: &str) -> Result<ExitCode> {
+/// Write the credentials `specs` name for `agents` (`--credential`), without the prompt:
+/// `KIND=REF`, `PROVIDER.KIND=REF` where the agents' providers share a kind, or
+/// `[PROVIDER.]login_inside`. A reference must resolve now, as the prompt checks it.
+pub fn set_credentials(
+    ctx: &Ctx,
+    env_name: &str,
+    agents: &[String],
+    specs: &[String],
+) -> Result<()> {
+    let providers: Vec<(String, profiles::Provider)> = agents
+        .iter()
+        .filter_map(|n| profiles::agent(n))
+        .flat_map(|a| a.providers)
+        .filter_map(|p| Some((p.clone(), profiles::provider(&p)?)))
+        .collect();
+    for spec in specs {
+        let (key, reference) = match spec.split_once('=') {
+            Some((k, r)) => (k.trim(), Some(r.trim())),
+            None => (spec.trim(), None),
+        };
+        let (named, kind) = match key.split_once('.') {
+            Some((p, k)) => (Some(p), k),
+            None => (None, key),
+        };
+        let takes = |p: &profiles::Provider| match reference {
+            Some(_) => p.auth.contains_key(kind),
+            None => kind == "login_inside" && !p.login_hosts.is_empty(),
+        };
+        let fits: Vec<&(String, profiles::Provider)> = providers
+            .iter()
+            .filter(|(n, p)| named.is_none_or(|x| x == n) && takes(p))
+            .collect();
+        let (provider, _) = match fits.as_slice() {
+            [one] => *one,
+            [] => bail!(
+                "--credential {}: none of the agents' providers ({}) takes it",
+                crate::text::display(key),
+                providers
+                    .iter()
+                    .map(|(n, p)| format!(
+                        "{n}: {}{}",
+                        p.auth.keys().cloned().collect::<Vec<_>>().join(", "),
+                        if p.login_hosts.is_empty() {
+                            ""
+                        } else {
+                            ", login_inside"
+                        }
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+            _ => bail!(
+                "--credential {}: several providers take it; name one as PROVIDER.{kind}",
+                crate::text::display(key)
+            ),
+        };
+        let value = match reference {
+            Some(r) => {
+                secrets::check_ref(r)?;
+                secrets::resolve(&ctx.global, r)
+                    .with_context(|| format!("--credential {key}: {r} doesn't resolve"))?;
+                ProviderValue::Ref(r.to_string())
+            }
+            None => ProviderValue::Flag(true),
+        };
+        EnvFile::load(&ctx.paths, env_name)?
+            .set_provider_credential(provider, &BTreeMap::from([(kind.to_string(), value)]))?;
+        println!("[credentials.{provider}] {kind} written to env `{env_name}`");
+    }
+    Ok(())
+}
+
+/// `luoto agent add`: list the agent in the env's config (and its `--credential`); `up` asks
+/// for a credential it still lacks, installs it and says how it logs in.
+pub fn add(env_name: &str, agent: &str, credential: Option<&str>) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let a = profile(agent)?;
+    if let Some(c) = credential {
+        set_credentials(&ctx, env_name, &[agent.to_string()], &[c.to_string()])?;
+    }
     let listed = !list_agent(&ctx, env_name, agent)?;
     let dev = names::dev(env_name);
     let there = listed && ctx.rt.is_running(&dev) && installed(&ctx, &dev, &a);

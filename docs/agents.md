@@ -38,6 +38,11 @@ luoto writes them into the agent's own user settings on `up`, so they are the de
 Codex take both, OpenCode takes `model`; a profile's `[settings.<option>]` says where each
 goes.
 
+Scripts and setups without a terminal give the credential on the command line instead of the
+prompt: `luoto agent add claude --credential oauth_token=op://Private/claude/token`, or
+`luoto init --agent claude --credential …`. It takes `KIND=REF`, `PROVIDER.KIND=REF` where
+two agents' providers share a kind, or `login_inside`; the reference must resolve.
+
 `--yolo` maps to the agent's own flag for skipping permission prompts, where it has one. The
 sandbox is the boundary, so the prompts guard nothing luoto doesn't.
 
