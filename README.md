@@ -214,7 +214,7 @@ from a newer luoto.
 
 ```toml
 presets = ["debian", "github", "toolchains", "npm"]   # see shared/presets/
-agents = ["claude"]           # or, with options: [agents.claude] model = "opus", effort = "high"
+agents = ["claude"]           # with options: [agents.claude] tables (docs/guides/agent-settings.md)
 ports = [5173]                # published by the gate itself (servers listening on all interfaces)
 # isolation = "container"     # default gVisor; this shares the VM's kernel, builds ~1.6× faster
 # idle_stop = "2h"            # default 30m; "off" disables
@@ -406,11 +406,10 @@ only proposes:
 Every env belongs to a folder, and gets a copy of it: the first `up` puts the folder, git
 history included, into the env, and the sandbox never writes to your folder. From a git
 repository it copies what git doesn't ignore, so ignored files such as `.env`, `*.tfvars` or
-state files stay on your machine. Development
-happens inside, in Zed or VS Code attached to the env, and work leaves as git pushes (with a
-`[credentials.github]` or `[credentials.azure_devops]` for the repo, or `[credentials.ssh]`
-for an SSH remote; `luoto init` prints the one that fits the folder's origin on GitHub or
-Azure DevOps). `luoto pull` brings files back when you need them on the host: it lists changed
+state files stay on your machine. Development happens inside, in Zed or VS Code attached to
+the env, and work leaves as git pushes (with a `[credentials.github]`,
+`[credentials.azure_devops]` or `[[credentials.git]]` for the repo, or `[credentials.ssh]` for
+an SSH remote; `up` asks for the ones the env's remotes need). `luoto pull` brings files back when you need them on the host: it lists changed
 files, skips risky ones (in the folder or any folder within it, such as a repository's own
 `.git` or `.envrc`) unless you pass `--include-risky`, refuses paths or symlinks that leave
 the folder, and never writes through host symlinks. `.git` and heavy directories

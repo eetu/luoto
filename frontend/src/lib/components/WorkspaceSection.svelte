@@ -28,11 +28,12 @@
     if (!env || !pull) return;
     const digest = pull.digest;
     const result = await act("writing…", () => api.pull(env, digest, includeRisky));
+    // Written or not, the reviewed plan is spent: a failure leaves a fresh review to do.
+    pull = null;
     if (!result) return;
     say(
       `wrote ${result.written} file(s)${result.skipped ? `, skipped ${result.skipped} risky` : ""}`,
     );
-    pull = null;
   }
 
   const entries = $derived(pull?.plans.flatMap((p) => p.entries) ?? []);
@@ -64,7 +65,10 @@
       <button class="btn" onclick={review}>pull changes…</button>
     {:else}
       <div class="plan">
-        {#each pull.plans as p (p.dir)}
+        {#if entries.length === 0}
+          <p class="small muted">nothing to pull</p>
+        {/if}
+        {#each pull.plans.filter((p) => pull?.plans.length === 1 || p.entries.length || p.refused.length) as p (p.dir)}
           {@const safe = p.entries.filter((e) => !e.risky)}
           {@const risky = p.entries.filter((e) => e.risky)}
           <div class="target">

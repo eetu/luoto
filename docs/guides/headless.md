@@ -92,7 +92,8 @@ graphql_mutations = ["createPullRequest", "updatePullRequest", "enablePullReques
 ```
 
 The repository needs "Allow auto-merge" enabled and the token Contents and Pull requests
-write; the prompt ends with `gh pr merge --auto --squash`.
+write; the prompt ends with `gh pr merge --auto --squash`. With several `[[credentials.github]]`,
+GraphQL goes with the first, so its list applies.
 
 Keep a required review in the branch protection: auto-merge then means "merged as soon as a
 person approves and CI is green". Without one, code the sandbox wrote reaches `main` with

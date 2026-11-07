@@ -31,7 +31,7 @@ env's name and its current rules.
 of its own, and open one pull request per repository. A repository the env may only read
 refuses pushes: say so instead of working around it. Where `gh pr create` is refused for a
 repository of a second GitHub owner, open the pull request over REST:
-`gh api repos/<owner>/<repo>/pulls -f head=<branch> -f base=main -f title=… -f body=…`.
+`gh api repos/<owner>/<repo>/pulls -f head=<branch> -f base=<base branch> -f title=… -f body=…`.
 
 ## Toolchains and packages
 

@@ -126,7 +126,10 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
                 Ok(f) => (f.cfg.workspace.dir, None),
                 Err(e) => (None, Some(format!("{e:#}"))),
             };
-            let repos = crate::repos::listed(&ctx, &name).unwrap_or_default();
+            let (repos, error) = match crate::repos::listed(&ctx, &name) {
+                Ok(r) => (r, error),
+                Err(e) => (Vec::new(), error.or(Some(format!("{e:#}")))),
+            };
             envs.push(EnvRow {
                 name,
                 dev,

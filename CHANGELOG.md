@@ -19,9 +19,9 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   are fetched and read through the gate, never pushed to or written; a GitHub App mints a
   read-only token for them.
 - **A GitHub credential per owner:** `[[credentials.github]]`, once per account. Each repo's
-  requests get the credential that lists it, GraphQL the first one's. A single
-  `[credentials.github]` stays as it is; a token that reaches several owners is one credential
-  listing all their repos, and `up` offers a reference the config has before asking for another.
+  requests get the credential that lists it, GraphQL the first one's; `[credentials.github]` is
+  the form for one. A token that reaches several owners is one credential listing all their
+  repos, and `up` offers a reference the config has before asking for another.
 - **Git on any forge:** `[[credentials.git]]` gives a host (GitLab, Forgejo, Gitea, Bitbucket,
   self-hosted) a token the gate adds to the listed repos' git requests as basic auth, with the
   push guard, `read_repos`, a port, `private = true` for a private network and `ca` for an
@@ -48,7 +48,7 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   and Copilot CLI have one.
 - **Presets from cloned repos:** after `up` clones repos, it offers the presets and default
   toolchains their files suggest, as `luoto init` does for a folder; it adds them only on your
-  yes. `luoto init` again on an env no longer adds them without a terminal.
+  yes, as `luoto init` on a running env does.
 - **`sandbox request --preset npm`** (MCP: `preset` in `sandbox_request_access`) asks for one of
   luoto's presets; approving adds it to the env and opens its hosts at once.
 - **`luoto agent rm`** drops an agent from an env's config and its hosts from the policy.
@@ -56,7 +56,7 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
 - **Agent model and effort:** `[agents.claude] model = "opus"`, `effort = "medium"` in an
   env's config, its `luoto.toml`, or `config.toml` for every env that has the agent; `up`
   writes them into the agent's settings as the default a session can change. `agents = [...]`
-  keeps working.
+  is the short form.
 - **Claude Code starts at its prompt:** luoto answers its first-start questions (onboarding,
   trusting `/workspace`) in the env, as the sandbox is the boundary; an agent profile lists
   such answers under `[[first_run]]`. The text style stays `theme` in your own settings.
@@ -64,7 +64,7 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   `luoto ui`, where a changed `luoto.toml` could leave it waiting.
 - **Copies follow `.gitignore`:** from a git repository (the folder, a repo, or one inside),
   `up` copies what git doesn't ignore plus `.git`, so ignored secrets (`.env`, `*.tfvars`, state
-  files, `.kube/`) stay on your machine. Other folders copy as before, now without
+  files, `.kube/`) stay on your machine. Other folders copy all but heavy directories and
   `.terraform`, which holds the host's provider binaries.
 
 ## 0.2.2 (2026-11-06)

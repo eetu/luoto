@@ -13,8 +13,9 @@
     const env = app.env;
     if (!env || !req) return;
     if (req.install) {
-      const done = await act("installing…", () => api.approve(env, id), `approved #${id}`);
-      if (done && "installed" in done) say(done.installed);
+      const label = req.install.kind === "preset" ? "approving…" : "installing…";
+      const done = await act(label, () => api.approve(env, id));
+      if (done && "installed" in done) say(`#${id} ${done.installed}`);
       if (done) app.subject = { kind: "env" };
       return;
     }
@@ -62,8 +63,9 @@
       <p class="reason">{req.reason}</p>
     </div>
     <p class="muted">
-      Approved, it is installed now and kept in the env's config, so a recreated container gets it
-      too.
+      {req.install.kind === "preset"
+        ? "Approved, its hosts open now and the env's config keeps the preset."
+        : "Approved, it is installed now and kept in the env's config, so a recreated container gets it too."}
     </p>
     {#if req.status === "pending"}
       <div class="actions">
