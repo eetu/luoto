@@ -236,11 +236,31 @@ pub fn approve_install(ctx: &Ctx, name: &str, req: &AccessRequest) -> Result<Str
     };
     install.check().map_err(anyhow::Error::msg)?;
     let mut f = EnvFile::load(&ctx.paths, name)?;
+    let what = crate::text::display(&install.describe());
+    if let Install::Preset { name: preset } = install {
+        let mut presets = f.cfg.presets.clone();
+        crate::config::extend_unique(&mut presets, [preset.clone()]);
+        f.set_list("presets", &presets)?;
+        let note = match sync::reapply(ctx, name) {
+            Ok(_) => "its hosts are open; the env's config keeps it".to_string(),
+            Err(e) => format!("added to the env's config; applies on `luoto up` ({e:#})"),
+        };
+        ctl::gate::<AccessRequest>(
+            &ctx.rt,
+            name,
+            &GateCtl::Resolve {
+                id: req.id,
+                approved: true,
+                note: Some(note.clone()),
+            },
+        )?;
+        return Ok(format!("approved: {what}: {note}"));
+    }
     match install {
         Install::Package { name } => f.add_system_package(name)?,
         Install::Tool { name, version } => f.set_in_table("tools", name, version)?,
+        Install::Preset { .. } => {}
     }
-    let what = crate::text::display(&install.describe());
     let result = (|| {
         let p = crate::env::plan(ctx, name)?;
         let home = p

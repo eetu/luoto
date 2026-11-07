@@ -213,9 +213,11 @@ export function startSync(): () => void {
   };
 }
 
-/** What an install request asks for: `postgresql-client`, `node 24 (mise)`. */
+/** What an install request asks for: `postgresql-client`, `node 24 (mise)`, `the npm preset`. */
 export function installLabel(i: Install): string {
-  return i.kind === "package" ? i.name : `${i.name} ${i.version} (mise)`;
+  if (i.kind === "package") return i.name;
+  if (i.kind === "preset") return `the ${i.name} preset`;
+  return `${i.name} ${i.version} (mise)`;
 }
 
 export function ago(ts?: string | null): string {

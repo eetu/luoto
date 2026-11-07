@@ -47,7 +47,7 @@ enum Cmd {
     /// toolchain in the env for good. Only the user can approve.
     Request {
         /// Host (`docs.rs`) or URL (`https://docs.rs/serde`).
-        #[arg(required_unless_present_any = ["package", "tool"])]
+        #[arg(required_unless_present_any = ["package", "tool", "preset"])]
         target: Option<String>,
         /// A system package (apt, apk or dnf) the env should have; approved, it is installed
         /// now and again whenever the container is recreated.
@@ -57,6 +57,10 @@ enum Cmd {
         /// kept in the env's config like a package.
         #[arg(long, value_name = "TOOL@VERSION", conflicts_with_all = ["target", "write", "paths"])]
         tool: Option<String>,
+        /// One of luoto's presets (`npm`, `pypi`, …) for a registry or service, instead of its
+        /// hosts one by one.
+        #[arg(long, conflicts_with_all = ["target", "package", "tool", "write", "paths"])]
+        preset: Option<String>,
         /// Ask for write access (any method) instead of read-only.
         #[arg(long)]
         write: bool,
@@ -113,6 +117,7 @@ fn main() -> ExitCode {
             target,
             package,
             tool,
+            preset,
             write,
             paths,
             reason,
@@ -122,6 +127,7 @@ fn main() -> ExitCode {
             target.as_deref(),
             package,
             tool.as_deref(),
+            preset,
             write,
             paths,
             &reason,
@@ -263,6 +269,7 @@ fn approve_hint(env: &str, id: u64) -> String {
 /// What a request asks for, for people.
 fn what(r: &AccessRequest) -> String {
     match &r.install {
+        Some(i @ Install::Preset { .. }) => i.describe(),
         Some(i) => format!("install {}", i.describe()),
         None => format!(
             "{} access to {}",
@@ -375,7 +382,7 @@ pub fn describe(o: &Outcome) -> String {
                 r.note
                     .as_ref()
                     .map(|n| format!(" — {n}"))
-                    .unwrap_or_else(|| " is installed.".into())
+                    .unwrap_or_else(|| " is in the env now.".into())
             ),
             None => format!("Request #{} approved: {} is reachable now.", r.id, r.host),
         },
@@ -398,20 +405,23 @@ pub fn describe(o: &Outcome) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn request(
     target: Option<&str>,
     package: Option<String>,
     tool: Option<&str>,
+    preset: Option<String>,
     write: bool,
     paths: Vec<String>,
     reason: &str,
     wait: Option<Duration>,
 ) -> Result<ExitCode> {
-    let o = match (target, package, tool) {
-        (_, Some(name), _) => request_install(Install::Package { name }, reason, wait)?,
-        (_, _, Some(t)) => request_install(parse_tool(t), reason, wait)?,
-        (Some(t), None, None) => request_access(t, write, paths, reason, wait)?,
-        (None, None, None) => anyhow::bail!("name a host, --package or --tool"),
+    let o = match (target, package, tool, preset) {
+        (_, Some(name), _, _) => request_install(Install::Package { name }, reason, wait)?,
+        (_, _, Some(t), _) => request_install(parse_tool(t), reason, wait)?,
+        (_, _, _, Some(name)) => request_install(Install::Preset { name }, reason, wait)?,
+        (Some(t), None, None, None) => request_access(t, write, paths, reason, wait)?,
+        (None, None, None, None) => anyhow::bail!("name a host, --preset, --package or --tool"),
     };
     println!("{}", describe(&o));
     Ok(match (o.request.status, o.waited) {

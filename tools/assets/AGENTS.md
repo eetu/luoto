@@ -63,6 +63,9 @@ repository of a second GitHub owner, open the pull request over REST:
 
        sandbox request <host> [--write] --reason "<why>" --wait
 
+   A registry or service luoto has a preset for (npm, pypi, crates, go, maven, …) is one
+   request for all its hosts: `sandbox request --preset npm --reason "<why>" --wait`.
+
 3. Tell the user what you requested and why. They approve it on the host with
    `luoto approve -e <env> <id>` or in `luoto ui`, or grant it directly, optionally time-boxed:
    `luoto allow -e <env> <host> [--write] [--ttl 1h]`.

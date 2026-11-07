@@ -42,6 +42,8 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
 - **Agent credentials on the command line:** `--credential oauth_token=op://…` on
   `luoto agent add` and `luoto init` writes the credential without the prompt; the reference
   must resolve.
+- **`sandbox request --preset npm`** (MCP: `preset` in `sandbox_request_access`) asks for one of
+  luoto's presets; approving adds it to the env and opens its hosts at once.
 - **`luoto agent rm`** drops an agent from an env's config and its hosts from the policy.
 - **`luoto requests --watch`** prints each new request as it comes, with the terminal's bell.
 - **Agent model and effort:** `[agents.claude] model = "opus"`, `effort = "medium"` in an

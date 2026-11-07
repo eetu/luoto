@@ -92,8 +92,9 @@ pub enum RequestStatus {
     Rejected,
 }
 
-/// Software the sandbox asks to have in the env. Approved, it joins the env's config (`[deps]
-/// system`, `[tools]`), so it is installed again whenever the container is recreated.
+/// What the sandbox asks to have in the env besides a host: software, or a preset's access.
+/// Approved, it joins the env's config (`[deps] system`, `[tools]`, `presets`), so it holds
+/// for every container the env gets.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Install {
@@ -101,6 +102,8 @@ pub enum Install {
     Package { name: String },
     /// A toolchain mise installs: `node` and `24`, `cargo:ripgrep` and `latest`.
     Tool { name: String, version: String },
+    /// One of luoto's presets (`npm`, `pypi`, …): the hosts a registry or service needs.
+    Preset { name: String },
 }
 
 impl Install {
@@ -123,6 +126,10 @@ impl Install {
             Install::Tool { version, .. } if !plain(version, b"+._-", 50) => {
                 Err(format!("`{version}` is not a version"))
             }
+            Install::Preset { name } if crate::presets::get(name).is_none() => Err(format!(
+                "`{name}` is not a preset (known: {})",
+                crate::presets::names().collect::<Vec<_>>().join(", ")
+            )),
             _ => Ok(()),
         }
     }
@@ -132,6 +139,7 @@ impl Install {
         match self {
             Install::Package { name } => format!("package {name}"),
             Install::Tool { name, version } => format!("{name} {version} (mise)"),
+            Install::Preset { name } => format!("the {name} preset"),
         }
     }
 }

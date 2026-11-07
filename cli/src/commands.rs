@@ -386,6 +386,10 @@ pub fn revoke(name: &str, rule: &str) -> Result<ExitCode> {
 /// What the sandbox asked for and why, escaped: the sandbox wrote all of it.
 fn fmt_request(r: &AccessRequest) -> String {
     let what = match &r.install {
+        Some(i @ luoto_shared::api::Install::Preset { .. }) => format!(
+            "{}, kept in the env's config",
+            crate::text::display(&i.describe())
+        ),
         Some(i) => format!(
             "install {}, kept in the env's config",
             crate::text::display(&i.describe())

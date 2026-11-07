@@ -48,17 +48,18 @@ fn tools() -> Value {
         },
         {
             "name": "sandbox_request_access",
-            "description": "Ask the user to allow egress to a host. Only the user can approve, on the host. Use the narrowest access: read unless writes are required; one exact host.",
+            "description": "Ask the user to allow egress to a host, or to add one of luoto's presets (a registry's hosts, e.g. npm). Only the user can approve, on the host. Use the narrowest access: read unless writes are required; one exact host.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "host": {"type": "string", "description": "Exact host, e.g. docs.rs"},
+                    "preset": {"type": "string", "description": "Instead of a host, one of luoto's presets for a registry or service: npm, pypi, crates, go, maven, …"},
                     "access": {"type": "string", "enum": ["read", "write"], "default": "read"},
                     "paths": {"type": "array", "items": {"type": "string"}, "description": "Optional path globs, e.g. /serde/**"},
                     "reason": {"type": "string", "description": "Why this is needed, shown to the user"},
                     "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 900, "default": 0, "description": "Wait this long for the user's decision"}
                 },
-                "required": ["host", "reason"],
+                "required": ["reason"],
                 "additionalProperties": false
             }
         },
@@ -107,6 +108,17 @@ fn call(name: &str, args: &Value) -> Value {
         "sandbox_request_access" => {
             let host = args["host"].as_str().unwrap_or_default();
             let reason = args["reason"].as_str().unwrap_or_default();
+            if let Some(name) = args["preset"].as_str() {
+                let wait = args["wait_seconds"].as_u64().unwrap_or(0).min(900);
+                let wait = (wait > 0).then(|| Duration::from_secs(wait));
+                let preset = luoto_shared::api::Install::Preset {
+                    name: name.to_string(),
+                };
+                return Ok(match request_install(preset, reason, wait) {
+                    Ok(o) => text(describe(&o), false),
+                    Err(e) => text(format!("request refused: {e:#}"), true),
+                });
+            }
             let write = args["access"].as_str() == Some("write");
             let paths = args["paths"]
                 .as_array()

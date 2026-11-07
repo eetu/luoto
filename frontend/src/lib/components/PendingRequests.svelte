@@ -14,7 +14,10 @@
       >
         <ShieldQuestion size={16} />
         {#if r.install}
-          <span>install <b>{installLabel(r.install)}</b> requested from inside the sandbox</span>
+          <span
+            >{r.install.kind === "preset" ? "" : "install "}<b>{installLabel(r.install)}</b> requested
+            from inside the sandbox</span
+          >
         {:else}
           <span><b>{r.access}</b> access to <b>{r.host}</b> requested from inside the sandbox</span>
         {/if}

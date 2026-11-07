@@ -48,7 +48,9 @@
       <dd>
         {req.install.kind === "package"
           ? "system package (apt, apk or dnf)"
-          : "toolchain installed by mise"}
+          : req.install.kind === "preset"
+            ? "preset: a registry's or service's hosts"
+            : "toolchain installed by mise"}
       </dd>
       <dt>filed</dt>
       <dd>{ago(req.created)}</dd>
@@ -66,7 +68,7 @@
     {#if req.status === "pending"}
       <div class="actions">
         <button class="btn primary" onclick={() => void approve(false)} disabled={!!app.busy}
-          >approve and install</button
+          >{req.install.kind === "preset" ? "approve" : "approve and install"}</button
         >
         <button class="btn" onclick={reject} disabled={!!app.busy}>reject</button>
       </div>

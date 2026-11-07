@@ -202,6 +202,16 @@ mod tests {
             version: "24".into(),
         };
         assert!(r.create(ask(tool)).is_ok());
+        assert!(
+            r.create(ask(Install::Preset { name: "npm".into() }))
+                .is_ok()
+        );
+        assert!(
+            r.create(ask(Install::Preset {
+                name: "nope".into()
+            }))
+            .is_err()
+        );
         for bad in [
             Install::Package {
                 name: "-oDebug::x".into(),

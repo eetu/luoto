@@ -40,8 +40,8 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   data set) and hands back its result as a file or on stdout, then stops; for scheduled or
   triggered jobs. Pull requests and merges stay behind the gate's write rules.
 - **More commands:** `fork` (copy an env), `push` (a reviewed copy-in), `reset-home`.
-- **Notifications** for access requests (UI and OS); `sandbox request` for presets and ports;
-  `approve` that narrows a request.
+- **Notifications** for access requests (UI and OS); `sandbox request` for ports; `approve`
+  that narrows a request.
 - **Editing envs in the UI:** presets, tools, `[deps]`, agents, ports, credentials and repos
   (the UI shows them; changes go through `luoto edit`).
 - **Azure DevOps beyond git:** pull requests through its REST API (`az repos pr`), with writes

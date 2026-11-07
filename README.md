@@ -172,8 +172,8 @@ Commands act on the env of the current folder; `-e NAME` picks another (`luoto s
 | to check isolation                                                                                   | `luoto doctor`                                                                                                                     |
 
 Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host> --reason …`
-asks you for access (`--package <name>` or `--tool <tool>@<version>` for software to keep);
-only you can approve, on the host.
+asks you for access (`--preset npm` for a registry's hosts at once; `--package <name>` or
+`--tool <tool>@<version>` for software to keep); only you can approve, on the host.
 
 ## Agents
 
