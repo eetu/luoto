@@ -494,8 +494,9 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     Ok(())
 }
 
-fn gate_spec(ctx: &Ctx, env: &str, cfg: &EnvConfig, a: &names::Addrs) -> RunSpec {
-    RunSpec {
+fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
+    let cfg = &p.cfg;
+    let mut spec = RunSpec {
         name: names::gate(env),
         image: ctx.image("gate"),
         hostname: Some(format!("{env}-gate")),
@@ -544,7 +545,15 @@ fn gate_spec(ctx: &Ctx, env: &str, cfg: &EnvConfig, a: &names::Addrs) -> RunSpec
         restart: Some("on-failure".into()),
         labels: labels(env, "gate"),
         ..Default::default()
+    };
+    // Read at start: a changed CA changes the spec, which recreates the gate.
+    if !p.compiled.upstream_ca.is_empty() {
+        spec.env.push((
+            "LUOTO_UPSTREAM_CA_PEM".into(),
+            p.compiled.upstream_ca.clone(),
+        ));
     }
+    spec
 }
 
 /// Start the gate from its image `image_id` (recreated when its spec changed), give it the
@@ -559,7 +568,7 @@ fn start_gate(
 ) -> Result<Launch> {
     let rt = &ctx.rt;
     let a = names::addrs(state.octet);
-    let launch = start_or_create(ctx, &gate_spec(ctx, env, &p.cfg, &a), image_id, true)?;
+    let launch = start_or_create(ctx, &gate_spec(ctx, env, p, &a), image_id, true)?;
     let gs = wait_until(Duration::from_secs(20), || ctl::gate_status(rt, env).ok()).with_context(
         || {
             format!(

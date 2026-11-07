@@ -1,8 +1,8 @@
 //! Guards that read a request body: forge write guard-rails (the ref updates at the start of
-//! a git push to GitHub or Azure DevOps, GitHub GraphQL documents that mutate outside an
-//! allowlist) and model API requests that ask the provider to reach the network. Server-side
-//! rulesets remain the real enforcement for forges; these keep a compromised sandbox from the
-//! obvious moves.
+//! a git push to GitHub, Azure DevOps or any `[[credentials.git]]` host, GitHub GraphQL
+//! documents that mutate outside an allowlist) and model API requests that ask the provider to
+//! reach the network. Server-side rulesets remain the real enforcement for forges; these keep
+//! a compromised sandbox from the obvious moves.
 
 use bytes::BytesMut;
 use graphql_parser::query::{Definition, OperationDefinition, Selection};
@@ -10,7 +10,7 @@ use http::HeaderMap;
 use http::header::CONTENT_ENCODING;
 use http_body_util::BodyExt;
 use luoto_shared::forges;
-use luoto_shared::policy::{AzureGuard, BodyDeny, GithubGuard, JsonBody, Policy};
+use luoto_shared::policy::{AzureGuard, BodyDeny, GitGuard, GithubGuard, JsonBody, Policy};
 
 use crate::body::{Body, collect_limited, full, prefixed};
 
@@ -57,7 +57,16 @@ pub async fn check(
                 PushRules::from(g),
             ))
         } else {
-            None
+            policy
+                .git
+                .iter()
+                .find(|g| g.host.eq_ignore_ascii_case(host))
+                .map(|g| {
+                    (
+                        git_repo_of(path).is_some_and(|r| g.repos.contains(&r)),
+                        PushRules::from(g),
+                    )
+                })
         };
         if let Some((granted, rules)) = push {
             return guard_push(headers, body, granted, rules).await;
@@ -161,6 +170,15 @@ impl<'a> From<&'a GithubGuard> for PushRules<'a> {
     }
 }
 
+impl<'a> From<&'a GitGuard> for PushRules<'a> {
+    fn from(g: &'a GitGuard) -> Self {
+        PushRules {
+            protected_branches: &g.protected_branches,
+            allow_tags: g.allow_tags,
+        }
+    }
+}
+
 impl<'a> From<&'a AzureGuard> for PushRules<'a> {
     fn from(g: &'a AzureGuard) -> Self {
         PushRules {
@@ -197,6 +215,19 @@ fn repo_of(path: &str) -> Option<String> {
         owner.to_ascii_lowercase(),
         repo.to_ascii_lowercase()
     ))
+}
+
+/// The repository path (lowercase, no `.git`) of a push on any git host: what comes before
+/// `/git-receive-pack`, as deep as the forge nests groups (`group/sub/repo`).
+fn git_repo_of(path: &str) -> Option<String> {
+    let lower = path.trim_start_matches('/').to_ascii_lowercase();
+    let repo = lower.strip_suffix("/git-receive-pack")?;
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    let plain = !repo.is_empty()
+        && !repo
+            .split('/')
+            .any(|s| s.is_empty() || s == "." || s == "..");
+    plain.then(|| repo.to_string())
 }
 
 /// `org/project/repo` (lowercase, no `.git`) from an Azure DevOps smart-HTTP path:
@@ -343,6 +374,18 @@ fn check_graphql(guard: &GithubGuard, body: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn any_git_host_names_its_repo_before_receive_pack() {
+        assert_eq!(
+            git_repo_of("/Group/Sub/Repo.git/git-receive-pack").as_deref(),
+            Some("group/sub/repo")
+        );
+        assert_eq!(git_repo_of("/o/r/git-receive-pack").as_deref(), Some("o/r"));
+        assert_eq!(git_repo_of("/o/../r/git-receive-pack"), None);
+        assert_eq!(git_repo_of("/git-receive-pack"), None);
+        assert_eq!(git_repo_of("/o/r/info/refs"), None);
+    }
 
     #[test]
     fn azure_paths_name_organization_project_and_repo() {

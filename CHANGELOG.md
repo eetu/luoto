@@ -22,6 +22,10 @@ Related repositories in one env, git on any forge, and an `up` that sets up what
   requests get the credential that lists it, GraphQL the first one's. A single
   `[credentials.github]` stays as it is; a token that reaches several owners is one credential
   listing all their repos, and `up` offers a reference the config has before asking for another.
+- **Git on any forge:** `[[credentials.git]]` gives a host (GitLab, Forgejo, Gitea, Bitbucket,
+  self-hosted) a token the gate adds to the listed repos' git requests as basic auth, with the
+  push guard, `read_repos`, a port, `private = true` for a private network and `ca` for an
+  internal CA. Without a token it lets public repos be fetched. `up` asks for one per host.
 - **`up` reconciles agents and credentials:** it installs the agents an env's config or its
   `luoto.toml` lists when the env lacks them, so a team's `agents = ["claude"]` reaches
   everyone; `init --agent`, `agent add` and `agent run` list the agent and leave the rest to

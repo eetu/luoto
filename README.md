@@ -233,6 +233,14 @@ repos = ["myorg/Project/repo"]   # `org/project/repo`, or the clone URL
 # read_repos = ["myorg/Project/lib"]   # fetched only
 protected_branches = ["main"]
 
+[[credentials.git]]           # git over HTTPS on any other host: GitLab, Forgejo, Gitea, …
+host = "gitlab.example.com"   # `host:port` for another port
+token = "op://Dev/gitlab/token"
+username = "oauth2"           # sent with the token: GitLab takes oauth2; Forgejo, the token's owner
+repos = ["group/api"]         # pushes, under the same guard; `read_repos` to fetch only
+# private = true              # a self-hosted one on a private network
+# ca = "~/certs/corp-ca.pem"  # the internal CA its certificate is signed by
+
 [credentials.ssh]             # git over SSH: the vault keeps the key and signs logins
 key = "op://Private/github-ssh/private key?ssh-format=openssh"
 hosts = ["github.com"]        # GitHub's and Azure DevOps' host keys are pinned
@@ -280,6 +288,11 @@ An Azure DevOps credential lets the env fetch and push its repos over HTTPS. Rem
 working as they are: SSH ones (`git@ssh.dev.azure.com:v3/…`, or a host alias from your
 `~/.ssh/config` that the folder's remotes use) and `*.visualstudio.com` ones are rewritten to
 `https://dev.azure.com` in the env. Pull requests are opened in Azure DevOps itself.
+
+A `[[credentials.git]]` works with any forge, as git speaks the same protocol to all: the gate
+adds the token to the listed repos' git requests only and guards pushes as on GitHub. It
+covers git, not the forge's API (merge requests), which a `[credentials.custom]` can reach.
+Without a token it lists public repos to fetch. Its host's SSH remotes go over HTTPS with it.
 
 An SSH credential lets git use SSH remotes as they are, to `hosts` on port 22 only. GitHub SSH
 remotes go to HTTPS when github.com isn't in `hosts`, as do Azure DevOps ones with an Azure

@@ -237,6 +237,17 @@ pub struct AzureGuard {
     pub allow_tags: bool,
 }
 
+/// Push guard-rails on any other git host (`[[credentials.git]]`): the gate reads git's own
+/// push protocol, so they hold whatever the forge.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct GitGuard {
+    pub host: String,
+    /// Repository paths as their URLs write them (`group/sub/repo`), lowercase, no `.git`.
+    pub repos: Vec<String>,
+    pub protected_branches: Vec<String>,
+    pub allow_tags: bool,
+}
+
 /// Name the gate answers itself in DNS (the gate, env services).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct InternalName {
@@ -259,6 +270,8 @@ pub struct Policy {
     pub github: Option<GithubGuard>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure_devops: Option<AzureGuard>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git: Vec<GitGuard>,
     #[serde(default)]
     pub internal_names: Vec<InternalName>,
 }
@@ -467,6 +480,9 @@ impl Policy {
         }
         if self.azure_devops.is_some() {
             guards.push((forges::AZURE_DEVOPS, "Azure DevOps push guard"));
+        }
+        for g in &self.git {
+            guards.push((g.host.as_str(), "git push guard"));
         }
         let skipped = if let Some(i) = self
             .injections

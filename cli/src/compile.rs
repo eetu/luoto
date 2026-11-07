@@ -11,14 +11,15 @@ use luoto_shared::creds::{
     default_github_api,
 };
 use luoto_shared::policy::{
-    Access, AccessLevel, AzureGuard, BodyDeny, CompiledRule, DenyRule, GithubGuard, InternalName,
-    Mode, Policy, Rule, RuleOrigin, rule_error,
+    Access, AccessLevel, AzureGuard, BodyDeny, CompiledRule, DenyRule, GitGuard, GithubGuard,
+    InternalName, Mode, Policy, Rule, RuleOrigin, rule_error,
 };
 use luoto_shared::{forges, presets, profiles};
 
 use crate::azure;
 use crate::config::{
-    AzureDevopsCred, CustomCred, EnvConfig, GithubCred, ProviderValue, SshCred, extend_unique,
+    AzureDevopsCred, CustomCred, EnvConfig, GitCred, GithubCred, ProviderValue, SshCred,
+    extend_unique,
 };
 
 pub struct Compiled {
@@ -33,6 +34,9 @@ pub struct Compiled {
     pub git_config: String,
     /// Pinned host keys of the hosts git over SSH may log in to (`/run/luoto/ssh_known_hosts`).
     pub known_hosts: String,
+    /// CA certificates (PEM) the gate trusts upstream besides the public roots: those of
+    /// self-hosted git hosts.
+    pub upstream_ca: String,
     pub warnings: Vec<String>,
 }
 
@@ -145,6 +149,15 @@ pub fn compile(
         aliases,
         over_ssh(azure::SSH_HOST),
     ));
+    let (git, upstream_ca) = compile_git(&mut b, &cfg.credentials.git)?;
+    for c in &cfg.credentials.git {
+        let host = c.host.split(':').next().unwrap_or_default();
+        if !over_ssh(host) {
+            for from in [format!("git@{host}:"), format!("ssh://git@{host}/")] {
+                b.rewrites.push((format!("https://{}/", c.host), from));
+            }
+        }
+    }
 
     for (i, r) in cfg.allow.iter().enumerate() {
         if let Some(e) = rule_error(r, RuleOrigin::Host) {
@@ -172,6 +185,7 @@ pub fn compile(
         injections: b.injections,
         github,
         azure_devops,
+        git,
         internal_names: gate_ip
             .map(|ip| InternalName {
                 name: luoto_shared::GATE_HOST.into(),
@@ -198,6 +212,7 @@ pub fn compile(
         dev_env: b.dev_env,
         git_config: git_config(&b.rewrites),
         known_hosts,
+        upstream_ca,
         warnings: b.warnings,
     })
 }
@@ -799,12 +814,150 @@ fn compile_github_one(
     Ok(repos.iter().map(|(o, r)| format!("{o}/{r}")).collect())
 }
 
-    Ok(GithubGuard {
-        repos: repos.iter().map(|(o, r)| format!("{o}/{r}")).collect(),
-        protected_branches: gh.protected_branches.clone(),
-        graphql_mutations: gh.graphql_mutations.clone(),
-        allow_tags: gh.allow_tags,
-    })
+/// `[[credentials.git]]`, git over HTTPS on any other host: its token as basic auth on the
+/// listed repos' smart-HTTP paths, those paths allowed (fetches; pushes for `repos`, under
+/// the push guard), private addresses for a host on a private network. The guards, and the
+/// hosts' CA certificates for the gate's upstream TLS.
+fn compile_git(b: &mut Builder, creds: &[GitCred]) -> Result<(Vec<GitGuard>, String)> {
+    let mut guards = Vec::new();
+    let mut pem = String::new();
+    let mut hosts = BTreeSet::new();
+    for (i, c) in creds.iter().enumerate() {
+        let (host, port) =
+            match c.host.rsplit_once(':') {
+                Some((h, p)) => (
+                    h.to_ascii_lowercase(),
+                    Some(p.parse::<u16>().with_context(|| {
+                        format!("credentials.git: `{}` has no valid port", c.host)
+                    })?),
+                ),
+                None => (c.host.to_ascii_lowercase(), None),
+            };
+        let plain = !host.is_empty()
+            && !host.starts_with(['-', '.'])
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-.".contains(&b));
+        if !plain {
+            bail!("credentials.git: `{}` is not a host name", c.host);
+        }
+        if host == forges::GITHUB || host == forges::AZURE_DEVOPS {
+            bail!(
+                "credentials.git: {host} has a credential of its own, [credentials.{}]",
+                if host == forges::GITHUB {
+                    "github"
+                } else {
+                    "azure_devops"
+                }
+            );
+        }
+        if !hosts.insert(host.clone()) {
+            bail!("credentials.git: {host} is listed twice; one credential per host");
+        }
+        if c.repos.is_empty() && c.read_repos.is_empty() {
+            bail!(
+                "credentials.git ({host}): list the repos the env may push to (`repos`) or only \
+                 fetch (`read_repos`)"
+            );
+        }
+        if !c.repos.is_empty() && c.token.is_none() {
+            bail!("credentials.git ({host}): pushing to `repos` takes a `token`");
+        }
+        let parse = |list: &[String]| -> Result<Vec<String>> {
+            list.iter()
+                .map(|r| {
+                    let r = r.trim_matches('/');
+                    let r = r.strip_suffix(".git").unwrap_or(r);
+                    let ok = !r.is_empty()
+                        && r.split('/').all(|s| {
+                            !s.is_empty()
+                                && s != "."
+                                && s != ".."
+                                && s.bytes()
+                                    .all(|b| b.is_ascii_alphanumeric() || b"._~%+-".contains(&b))
+                        });
+                    if !ok {
+                        bail!("credentials.git ({host}): `{r}` is not a repository path");
+                    }
+                    Ok(r.to_string())
+                })
+                .collect()
+        };
+        let (repos, read_repos) = (parse(&c.repos)?, parse(&c.read_repos)?);
+        let git_paths = |r: &str, write: bool| {
+            let mut out = Vec::new();
+            for base in [format!("/{r}"), format!("/{r}.git")] {
+                out.push(format!("{base}/info/refs"));
+                out.push(format!("{base}/git-upload-pack"));
+                if write {
+                    out.push(format!("{base}/git-receive-pack"));
+                }
+                out.push(format!("{base}/info/lfs/**"));
+            }
+            out
+        };
+        let paths: Vec<String> = repos
+            .iter()
+            .flat_map(|r| git_paths(r, true))
+            .chain(read_repos.iter().flat_map(|r| git_paths(r, false)))
+            .collect();
+        let id = format!("git-{}", i + 1);
+        if let Some(token) = &c.token {
+            b.bindings.insert(
+                id.clone(),
+                BindingSpec::Static {
+                    secret_ref: token.clone(),
+                },
+            );
+            // Forges read repository paths in any case.
+            b.injections.push(Injection {
+                binding: id.clone(),
+                host: host.clone(),
+                paths: paths.clone(),
+                place: Placement::Basic {
+                    username: c.username.clone(),
+                },
+                ignore_case: true,
+            });
+        }
+        b.rule(
+            id,
+            "git",
+            Rule {
+                host: host.clone(),
+                port,
+                access: Access::Methods(vec!["GET".into(), "POST".into()]),
+                paths,
+                ignore_case: true,
+                allow_private: c.private,
+                ..Default::default()
+            },
+        );
+        if !repos.is_empty() {
+            guards.push(GitGuard {
+                host: host.clone(),
+                repos: repos.iter().map(|r| r.to_ascii_lowercase()).collect(),
+                protected_branches: c.protected_branches.clone(),
+                allow_tags: c.allow_tags,
+            });
+        }
+        if let Some(ca) = &c.ca {
+            let path = crate::workspace::expand(ca);
+            let text = std::fs::read_to_string(&path).with_context(|| {
+                format!("credentials.git ({host}): read its CA {}", path.display())
+            })?;
+            if !text.contains("-----BEGIN CERTIFICATE-----") {
+                bail!(
+                    "credentials.git ({host}): {} holds no PEM certificate",
+                    path.display()
+                );
+            }
+            pem.push_str(text.trim_end());
+            pem.push('\n');
+        }
+        b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+    }
+    Ok((guards, pem))
 }
 
 /// Azure DevOps: the PAT added as basic auth on the repos' git paths, those paths allowed
@@ -1261,6 +1414,78 @@ protected_branches = ["prod"]
             "[[credentials.github]]\ntoken = \"env:A\"\nrepos = [\"a/x\"]\n[[credentials.github]]\ntoken = \"env:B\"\nread_repos = [\"A/X\"]\n",
         );
         assert!(compile("t", &twice, GATE, &[]).is_err());
+    }
+
+    #[test]
+    fn any_git_host_gets_its_token_on_its_repos_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca.pem");
+        std::fs::write(
+            &ca,
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let text = format!(
+            r#"
+[[credentials.git]]
+host = "forge.internal:3000"
+token = "op://v/forge/token"
+username = "dev"
+repos = ["Infra/Platform/api"]
+read_repos = ["infra/lib"]
+private = true
+ca = "{}"
+"#,
+            ca.display()
+        );
+        let c = compile("t", &cfg(&text), GATE, &[]).unwrap();
+        let p = &c.policy;
+        let allowed = |method, path| {
+            matches!(
+                p.decide(
+                    &RequestInfo {
+                        host: "forge.internal",
+                        port: 3000,
+                        method,
+                        path,
+                        websocket: false,
+                        content_length: Some(10),
+                    },
+                    Utc::now(),
+                ),
+                Decision::Allow { .. }
+            )
+        };
+        assert!(allowed("POST", "/infra/platform/api.git/git-receive-pack"));
+        assert!(allowed("GET", "/infra/lib.git/info/refs"));
+        assert!(!allowed("POST", "/infra/lib.git/git-receive-pack"));
+        assert!(!allowed("GET", "/other/repo.git/info/refs"));
+        let inj = p.injections_for("forge.internal", "/Infra/Platform/api/info/refs");
+        assert!(matches!(&inj[0].place, Placement::Basic { username } if username == "dev"));
+        assert!(
+            p.injections_for("forge.internal", "/other/repo/info/refs")
+                .is_empty()
+        );
+        assert_eq!(p.git[0].repos, ["infra/platform/api"]);
+        assert!(c.upstream_ca.contains("BEGIN CERTIFICATE"));
+        assert!(c.git_config.contains("insteadOf = \"git@forge.internal:\""));
+        assert!(c.git_config.contains("https://forge.internal:3000/"));
+        assert!(
+            p.rules
+                .iter()
+                .any(|r| r.rule.allow_private && r.rule.port == Some(3000))
+        );
+        for bad in [
+            "[[credentials.git]]\nhost = \"github.com\"\ntoken = \"env:T\"\nrepos = [\"a/b\"]",
+            "[[credentials.git]]\nhost = \"x.example\"\nrepos = [\"a/b\"]",
+            "[[credentials.git]]\nhost = \"x.example\"\ntoken = \"env:T\"\nrepos = [\"a/../b\"]",
+        ] {
+            assert!(compile("t", &cfg(bad), GATE, &[]).is_err(), "{bad}");
+        }
+        // Public repos: fetched, no credential.
+        let public = cfg("[[credentials.git]]\nhost = \"codeberg.org\"\nread_repos = [\"o/r\"]");
+        let c = compile("t", &public, GATE, &[]).unwrap();
+        assert!(c.policy.injections.is_empty() && c.policy.git.is_empty());
     }
 
     #[test]

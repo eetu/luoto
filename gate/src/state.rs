@@ -162,9 +162,13 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
 fn upstream_tls(cfg: &Config) -> Result<ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut pems = Vec::new();
     if let Some(path) = &cfg.upstream_ca {
-        let pem = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        for cert in rustls_pki_types::pem::PemObject::pem_slice_iter(&pem) {
+        pems.push(std::fs::read(path).with_context(|| format!("read {}", path.display()))?);
+    }
+    pems.extend(cfg.upstream_ca_pem.iter().map(|p| p.as_bytes().to_vec()));
+    for pem in &pems {
+        for cert in rustls_pki_types::pem::PemObject::pem_slice_iter(pem) {
             let cert: rustls_pki_types::CertificateDer<'static> = cert?;
             roots.add(cert)?;
         }

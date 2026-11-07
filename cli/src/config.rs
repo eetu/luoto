@@ -209,10 +209,51 @@ pub struct AzureDevopsCred {
     /// `org/project/repo` (or a clone URL) the env may fetch and push.
     #[serde(default)]
     pub repos: Vec<String>,
+    /// Repos the env may only fetch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_repos: Vec<String>,
     #[serde(default = "default_protected")]
     pub protected_branches: Vec<String>,
     #[serde(default)]
     pub allow_tags: bool,
+}
+
+/// Git over HTTPS on any other host (GitLab, Forgejo, Gitea, Bitbucket, GitHub Enterprise
+/// Server): a token the gate adds to the listed repos' git requests as basic auth, and the
+/// push guard on them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct GitCred {
+    /// `git.example.com`, or `git.example.com:3000` for another port.
+    pub host: String,
+    /// Ref to the token; none for public repos it only fetches (`read_repos`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// The user name sent with the token (GitLab takes `oauth2`; Forgejo and Gitea, the
+    /// token's owner).
+    #[serde(default = "default_git_user")]
+    pub username: String,
+    /// Repository paths as their URLs write them (`group/sub/repo`) the env may fetch and push.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
+    /// Repository paths the env may only fetch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_repos: Vec<String>,
+    #[serde(default = "default_protected")]
+    pub protected_branches: Vec<String>,
+    #[serde(default)]
+    pub allow_tags: bool,
+    /// The host is on a private network (its addresses are private), as self-hosted ones are.
+    #[serde(default)]
+    pub private: bool,
+    /// A CA certificate (PEM file on this machine) the host's TLS certificate is signed by,
+    /// for a host with an internal CA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca: Option<String>,
+}
+
+fn default_git_user() -> String {
+    "oauth2".into()
 }
 
 /// A custom header credential for any API.
@@ -310,6 +351,9 @@ pub struct Credentials {
     pub azure_devops: Option<AzureDevopsCred>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<SshCred>,
+    /// `[[credentials.git]]`, one per host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git: Vec<GitCred>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub custom: BTreeMap<String, CustomCred>,
     /// Provider credentials (`anthropic`, `openai`, …): auth kind → secret ref, or
@@ -750,6 +794,57 @@ impl EnvFile {
                 self.path.display()
             ),
         };
+        push_unique(table, key, repos);
+        self.save()
+    }
+
+    /// Add repository paths to the `[[credentials.git]]` of `new.host`, or add `new` (with
+    /// them) when there is none. `read` puts them in `read_repos`.
+    pub fn add_git_repos(&mut self, new: &GitCred, repos: &[String], read: bool) -> Result<()> {
+        let key = if read { "read_repos" } else { "repos" };
+        let path = self.path.display().to_string();
+        let creds = self.credentials_table()?;
+        if creds.get("git").is_none() {
+            creds.insert(
+                "git",
+                toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()),
+            );
+        }
+        let list = creds
+            .get_mut("git")
+            .and_then(|i| i.as_array_of_tables_mut())
+            .with_context(|| {
+                format!("`credentials.git` in {path} is not [[credentials.git]] tables")
+            })?;
+        let found = list.iter().position(|t| {
+            t.get("host")
+                .and_then(|h| h.as_str())
+                .is_some_and(|h| h.eq_ignore_ascii_case(&new.host))
+        });
+        let at = match found {
+            Some(i) => i,
+            None => {
+                let mut t = toml_edit::Table::new();
+                t["host"] = toml_edit::value(new.host.as_str());
+                if let Some(token) = &new.token {
+                    t["token"] = toml_edit::value(token.as_str());
+                    t["username"] = toml_edit::value(new.username.as_str());
+                }
+                if new.private {
+                    t["private"] = toml_edit::value(true);
+                }
+                if let Some(ca) = &new.ca {
+                    t["ca"] = toml_edit::value(ca.as_str());
+                }
+                list.push(t);
+                list.len() - 1
+            }
+        };
+        let table = list.get_mut(at).context("credentials.git")?;
+        if found.is_some() && table.get("token").is_none() && new.token.is_some() {
+            table["token"] = toml_edit::value(new.token.as_deref().unwrap_or_default());
+            table["username"] = toml_edit::value(new.username.as_str());
+        }
         push_unique(table, key, repos);
         self.save()
     }
