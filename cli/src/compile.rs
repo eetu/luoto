@@ -1665,7 +1665,7 @@ username = "dev"
 repos = ["Infra/Platform/api"]
 read_repos = ["infra/lib"]
 private = true
-ca = "{}"
+ca = '{}'
 "#,
             ca.display()
         );
