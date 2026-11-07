@@ -165,7 +165,7 @@ pub fn pull(
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn up(name: &str, selftest: bool, recreate: bool) -> Result<ExitCode> {
+pub fn up(name: &str, selftest: bool, recreate: bool, quiet: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     if recreate {
         env::remove_dev(&ctx, name)?;
@@ -175,7 +175,7 @@ pub fn up(name: &str, selftest: bool, recreate: bool) -> Result<ExitCode> {
         name,
         &UpOptions {
             no_selftest: !selftest,
-            quiet: false,
+            quiet,
         },
     )?;
     Ok(ExitCode::SUCCESS)

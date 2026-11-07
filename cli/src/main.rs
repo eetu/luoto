@@ -91,6 +91,9 @@ enum Cmd {
         /// Recreate the dev container (the workspace and home volumes are kept).
         #[arg(long)]
         recreate: bool,
+        /// Leave out the summary of how to reach the env (`luoto run` starts it so).
+        #[arg(long, hide = true)]
+        quiet: bool,
     },
     /// Stop the env (volumes and config are kept).
     Down,
@@ -350,8 +353,9 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Up {
             no_selftest,
             recreate,
+            quiet,
         } => match env() {
-            Ok(name) => c::up(&name, !no_selftest, recreate),
+            Ok(name) => c::up(&name, !no_selftest, recreate, quiet),
             // A folder without an env: offer to set one up (init shows it and asks first).
             Err(_) if env_arg.is_none() && std::io::stdin().is_terminal() => {
                 println!("No env for this folder yet.\n");

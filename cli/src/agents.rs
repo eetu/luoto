@@ -492,7 +492,7 @@ pub fn headless(
     list_agent(&ctx, env_name, agent)?;
     let progress = Stdio::from(std::io::stderr());
     let up = std::process::Command::new(std::env::current_exe()?)
-        .args(["up", "-e", env_name])
+        .args(["up", "-e", env_name, "--quiet"])
         .stdin(Stdio::null())
         .stdout(progress)
         .status()?;
