@@ -92,6 +92,10 @@ pub struct Injection {
     /// Empty = every path on the host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+    /// The methods it goes on, upper-case; empty = every method. A request another rule
+    /// allows with a method outside these goes without it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<String>,
     pub place: Placement,
     /// Match `paths` without regard to ASCII case (see `Rule::ignore_case`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -101,6 +105,10 @@ pub struct Injection {
 impl Injection {
     pub fn path_matches(&self, path: &str) -> bool {
         glob::matches_any(&self.paths, self.ignore_case, path)
+    }
+
+    pub fn method_matches(&self, method: &str) -> bool {
+        self.methods.is_empty() || self.methods.iter().any(|m| m == method)
     }
 }
 

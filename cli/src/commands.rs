@@ -948,22 +948,26 @@ pub fn unlock() -> Result<ExitCode> {
 
 pub fn reload(env: Option<&str>) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
-    let refs = match env {
+    // An env's refs load whether held or not; the vault's own are only read again.
+    let (refs, held_only) = match env {
         Some(e) => {
             let name = workspace::resolve(&ctx.paths, Some(e))?;
-            env::plan(&ctx, &name)?.compiled.vault_refs()
+            (env::plan(&ctx, &name)?.compiled.vault_refs(), false)
         }
-        None => crate::ctl::vault_status(&ctx.rt)?
-            .loaded_refs
-            .into_iter()
-            .collect(),
+        None => (
+            crate::ctl::vault_status(&ctx.rt)?
+                .loaded_refs
+                .into_iter()
+                .collect(),
+            true,
+        ),
     };
     if refs.is_empty() {
         println!("the vault holds no secrets to read again (`luoto vault unlock` loads them)");
         return Ok(ExitCode::SUCCESS);
     }
     eprintln!("reading {} secret(s) from your secret store…", refs.len());
-    let r = sync::reload(&ctx, &refs)?;
+    let r = sync::reload(&ctx, &refs, held_only)?;
     println!(
         "read {}: {} changed{}",
         r.read,

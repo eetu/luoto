@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use luoto_shared::policy::{Access, AccessLevel, Deny, Mode, Rule, RuleOrigin, rule_error};
+use luoto_shared::policy::{Access, AccessLevel, Deny, Mode, Policy, Rule, RuleOrigin, rule_error};
 use luoto_shared::{presets, profiles};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -689,6 +689,18 @@ pub fn diff(old: &ProjectConfig, new: &ProjectConfig) -> Vec<String> {
     out
 }
 
+/// The credentials of yours that the rules `new` adds over `old` would carry (`policy` is the
+/// env's), one line each below the diff.
+fn credentials_reached(policy: &Policy, old: &ProjectConfig, new: &ProjectConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    for r in new.allow.iter().filter(|r| !old.allow.contains(r)) {
+        for why in policy.credentials_reached(r) {
+            out.push(format!("! {:<8} {}: {why}", "allow", display(&r.host)));
+        }
+    }
+    out
+}
+
 /// Config snippets for credentials the project needs and the env lacks.
 pub fn missing_needs(p: &ProjectConfig, cfg: &EnvConfig) -> Vec<String> {
     let mut out = Vec::new();
@@ -847,16 +859,23 @@ pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
     };
     s.current = summary(&new);
     s.needs = missing_needs(&new, &cfg);
+    let none = ProjectConfig::default();
+    let changed_from = match &old {
+        Some((t, p)) if *t == text || *p == new => None,
+        Some((_, p)) => Some(p),
+        None => Some(&none),
+    };
+    if let Some(before) = changed_from {
+        s.diff = diff(before, &new);
+        if let Ok(plan) = crate::env::plan(ctx, env) {
+            s.diff
+                .extend(credentials_reached(&plan.compiled.policy, before, &new));
+        }
+    }
     s.state = match &old {
         Some((t, p)) if *t == text || *p == new => State::Accepted,
-        Some((_, p)) => {
-            s.diff = diff(p, &new);
-            State::Changed
-        }
-        None => {
-            s.diff = diff(&ProjectConfig::default(), &new);
-            State::New
-        }
+        Some(_) => State::Changed,
+        None => State::New,
     };
     if s.state != State::Accepted && declined(ctx, env, &text) {
         s.state = State::Declined;
@@ -943,6 +962,29 @@ pub fn ignore(ctx: &Ctx, env: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_projects_rule_over_your_credentials_host_says_so() {
+        let cfg: EnvConfig = toml::from_str(
+            "[credentials.azure]\nsubscriptions = [\"0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0\"]\n\
+             graph = true\n",
+        )
+        .unwrap();
+        let policy = crate::compile::compile("t", &cfg, None, &[])
+            .unwrap()
+            .policy;
+        let old = parse("[[allow]]\nhost = \"docs.rs\"").unwrap();
+        let new = parse("[[allow]]\nhost = \"docs.rs\"\n[[allow]]\nhost = \"graph.microsoft.com\"")
+            .unwrap();
+        assert_eq!(
+            credentials_reached(&policy, &old, &new),
+            [
+                "! allow    graph.microsoft.com: requests it allows to graph.microsoft.com carry \
+              your `azure-graph` credential"
+            ]
+        );
+        assert!(credentials_reached(&policy, &new, &new).is_empty());
+    }
 
     #[test]
     fn a_project_needing_azure_gets_its_section_suggested() {

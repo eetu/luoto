@@ -2,7 +2,11 @@
 //! token from this machine's Azure CLI, and logging the env's own `az` in to the managed
 //! identity the gate answers for.
 
-use std::process::{Command, Stdio};
+use std::collections::BTreeMap;
+use std::io::Read as _;
+use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
@@ -20,6 +24,15 @@ use crate::{connect, names};
 
 /// The secret ref scheme for a token from this machine's `az` login.
 pub const AZCLI: &str = "azcli:";
+
+/// How long `az account get-access-token` may run before it is killed. It answers from its
+/// cache in a second or two (Python starting), or after one refresh at Entra ID; 30 s leaves
+/// room for a slow network, and is the longest `up`, or the watcher's one loop (port forwards,
+/// notifications, idle stops), waits on an `az` that hangs (a stuck proxy, a prompt).
+const AZ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The tenant (`tid`) of the token last read for each ref in this process.
+static TENANTS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 /// Why `c` is refused, if it is.
 pub fn check(c: &AzureCred) -> Result<()> {
@@ -116,13 +129,18 @@ pub fn read(r: &str) -> Result<(String, Option<DateTime<Utc>>)> {
     if let Some(t) = tenant {
         cmd.args(["--tenant", t]);
     }
-    let out = match cmd.stdin(Stdio::null()).output() {
+    let out = match output_within(cmd, AZ_TIMEOUT) {
+        Ok(Some(out)) => out,
+        Ok(None) => bail!(
+            "az account get-access-token gave no answer within {} s and was stopped",
+            AZ_TIMEOUT.as_secs()
+        ),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
             "the Azure CLI (`az`) is not installed on this machine: install it and run \
              `az login`, or give [credentials.azure] a service principal (client_id, \
              client_secret)"
         ),
-        out => out.context("run the Azure CLI (`az`)")?,
+        Err(e) => return Err(e).context("run the Azure CLI (`az`)"),
     };
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -136,7 +154,77 @@ pub fn read(r: &str) -> Result<(String, Option<DateTime<Utc>>)> {
         }
         bail!("az account get-access-token failed: {err}");
     }
-    parse_output(&out.stdout)
+    let (token, expires) = parse_output(&out.stdout)?;
+    remember_tenant(r, &token);
+    Ok((token, expires))
+}
+
+/// Keep the tenant `token`, read for `r`, is for: its `tid`, when that is a tenant ID.
+fn remember_tenant(r: &str, token: &str) {
+    if let Some(tid) = claims(token)
+        .and_then(|c| c.get("tid")?.as_str().map(str::to_string))
+        .filter(|t| is_guid(t))
+    {
+        TENANTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(r.to_string(), tid);
+    }
+}
+
+/// The tenant of `az`'s token for ref `r`: the token this process read last, else one read
+/// now. Its `tid` claim, unverified: it only names the tenant to tools in the env, while the
+/// gate decides where the token goes.
+pub fn tenant(r: &str) -> Option<String> {
+    let known = |r: &str| {
+        TENANTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(r)
+            .cloned()
+    };
+    known(r).or_else(|| read(r).ok().and_then(|_| known(r)))
+}
+
+/// `cmd`'s output, or `None` once it has run for `limit`, when it is killed. Its stdin is
+/// empty, so it can't wait on a prompt.
+fn output_within(mut cmd: Command, limit: Duration) -> std::io::Result<Option<Output>> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // Each pipe is read on its own thread, so one filling up can't stall the process.
+    let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut out);
+            }
+            out
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = drain(child.stderr.take().map(|p| Box::new(p) as _));
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            // A process it started may still hold the pipes: their threads are left to end
+            // with it.
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    Ok(Some(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    }))
 }
 
 /// The token in `az account get-access-token`'s JSON and when it expires: `expires_on`
@@ -164,10 +252,14 @@ pub fn parse_output(json: &[u8]) -> Result<(String, Option<DateTime<Utc>>)> {
 
 /// When JWT `token` expires, by its `exp` claim.
 pub fn token_expiry(token: &str) -> Option<DateTime<Utc>> {
+    DateTime::from_timestamp(claims(token)?.get("exp")?.as_i64()?, 0)
+}
+
+/// The claims of JWT `token`, unverified.
+fn claims(token: &str) -> Option<serde_json::Value> {
     let payload = token.split('.').nth(1)?;
     let bytes = B64URL.decode(payload.trim_end_matches('=')).ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    DateTime::from_timestamp(claims.get("exp")?.as_i64()?, 0)
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// Log the env's Azure CLI in to the gate's managed identity as the dev user, with the first
@@ -350,5 +442,38 @@ mod tests {
             .to_string();
         assert!(!e.contains(&jwt), "{e}");
         assert!(parse_output(br#"{"accessToken": ""}"#).is_err());
+    }
+
+    #[test]
+    fn the_tenant_is_the_tid_of_the_token_read() {
+        let jwt = |claims: &str| format!("h.{}.s", B64URL.encode(claims));
+        let r = "azcli:https://management.azure.com/?tenant=test.example";
+        remember_tenant(r, &jwt(r#"{"tid":"evil' $(x)"}"#));
+        remember_tenant(r, "opaque");
+        assert!(TENANTS.lock().unwrap().get(r).is_none());
+        remember_tenant(r, &jwt(&format!(r#"{{"tid":"{SUB}"}}"#)));
+        assert_eq!(tenant(r).as_deref(), Some(SUB));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_hangs_is_stopped() {
+        let started = Instant::now();
+        let mut sleep = Command::new("sleep");
+        sleep.arg("30");
+        assert!(
+            output_within(sleep, Duration::from_millis(200))
+                .unwrap()
+                .is_none()
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let mut echo = Command::new("sh");
+        echo.args(["-c", "echo out; echo err >&2"]);
+        let out = output_within(echo, Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"out\n");
+        assert_eq!(out.stderr, b"err\n");
     }
 }

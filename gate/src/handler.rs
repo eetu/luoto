@@ -386,10 +386,12 @@ async fn handle_inner(
             };
             return deny(ev, reason);
         }
+        // The client's own credentials go whether or not the gate adds one: a method outside
+        // a credential's goes without any.
         for h in AUTH_HEADERS {
             parts.headers.remove(*h);
         }
-        let injections = policy.injections_for(&target.host, &path);
+        let injections = policy.injections_for(&method, &target.host, &path);
         if !injections.is_empty() {
             let Some(vault) = state.vault() else {
                 return deny(ev, DenyReason::Locked);

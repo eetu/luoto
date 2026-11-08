@@ -348,7 +348,7 @@ impl Azcli {
         if due.is_empty() {
             return;
         }
-        let r = match sync::reload(ctx, &due) {
+        let r = match sync::reload(ctx, &due, true) {
             Ok(r) => r,
             Err(e) => {
                 println!("{} Azure tokens not renewed: {e:#}", Utc::now());
@@ -429,7 +429,7 @@ fn reread_refused(
         return;
     }
     let refs: Vec<&str> = due.iter().map(String::as_str).collect();
-    match sync::reload(ctx, &due) {
+    match sync::reload(ctx, &due, true) {
         Ok(r) => {
             println!(
                 "{} read refused secret(s) again ({}): {} changed",

@@ -299,11 +299,10 @@ pub fn plan(ctx: &Ctx, env: &str) -> Result<Plan> {
     let state = EnvState::load(&ctx.paths, env)?;
     let gate = state.as_ref().map(|s| names::addrs(s.octet).gate);
     let compiled = compile(env, &cfg, gate, &azure::aliases(&cfg.workspace))?;
-    for r in compiled
-        .vault_refs()
-        .iter()
-        .chain(compiled.sandbox_refs.values())
-    {
+    for r in compiled.vault_refs() {
+        secrets::check_vault_ref(&r)?;
+    }
+    for r in compiled.sandbox_refs.values() {
         secrets::check_ref(r)?;
     }
     Ok(Plan {

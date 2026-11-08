@@ -5,7 +5,9 @@ use anyhow::{Context, Result, bail};
 use chrono::{TimeDelta, Utc};
 use luoto_shared::api::{AccessRequest, Install, Narrowing, RequestStatus};
 use luoto_shared::ctl::GateCtl;
-use luoto_shared::policy::{Access, AccessLevel, Mode, Rule, RuleOrigin, Severity, validate_rule};
+use luoto_shared::policy::{
+    Access, AccessLevel, Mode, Policy, Rule, RuleOrigin, Severity, validate_rule,
+};
 use serde::Serialize;
 
 use crate::config::{EnvFile, new_rule_id};
@@ -111,20 +113,23 @@ pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
     })
 }
 
-/// Refuse a tunnel over a host where the env's gate strips credentials, guards writes or
-/// applies a deny (see `Policy::tunnel_bypass`).
-fn check_tunnel(ctx: &Ctx, name: &str, rule: &Rule) -> Result<()> {
-    if rule.mode != Mode::Tunnel {
-        return Ok(());
+/// The risks of adding `rule` to an env with `policy`, or why it is refused: refused when
+/// it is invalid, or a tunnel over a host where the gate strips credentials, guards writes or
+/// applies a deny (see `Policy::tunnel_bypass`); a risk when it covers a host the gate puts
+/// one of your credentials on.
+fn risks(policy: &Policy, rule: &Rule) -> Result<Vec<String>> {
+    let issues = validate_rule(rule, RuleOrigin::Host);
+    if let Some(e) = issues.iter().find(|i| i.severity == Severity::Error) {
+        bail!("{}", e.message);
     }
-    if let Some(why) = env::plan(ctx, name)?
-        .compiled
-        .policy
-        .tunnel_bypass(&rule.host)
+    if rule.mode == Mode::Tunnel
+        && let Some(why) = policy.tunnel_bypass(&rule.host)
     {
         bail!("{why}");
     }
-    Ok(())
+    let mut out: Vec<String> = issues.into_iter().map(|i| i.message).collect();
+    out.extend(policy.credentials_reached(rule));
+    Ok(out)
 }
 
 /// Risks a rule carries that the user has yet to accept; the CLI asks, the UI answers 409.
@@ -143,13 +148,9 @@ impl std::error::Error for Risks {}
 /// added: with an id.
 pub fn add_rule_checked(ctx: &Ctx, name: &str, mut rule: Rule, force: bool) -> Result<Rule> {
     rule.id.get_or_insert_with(new_rule_id);
-    let issues = validate_rule(&rule, RuleOrigin::Host);
-    if let Some(e) = issues.iter().find(|i| i.severity == Severity::Error) {
-        bail!("{}", e.message);
-    }
-    check_tunnel(ctx, name, &rule)?;
-    if !issues.is_empty() && !force {
-        return Err(Risks(issues.into_iter().map(|i| i.message).collect()).into());
+    let risks = risks(&env::plan(ctx, name)?.compiled.policy, &rule)?;
+    if !risks.is_empty() && !force {
+        return Err(Risks(risks).into());
     }
     let mut f = EnvFile::load(&ctx.paths, name)?;
     f.add_rule(&rule)?;
@@ -379,6 +380,35 @@ mod tests {
         assert!(parse_ttl("1y").is_err());
         assert!(parse_ttl("-5m").is_err());
         assert!(parse_ttl("99999999999999d").is_err());
+    }
+
+    #[test]
+    fn a_rule_over_a_credentialed_host_says_whose_credential_it_reaches() {
+        let cfg: crate::config::EnvConfig = toml::from_str(
+            "[credentials.azure]\nsubscriptions = [\"0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0\"]\n\
+             graph = true\n",
+        )
+        .unwrap();
+        let policy = crate::compile::compile("t", &cfg, None, &[])
+            .unwrap()
+            .policy;
+        let rule = |host: &str| Rule {
+            host: host.into(),
+            ..Rule::default()
+        };
+        let graph = risks(&policy, &rule("graph.microsoft.com")).unwrap();
+        assert_eq!(
+            graph,
+            ["requests it allows to graph.microsoft.com carry your `azure-graph` credential"]
+        );
+        let arm = risks(&policy, &rule("management.azure.com")).unwrap();
+        assert!(arm[0].contains("`azure-arm`"), "{arm:?}");
+        assert!(risks(&policy, &rule("docs.rs")).unwrap().is_empty());
+        let tunnel = Rule {
+            mode: Mode::Tunnel,
+            ..rule("graph.microsoft.com")
+        };
+        assert!(risks(&policy, &tunnel).is_err());
     }
 
     #[test]

@@ -10,7 +10,7 @@ use luoto_shared::policy::Rule;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::azure_identity::AZCLI;
+use crate::azure_identity::{self, AZCLI};
 use crate::compile::Compiled;
 use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx, Plan};
@@ -59,7 +59,11 @@ pub fn load_secrets(ctx: &Ctx, refs: &BTreeSet<String>, whose: &str, renew: bool
             }
         }
         if !values.is_empty() {
-            ctl::vault::<usize>(&ctx.rt, &VaultCtl::Load { secrets: values })?;
+            let load = VaultCtl::Load {
+                secrets: values,
+                held_only: false,
+            };
+            ctl::vault::<usize>(&ctx.rt, &load)?;
         }
         if !failed.is_empty() {
             bail!(
@@ -164,8 +168,9 @@ pub struct Reloaded {
 
 /// Read `refs` from the secret store again (a token rotated there) and give the vault those
 /// that changed; the gates then drop their cached copies. A reference that can't be read
-/// keeps the value the vault has.
-pub fn reload(ctx: &Ctx, refs: &BTreeSet<String>) -> Result<Reloaded> {
+/// keeps the value the vault has. With `held_only` the vault takes only refs it still holds,
+/// so one locked meanwhile stays empty.
+pub fn reload(ctx: &Ctx, refs: &BTreeSet<String>, held_only: bool) -> Result<Reloaded> {
     let mut values = BTreeMap::new();
     let mut failed = Vec::new();
     let mut expires = BTreeMap::new();
@@ -184,7 +189,11 @@ pub fn reload(ctx: &Ctx, refs: &BTreeSet<String>) -> Result<Reloaded> {
     let changed = if values.is_empty() {
         0
     } else {
-        ctl::vault::<usize>(&ctx.rt, &VaultCtl::Load { secrets: values })?
+        let load = VaultCtl::Load {
+            secrets: values,
+            held_only,
+        };
+        ctl::vault::<usize>(&ctx.rt, &load)?
     };
     if changed > 0 {
         failed.extend(flush_gates(ctx)?);
@@ -255,6 +264,15 @@ pub fn with_grants<T>(
 /// (memory only) and sourced by shells.
 fn runtime_env(ctx: &Ctx, compiled: &Compiled) -> Result<BTreeMap<String, String>> {
     let mut env = compiled.dev_env.clone();
+    if let Some(tid) = compiled
+        .tenant_from
+        .as_deref()
+        .and_then(azure_identity::tenant)
+    {
+        for k in ["ARM_TENANT_ID", "AZURE_TENANT_ID"] {
+            env.entry(k.into()).or_insert_with(|| tid.clone());
+        }
+    }
     if !compiled.sandbox_refs.is_empty() {
         let refs: BTreeSet<String> = compiled.sandbox_refs.values().cloned().collect();
         let values = secrets::resolve_all(&ctx.global, &refs)?;

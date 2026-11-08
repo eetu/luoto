@@ -64,10 +64,13 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   (`shared/src/forges.rs`, plus `host_keys`; `vault/src/agent.rs`).
 - Azure (`[credentials.azure]`, not Azure DevOps' `azure.rs`): audiences, their hosts and
   name rules in `shared/src/azure_identity.rs`; one binding per audience. The gate answers IMDS
-  itself (`gate/src/imds.rs`) with placeholders (real header and claims, unusable signature)
-  and never returns a real token; the vault mints service principal tokens
-  (`vault/src/entra.rs`, only `login.microsoftonline.com`); `azcli:` refs read the host's `az`
-  (`cli/src/azure_identity.rs`), and the watcher renews them before they expire.
+  itself (`gate/src/imds.rs`) with placeholders (real header, the claims tools read, unusable
+  signature) and never returns a real token; injections carry the methods their rule allows.
+  The vault mints service principal tokens (`vault/src/entra.rs`, only
+  `login.microsoftonline.com`); `azcli:` refs read the host's `az`
+  (`cli/src/azure_identity.rs`) and are only the Azure bindings' (`compile` refuses them
+  elsewhere), and the watcher renews them before they expire, into a vault that holds them.
+  An env's own file is the only place for it.
 - `project.rs`: a repo's `luoto.toml` is untrusted. It layers in (`env::plan`) only as the
   exact text the user accepted (kept in the env's state); changes need a fresh accept. Never
   let it carry secret refs or mutes or skip `RuleOrigin::Sandbox` validation, and print its

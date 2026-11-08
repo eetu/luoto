@@ -66,25 +66,25 @@ pub struct GlobalConfig {
     /// Mutes for every env, beside each env's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mute: Vec<Mute>,
-    /// Credentials for every env that has none of that kind of its own.
-    #[serde(default, skip_serializing_if = "GlobalCredentials::is_empty")]
-    pub credentials: GlobalCredentials,
+    /// Refused, with where credentials go instead ([`env_only`]).
+    #[serde(
+        rename = "credentials",
+        default,
+        skip_serializing,
+        deserialize_with = "env_only"
+    )]
+    _credentials: (),
     #[serde(default)]
     pub sources: Sources,
 }
 
-/// The credentials `config.toml` can give every env.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct GlobalCredentials {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub azure: Option<AzureCred>,
-}
-
-impl GlobalCredentials {
-    pub fn is_empty(&self) -> bool {
-        *self == Self::default()
-    }
+/// `[credentials.*]` in config.toml. Each env names its own, so none reaches an account it
+/// doesn't name.
+fn env_only<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
+    Err(serde::de::Error::custom(
+        "credentials go in each env's own file (envs/<env>.toml, `luoto edit -e <env>`), not \
+         in config.toml",
+    ))
 }
 
 impl GlobalConfig {
@@ -93,12 +93,8 @@ impl GlobalConfig {
         self.mute.iter().chain(&cfg.mute).cloned().collect()
     }
 
-    /// Put these denies and mutes under an env's, each deny noting where it came from, and
-    /// these credentials where it has none of their kind.
+    /// Put these denies and mutes under an env's, each deny noting where it came from.
     pub fn layer_under(&self, cfg: &mut EnvConfig) {
-        if cfg.credentials.azure.is_none() {
-            cfg.credentials.azure = self.credentials.azure.clone();
-        }
         let mut deny: Vec<Deny> = self
             .deny
             .iter()
@@ -285,7 +281,8 @@ pub struct AzureDevopsCred {
 pub struct AzureCred {
     /// Subscription IDs whose Resource Manager paths the env may reach.
     pub subscriptions: Vec<String>,
-    /// `read` (GET, HEAD) or `write` (every method), on Resource Manager and the data planes.
+    /// `read` (GET, HEAD, OPTIONS) or `write` (every method), on Resource Manager and the
+    /// data planes.
     #[serde(default = "read_access")]
     pub access: AccessLevel,
     /// Tenant ID or domain: required with a service principal; else `az`'s current tenant.
@@ -300,10 +297,15 @@ pub struct AzureCred {
     /// Microsoft Graph, read-only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub graph: bool,
-    /// Under `access = "write"`, also role assignments, role definitions and federated
-    /// identity credentials: each can give someone outside the env lasting access.
+    /// Under `access = "write"`, also what gives someone access: role assignments and
+    /// definitions, PIM requests and policies, federated identity credentials, Lighthouse
+    /// delegations, key vault access policies and `elevateAccess`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub role_assignments: bool,
+    /// Under `access = "write"`, also template deployments, deployment scripts and deployment
+    /// stacks, which act with all of the identity's roles, beyond `subscriptions` too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deployments: bool,
     /// A service principal's application ID, as the token source in place of `az` on this
     /// machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -716,11 +718,33 @@ pub fn validate_name(name: &str) -> Result<()> {
 pub fn load_global(paths: &Paths) -> Result<GlobalConfig> {
     let p = paths.global_config();
     match std::fs::read_to_string(&p) {
-        Ok(s) => toml::from_str(&crate::format::upgrade(&p, &s)?.text)
+        Ok(s) => parse_global(&crate::format::upgrade(&p, &s)?.text)
             .with_context(|| format!("parse {}", p.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(GlobalConfig::default()),
         Err(e) => Err(e).with_context(|| format!("read {}", p.display())),
     }
+}
+
+/// config.toml's text, its source tokens checked: an `azcli:` ref is a token for all of your
+/// Azure, which only `[credentials.azure]` hands out, to the hosts it names.
+pub fn parse_global(text: &str) -> Result<GlobalConfig> {
+    let cfg: GlobalConfig = toml::from_str(text)?;
+    let tokens = [
+        (
+            "sources.op.service_account_token",
+            cfg.sources.op.service_account_token.as_deref(),
+        ),
+        (
+            "sources.vault.token",
+            cfg.sources.vault.as_ref().map(|v| v.token.as_str()),
+        ),
+    ];
+    for (key, r) in tokens {
+        if r.is_some_and(|r| r.starts_with(crate::azure_identity::AZCLI)) {
+            bail!("{key}: an `azcli:` ref is only for [credentials.azure], which writes its own");
+        }
+    }
+    Ok(cfg)
 }
 
 pub fn save_global(paths: &Paths, cfg: &GlobalConfig) -> Result<()> {

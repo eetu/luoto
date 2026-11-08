@@ -271,12 +271,16 @@ protected_branches = ["main"]
 
 [credentials.azure]           # Azure: az, terraform and the SDKs see a managed identity
 subscriptions = ["<subscription id>"]   # Resource Manager paths the env may reach
-access = "read"               # GET and HEAD; "write": every method, as your Azure role allows
+access = "read"               # GET, HEAD, OPTIONS; "write": every method, as your Azure role allows
 # tenant = "contoso.onmicrosoft.com"    # required with a service principal; else az's current
 # key_vaults = ["kv-prod"]    # data planes, by name: read or write as `access` says
 # storage_accounts = ["acct"] # its blob, queue, table, file and dfs hosts
 # graph = true                # Microsoft Graph, read-only
-# role_assignments = true     # under write, also role assignments and federated credentials
+# role_assignments = true     # under write, also what gives access: role assignments and
+                              # definitions, PIM requests and policies, federated identity
+                              # credentials, Lighthouse, key vault access policies, elevateAccess
+# deployments = true          # under write, also template deployments, deployment scripts and
+                              # stacks, which act with all of the identity's roles, anywhere
 # client_id = "<app id>"      # a service principal instead of your `az login` on this machine
 # client_secret = "op://Dev/azure-sp/secret"
 
@@ -321,9 +325,8 @@ hosts = ["dl.k8s.io"]         # extra hosts readable only while installs run
 
 `config.toml` takes `[tools]`, `[deps]`, `[[deny]]`, `[[mute]]`, `idle_stop` and
 `auto_forward` too, for every env, and `[agents.<name>]` options (`model`, `effort`) for every
-env that has that agent; an env's own, and its `luoto.toml`'s, come on top. A
-`[credentials.azure]` there is every env's that has none of its own.
-`notifications = false` there turns desktop notifications off.
+env that has that agent; an env's own, and its `luoto.toml`'s, come on top. Credentials go
+only in each env's own file. `notifications = false` there turns desktop notifications off.
 
 A `[[deny]]` beats every allow: a preset's, a rule's, an approved request's. It applies to the
 HTTP(S) the gate reads: a tunnel rule can't cover a denied host, and SSH to
@@ -332,9 +335,9 @@ for telemetry you keep denied: its denials are still recorded, but stay out of `
 the UI and the offers to allow them; `luoto egress --all` shows them.
 
 Secret refs: `op://…` (1Password CLI, desktop or service account), `vault://mount/path#field`
-(OpenBao / HashiCorp Vault), `keyring:service/account` (OS keychain), `env:NAME`, `file:path`,
-`azcli:<resource>` (a token from your `az` login, which `[credentials.azure]` uses). Sources
-are configured in `~/.config/luoto/config.toml`.
+(OpenBao / HashiCorp Vault), `keyring:service/account` (OS keychain), `env:NAME`, `file:path`.
+Sources are configured in `~/.config/luoto/config.toml`. `[credentials.azure]` reads your `az`
+login itself, with no ref.
 
 `[sandbox_secrets]` are resolved on your machine at `up` and written to a memory-only file in
 the dev container that every shell loads; they leave with the container. Anything that only
@@ -359,11 +362,11 @@ votes, stay with you. `az repos pr` addresses repos by ID, which the gate doesn'
 An Azure credential gives the env a managed identity: the gate answers the instance metadata
 service (`169.254.169.254`) itself, so `az` (logged in by `up`), terraform's azurerm
 (`ARM_USE_MSI`) and the SDKs' `DefaultAzureCredential` work unchanged. The token they get is a
-placeholder with the real one's claims; the gate puts the real token on Resource Manager
+placeholder with the claims tools read; the gate puts the real token on Resource Manager
 requests for the listed subscriptions and on the key vaults, storage accounts and Graph you
-name. It comes from your `az login` on this machine, refreshed before it expires, or from a
-service principal whose secret the vault keeps and mints with
-([guide](docs/guides/azure.md)).
+name, with the methods `access` allows there. It comes from your `az login` on this machine,
+refreshed before it expires, or from a service principal whose secret the vault keeps and
+mints with ([guide](docs/guides/azure.md)).
 
 A `[[credentials.git]]` works with any forge, as git speaks the same protocol to all: the gate
 adds the token to the listed repos' git requests only and guards pushes as on GitHub. It

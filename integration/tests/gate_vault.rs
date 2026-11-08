@@ -284,7 +284,10 @@ impl Env {
             .iter()
             .map(|(r, v)| (r.to_string(), v.to_string()))
             .collect();
-        self.vault(&VaultCtl::Load { secrets });
+        self.vault(&VaultCtl::Load {
+            secrets,
+            held_only: false,
+        });
     }
 
     /// One request through the proxy, absolute-form, with the URL's host as `Host` unless
@@ -468,6 +471,7 @@ fn credentialed_policy() -> Policy {
         binding: "t.key".into(),
         host: "api.test".into(),
         paths: vec![path.into()],
+        methods: Vec::new(),
         ignore_case: false,
         place,
     };
@@ -519,6 +523,14 @@ async fn locking_the_vault_fails_credentialed_requests_closed() {
     assert!(r.status == 403 && r.denied("locked"), "{}", r.head);
     // Egress without credentials keeps working while locked.
     assert_eq!(env.get("http://api.test/ok").status, 200);
+    // A renewal read before the lock leaves it locked.
+    let renewed = env.vault(&VaultCtl::Load {
+        secrets: BTreeMap::from([("env:X".to_string(), "renewed".to_string())]),
+        held_only: true,
+    });
+    assert_eq!(renewed["data"], 0, "{renewed}");
+    let r = env.get("http://api.test/secret");
+    assert!(r.status == 403 && r.denied("locked"), "{}", r.head);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1412,6 +1424,7 @@ async fn credentials_go_only_over_tls_in_place_of_the_clients_own() {
         binding: "t.key".into(),
         host: "plain.test".into(),
         paths: vec![],
+        methods: Vec::new(),
         ignore_case: false,
         place: Placement::Header {
             name: "x-api-key".into(),
@@ -1659,7 +1672,10 @@ async fn a_new_app_key_retires_the_minted_token_and_signs_the_next() {
     let value = || env.credential("github").json()["value"].clone();
     let load = |key: &str| {
         let secrets = BTreeMap::from([("env:APP".to_string(), key.to_string())]);
-        env.vault(&VaultCtl::Load { secrets });
+        env.vault(&VaultCtl::Load {
+            secrets,
+            held_only: false,
+        });
     };
 
     assert_eq!(value(), "ghs_1");
@@ -1688,14 +1704,16 @@ fn entra_token(aud: &str, n: usize) -> String {
         "appid": "cccccccc-0000-0000-0000-000000000003",
         "nbf": now - 300,
         "exp": now + 3600,
+        "upn": "someone@contoso.example",
+        "ipaddr": "203.0.113.7",
         "n": n,
     });
     let key = jsonwebtoken::EncodingKey::from_secret(b"entra");
     jsonwebtoken::encode(&jsonwebtoken::Header::default(), &claims, &key).unwrap()
 }
 
-/// Resource Manager readable under the test subscription, with the `azure-arm` token there
-/// and from IMDS.
+/// Resource Manager readable under the test subscription, with the `azure-arm` token on
+/// reads there and from IMDS.
 fn azure_policy() -> Policy {
     let paths = [format!("/subscriptions/{SUB}/**")];
     let mut arm = rule(
@@ -1712,6 +1730,7 @@ fn azure_policy() -> Policy {
             binding: "azure-arm".into(),
             host: "management.azure.com".into(),
             paths: paths.to_vec(),
+            methods: ["GET", "HEAD", "OPTIONS"].map(String::from).to_vec(),
             ignore_case: true,
             place: Placement::Header {
                 name: "authorization".into(),
@@ -1737,20 +1756,29 @@ impl Env {
     }
 }
 
-/// `placeholder` is `real` with a signature that can't verify.
+/// `placeholder` is `real`'s header and the claims tools read, with a signature that can't
+/// verify.
 fn assert_placeholder(placeholder: &str, real: &str) {
     use base64::Engine as _;
-    let (signed, sig) = placeholder.rsplit_once('.').unwrap();
-    let (real_signed, real_sig) = real.rsplit_once('.').unwrap();
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let parts = |t: &str| -> Vec<String> { t.split('.').map(str::to_string).collect() };
+    let (p, r) = (parts(placeholder), parts(real));
+    assert_eq!(p[0], r[0], "the header is the real token's");
+    let claims = |payload: &str| -> serde_json::Value {
+        serde_json::from_slice(&b64.decode(payload).unwrap()).unwrap()
+    };
+    let (kept, all) = (claims(&p[1]), claims(&r[1]));
+    for k in ["aud", "oid", "tid", "appid", "nbf", "exp"] {
+        assert_eq!(kept[k], all[k], "{k}");
+    }
+    for k in ["upn", "ipaddr", "n"] {
+        assert!(all.get(k).is_some() && kept.get(k).is_none(), "{k}");
+    }
+    assert_ne!(p[2], r[2]);
     assert_eq!(
-        signed, real_signed,
-        "the header and claims are the real token's"
+        b64.decode(&p[2]).unwrap(),
+        b"luoto: the gate adds the real token"
     );
-    assert_ne!(sig, real_sig);
-    let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(sig)
-        .unwrap();
-    assert_eq!(sig, b"luoto: the gate adds the real token");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1904,21 +1932,46 @@ async fn resource_manager_gets_the_real_token_in_place_of_the_placeholder() {
         r.head
     );
 
+    // A write another rule allows (an approved request) goes without the token, and without
+    // the client's own.
+    let mut policy = azure_policy();
+    policy.rules.push(rule(
+        "approved",
+        "management.azure.com",
+        Access::Level(AccessLevel::Write),
+        &[],
+    ));
+    env.apply(policy);
+    let keys = format!(
+        "/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/a/listKeys"
+    );
+    let r = env.request(
+        "POST",
+        &format!("http://management.azure.com{keys}"),
+        &[("Authorization", "Bearer from-the-sandbox")],
+        b"",
+    );
+    assert_eq!(r.status, 401, "{}", r.head);
+
     let seen = arm.received_requests().await.unwrap();
-    assert_eq!(seen.len(), 2);
-    for req in &seen {
+    assert_eq!(seen.len(), 3);
+    for req in &seen[..2] {
         assert_eq!(
             req.headers["authorization"],
             format!("Bearer {real}").as_str()
         );
         assert!(!req.headers.contains_key("x-ms-authorization-auxiliary"));
     }
+    assert_eq!(seen[2].method.as_str(), "POST");
+    assert!(!seen[2].headers.contains_key("authorization"));
 }
 
 /// Entra ID's token endpoint: a new token for the scope's audience on each call, for client
 /// secrets `good-1` and `good-2`; any other is refused as Entra refuses one.
 struct EntraMint {
     minted: AtomicUsize,
+    /// How long each answer takes.
+    delay: Duration,
 }
 
 impl Respond for EntraMint {
@@ -1934,13 +1987,80 @@ impl Respond for EntraMint {
             }));
         }
         let n = self.minted.fetch_add(1, Ordering::SeqCst) + 1;
-        ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "token_type": "Bearer",
-            "expires_in": 3599,
-            "ext_expires_in": 3599,
-            "access_token": entra_token(ARM, n),
-        }))
+        ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({
+                "token_type": "Bearer",
+                "expires_in": 3599,
+                "ext_expires_in": 3599,
+                "access_token": entra_token(ARM, n),
+            }))
+            .set_delay(self.delay)
     }
+}
+
+/// An env whose `azure-arm` binding is minted by `login` for a service principal with secret
+/// `secret`.
+async fn service_principal(login: &MockServer, delay: Duration, secret: &str) -> Env {
+    Mock::given(method("POST"))
+        .and(path("/contoso.onmicrosoft.com/oauth2/v2.0/token"))
+        .respond_with(EntraMint {
+            minted: AtomicUsize::new(0),
+            delay,
+        })
+        .mount(login)
+        .await;
+    let env = Env::start_both(&[], &[], &[("LUOTO_TEST_AZURE_LOGIN", &login.uri())]);
+    env.credentials(
+        &[(
+            "azure-arm",
+            BindingSpec::AzureServicePrincipal {
+                tenant: "contoso.onmicrosoft.com".into(),
+                client_id: "11111111-2222-3333-4444-555555555555".into(),
+                secret_ref: "env:SP".into(),
+                audience: ARM.into(),
+            },
+        )],
+        &[("env:SP", secret)],
+    );
+    env
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn requests_meanwhile_share_one_mint_and_a_refusal_is_not_asked_again_at_once() {
+    let login = MockServer::start().await;
+    let env = service_principal(&login, Duration::from_millis(500), "good-1").await;
+    let tokens: Vec<String> = std::thread::scope(|s| {
+        let asks: Vec<_> = (0..6)
+            .map(|_| s.spawn(|| env.credential("azure-arm")))
+            .collect();
+        asks.into_iter()
+            .map(|a| {
+                let r = a.join().unwrap();
+                assert_eq!(r.status, 200, "{}", r.body);
+                r.json()["value"].as_str().unwrap().to_string()
+            })
+            .collect()
+    });
+    assert!(tokens.windows(2).all(|w| w[0] == w[1]));
+    assert_eq!(login.received_requests().await.unwrap().len(), 1);
+
+    let refused = MockServer::start().await;
+    let env = service_principal(&refused, Duration::ZERO, "revoked").await;
+    let first = env.credential("azure-arm");
+    assert_eq!(first.status, 502, "{}", first.body);
+    for _ in 0..5 {
+        let again = env.credential("azure-arm");
+        assert_eq!((again.status, &again.body), (502, &first.body));
+    }
+    assert_eq!(refused.received_requests().await.unwrap().len(), 1);
+    // A new secret is tried at once.
+    env.vault(&VaultCtl::Load {
+        secrets: BTreeMap::from([("env:SP".to_string(), "good-1".to_string())]),
+        held_only: false,
+    });
+    assert_eq!(env.credential("azure-arm").status, 200);
+    assert_eq!(refused.received_requests().await.unwrap().len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1951,6 +2071,7 @@ async fn a_service_principal_token_is_minted_in_the_vault_reused_and_retired_wit
         .and(path("/contoso.onmicrosoft.com/oauth2/v2.0/token"))
         .respond_with(EntraMint {
             minted: AtomicUsize::new(0),
+            delay: Duration::ZERO,
         })
         .mount(&login)
         .await;
@@ -1975,7 +2096,10 @@ async fn a_service_principal_token_is_minted_in_the_vault_reused_and_retired_wit
     };
     let load = |secret: &str| {
         let secrets = BTreeMap::from([("env:SP".to_string(), secret.to_string())]);
-        env.vault(&VaultCtl::Load { secrets });
+        env.vault(&VaultCtl::Load {
+            secrets,
+            held_only: false,
+        });
     };
 
     let first = value();
@@ -2007,6 +2131,11 @@ async fn a_service_principal_token_is_minted_in_the_vault_reused_and_retired_wit
     assert_eq!(r.status, 502, "{}", r.body);
     assert!(r.body.contains("invalid_client") && r.body.contains("AADSTS7000215"));
     assert!(!r.body.contains("not-the-secret"));
+    assert_eq!(
+        env.credential("azure-arm").body,
+        r.body,
+        "answered again, not asked"
+    );
 
     let seen = login.received_requests().await.unwrap();
     assert_eq!(seen.len(), 3);

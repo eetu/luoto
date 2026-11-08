@@ -8,8 +8,8 @@ requests to Azure that the env is allowed to make.
 
 ## Set it up
 
-In the env's config (`luoto edit`), or in `~/.config/luoto/config.toml` for every env that has
-none of its own. A repository's `luoto.toml` can't carry it.
+In the env's own config (`luoto edit`), so each env names what it reaches. Neither
+`config.toml` nor a repository's `luoto.toml` can carry it.
 
 ### With your own `az` login
 
@@ -70,25 +70,43 @@ smuggled in.
 
 | | `access = "read"` | `access = "write"` |
 | --- | --- | --- |
-| Resource Manager, under `subscriptions` | GET, HEAD | every method |
-| role assignments and definitions, federated identity credentials | read | read; every method with `role_assignments = true` |
-| `GET /subscriptions`, `/tenants`, `/providers/…` | read | read |
-| `key_vaults`, `storage_accounts` | GET, HEAD | every method |
+| Resource Manager, under `subscriptions` | GET, HEAD, OPTIONS | every method |
+| what gives access (below) | read | read; every method with `role_assignments = true` |
+| deployments, deployment scripts and stacks | read | read; every method with `deployments = true` |
+| `GET /subscriptions`, `/tenants`, `/providers`, `/providers/<namespace>` | read | read |
+| `key_vaults`, `storage_accounts` | GET, HEAD, OPTIONS | every method |
 | Microsoft Graph | read | read |
 
-Read is plan-only for most tools. Some reads are POSTs at Azure and need write: listing a
-storage account's keys (`listKeys`, which terraform does when it refreshes a storage account),
-Resource Graph queries, and Key Vault's `decrypt` and `sign`. Write lets code in the env do
-whatever the identity's Azure roles allow, so the role is the real limit: give a service
-principal the narrowest one that works rather than writing as yourself.
+The token goes only with the methods in this table. A rule you add for one of these hosts, or
+an access request you approve, may let more through (`luoto allow` and `luoto approve` say
+whose credential the host gets and ask first), but those requests go without the token, and
+without whatever token the client sent.
 
-Under write, role assignments, role definitions and federated identity credentials stay
-read-only, at any scope: each can give someone outside the env lasting access to the
-subscription. `role_assignments = true` allows them, for terraform that manages roles. The
-gate only sees the requests that make them directly; an identity that may assign roles
-(Owner, User Access Administrator) can still do so through a template deployment or a
-deployment script, so for write prefer a service principal with Contributor, which Azure
-itself stops from assigning roles.
+Read is plan-only for most tools. Some reads are POSTs at Azure and need write: listing a
+storage account's keys (`listKeys`, which terraform does when it refreshes a storage account)
+and Key Vault's `decrypt` and `sign`. Resource Graph queries (`az graph query`) are a POST
+outside the subscriptions, so they are refused either way. Write lets code in the env do
+whatever the identity's Azure roles allow on the listed subscriptions, so the role is the
+real limit: give a service principal the narrowest one that works rather than writing as
+yourself.
+
+What gives someone access stays read-only, at every scope from the tenant root down, whatever
+rule allows it: role assignments and definitions, PIM's assignment and eligibility requests
+and its policies, federated identity credentials, Azure Lighthouse delegations, key vault
+access policies, and `elevateAccess`. Each can give someone outside the env lasting access.
+`role_assignments = true` allows them under write, for terraform that manages roles.
+
+Template deployments, deployment scripts and deployment stacks stay read-only too: they run
+with all of the identity's roles, so a nested deployment can name any subscription it may
+write to, and a template or script can assign roles. `deployments = true` allows them under
+write, and with them whatever the identity may do anywhere.
+
+Contributor, which Azure stops from assigning roles, is the usual choice for a service
+principal that writes, but not a harmless one. On a key vault that uses access policies
+rather than Azure RBAC it can give anyone the vault's secrets: the gate refuses the
+`accessPolicies` endpoint unless `role_assignments = true`, but a write of the vault itself
+carries its access policies too. And under write `listKeys` hands the env a storage account's
+keys, which work from anywhere. Scope the role to the resource groups the env works on.
 
 ## Inside the env
 
@@ -96,8 +114,8 @@ itself stops from assigning roles.
 first subscription), so `az group list` just works. Never run `az login` inside: the gate is
 the identity.
 
-Terraform's azurerm provider reads `ARM_USE_MSI=true` and `ARM_SUBSCRIPTION_ID` (and
-`ARM_TENANT_ID` when you set `tenant`), which the env has:
+Terraform's azurerm provider reads `ARM_USE_MSI=true`, `ARM_SUBSCRIPTION_ID` and
+`ARM_TENANT_ID` (`tenant`, or the tenant of your `az` login's token), which the env has:
 
 ```hcl
 provider "azurerm" {
@@ -118,18 +136,21 @@ terraform {
 
 `DefaultAzureCredential` (Python, JavaScript, Go, .NET, Java) finds the managed identity on its
 own; `ManagedIdentityCredential` does too. `AZURE_SUBSCRIPTION_ID` holds the first
-subscription.
+subscription, `AZURE_TENANT_ID` the tenant.
 
 A token the env sees (`az account get-access-token`, the SDKs', IMDS's) is a placeholder: the
-real token's header and claims (your object ID, tenant, expiry, and for your own login your
-user name) with a signature that can't verify. Tools that read the claims, such as terraform's
-`azurerm_client_config`, get true values; the token itself works nowhere.
+real token's header and the claims tools read (audience, issuer, times, tenant, object and
+application IDs, subject, identity type, version) with a signature that can't verify. Tools
+that read the claims, such as terraform's `azurerm_client_config`, get true values; names,
+addresses, roles and scopes stay out, and the token itself works nowhere.
 
 ## What the env can't do
 
 - Reach other subscriptions, key vaults or storage accounts, or Azure hosts you didn't list
-  (`*.azurewebsites.net`, `login.microsoftonline.com`, …): the gate denies them.
-- Write through Graph, or reach Graph without `graph = true`.
+  (`*.azurewebsites.net`, `login.microsoftonline.com`, …): the gate denies them. With
+  `deployments = true`, a deployment reaches every subscription the identity may write to.
+- Write through Graph, or reach Graph without `graph = true`: the Graph token goes on reads
+  only, whatever rule allows a write.
 - Get a token for another audience: IMDS refuses one the env isn't granted, naming it.
 - Carry a real token anywhere: the env never has one.
 
@@ -139,7 +160,9 @@ What it reads does reach the sandbox: Key Vault secret values, blobs, and with w
 ## Troubleshooting
 
 - **`the Azure CLI on this machine is not logged in`** at `up`: run `az login` (with
-  `--tenant` if you set one) on your machine, then `luoto vault reload` or `luoto up`.
+  `--tenant` if you set one) on your machine, then `luoto vault reload -e <env>` or `luoto up`.
+- **`gave no answer within 30 s`**: `az account get-access-token` hung on your machine and was
+  stopped; run it yourself to see why.
 - **401 from Azure after the laptop slept**: the token expired while the watcher wasn't
   running. It is read again within a minute; `luoto vault reload` does it at once.
 - **403 with `AuthorizationFailed`** in the body (JSON from Azure): Azure's RBAC refused the

@@ -32,27 +32,40 @@ pub fn resolve_all(
     Ok(out)
 }
 
-pub fn scheme_ok(r: &str) -> bool {
-    ["op://", "vault://", "keyring:", "env:", "file:", AZCLI]
+fn scheme_ok(r: &str) -> bool {
+    ["op://", "vault://", "keyring:", "env:", "file:"]
         .iter()
         .any(|p| r.starts_with(p))
 }
 
-/// Why `r` can't be resolved as written, if it can't.
+/// Why `r`, a ref written in a config, can't be resolved as written, if it can't. `azcli:` is
+/// not one: only the bindings `[credentials.azure]` compiles to use it ([`check_vault_ref`]).
 pub fn check_ref(r: &str) -> Result<()> {
+    if r.starts_with(AZCLI) {
+        bail!(
+            "`{r}` is luoto's own ref for [credentials.azure], which reads your az login \
+             without one"
+        );
+    }
     if !scheme_ok(r) {
         bail!(
-            "secret ref `{r}` has an unknown scheme (use op://, vault://, keyring:, env:, file: \
-             or azcli:)"
+            "secret ref `{r}` has an unknown scheme (use op://, vault://, keyring:, env: or \
+             file:)"
         );
     }
     if let Some(path) = r.strip_prefix("file:") {
         file_path(path)?;
     }
-    if r.starts_with(AZCLI) {
-        azure_identity::parse_ref(r)?;
-    }
     Ok(())
+}
+
+/// [`check_ref`] for a ref a compiled binding uses, which may be an `azcli:` one
+/// (`compile` lets only `[credentials.azure]`'s bindings have it).
+pub fn check_vault_ref(r: &str) -> Result<()> {
+    if r.starts_with(AZCLI) {
+        return azure_identity::parse_ref(r).map(|_| ());
+    }
+    check_ref(r)
 }
 
 /// `r`'s value, and when it expires where its source says (an `azcli:` token).
@@ -93,7 +106,7 @@ pub fn resolve(global: &GlobalConfig, r: &str) -> Result<String> {
             .trim_end_matches(['\r', '\n'])
             .to_string());
     }
-    bail!("unknown secret ref scheme (use op://, vault://, keyring:, env:, file: or azcli:)")
+    bail!("unknown secret ref scheme (use op://, vault://, keyring:, env: or file:)")
 }
 
 /// Whether reading `r` needs no one at the machine: not the 1Password app, which asks for
@@ -321,5 +334,10 @@ mod tests {
         assert!(check_ref("file:~/k").is_ok());
         assert!(check_ref("op://v/i/f").is_ok());
         assert!(check_ref("http://x").is_err());
+        let azcli = "azcli:https://management.azure.com/";
+        assert!(check_ref(azcli).is_err());
+        assert!(check_vault_ref(azcli).is_ok());
+        assert!(check_vault_ref("azcli:https://x?tenant=a/b").is_err());
+        assert!(check_vault_ref("http://x").is_err());
     }
 }

@@ -621,17 +621,44 @@ impl Policy {
         Decision::Deny(DenyReason::PathNotAllowed)
     }
 
-    /// Injections that apply to this request (host + path).
-    pub fn injections_for<'a>(&'a self, host: &'a str, path: &'a str) -> Vec<&'a Injection> {
+    /// Injections that apply to this request (method, host and path).
+    pub fn injections_for<'a>(
+        &'a self,
+        method: &str,
+        host: &str,
+        path: &str,
+    ) -> Vec<&'a Injection> {
         self.injections
             .iter()
             .filter(|i| host_matches(&i.host, host) && i.path_matches(path))
+            .filter(|i| i.method_matches(method))
             .collect()
     }
 
     /// Hosts carrying credentials: client-supplied auth headers are always stripped there.
     pub fn is_credentialed_host(&self, host: &str) -> bool {
         self.injections.iter().any(|i| host_matches(&i.host, host))
+    }
+
+    /// Why `rule` would put a credential on requests, one line per credential: it covers a
+    /// host the gate adds that credential on, with a method the credential goes with. Paths
+    /// aren't compared, so it may name one the rule's paths keep clear of.
+    pub fn credentials_reached(&self, rule: &Rule) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for i in &self.injections {
+            let methods = i.methods.is_empty() || i.methods.iter().any(|m| rule.access.allows(m));
+            if !methods || !patterns_overlap(&rule.host, &i.host) {
+                continue;
+            }
+            let line = format!(
+                "requests it allows to {} carry your `{}` credential",
+                i.host, i.binding
+            );
+            if !out.contains(&line) {
+                out.push(line);
+            }
+        }
+        out
     }
 
     /// The explicit deny that refuses all of `host`, every method and path: no rule or
@@ -1216,6 +1243,7 @@ mod tests {
             binding: "anthropic".into(),
             host: "api.anthropic.com".into(),
             paths: vec![],
+            methods: vec![],
             place: crate::creds::Placement::Header {
                 name: "x-api-key".into(),
                 format: "{secret}".into(),
@@ -1233,6 +1261,45 @@ mod tests {
         }
         assert!(p.tunnel_bypass("grpc.example.com").is_none());
         assert!(p.tunnel_bypass("*.githubusercontent.com").is_none());
+    }
+
+    #[test]
+    fn a_rule_over_a_credentialed_host_names_the_credential_its_methods_reach() {
+        let mut p = policy();
+        p.injections.push(Injection {
+            binding: "azure-graph".into(),
+            host: "graph.microsoft.com".into(),
+            paths: vec![],
+            methods: READ_METHODS.iter().map(|m| m.to_string()).collect(),
+            place: crate::creds::Placement::Header {
+                name: "authorization".into(),
+                format: "Bearer {secret}".into(),
+            },
+            ignore_case: false,
+        });
+        let rule = |host: &str, access: Access| Rule {
+            host: host.into(),
+            access,
+            ..Default::default()
+        };
+        let read = Access::Level(AccessLevel::Read);
+        assert_eq!(
+            p.credentials_reached(&rule("graph.microsoft.com", read.clone())),
+            ["requests it allows to graph.microsoft.com carry your `azure-graph` credential"]
+        );
+        assert_eq!(
+            p.credentials_reached(&rule("*.microsoft.com", read)).len(),
+            1
+        );
+        let post = Access::Methods(vec!["POST".into()]);
+        assert!(
+            p.credentials_reached(&rule("graph.microsoft.com", post))
+                .is_empty()
+        );
+        assert!(
+            p.credentials_reached(&rule("example.com", Access::Level(AccessLevel::Write)))
+                .is_empty()
+        );
     }
 
     #[test]

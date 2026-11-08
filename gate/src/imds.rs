@@ -1,9 +1,9 @@
 //! The Azure instance metadata service (IMDS) as the sandbox sees it, for an env with
 //! `[credentials.azure]`: the gate answers its managed identity token endpoint itself, for
 //! the audiences the env is granted, and never dials 169.254.169.254. The token it hands out
-//! is a placeholder: the real token's header and claims with a signature that can't verify,
-//! so tools read true claims (object ID, tenant, expiry) while the real token leaves only on
-//! the Azure hosts where the gate adds it (`creds.rs`).
+//! is a placeholder: the real token's header and the claims tools read ([`CLAIMS`]) with a
+//! signature that can't verify, so tools read true claims (object ID, tenant, expiry) while the
+//! real token leaves only on the Azure hosts where the gate adds it (`creds.rs`).
 
 use std::time::Instant;
 
@@ -25,6 +25,13 @@ use crate::state::State;
 
 /// What replaces a token's signature in its placeholder.
 const SIGNATURE: &str = "luoto: the gate adds the real token";
+/// The claims a placeholder keeps: what the tools that take a managed identity's token read.
+/// `az login --identity` reads the tenant; terraform's azurerm (`azurerm_client_config`) the
+/// object, application and tenant IDs and the identity type; the Azure SDKs only the times.
+/// The rest (names, the client's address, roles and scopes) stays with the real token.
+const CLAIMS: &[&str] = &[
+    "aud", "iss", "iat", "nbf", "exp", "tid", "oid", "sub", "appid", "azp", "idtyp", "ver",
+];
 /// The most of a client's `resource` an answer or event repeats.
 const MAX_RESOURCE: usize = 200;
 
@@ -234,18 +241,21 @@ async fn token(state: &State, req: &Request<Incoming>, target: &Target) -> Answe
     }
 }
 
-/// `token` with its signature replaced by one that can't verify; its header and claims as
-/// they are. `None` unless it is a signed JWT (three parts, its claims a JSON object).
+/// `token` with only the [`CLAIMS`] tools read and a signature that can't verify; its header
+/// as it is. `None` unless it is a signed JWT (three parts, its claims a JSON object).
 pub fn placeholder(token: &str) -> Option<String> {
     let mut parts = token.split('.');
-    let (Some(header), Some(payload), Some(_), None) =
+    let (Some(header), Some(_), Some(_), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
         return None;
     };
-    if header.is_empty() || claims(token).is_none() {
+    if header.is_empty() {
         return None;
     }
+    let mut kept = claims(token)?;
+    kept.retain(|k, _| CLAIMS.contains(&k.as_str()));
+    let payload = B64URL.encode(serde_json::to_vec(&Value::Object(kept)).ok()?);
     Some(format!("{header}.{payload}.{}", B64URL.encode(SIGNATURE)))
 }
 
@@ -302,18 +312,33 @@ mod tests {
     }
 
     #[test]
-    fn the_placeholder_keeps_the_claims_and_cannot_verify() {
-        let claims = json!({"aud": "https://management.azure.com/", "oid": "o-1", "tid": "t-1",
-            "exp": 1_900_000_000, "appid": "a-1"});
-        let real = jwt(&claims);
+    fn the_placeholder_keeps_the_claims_tools_read_and_cannot_verify() {
+        let kept = json!({"aud": "https://management.azure.com/", "iss": "https://sts/t-1/",
+            "iat": 1_899_990_000, "nbf": 1_899_990_000, "exp": 1_900_000_000, "tid": "t-1",
+            "oid": "o-1", "sub": "s-1", "appid": "a-1", "azp": "a-1", "idtyp": "user",
+            "ver": "1.0"});
+        let mut all = kept.clone();
+        for (k, v) in [
+            ("name", json!("Eetu")),
+            ("upn", json!("eetu@example.com")),
+            ("unique_name", json!("eetu@example.com")),
+            ("ipaddr", json!("203.0.113.7")),
+            ("wids", json!(["62e90394-69f5-4237-9190-012177145e10"])),
+            ("scp", json!("user_impersonation")),
+            ("xms_tcdt", json!(1_600_000_000)),
+        ] {
+            all[k] = v;
+        }
+        let real = jwt(&all);
         let p = placeholder(&real).unwrap();
-        let (real_signed, real_sig) = real.rsplit_once('.').unwrap();
-        let (p_signed, p_sig) = p.rsplit_once('.').unwrap();
-        assert_eq!(p_signed, real_signed, "header and claims unchanged");
-        assert_ne!(p_sig, real_sig);
+        let (real_header, _) = real.split_once('.').unwrap();
+        let (p_header, _) = p.split_once('.').unwrap();
+        assert_eq!(p_header, real_header);
+        let (_, real_sig) = real.rsplit_once('.').unwrap();
+        let (_, p_sig) = p.rsplit_once('.').unwrap();
         assert!(!p.contains(real_sig));
         assert_eq!(B64URL.decode(p_sig).unwrap(), SIGNATURE.as_bytes());
-        assert_eq!(super::claims(&p).unwrap()["oid"], "o-1");
+        assert_eq!(Value::Object(super::claims(&p).unwrap()), kept);
     }
 
     #[test]

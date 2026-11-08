@@ -727,7 +727,7 @@ async fn vault_action(Path(action): Path<String>) -> ApiResult<Value> {
                     .loaded_refs
                     .into_iter()
                     .collect();
-                Ok(serde_json::to_value(sync::reload(&ctx, &refs)?)?)
+                Ok(serde_json::to_value(sync::reload(&ctx, &refs, true)?)?)
             }
             "lock" => {
                 let failed = sync::lock_all(&ctx)?;

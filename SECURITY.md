@@ -35,7 +35,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   store at unlock and wiped by `luoto vault lock` or a VM restart. `luoto vault reload` reads
   them again; one an upstream refuses (401) is read again on its own, at most every 10
   minutes, when its source needs no one (the keychain, a 1Password service account, `file:`,
-  Vault, `az`). Each gate authenticates to the
+  Vault, `az`). Those background reads only replace what the vault holds, so a locked vault
+  stays empty. Each gate authenticates to the
   vault with its own token and receives only its env's bindings, as short-lived values
   (GitHub installation tokens restricted to the env's repositories and permissions). On a
   credentialed host the gate removes any credential the client sent before injecting its own,
@@ -65,14 +66,21 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   never loopback, cloud metadata or luoto's own networks.
 - **Azure** (`[credentials.azure]`). Tokens live in the vault: read from your `az` login on
   the host (and read again before they expire), or minted there from a service principal's
-  secret, which never leaves it; the vault reaches only `login.microsoftonline.com` for them.
-  The gate answers the instance metadata service itself and never dials it. What it hands the
-  sandbox is a placeholder: the real token's header and claims (object and tenant IDs, expiry,
-  and for your own login your user name) with a signature that can't verify. The real token
-  goes, over TLS, only on Resource Manager paths of the listed subscriptions (plus reading the
-  subscription, tenant and provider lists), the key vaults and storage accounts named exactly,
-  and Graph, read-only; IMDS serves no other audience. Only your own config grants it: a
-  `luoto.toml` can't, and access requests from the sandbox add hosts, never tokens.
+  secret, which never leaves it; the vault reaches only `login.microsoftonline.com` for them,
+  one mint at a time per token, and answers a refused mint again for 30 seconds rather than
+  asking. The gate answers the instance metadata service itself and never dials it. What it
+  hands the sandbox is a placeholder: the real token's header and the claims tools read
+  (audience, issuer, times, tenant, object and application IDs, subject, identity type,
+  version) with a signature that can't verify; names, addresses, roles and scopes stay out.
+  The real token goes, over TLS, only on Resource Manager paths of the listed subscriptions
+  (plus reading the subscription and tenant lists and the resource providers), the key vaults
+  and storage accounts named exactly, and Graph, and only with the methods `access` allows
+  there (Graph and those lists: read); IMDS serves no other audience. Only the env's own config
+  grants it: not `config.toml`, not a `luoto.toml`, and an `azcli:` ref (your `az` login's
+  token) works nowhere else. A rule you add or an access request you approve may open more of
+  those hosts, but adds no token: the gate strips the client's and adds its own only within the
+  above, and `luoto allow` and `luoto approve` say whose credential a rule's host gets before
+  adding it.
 - **Credentials coming back.** On a credentialed host the gate looks for the credential it
   placed in the response's headers and the start of its body (all of a JSON body, from which
   it removes the fields carrying it, as LFS servers echo it); a response that still carries it
@@ -132,12 +140,16 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   (unless `server_tools = true`); the other providers' are not.
 - **Azure write access.** With `access = "write"`, code in the sandbox can do on the listed
   subscriptions whatever the identity's roles allow: create resources that reach the internet,
-  read keys that `listKeys` returns. The gate refuses the direct ways to lasting access from
-  outside (role assignments and definitions, federated identity credentials) unless
-  `role_assignments = true`, but an identity allowed to assign roles can still do it through
-  a template deployment or a deployment script. Azure RBAC is the boundary, and with your own
-  `az` login it is your roles: prefer a service principal with Contributor or narrower.
-  Whatever the identity reads reaches the sandbox, Key Vault secret values included.
+  read keys that `listKeys` returns. The gate refuses, at every scope, the writes that give
+  access (role assignments and definitions, PIM requests and policies, federated identity
+  credentials, Lighthouse delegations, key vault access policies, `elevateAccess`) unless
+  `role_assignments = true`, and template deployments, deployment scripts and stacks, which
+  act with all of the identity's roles beyond the listed subscriptions, unless
+  `deployments = true`. A key vault's own write still carries its access policies. Azure RBAC
+  is the boundary, and with your own `az` login it is your roles: prefer a service principal
+  with a role scoped to the env's resource groups. Whatever the identity reads reaches the
+  sandbox, Key Vault secret values included. A storage SAS URL (`sig=` in its query) works
+  from anywhere, as any secret the sandbox reads does.
 - **Exhausting the gate.** Code in the sandbox can hold the gate's 1024 connections and
   so stop the env's own traffic, which it could break anyway; other envs have their own gates.
   The event queue, cached certificates and the logs of the gate, the vault and the dev container

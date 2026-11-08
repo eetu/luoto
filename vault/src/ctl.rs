@@ -49,8 +49,8 @@ fn lifecycle(vault: &Vault, env: &str, msg: String) {
 fn dispatch(vault: &Vault, op: VaultCtl) -> CtlResponse {
     match op {
         VaultCtl::Status => CtlResponse::ok(vault.status()),
-        VaultCtl::Load { secrets } => {
-            let n = vault.load(secrets);
+        VaultCtl::Load { secrets, held_only } => {
+            let n = vault.load(secrets, held_only);
             lifecycle(vault, "", format!("{n} secret(s) loaded or changed"));
             CtlResponse::ok(n)
         }
