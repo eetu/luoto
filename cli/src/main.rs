@@ -27,6 +27,7 @@ mod ports;
 mod project;
 mod prompt;
 mod release;
+mod report;
 mod repos;
 mod rules;
 mod runtime;
@@ -37,6 +38,7 @@ mod state;
 mod sync;
 mod text;
 mod ui;
+mod uninstall;
 mod upgrade;
 mod watch;
 mod wizard;
@@ -72,9 +74,21 @@ enum Cmd {
     /// Detect the host, recommend/install a container runtime, prepare images.
     Setup(setup::SetupOpts),
     /// Check the runtime, images, vault and every env's isolation.
-    Doctor,
+    Doctor {
+        /// Also write what a bug report needs to FILE (default: luoto-report-<time>.txt here),
+        /// with secrets and what identifies you taken out.
+        #[arg(long, value_name = "FILE", num_args = 0..=1)]
+        report: Option<Option<String>>,
+    },
     /// Update luoto to the latest release.
     Upgrade,
+    /// Remove luoto's envs, vault, images, keychain entries, config and data (and its VM when
+    /// nothing else uses it), after listing them; the binary stays.
+    Uninstall {
+        /// Don't ask first.
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// Start the local web UI.
     Ui {
         /// Outside the ports envs forward to this machine (1024–32767), so no env can serve
@@ -397,8 +411,12 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
     let env = || workspace::resolve(&paths, env_arg.as_deref());
     match cmd {
         Cmd::Setup(o) => setup::setup(o),
-        Cmd::Doctor => setup::doctor(),
+        Cmd::Doctor { report } => setup::doctor(report),
         Cmd::Upgrade => upgrade::upgrade(),
+        Cmd::Uninstall { .. } if env_arg.is_some() => {
+            anyhow::bail!("uninstall removes every env: leave out -e")
+        }
+        Cmd::Uninstall { yes } => uninstall::uninstall(yes),
         Cmd::Ui { port, no_open } => ui::serve(port, !no_open),
         Cmd::Init(o) => {
             if env_arg.is_some() {
@@ -623,5 +641,23 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_report_file_is_optional_and_uninstall_takes_no_env() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat()).unwrap();
+        let report = |args: &[&str]| match parse(args).cmd {
+            Cmd::Doctor { report } => report,
+            _ => panic!("not doctor"),
+        };
+        assert_eq!(report(&["doctor"]), None);
+        assert_eq!(report(&["doctor", "--report"]), Some(None));
+        assert_eq!(
+            report(&["doctor", "--report", "bug.txt"]),
+            Some(Some("bug.txt".into()))
+        );
+        let cli = parse(&["uninstall", "-e", "web"]);
+        let e = run(cli.env, cli.cmd).unwrap_err().to_string();
+        assert!(e.contains("leave out -e"), "{e}");
     }
 }

@@ -90,6 +90,10 @@ impl States {
         self.by_name.get(name).is_some_and(|s| s == "running")
     }
 
+    pub fn exists(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+
     /// An env's dev and gate container states, `absent` for one that doesn't exist.
     pub fn env(&self, env: &str) -> (String, String) {
         if self.vm_stopped {

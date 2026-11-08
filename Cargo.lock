@@ -1874,6 +1874,7 @@ dependencies = [
  "hex",
  "inquire",
  "keyring",
+ "keyring-core",
  "luoto-shared",
  "mime_guess",
  "open",

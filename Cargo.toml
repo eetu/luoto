@@ -58,6 +58,8 @@ toml_edit = { version = "0.25", features = ["serde"] }
 directories = "6"
 open = "5"
 keyring = "4"
+# keyring's own core, for searching the keychain (`luoto uninstall`); keep it the one keyring uses.
+keyring-core = "1"
 axum = { version = "0.8", features = ["tokio", "tracing"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["set-header"] }

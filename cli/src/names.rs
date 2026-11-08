@@ -15,6 +15,15 @@ pub fn instance() -> &'static str {
     }
 }
 
+/// The instance that shares this one's VM.
+pub fn other_instance() -> &'static str {
+    if instance() == "luoto" {
+        "luoto-dev"
+    } else {
+        "luoto"
+    }
+}
+
 /// The `luoto ui` port, outside the ports envs forward (1024-32767).
 pub fn ui_port() -> u16 {
     if crate::release::pinned() {
@@ -97,4 +106,51 @@ pub fn addrs(octet: u8) -> Addrs {
 
 pub fn image(component: &str, tag: &str) -> String {
     format!("localhost/luoto-{component}:{tag}")
+}
+
+/// Whether a container, network or volume labelled with `env` and `role` has the name
+/// instance `inst` gives such an object. Both instances label alike in one VM, so the name
+/// says whose it is.
+pub fn named_by(inst: &str, name: &str, env: &str, role: &str) -> bool {
+    let base = format!("{inst}-{env}");
+    match role {
+        "vault" => {
+            env.is_empty()
+                && (name == format!("{inst}-vault") || name == format!("{inst}-vault-out"))
+        }
+        _ if env.is_empty() => false,
+        "dev" => name == base,
+        "net" => name == base || name == format!("{base}-out"),
+        // The gate container, and the tools, gate, work and home volumes.
+        _ => name == format!("{base}-{role}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_say_which_instance_made_an_object() {
+        for (name, env, role) in [
+            (dev("web"), "web", "dev"),
+            (gate("web"), "web", "gate"),
+            (internal_net("web"), "web", "net"),
+            (egress_net("web"), "web", "net"),
+            (volume("web", "work"), "web", "work"),
+            (volume("web", "gate"), "web", "gate"),
+            (vault(), "", "vault"),
+            (vault_out_net(), "", "vault"),
+        ] {
+            assert!(named_by(instance(), &name, env, role), "{name}");
+            assert!(!named_by(other_instance(), &name, env, role), "{name}");
+        }
+        // A release's env `dev-web` (older than the rule against such names) and a source
+        // build's env `web` share a container name; the env label tells them apart.
+        assert!(named_by("luoto", "luoto-dev-web", "dev-web", "dev"));
+        assert!(!named_by("luoto", "luoto-dev-web", "web", "dev"));
+        assert!(named_by("luoto-dev", "luoto-dev-web", "web", "dev"));
+        assert!(!named_by("luoto", "luoto-web", "", "dev"));
+        assert!(!named_by("luoto", "luoto-vault", "web", "vault"));
+    }
 }
