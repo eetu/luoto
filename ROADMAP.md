@@ -36,15 +36,10 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   an env; seed from a git bundle and `luoto fetch` into `refs/remotes/luoto/<env>`.
 - **A folder shared live** (Linux, or a VM that shares folders), with an audit of the files
   host tools act on (`.git/config`, hooks, `.envrc`, editor and pre-commit configs).
-- **`luoto run` jobs:** `--timeout`, a summary of denials, a clean-checkout start, a CI recipe.
+- **`luoto run` jobs:** a clean-checkout start, a CI recipe.
 - **Detached agents:** `agent run --detach`, `agent ps`, `agent attach`.
-- **Notifications** (UI and OS) for access requests and the first denial at a new host;
-  `sandbox request` for ports; `approve` that narrows a request.
-- **Your own deny and mute rules:** block a path a preset allows; keep telemetry out of
-  `egress`.
-- **More commands:** `push` (a reviewed copy-in), `reset-home`, `--all` on `up` and `down`,
-  `logs`, `doctor --report`, `uninstall`.
-- **Port forwards** listed in `status` and the UI, with links.
+- **Requests:** `sandbox request` for ports; `approve` that narrows a request.
+- **More commands:** `push` (a reviewed copy-in), `doctor --report`, `uninstall`.
 - **`luoto project suggest`:** an env's working rules as a `luoto.toml` for the team.
 - **The UI does what the CLI does:** editing an env's presets, tools, agents, ports,
   credentials and repos, removing it, and the questions `init` and installs ask (prompts and
@@ -88,5 +83,4 @@ Each change is a format migration (`cli/src/format.rs`); the first one also brin
 - `sandbox provision`: one call into the env instead of the 26 an unchanged `up` makes.
 - Gate limits: connection cap, bounded event queue, log rotation, certificate expiry, response
   timeouts.
-- Generated frontend types; tests for the UI's Host and Origin checks, the gate's TLS
-  interception and the vault's GitHub App tokens.
+- Generated frontend types.

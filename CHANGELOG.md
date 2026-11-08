@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.1
+
+Your own deny and mute rules, notifications for requests, and commands for every env at once.
+
+- **Deny and mute rules:** `[[deny]]` (in an env, `config.toml` or a project's `luoto.toml`)
+  refuses a host, its paths or methods whatever allows them. `[[mute]]` keeps denials you
+  leave denied, such as telemetry, out of `luoto egress`, the UI, notifications, run summaries
+  and allow offers; `egress --all` shows them. A `luoto.toml` can't mute.
+- **Notifications:** a desktop notification (macOS, Linux with `notify-send`) for each access
+  request and the first denial at each host; `notifications = false` in `config.toml` turns
+  them off. The UI's bell adds browser notifications for requests.
+- **Port forwards listed:** `luoto status` and the UI's env panel show forwarded ports as
+  links, and ports taken on this machine with a `luoto forward` hint.
+- **`luoto run --timeout 30m`:** stops the agent and everything it started in the env, and
+  exits 124. After every run, stderr lists the hosts the gate denied, with counts, requests
+  and reasons.
+- **`up --all`, `down --all`:** every env in the config dir. `up` asks nothing; an env that
+  fails leaves the rest to go, and the exit code says so.
+- **`luoto reset-home`:** discards an env's home (dotfiles, history, agents' logins,
+  toolchains); the workspace stays.
+- **`luoto logs`:** the gate's log, the watcher's, or the env's installs (the newest 1 MiB
+  kept); `-f`, `-n`.
+- **luoto.toml review:** an `up` that can't ask (the UI, `up --all`) leaves a changed
+  `luoto.toml` unapplied without recording a decline.
+
 ## 0.3.0 (2026-11-07)
 
 Related repositories in one env, git on any forge, and an `up` that sets up what an env lacks.
