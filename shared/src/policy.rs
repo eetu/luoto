@@ -573,11 +573,18 @@ impl Policy {
                 body_bad = Some(max);
                 continue;
             }
+            // A rule's `idle` is for its host, whichever rule allows the request (a preset's
+            // usually comes first).
+            let idle = self
+                .live_rules(req.host, req.port, now)
+                .filter(|o| o.rule.path_matches(req.path))
+                .filter_map(|o| o.rule.idle_limit())
+                .max();
             return Decision::Allow {
                 rule: r.id.clone(),
                 max_body: r.rule.max_body,
                 allow_private: r.rule.allow_private,
-                idle: r.rule.idle_limit(),
+                idle,
             };
         }
 
@@ -621,6 +628,23 @@ impl Policy {
     /// Hosts carrying credentials: client-supplied auth headers are always stripped there.
     pub fn is_credentialed_host(&self, host: &str) -> bool {
         self.injections.iter().any(|i| host_matches(&i.host, host))
+    }
+
+    /// The explicit deny that refuses all of `host`, every method and path: no rule or
+    /// approved request can open it.
+    pub fn wholly_denied(&self, host: &str) -> Option<&DenyRule> {
+        let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        self.denies.iter().find(|d| {
+            host_matches(&d.host, &host)
+                && d.methods.is_empty()
+                && (d.paths.is_empty() || d.paths.iter().any(|p| p == "**" || p == "/**"))
+        })
+    }
+
+    /// Whether an explicit deny refuses some of `host`.
+    pub fn partly_denied(&self, host: &str) -> bool {
+        let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        self.denies.iter().any(|d| host_matches(&d.host, &host))
     }
 
     /// Why a tunnel rule for `pattern` is refused, if it is: the gate only passes a tunnel's
@@ -792,6 +816,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_host_is_wholly_denied_only_by_a_deny_on_every_path_and_method() {
+        let deny = |paths: &[&str], methods: &[&str]| DenyRule {
+            host: "telemetry.example".into(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+            methods: methods.iter().map(|m| m.to_string()).collect(),
+            reason: "r".into(),
+        };
+        let p = |d: DenyRule| Policy {
+            denies: vec![d],
+            ..Default::default()
+        };
+        assert!(
+            p(deny(&[], &[]))
+                .wholly_denied("Telemetry.Example.")
+                .is_some()
+        );
+        assert!(
+            p(deny(&["/**"], &[]))
+                .wholly_denied("telemetry.example")
+                .is_some()
+        );
+        for partial in [deny(&["/v1/**"], &[]), deny(&[], &["POST"])] {
+            let p = p(partial);
+            assert!(p.wholly_denied("telemetry.example").is_none());
+            assert!(p.partly_denied("telemetry.example"));
+            assert!(!p.partly_denied("example.com"));
+        }
+    }
+
+    #[test]
     fn a_rules_idle_is_a_duration_up_to_a_day() {
         assert_eq!(parse_idle("90s"), Ok(std::time::Duration::from_secs(90)));
         assert_eq!(parse_idle("30m"), Ok(std::time::Duration::from_secs(1800)));
@@ -827,6 +881,22 @@ mod tests {
         assert!(matches!(
             p.decide(&req("k8s.example", "GET", "/logs"), Utc::now()),
             Decision::Allow { idle: Some(d), .. } if d == std::time::Duration::from_secs(7200)
+        ));
+
+        // Behind a preset's rule for the host, which allows the request first.
+        let mut idle = Rule::read("registry.npmjs.org");
+        idle.idle = Some("2h".into());
+        let p = Policy {
+            rules: vec![
+                rule("preset", Rule::read("registry.npmjs.org")),
+                rule("mine", idle),
+            ],
+            ..Default::default()
+        };
+        assert!(matches!(
+            p.decide(&req("registry.npmjs.org", "GET", "/react"), Utc::now()),
+            Decision::Allow { rule, idle: Some(d), .. }
+                if rule == "preset" && d == std::time::Duration::from_secs(7200)
         ));
     }
     use chrono::Duration;

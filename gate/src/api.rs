@@ -49,6 +49,16 @@ pub async fn handle(state: Arc<State>, req: Request<Incoming>) -> Response<Body>
         },
         (Method::POST, "/requests") => match read::<NewAccessRequest>(req).await {
             Ok(new) => {
+                if new.install.is_none()
+                    && let Some(d) = state.policy().wholly_denied(&new.host)
+                {
+                    let msg = format!(
+                        "{} is refused by a [[deny]] rule ({}): no request can open it\n",
+                        new.host.trim(),
+                        d.reason
+                    );
+                    return plain(StatusCode::UNPROCESSABLE_ENTITY, msg);
+                }
                 let created = state.requests().create(new);
                 match created {
                     Ok(r) => {

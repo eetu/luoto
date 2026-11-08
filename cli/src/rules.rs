@@ -259,12 +259,29 @@ pub fn approve(
         }
         return approve_install(ctx, name, req).map(|installed| Approved::Installed { installed });
     }
+    let policy = env::plan(ctx, name)?.compiled.policy;
+    if let Some(d) = policy.wholly_denied(&req.host) {
+        bail!(
+            "{} is refused by a [[deny]] rule ({}): approving request #{} would open nothing; \
+             reject it, or remove the deny first",
+            crate::text::display(&req.host),
+            d.reason,
+            req.id
+        );
+    }
     let mut rule = grant(req, narrow)?;
     rule.expires = ttl.map(parse_ttl).transpose()?.map(|d| Utc::now() + d);
     rule.note = Some(format!("approved request #{}", req.id));
     let rule = add_rule_checked(ctx, name, rule, force)?;
-    // The sandbox reads the note: it learns it got less than it asked for.
-    let note = (!narrow.is_empty()).then(|| format!("granted less: {}", describe(&rule)));
+    // The sandbox reads the note: it learns what it got, if less than it asked for.
+    let mut notes = Vec::new();
+    if !narrow.is_empty() {
+        notes.push(format!("granted less: {}", describe(&rule)));
+    }
+    if policy.partly_denied(&req.host) {
+        notes.push("[[deny]] rules still refuse some of it".to_string());
+    }
+    let note = (!notes.is_empty()).then(|| notes.join("; "));
     ctl::gate::<AccessRequest>(
         &ctx.rt,
         name,

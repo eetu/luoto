@@ -431,10 +431,8 @@ pub fn describe(o: &Outcome) -> String {
             None => {
                 let to = match r.port {
                     Some(port) => format!(
-                        "a tunnel to {}:{port} is open now, through the proxy (CONNECT to {}:{})",
-                        r.host,
-                        luoto_shared::GATE_HOST,
-                        luoto_shared::PROXY_PORT
+                        "a tunnel to {}:{port} is open now: connect to it as it is",
+                        r.host
                     ),
                     None => format!("{} is reachable now", r.host),
                 };
@@ -576,6 +574,6 @@ mod tests {
             request: r,
             waited: None,
         });
-        assert!(said.contains("CONNECT to gate:3128"), "{said}");
+        assert!(said.contains("db.example.com:5432 is open now"), "{said}");
     }
 }

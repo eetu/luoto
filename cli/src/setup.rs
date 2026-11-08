@@ -572,7 +572,7 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
     ]);
     for env_name in config::list_envs(&ctx.paths)? {
         if let Some(n) = crate::ca::notice(&ctx.paths.env_state(&env_name), &env_name) {
-            println!("env {env_name}: CA {n}");
+            out.say(format!("env {env_name}: CA {n}"));
         }
         if !ctx.rt.is_running(&names::dev(&env_name)) {
             out.say(format!("env {env_name}: not running"));

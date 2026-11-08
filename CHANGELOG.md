@@ -21,8 +21,8 @@ Your own deny and mute rules, notifications for requests, and commands for every
   fails leaves the rest to go, and the exit code says so.
 - **`luoto reset-home`:** discards an env's home (dotfiles, history, agents' logins,
   toolchains); the workspace stays.
-- **`luoto logs`:** the gate's log, the watcher's, or the env's installs (the newest 1 MiB
-  kept); `-f`, `-n`.
+- **`luoto logs`:** the gate's log, the watcher's, or the env's installs (up to the newest
+  1 MiB kept); `-f`, `-n`.
 - **Gate limits:** at most 1024 connections per env, refused beyond with an event. A
   response must start within 10 minutes; a stream silent for 5 minutes, or a tunnel or
   websocket for an hour, is closed; a rule's `idle` (`luoto allow --idle 2h`, up to 24h)

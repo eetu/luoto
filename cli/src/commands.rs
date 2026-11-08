@@ -531,6 +531,7 @@ fn print_rules(p: &env::Plan) {
         }
         let extra = [
             (!r.rule.paths.is_empty()).then(|| format!("paths {}", r.rule.paths.join(","))),
+            r.rule.idle.as_ref().map(|i| format!("idle {i}")),
             r.rule
                 .expires
                 .map(|e| format!("until {}", e.format("%m-%d %H:%M"))),
@@ -539,9 +540,13 @@ fn print_rules(p: &env::Plan) {
         .flatten()
         .collect::<Vec<_>>()
         .join(" ");
+        let host = match r.rule.port {
+            Some(port) => format!("{}:{port}", r.rule.host),
+            None => r.rule.host.clone(),
+        };
         println!(
             "{:<22} {:<38} {:<28} {} {extra}",
-            r.id, r.rule.host, access, r.origin
+            r.id, host, access, r.origin
         );
     }
     if !p.compiled.policy.injections.is_empty() {
