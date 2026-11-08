@@ -104,14 +104,48 @@ pub fn resolve(paths: &Paths, arg: Option<&str>) -> Result<String> {
         }
         _ => {
             let cwd = std::env::current_dir()?.canonicalize()?;
-            env_for_dir(paths, &cwd)?.with_context(|| {
-                format!(
-                    "no env for {} — name one, or create it here with `luoto init`",
-                    cwd.display()
-                )
-            })
+            env_for_dir(paths, &cwd)?.with_context(|| no_env_here(paths, &cwd))
         }
     }
+}
+
+/// Why no env acts on `cwd`, naming the envs no folder leads to: those cloned from a remote.
+fn no_env_here(paths: &Paths, cwd: &Path) -> String {
+    let remote: Vec<String> = config::list_envs(paths)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| {
+            EnvFile::load(paths, n)
+                .is_ok_and(|f| f.cfg.workspace.dir.is_none() && f.cfg.workspace.url.is_some())
+        })
+        .collect();
+    let mut msg = format!(
+        "no env for {} — name one with -e, or create it here with `luoto init`",
+        cwd.display()
+    );
+    if !remote.is_empty() {
+        msg.push_str(&format!(
+            "; envs cloned from a remote have no folder here, so -e picks them: {}",
+            remote.join(", ")
+        ));
+    }
+    msg
+}
+
+/// A folder `pull --to` may write: never your home folder or one that holds it.
+pub fn check_pull_dest(dest: &Path) -> Result<()> {
+    let home = directories::BaseDirs::new().map(|b| {
+        b.home_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| b.home_dir().to_path_buf())
+    });
+    if home.is_some_and(|h| h.starts_with(dest)) {
+        bail!(
+            "{} is your home folder or holds it: pull into a project's own folder",
+            dest.display()
+        );
+    }
+    Ok(())
 }
 
 /// A path component as macOS (APFS/HFS+) and Windows (NTFS) compare it: case-folded, with
@@ -1225,6 +1259,7 @@ mod tests {
                     },
                 ),
             ]),
+            ..Default::default()
         };
         let present = BTreeSet::from(["api".to_string(), "web".to_string()]);
         let all = pull_targets(&ws, None, None, &present).unwrap();
@@ -1262,6 +1297,57 @@ mod tests {
         let web = pull_targets(&ws, None, Some("web"), &present).unwrap();
         assert_eq!(web[0].dest, canon(root.path()).join("web"));
         assert!(pull_targets(&ws, None, Some("nope"), &present).is_err());
+    }
+
+    #[test]
+    fn a_clone_pulls_only_to_a_folder_you_name_never_home() {
+        let ws = Workspace {
+            url: Some("acme/web".into()),
+            repos: BTreeMap::from([(
+                "api".to_string(),
+                config::Repo {
+                    url: Some("acme/api".into()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let present = BTreeSet::from(["api".to_string()]);
+        let e = pull_targets(&ws, None, None, &present).unwrap_err();
+        assert!(format!("{e:#}").contains("--to"), "{e:#}");
+        assert!(pull_targets(&ws, None, Some("api"), &present).is_err());
+        let to = tempfile::tempdir().unwrap();
+        let all = pull_targets(&ws, Some(to.path().to_path_buf()), None, &present).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].dest, to.path());
+        assert_eq!(all[0].skip, ["api"]);
+
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .canonicalize()
+            .unwrap();
+        assert!(check_pull_dest(&home).is_err());
+        assert!(check_pull_dest(home.parent().unwrap()).is_err());
+        assert!(check_pull_dest(home.ancestors().last().unwrap()).is_err());
+        assert!(check_pull_dest(&to.path().canonicalize().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn with_no_env_here_the_error_names_the_envs_cloned_from_a_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config: dir.path().join("config"),
+            data: dir.path().join("data"),
+        };
+        let mut cfg = config::EnvConfig::default();
+        cfg.workspace.url = Some("acme/web".into());
+        EnvFile::create(&paths, "web", &cfg).unwrap();
+        let mut own = config::EnvConfig::default();
+        own.workspace.dir = Some(dir.path().display().to_string());
+        EnvFile::create(&paths, "api", &own).unwrap();
+        let msg = no_env_here(&paths, Path::new("/tmp"));
+        assert!(msg.ends_with("so -e picks them: web"), "{msg}");
     }
 
     #[test]

@@ -197,9 +197,23 @@ pub fn github_repo(url: &str) -> Option<String> {
     shorthand(path).map(|(o, r)| format!("{o}/{r}"))
 }
 
-/// The env config's repos are well-formed: valid names that stay distinct on a
-/// case-insensitive host, each a folder (`dir`) or a remote (`url`, maybe with a `branch`).
+/// The env config's workspace is well-formed: a host folder (`dir`) or a remote (`url`, maybe
+/// with a `branch`), not both; and its repos have valid names that stay distinct on a
+/// case-insensitive host, each a folder or a remote in the same way.
 pub fn check(ws: &Workspace) -> Result<()> {
+    match (&ws.dir, &ws.url) {
+        (Some(_), Some(_)) => {
+            bail!("[workspace]: a host folder (`dir`) or a remote (`url`), not both")
+        }
+        (None, Some(u)) => check_url(u).context("[workspace]")?,
+        _ => {}
+    }
+    if let Some(b) = &ws.branch {
+        if ws.url.is_none() {
+            bail!("[workspace]: `branch` is for a remote (`url`); a folder is copied as it is");
+        }
+        check_branch(b).context("[workspace]")?;
+    }
     let mut folded: BTreeMap<String, &str> = BTreeMap::new();
     for (name, r) in &ws.repos {
         check_name(name).context("[workspace.repos]")?;
@@ -401,28 +415,17 @@ pub fn seed(ctx: &Ctx, env: &str, ws: &Workspace, done: &BTreeSet<String>) -> BT
             return now;
         }
     };
-    // Credentials that didn't load (a reference that doesn't resolve) fail clones with 403s
-    // whose cause is that, not a missing credential.
-    let locked = pending.iter().any(|(_, r)| r.url.is_some())
-        && crate::ctl::vault_status(&ctx.rt).is_ok_and(|s| {
-            s.locked || s.envs.iter().any(|e| e.env == env && !e.missing.is_empty())
-        });
+    let locked = pending.iter().any(|(_, r)| r.url.is_some()) && creds_locked(ctx, env);
     let mut added = Vec::new();
-    // An entry of the env's own folder by a repo's name would be taken for the repo, and
-    // `pull` would then leave it out of the folder.
-    let own: BTreeSet<String> = ws
-        .dir
-        .as_deref()
-        .and_then(|d| std::fs::read_dir(d).ok())
-        .into_iter()
-        .flatten()
-        .filter_map(|e| Some(e.ok()?.file_name().to_str()?.to_lowercase()))
-        .collect();
+    // An entry of the env's own folder (or clone) by a repo's name would be taken for the
+    // repo, and `pull` would then leave it out of the folder.
+    let own = own_entries(ctx, env, ws);
     for (name, r) in pending {
         if own.contains(&name.to_lowercase()) {
             eprintln!(
-                "warning: repo {name}: the env's folder has its own `{name}`, so the repo is left \
-                 out; give it another name"
+                "warning: repo {name}: the env's {} has its own `{name}`, so the repo is left \
+                 out; give it another name",
+                if ws.dir.is_some() { "folder" } else { "clone" }
             );
             continue;
         }
@@ -452,6 +455,187 @@ pub fn seed(ctx: &Ctx, env: &str, ws: &Workspace, done: &BTreeSet<String>) -> BT
         eprintln!("warning: repos not added to the folder's .git/info/exclude ({e:#})");
     }
     now
+}
+
+/// Whether some of the env's credentials didn't load (the vault is locked, or a reference
+/// doesn't resolve): clones then fail with 403s whose cause is that, not a missing credential.
+pub fn creds_locked(ctx: &Ctx, env: &str) -> bool {
+    crate::ctl::vault_status(&ctx.rt)
+        .is_ok_and(|s| s.locked || s.envs.iter().any(|e| e.env == env && !e.missing.is_empty()))
+}
+
+/// The top-level names of the env's own workspace, lowercased: its host folder's entries, or
+/// what its clone tracks (`git ls-tree` in the env; the host has no copy).
+fn own_entries(ctx: &Ctx, env: &str, ws: &Workspace) -> BTreeSet<String> {
+    if let Some(d) = &ws.dir {
+        return std::fs::read_dir(d)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| Some(e.ok()?.file_name().to_str()?.to_lowercase()))
+            .collect();
+    }
+    if ws.url.is_none() {
+        return BTreeSet::new();
+    }
+    let dev = names::dev(env);
+    ctx.rt
+        .run([
+            "exec",
+            "-u",
+            UID,
+            dev.as_str(),
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "-C",
+            "/workspace",
+            "ls-tree",
+            "-z",
+            "--name-only",
+            "HEAD",
+        ])
+        .unwrap_or_default()
+        .split('\0')
+        .filter(|n| !n.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Where the env's own remote is cloned before its entries move into `/workspace`.
+const WORKSPACE_CLONE: &str = ".luoto-clone";
+
+/// What [`clone_workspace`] runs as the dev user: the env's remote cloned into a hidden folder
+/// of `/workspace`, its entries moved up only once the clone is whole, so a clone cut short
+/// leaves nothing an `up` would take as the workspace. No prompts, no submodules, and LFS
+/// files stay pointers (no filter runs). Exits 3, touching nothing, when `/workspace` holds
+/// anything else.
+pub fn workspace_clone_script(url: &str, branch: Option<&str>, progress: bool) -> String {
+    format!(
+        r#"export GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes' GIT_LFS_SKIP_SMUDGE=1
+cd /workspace || exit 1
+for f in * .[!.]* ..?*; do
+  {{ [ -e "$f" ] || [ -L "$f" ]; }} && [ "$f" != {tmp} ] && exit 3
+done
+t=/workspace/{tmp}
+rm -rf "$t" && git clone --no-recurse-submodules{progress}{branch} -- {url} "$t" || {{ rm -rf "$t"; exit 1; }}
+for f in "$t"/* "$t"/.[!.]* "$t"/..?*; do
+  {{ [ -e "$f" ] || [ -L "$f" ]; }} || continue
+  mv -- "$f" /workspace/ || exit 1
+done
+rmdir "$t""#,
+        tmp = WORKSPACE_CLONE,
+        progress = if progress { " --progress" } else { "" },
+        branch = branch
+            .map(|b| format!(" --branch {}", sh_quote(b)))
+            .unwrap_or_default(),
+        url = sh_quote(&clone_url(url)),
+    )
+}
+
+/// Clone the env's own remote (`[workspace] url`) into `/workspace`, inside the env and
+/// through the gate, as the dev user. `locked`: some of the env's credentials didn't load.
+pub fn clone_workspace(
+    ctx: &Ctx,
+    env: &str,
+    url: &str,
+    branch: Option<&str>,
+    locked: bool,
+) -> Result<()> {
+    println!(
+        "cloning {}{} into the env…",
+        display(url),
+        branch
+            .map(|b| format!(" ({})", display(b)))
+            .unwrap_or_default()
+    );
+    let script = workspace_clone_script(url, branch, std::io::stderr().is_terminal());
+    let dev = names::dev(env);
+    let status = ctx.rt.interactive([
+        "exec",
+        "-u",
+        UID,
+        "-w",
+        "/",
+        dev.as_str(),
+        "sh",
+        "-c",
+        connect::LOGIN,
+        &script,
+    ])?;
+    if status.code() == Some(3) {
+        bail!(
+            "/workspace in the env has files, but no clone into it finished (an `up` cut short, \
+             or files written in the env since): see them with `luoto shell -e {env}`; to clone \
+             it again, empty /workspace there (`find /workspace -mindepth 1 -delete`) and \
+             `luoto up -e {env}`"
+        );
+    }
+    if !status.success() && locked {
+        bail!(
+            "git clone failed: some of the env's credentials are locked (see the warning about \
+             secrets above); once `luoto vault unlock` loads them, `luoto up -e {env}` clones it"
+        );
+    }
+    if !status.success() {
+        bail!(
+            "git clone failed. A private repository needs a credential that covers it (`luoto \
+             up` asks for one; read only is enough to clone); `luoto egress -e {env} --denied \
+             --since 10m` shows what the gate blocked; `luoto up -e {env}` tries again"
+        );
+    }
+    Ok(())
+}
+
+/// The clone in the env as `git status --porcelain --branch` sees it, run as the dev user: its
+/// branch line (with how far it is ahead of its upstream), and how many files changed. The
+/// sandbox can write any of it, so the line is cleaned for the terminal.
+pub fn workspace_status(ctx: &Ctx, env: &str) -> Result<(String, usize)> {
+    let dev = names::dev(env);
+    let out = ctx.rt.run([
+        "exec",
+        "-u",
+        UID,
+        dev.as_str(),
+        "git",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "/workspace",
+        "status",
+        "--porcelain",
+        "--branch",
+    ])?;
+    Ok(porcelain_summary(&out))
+}
+
+fn porcelain_summary(out: &str) -> (String, usize) {
+    let lines = out.lines().filter(|l| !l.is_empty());
+    let branch = lines
+        .clone()
+        .next()
+        .and_then(|l| l.strip_prefix("## "))
+        .map(display)
+        .unwrap_or_default();
+    let changed = lines.filter(|l| !l.starts_with("## ")).count();
+    (branch, changed)
+}
+
+/// Forget that `url` was answered as public, so the next `up` asks for its access again:
+/// for a remote that failed to clone. Whether it had been.
+pub fn undecline(ctx: &Ctx, env: &str, url: &str) -> Result<bool> {
+    let keys: BTreeSet<String> = uncovered(&[clone_url(url)], &Credentials::default())
+        .iter()
+        .flat_map(|(f, repos)| repos.iter().map(|r| f.key(r)))
+        .collect();
+    let mut skip = declined(ctx, env);
+    let before = skip.len();
+    skip.retain(|k| !keys.contains(k));
+    if skip.len() == before {
+        return Ok(false);
+    }
+    let text: String = skip.iter().map(|k| format!("{k}\n")).collect();
+    crate::paths::write_private(&declined_path(ctx, env), text.as_bytes())?;
+    Ok(true)
 }
 
 fn copy_in(ctx: &Ctx, env: &str, ws: &Workspace, name: &str, dir: &str) -> Result<()> {
@@ -564,17 +748,18 @@ impl Forge {
     }
 }
 
-/// Every remote the env works with: its folder's origin, and its repos' (a folder's origin,
-/// or the remote it clones).
+/// Every remote the env works with: its folder's origin or the remote its workspace is cloned
+/// from, and its repos' (a folder's origin, or the remote it clones).
 pub fn remotes(ws: &Workspace) -> Vec<String> {
     ws.dir
         .iter()
         .chain(ws.repos.values().filter_map(|r| r.dir.as_ref()))
         .filter_map(|d| crate::init::origin_url(Path::new(d)))
         .chain(
-            ws.repos
-                .values()
-                .filter_map(|r| r.url.as_deref().map(clone_url)),
+            ws.url
+                .iter()
+                .chain(ws.repos.values().filter_map(|r| r.url.as_ref()))
+                .map(|u| clone_url(u)),
         )
         .collect()
 }
@@ -856,8 +1041,11 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
     }
     // Repos a repository's luoto.toml named, not the env's own config: whoever writes that
     // repository chose them, so nothing is granted for them on a bare Enter.
-    let own = uncovered(
-        &remotes(&EnvFile::load(&ctx.paths, env)?.cfg.workspace),
+    let own_ws = EnvFile::load(&ctx.paths, env)?.cfg.workspace;
+    let own = uncovered(&remotes(&own_ws), &cfg.credentials);
+    // The remote a folder-less env is cloned from: a bare Enter answers that it is public.
+    let cloned_from = uncovered(
+        &own_ws.url.iter().map(|u| clone_url(u)).collect::<Vec<_>>(),
         &cfg.credentials,
     );
     let mut changed = false;
@@ -865,6 +1053,9 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
         let from_project = repos
             .iter()
             .any(|r| !own.get(&forge).is_some_and(|o| o.contains(r)));
+        let workspace = cloned_from
+            .get(&forge)
+            .is_some_and(|w| repos.iter().any(|r| w.contains(r)));
         let mut f = EnvFile::load(&ctx.paths, env)?;
         let shown = repos
             .iter()
@@ -882,6 +1073,8 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
             display(&account),
             if from_project {
                 ", named by the project's luoto.toml"
+            } else if workspace {
+                ", the env's workspace is cloned from it"
             } else {
                 ""
             }
@@ -890,8 +1083,15 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
         const READ: &str = "read only (a private repo)";
         const PUBLIC: &str = "none: it is public, read only";
         const LATER: &str = "later: `luoto up` asks again";
+        let start = if from_project {
+            3
+        } else if workspace {
+            2
+        } else {
+            0
+        };
         let Some(pick) = inquire::Select::new("Access:", vec![PUSH, READ, PUBLIC, LATER])
-            .with_starting_cursor(if from_project { 3 } else { 0 })
+            .with_starting_cursor(start)
             .prompt_skippable()?
         else {
             continue;
@@ -1320,6 +1520,7 @@ mod tests {
                 .iter()
                 .map(|(n, r)| (n.to_string(), r.clone()))
                 .collect(),
+            ..Default::default()
         };
         let url = |u: &str| Repo {
             url: Some(u.into()),
@@ -1339,6 +1540,119 @@ mod tests {
         };
         assert!(check(&ws(&[("api", relative)])).is_err());
         assert!(check(&ws(&[("Api", url("acme/a")), ("api", url("acme/b"))])).is_err());
+    }
+
+    #[test]
+    fn a_workspace_is_a_folder_or_a_remote() {
+        let ws = |dir: Option<&str>, url: Option<&str>, branch: Option<&str>| Workspace {
+            dir: dir.map(String::from),
+            url: url.map(String::from),
+            branch: branch.map(String::from),
+            ..Default::default()
+        };
+        assert!(check(&ws(Some("/p"), None, None)).is_ok());
+        assert!(check(&ws(None, Some("acme/web"), Some("develop"))).is_ok());
+        assert!(
+            check(&ws(None, None, None)).is_ok(),
+            "`up` says what to set"
+        );
+        let both = check(&ws(Some("/p"), Some("acme/web"), None)).unwrap_err();
+        assert!(format!("{both:#}").contains("not both"), "{both:#}");
+        assert!(check(&ws(Some("/p"), None, Some("main"))).is_err());
+        assert!(check(&ws(None, Some("file:///etc"), None)).is_err());
+        assert!(check(&ws(None, Some("acme/web"), Some("--upload-pack=x"))).is_err());
+    }
+
+    #[test]
+    fn the_cloned_remote_is_one_the_env_needs_access_to() {
+        let ws = Workspace {
+            url: Some("acme/web".into()),
+            repos: BTreeMap::from([(
+                "api".to_string(),
+                Repo {
+                    url: Some("git@gitlab.com:acme/api.git".into()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let all = remotes(&ws);
+        assert_eq!(
+            all,
+            [
+                "https://github.com/acme/web.git",
+                "git@gitlab.com:acme/api.git"
+            ]
+        );
+        let needs = uncovered(&all, &Credentials::default());
+        assert_eq!(needs[&Forge::Github("acme".into())], ["acme/web"]);
+        let have: Credentials =
+            toml::from_str("[github]\ntoken = \"env:T\"\nread_repos = [\"acme/web\"]\n").unwrap();
+        assert!(!uncovered(&all, &have).contains_key(&Forge::Github("acme".into())));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_workspace_clone_moves_in_whole_and_runs_nothing_it_brings() {
+        let script = workspace_clone_script("acme/web", Some("dev"), false);
+        assert!(script.contains("GIT_LFS_SKIP_SMUDGE=1"));
+        assert!(script.contains(
+            "--no-recurse-submodules --branch dev -- https://github.com/acme/web.git \"$t\""
+        ));
+        assert!(
+            workspace_clone_script("x/y", Some("a'b"), true)
+                .contains("--progress --branch 'a'\\''b' --")
+        );
+        // The script against a stand-in for git, with a temporary folder as /workspace.
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("workspace");
+        let bin = root.path().join("bin");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = r#"#!/bin/sh
+[ "$GIT_LFS_SKIP_SMUDGE" = 1 ] || exit 9
+for last; do :; done
+[ -n "$FAIL" ] && { mkdir -p "$last"; echo half > "$last/a"; exit 128; }
+mkdir -p "$last/.git" "$last/src" && echo x > "$last/src/main.rs" && echo y > "$last/.envrc"
+"#;
+        std::fs::write(bin.join("git"), fake).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let run = |fail: bool| {
+            let s = script.replace("/workspace", &ws.display().to_string());
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", &s]).env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            );
+            if fail {
+                c.env("FAIL", "1");
+            }
+            c.status().unwrap().code()
+        };
+        let names = || {
+            let mut n: Vec<String> = std::fs::read_dir(&ws)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            n.sort();
+            n
+        };
+        assert_eq!(run(true), Some(1));
+        assert!(names().is_empty(), "a failed clone leaves nothing");
+        assert_eq!(run(false), Some(0));
+        assert_eq!(names(), [".envrc", ".git", "src"]);
+        assert_eq!(run(false), Some(3), "a workspace with files is left alone");
+        assert_eq!(names(), [".envrc", ".git", "src"]);
+    }
+
+    #[test]
+    fn git_status_counts_what_is_not_committed() {
+        let (branch, changed) =
+            porcelain_summary("## main...origin/main [ahead 2]\n M src/a.rs\n?? new\x1b[2K\n");
+        assert_eq!(branch, "main...origin/main [ahead 2]");
+        assert_eq!(changed, 2);
+        assert_eq!(porcelain_summary("## x\u{202e}y\n").0, "x\\u{202e}y");
     }
 
     #[test]

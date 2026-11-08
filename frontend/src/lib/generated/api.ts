@@ -105,6 +105,10 @@ export type EnvRow = {
   dev: string;
   gate: string;
   dir: string | null;
+  /** The remote the workspace is cloned from, in the env, when the env has no folder. */
+  remote: string | null;
+  /** The branch that clone checks out. */
+  branch: string | null;
   /** Repositories beside the folder (`repos.rs`). */
   repos: Repo[];
   pending: number;
@@ -298,7 +302,12 @@ export type ProjectState =
   /** It can't be read or parsed. */
   | "invalid"
   /** The file is gone; the accepted settings still apply. */
-  | "removed";
+  | "removed"
+  /**
+   * The env is stopped and its workspace exists only in the env (a clone), so the file
+   * can't be read; the accepted settings still apply.
+   */
+  | "unread";
 
 export type ProjectStatus = {
   state: ProjectState;
@@ -318,6 +327,11 @@ export type Proposal = {
   name: string;
   /** The folder is missing (created with the env) or empty: nothing to detect. */
   new_folder: boolean;
+  /**
+   * The choice names a remote, not a folder: such an env is made in a terminal (`luoto
+   * init <remote>`), where its first `up` shows the clone's luoto.toml and installs.
+   */
+  remote: string | null;
   presets: ProposedPreset[];
   tools: ToolPin[];
   /** The folder's luoto.toml as `[label, value]` lines; creating the env accepts it. */

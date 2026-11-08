@@ -3,12 +3,14 @@
   import { act, app, busyWhile, say } from "$lib/stores/app.svelte";
   import type { PullPlans } from "$lib/types";
 
-  // The env's folder and its repos, and a reviewed pull of what changed in the env's copies:
-  // the folder's, and each repo's copied in from a folder of its own. The plan belongs to one
-  // env: the parent keys this section on it.
+  // The env's folder (or the remote its workspace is cloned from, in the env) and its repos,
+  // and a reviewed pull of what changed in the env's copies: the folder's, and each repo's
+  // copied in from a folder of its own. An env without a folder pulls only in a terminal
+  // (`luoto pull --to`). The plan belongs to one env: the parent keys this section on it.
   const d = $derived(app.detail);
   const row = $derived(app.overview?.envs.find((e) => e.name === app.env));
   const dir = $derived(row?.dir ?? null);
+  const remote = $derived(row?.remote ?? null);
   const repos = $derived(row?.repos ?? []);
 
   let pull = $state<PullPlans | null>(null);
@@ -42,9 +44,22 @@
 </script>
 
 <div class="section">
-  <p class="label">folder</p>
-  <p class="small path">{dir ?? "none"}</p>
-  <p class="small muted">copied in: the sandbox never writes here</p>
+  {#if remote && !dir}
+    <p class="label">workspace</p>
+    <p class="small">
+      <span class="muted">cloned from</span>
+      <span class="path">{remote}</span>
+      {#if row?.branch}<span class="muted">({row.branch})</span>{/if}
+    </p>
+    <p class="small muted">
+      in the env, with nothing on this machine: its work leaves by git push, or
+      <code>luoto pull --to &lt;new folder&gt;</code>
+    </p>
+  {:else}
+    <p class="label">folder</p>
+    <p class="small path">{dir ?? "none"}</p>
+    <p class="small muted">copied in: the sandbox never writes here</p>
+  {/if}
 
   {#if repos.length > 0}
     <p class="label repos">repos</p>

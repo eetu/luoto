@@ -164,9 +164,16 @@ pub struct Deps {
 #[serde(deny_unknown_fields)]
 pub struct Workspace {
     /// The project's host folder (absolute), copied into the env's workspace volume on the
-    /// first `up`; `luoto pull` writes back to it. Every env has one.
+    /// first `up`; `luoto pull` writes back to it. An env has this or `url`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
+    /// A remote cloned into `/workspace` inside the env, through the gate, on the first `up`
+    /// (`repos::clone_workspace`): the env has nothing on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The branch that clone checks out (default: the remote's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// Repositories beside the folder, each at `/workspace/<name>` (`repos.rs`), over the
     /// accepted luoto.toml's of the same name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1436,6 +1443,28 @@ host = "telemetry.example"
         assert_eq!(hosts, ["b.example", "d.example"]);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.starts_with("# my env") && !saved.contains("a.example"));
+    }
+
+    #[test]
+    fn a_workspace_is_a_folder_or_a_remote_never_both() {
+        let f = EnvFile::parse(
+            "t.toml".into(),
+            "[workspace]\nurl = \"acme/web\"\nbranch = \"develop\"\n",
+        )
+        .unwrap();
+        assert_eq!(f.cfg.workspace.dir, None);
+        assert_eq!(f.cfg.workspace.url.as_deref(), Some("acme/web"));
+        assert_eq!(f.cfg.workspace.branch.as_deref(), Some("develop"));
+        assert!(crate::compile::compile("web", &f.cfg, None, &[]).is_ok());
+        let both = EnvFile::parse(
+            "t.toml".into(),
+            "[workspace]\ndir = \"/home/me/web\"\nurl = \"acme/web\"\n",
+        )
+        .unwrap();
+        let Err(e) = crate::compile::compile("web", &both.cfg, None, &[]) else {
+            panic!("a folder and a remote compiled");
+        };
+        assert!(format!("{e:#}").contains("not both"), "{e:#}");
     }
 
     #[test]

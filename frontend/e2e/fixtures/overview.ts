@@ -6,6 +6,8 @@ export default {
       "denied_recent": 1,
       "dev": "running",
       "dir": "/home/me/dev/web",
+      "remote": null,
+      "branch": null,
       "error": null,
       "gate": "running",
       "name": "web",

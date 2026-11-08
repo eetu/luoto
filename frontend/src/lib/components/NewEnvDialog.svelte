@@ -40,8 +40,14 @@
       .replace(/^-+|-+$/g, "") ?? "",
   );
   const finalName = $derived(name.trim() || suggested);
+  // A remote is cloned inside the env, and its first start asks about the clone's luoto.toml
+  // and installs on a terminal: such an env is made with `luoto init`, not here.
+  const remote = $derived(detection.ready ? (proposal?.remote ?? null) : null);
   const valid = $derived(
-    /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/.test(finalName) && dir.trim() !== "" && detection.ready,
+    /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/.test(finalName) &&
+      dir.trim() !== "" &&
+      detection.ready &&
+      !remote,
   );
 
   async function create() {
@@ -75,7 +81,11 @@
         <div>
           <input type="text" bind:value={dir} placeholder="~/dev/my-project" />
           <p class="hint">
-            {#if proposal?.new_folder}
+            {#if remote}
+              A remote, cloned inside the env with nothing on this machine. Its first start shows
+              the clone's luoto.toml and what it installs, so create it in a terminal:
+              <code>luoto init {remote}</code>
+            {:else if proposal?.new_folder}
               New or empty: luoto creates it if needed, and the env starts empty. Pick its egress
               below.
             {:else}

@@ -99,7 +99,8 @@ enum Cmd {
         #[arg(long)]
         no_open: bool,
     },
-    /// Create an env for a folder (default: the current one) and start it.
+    /// Create an env for a folder (default: the current one), or for a remote cloned inside
+    /// it (`luoto init acme/web`), and start it.
     Init(init::InitOpts),
     /// Create or update the env's containers from its config and start it.
     Up {
@@ -122,7 +123,8 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// Delete the env: containers, workspace and home volumes, config (your folder stays).
+    /// Delete the env: containers, workspace and home volumes, config (your folder stays; an
+    /// env cloned from a remote keeps only what was pushed).
     Rm {
         /// Don't ask first.
         #[arg(long, short)]
@@ -206,7 +208,9 @@ enum Cmd {
     /// Copy changed files from the env back to its folder, and its repos copied in from
     /// folders back to theirs (reviewed first).
     Pull {
-        /// Write here instead of the env's folder (or the `--repo`'s).
+        /// Write here instead of the env's folder (or the `--repo`'s). An env cloned from a
+        /// remote has no folder: it pulls only here, into a new or empty folder unless you
+        /// confirm. Never your home folder.
         #[arg(long)]
         to: Option<String>,
         /// Only this repo: to its host folder, or else (a clone) the same name in the env's

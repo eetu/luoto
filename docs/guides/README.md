@@ -3,6 +3,8 @@
 Step by step, for a task; the reference is the [README](../../README.md) and
 [agents.md](../agents.md).
 
+- [A repository you don't trust](untrusted-repo.md): cloned inside the env with nothing on
+  your machine, and what you are asked before anything of it runs.
 - [Several repositories in one env](multi-repo.md): from the command line, a team's launchpad,
   or both, and the credentials they need.
 - [Headless runs](headless.md): `luoto run` for scripts and schedules, from a report to a pull

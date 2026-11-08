@@ -353,6 +353,8 @@ pub struct UpOptions {
     /// Skip the isolation self-test after a start.
     pub no_selftest: bool,
     pub quiet: bool,
+    /// Install what a remote cloned into the workspace pins without asking (`init --yes`).
+    pub accept_installs: bool,
 }
 
 /// Remove the dev container so the next `up` makes a new one; workspace and home volumes stay.
@@ -461,13 +463,36 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         opts.quiet,
     )?;
 
+    // Nothing the clone of the env's own remote brings runs, installs or is granted until the
+    // user has seen its luoto.toml (`project::review`) and what it would install (below).
+    let mut cloned_workspace = false;
     if fresh_work || !state.seeded {
-        let dir = workspace::canonical(p.cfg.workspace.dir.as_deref().with_context(|| {
-            format!("env `{env}` has no folder: set `[workspace] dir` (`luoto edit -e {env}`)")
-        })?)?;
-        println!("copying {} into the env…", dir.display());
-        let n = workspace::push(ctx, env, &dir, None)?;
-        println!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
+        let ws = &p.cfg.workspace;
+        match (&ws.dir, &ws.url) {
+            (Some(dir), _) => {
+                let dir = workspace::canonical(dir)?;
+                println!("copying {} into the env…", dir.display());
+                let n = workspace::push(ctx, env, &dir, None)?;
+                println!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
+            }
+            (None, Some(url)) => {
+                let locked = repos::creds_locked(ctx, env);
+                if let Err(e) = repos::clone_workspace(ctx, env, url, ws.branch.as_deref(), locked)
+                {
+                    if repos::undecline(ctx, env, url)? {
+                        eprintln!(
+                            "note: it was answered as public; `luoto up` asks for its access again"
+                        );
+                    }
+                    return Err(e);
+                }
+                cloned_workspace = true;
+            }
+            (None, None) => bail!(
+                "env `{env}` has no folder or remote: set `[workspace] dir` or `url` \
+                 (`luoto edit -e {env}`)"
+            ),
+        }
         EnvState::update(&ctx.paths, env, |s| s.seeded = true)?;
     }
     // A new volume holds none of the repos, whatever the host remembers.
@@ -508,30 +533,48 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     }
     // New clones bring files of their own: the presets and toolchains they suggest, offered
     // as `luoto init` offers a folder's.
-    if cloned {
+    let mut install = true;
+    if cloned || cloned_workspace {
         match deps::detect_in_env(ctx, env) {
             Ok(found) => {
-                let heading = format!("the repos cloned into `{env}` suggest:");
+                let heading = if cloned_workspace {
+                    format!("the repository cloned into `{env}` suggests:")
+                } else {
+                    format!("the repos cloned into `{env}` suggest:")
+                };
                 if crate::init::offer(ctx, env, &found, &heading, false, true)? {
                     sync::reapply(ctx, env)?;
                     p = plan(ctx, env)?;
                 }
+                if cloned_workspace {
+                    install = ask_installs(ctx, env, &p.cfg, &found, opts.accept_installs);
+                }
             }
-            Err(e) => eprintln!("warning: the cloned repos weren't read ({e:#})"),
+            Err(e) => {
+                eprintln!("warning: the cloned repos weren't read ({e:#})");
+                // What the clone pins is unknown: nothing installs without a look at it.
+                if cloned_workspace {
+                    install = false;
+                    println!("nothing installed yet: `luoto up -e {env}` installs it");
+                }
+            }
         }
     }
-    if let Err(e) = deps::ensure(ctx, env, &p.cfg, state.home()) {
-        eprintln!(
-            "warning: deps not installed: {e:#}\n         \
-             see `luoto egress -e {env} --denied --since 30m`; `luoto up -e {env}` retries"
-        );
+    if install {
+        if let Err(e) = deps::ensure(ctx, env, &p.cfg, state.home()) {
+            eprintln!(
+                "warning: deps not installed: {e:#}\n         \
+                 see `luoto egress -e {env} --denied --since 30m`; `luoto up -e {env}` retries"
+            );
+        }
+        let agents: Vec<String> = p.cfg.agents.names().cloned().collect();
+        if let Err(e) = crate::agents::ensure(ctx, env, &agents, opts.quiet) {
+            eprintln!("warning: agents not installed: {e:#}\n         `luoto up -e {env}` retries");
+        }
     }
-    let agents: Vec<String> = p.cfg.agents.names().cloned().collect();
-    if let Err(e) = crate::agents::ensure(ctx, env, &agents, opts.quiet) {
-        eprintln!("warning: agents not installed: {e:#}\n         `luoto up -e {env}` retries");
-    }
-    // After deps: the image or [deps] may be what brings `az`.
-    if let Some(c) = &p.cfg.credentials.azure {
+    // After deps: the image or [deps] may be what brings `az`, which then runs in the
+    // workspace (a mise shim reads its files), so not before the installs were wanted.
+    if install && let Some(c) = &p.cfg.credentials.azure {
         crate::azure_identity::login_in_env(ctx, env, c);
     }
 
@@ -565,6 +608,76 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         println!("  web UI:  luoto ui");
     }
     Ok(())
+}
+
+/// After the env's own remote is cloned in: what installing would act on (the toolchains the
+/// clone pins, which mise installs reading its files, the presets those installs open for a
+/// while, the env's agents and `[deps]`), then one question. `accept` is `init --yes`'s answer.
+/// Whether to install on this `up`; without one, the next `up` installs.
+fn ask_installs(
+    ctx: &Ctx,
+    env: &str,
+    cfg: &EnvConfig,
+    found: &crate::detect::Detected,
+    accept: bool,
+) -> bool {
+    let defaults = deps::tools_for(ctx, cfg);
+    let pins: Vec<String> = found
+        .tools
+        .iter()
+        .map(|t| crate::text::display(&format!("{} {} ({})", t.tool, t.version, t.source)))
+        .chain(
+            defaults
+                .iter()
+                .filter(|(k, _)| !found.tools.iter().any(|t| &t.tool == *k))
+                .map(|(k, v)| format!("{k} {} (default)", v.as_str().unwrap_or("?"))),
+        )
+        .collect();
+    let tools = found
+        .tools
+        .iter()
+        .map(|t| t.tool.as_str())
+        .chain(defaults.keys().map(String::as_str));
+    let presets = deps::install_presets(tools, &cfg.presets);
+    println!(
+        "\nInstalling reads the clone: mise installs what its files pin, and a mise.toml can run \
+         commands in the env."
+    );
+    println!(
+        "  toolchains {}",
+        if pins.is_empty() {
+            "none pinned".to_string()
+        } else {
+            pins.join(", ")
+        }
+    );
+    if !presets.is_empty() {
+        println!(
+            "  presets    {}, opened only while they install",
+            presets.join(", ")
+        );
+    }
+    let agents: Vec<&str> = cfg.agents.names().map(String::as_str).collect();
+    if !agents.is_empty() {
+        println!("  agents     {}", agents.join(", "));
+    }
+    let d = deps::merged(&ctx.global.deps, &cfg.deps);
+    if !d.system.is_empty() || !d.run.is_empty() {
+        println!("  [deps]     system packages and setup commands, as the env's config says");
+    }
+    if accept {
+        return true;
+    }
+    let later = format!("nothing installed yet: `luoto up -e {env}` installs them");
+    if !crate::prompt::interactive() {
+        println!("{later}");
+        return false;
+    }
+    if crate::prompt::ask("Install them now? [Y/n]", 'y') == 'n' {
+        println!("{later}");
+        return false;
+    }
+    true
 }
 
 /// The gate's log is the env's event history: over 100 000 events, and a flood of them can't

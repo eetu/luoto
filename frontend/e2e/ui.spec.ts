@@ -63,6 +63,72 @@ test("a new env waits until its folder's luoto.toml is on screen", async ({ page
   });
 });
 
+test("an env cloned from a remote shows where it comes from and pulls only in a terminal", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const overview = fixture("overview");
+  await page.route(
+    (url) => url.pathname === "/api/overview",
+    (route) => route.fulfill({ json: { ...overview, envs: [...overview.envs, fixture("remote")] } }),
+  );
+  const detail = { ...fixture("env"), name: "api", path: "/home/me/.config/luoto/envs/api.toml" };
+  await page.route(
+    (url) => url.pathname === "/api/envs/api",
+    (route) => route.fulfill({ json: detail }),
+  );
+  await page.route(
+    (url) => /^\/api\/envs\/api\/(egress|requests)$/.test(url.pathname),
+    (route) => route.fulfill({ json: [] }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/envs/api/project",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...fixture("project"),
+          state: "unread",
+          accepted: [["presets", "npm"]],
+        },
+      }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await expect(page.getByRole("button", { name: "pull changes…" })).toBeVisible();
+
+  await page.getByRole("button", { name: /^api/ }).click();
+  await expect(page.getByText("cloned from", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("acme/api", { exact: true })).toBeVisible();
+  await expect(page.getByText("(develop)")).toBeVisible();
+  await expect(page.getByText("luoto pull --to <new folder>")).toBeVisible();
+  await expect(page.getByRole("button", { name: "pull changes…" })).toHaveCount(0);
+  await expect(page.getByText(/in the env's clone, read when it starts/)).toBeVisible();
+});
+
+test("a remote in the new-env dialog is made in a terminal", async ({ page }) => {
+  const writes = await mockApi(page);
+  await page.route("**/api/detect", (route) =>
+    route.fulfill({
+      json: {
+        ...fixture("detect"),
+        name: "web",
+        remote: "acme/web",
+        presets: [],
+        tools: [],
+        project: null,
+        project_sha: null,
+      },
+    }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: "new env" }).click();
+  await page.getByPlaceholder("~/dev/my-project").fill("acme/web");
+
+  await expect(page.getByText("luoto init acme/web")).toBeVisible();
+  await expect(page.getByRole("button", { name: "create", exact: true })).toBeDisabled();
+  expect(writes).toHaveLength(0);
+});
+
 test("applying luoto.toml names the text that was reviewed", async ({ page }) => {
   await mockApi(page);
   const status = {

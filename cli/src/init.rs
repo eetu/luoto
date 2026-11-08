@@ -1,5 +1,6 @@
 //! `luoto init` and the UI's new-env dialog: propose an env for a folder from what the folder
-//! says about itself, then create and start it.
+//! says about itself, or for a remote cloned inside the env (read there, never on the host),
+//! then create and start it.
 
 use std::io::IsTerminal;
 use std::path::Path;
@@ -12,15 +13,22 @@ use crate::config::{self, EnvConfig, EnvFile, Workspace};
 use crate::env::{self, Ctx, UpOptions};
 use crate::paths::Paths;
 use crate::prompt::{ask, confirm};
+use crate::text::display;
 use crate::{complete, detect, names, project, repos, workspace};
 
 #[derive(Default, clap::Args)]
 pub struct InitOpts {
-    /// The project folder, copied into the env (default: `.`); created when missing.
+    /// The project folder, copied into the env (default: `.`; created when missing), or a
+    /// remote cloned inside the env, with nothing on this machine: `owner/repo` on GitHub, an
+    /// https or ssh URL, or user@host:path. `./owner/repo` is a folder.
+    #[arg(value_name = "DIR|REMOTE")]
     pub dir: Option<String>,
-    /// Env name (default: the folder's name).
+    /// Env name (default: the folder's or repository's name).
     #[arg(long)]
     pub name: Option<String>,
+    /// The branch a remote's clone checks out (default: the remote's).
+    #[arg(long)]
+    pub branch: Option<String>,
     #[arg(long)]
     pub image: Option<String>,
     /// Egress presets (repeatable), replacing the defaults and the detected ones:
@@ -52,12 +60,90 @@ pub struct InitOpts {
     /// Only write the config.
     #[arg(long)]
     pub no_up: bool,
-    /// Create without asking; accepts the folder's luoto.toml (`--no-project` ignores it).
+    /// Create without asking; accepts the folder's luoto.toml (`--no-project` ignores it). A
+    /// remote's clone installs what it pins, and its luoto.toml waits for `luoto project apply`.
     #[arg(long, short)]
     pub yes: bool,
     /// Ignore the folder's luoto.toml.
     #[arg(long)]
     pub no_project: bool,
+}
+
+/// What `luoto init`'s argument names.
+#[derive(Debug, PartialEq)]
+pub enum Source {
+    /// A host folder, which need not exist yet; `None` is the current one.
+    Folder(Option<String>),
+    /// A remote, cloned inside the env.
+    Remote(String),
+}
+
+/// A folder when the argument looks like a path (starts with `/`, `~` or `.`, or holds a `\`),
+/// exists, or has a parent that exists (a new folder); else a remote, if `repos::check_url`
+/// takes it. Relative paths are read against `cwd`.
+pub fn source(arg: Option<&str>, cwd: &Path) -> Result<Source> {
+    let Some(a) = arg else {
+        return Ok(Source::Folder(None));
+    };
+    let path_like = a.starts_with(['/', '~', '.']) || a.contains('\\');
+    let path = cwd.join(workspace::expand(a));
+    let parent = path.parent().unwrap_or(cwd);
+    if path_like || path.exists() || parent.is_dir() {
+        return Ok(Source::Folder(Some(a.to_string())));
+    }
+    if let Err(e) = repos::check_url(a) {
+        bail!(
+            "{e:#}; as a folder, {} does not exist (luoto creates only the last folder of a path)",
+            parent.display()
+        );
+    }
+    Ok(Source::Remote(a.to_string()))
+}
+
+/// The env whose workspace is cloned from `url`: the same clone URL in any case, or the same
+/// GitHub repository however it is spelled.
+pub fn env_cloned_from(paths: &Paths, url: &str) -> Result<Option<String>> {
+    let want = repos::clone_url(url);
+    let github = repos::github_repo(url).map(|r| r.to_lowercase());
+    for name in config::list_envs(paths)? {
+        let Ok(f) = EnvFile::load(paths, &name) else {
+            continue;
+        };
+        let Some(have) = f.cfg.workspace.url else {
+            continue;
+        };
+        if repos::clone_url(&have).eq_ignore_ascii_case(&want)
+            || (github.is_some() && repos::github_repo(&have).map(|r| r.to_lowercase()) == github)
+        {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
+}
+
+/// An env's name and workspace for a remote: nothing on the host, so nothing is read there.
+fn remote_workspace(
+    url: &str,
+    branch: Option<&str>,
+    name: Option<&str>,
+) -> Result<(String, Workspace)> {
+    if let Some(b) = branch {
+        repos::check_branch(b)?;
+    }
+    let name = match name {
+        Some(n) => n.to_string(),
+        None => workspace::name_from(&repos::default_name(&repos::Source::Remote(url.into()))?),
+    };
+    config::validate_name(&name)
+        .with_context(|| format!("pick a name with --name (derived `{name}` is not valid)"))?;
+    Ok((
+        name,
+        Workspace {
+            url: Some(url.to_string()),
+            branch: branch.map(str::to_string),
+            ..Default::default()
+        },
+    ))
 }
 
 /// Presets every new env starts with; the folder's files add more.
@@ -79,9 +165,27 @@ pub struct Proposal {
 }
 
 /// Defaults plus what the folder says about itself; explicit options replace both. Touches
-/// nothing on disk.
+/// nothing on disk. A remote is read nowhere: its clone, inside the env, says what it needs
+/// on the first `up`.
 pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
-    let (name, mut workspace) = new_workspace(paths, o.dir.as_deref(), o.name.as_deref())?;
+    let (name, mut workspace) = match source(o.dir.as_deref(), &std::env::current_dir()?)? {
+        Source::Folder(dir) => {
+            if o.branch.is_some() {
+                bail!("--branch is for a remote; a folder is copied as it is");
+            }
+            new_workspace(paths, dir.as_deref(), o.name.as_deref())?
+        }
+        Source::Remote(url) => {
+            if o.no_project {
+                bail!(
+                    "--no-project is for a folder: a remote's luoto.toml is shown on the first \
+                     `up`, and applies only if you say yes"
+                );
+            }
+            remote_workspace(&url, o.branch.as_deref(), o.name.as_deref())?
+        }
+    };
+    let remote = workspace.url.is_some();
     let dir = std::path::PathBuf::from(workspace.dir.as_deref().unwrap_or_default());
     for spec in &o.repos {
         let src = repos::parse_source(spec)?;
@@ -107,8 +211,8 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
         }
     }
     repos::check(&workspace)?;
-    let new_folder = std::fs::read_dir(&dir).map_or(true, |mut d| d.next().is_none());
-    let (project, project_error) = if o.no_project || new_folder {
+    let new_folder = !remote && std::fs::read_dir(&dir).map_or(true, |mut d| d.next().is_none());
+    let (project, project_error) = if o.no_project || new_folder || remote {
         (None, None)
     } else {
         match project::read_host(&dir)
@@ -120,7 +224,7 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
     };
     // The folder and the host folders of its repos, each repo's files under its name.
     let mut roots: Vec<(String, std::path::PathBuf)> = Vec::new();
-    if !new_folder {
+    if !new_folder && !remote {
         roots.push((String::new(), dir.clone()));
     }
     roots.extend(
@@ -196,10 +300,20 @@ fn print_proposal(p: &Proposal) {
         ws.dir
             .as_deref()
             .map(|d| format!(" from {d}"))
+            .or_else(|| ws.url.as_deref().map(|u| format!(" from {}", display(u))))
             .unwrap_or_default()
     );
     let exists = ws.dir.as_deref().is_some_and(|d| Path::new(d).exists());
-    if exists {
+    if let Some(url) = &ws.url {
+        println!(
+            "  workspace  a remote: {}{} cloned in the env through the gate; nothing on this machine",
+            display(url),
+            ws.branch
+                .as_deref()
+                .map(|b| format!(" ({})", display(b)))
+                .unwrap_or_default()
+        );
+    } else if exists {
         println!(
             "  workspace  copy: the env works on its own copy; changes leave by git push or `luoto pull`"
         );
@@ -279,7 +393,16 @@ fn print_proposal(p: &Proposal) {
             tools.push(format!("{k} {v} ({why})"));
         }
     }
-    if tools.is_empty() {
+    if ws.url.is_some() {
+        println!(
+            "  toolchains and luoto.toml: read from the clone, shown before anything applies{}",
+            if tools.is_empty() {
+                String::new()
+            } else {
+                format!("\n{INDENT}defaults: {}", tools.join(", "))
+            }
+        );
+    } else if tools.is_empty() {
         println!(
             "  toolchains none pinned; in the env, `mise use <tool>@<version>` adds one to the project"
         );
@@ -410,7 +533,9 @@ pub fn make_folder(p: &mut Proposal) -> Result<()> {
 /// Create the proposed env: its folder, its config, and the answer to the folder's
 /// luoto.toml (`accept_project`).
 pub fn create(ctx: &Ctx, p: &mut Proposal, accept_project: bool, quiet: bool) -> Result<()> {
-    make_folder(p)?;
+    if p.cfg.workspace.url.is_none() {
+        make_folder(p)?;
+    }
     let name = &p.name;
     let f = EnvFile::create(&ctx.paths, name, &p.cfg)?;
     if !quiet {
@@ -432,13 +557,14 @@ pub fn create(ctx: &Ctx, p: &mut Proposal, accept_project: bool, quiet: bool) ->
 }
 
 /// Start a new env: `up` asks for the credentials its agents and repos lack and installs the
-/// agents.
-pub fn start(ctx: &Ctx, name: &str, quiet: bool) -> Result<()> {
+/// agents. `accept_installs`: what a remote's clone pins installs without a question.
+pub fn start(ctx: &Ctx, name: &str, quiet: bool, accept_installs: bool) -> Result<()> {
     env::up(
         ctx,
         name,
         &UpOptions {
             quiet,
+            accept_installs,
             ..Default::default()
         },
     )
@@ -450,15 +576,24 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
         // Nothing asks, `up` included: agents log in inside, repos get a hint.
         crate::prompt::never_ask();
     }
-    // `init` again in an env's own folder: detect anew and offer what is missing.
-    if o.name.is_none()
-        && let Some(dir) = match &o.dir {
-            Some(d) => workspace::canonical(d).ok(),
-            None => std::env::current_dir()?.canonicalize().ok(),
+    // `init` again for an env's own folder or remote: detect anew and offer what is missing.
+    if o.name.is_none() {
+        match source(o.dir.as_deref(), &std::env::current_dir()?)? {
+            Source::Folder(d) => {
+                if let Some(dir) = match &d {
+                    Some(d) => workspace::canonical(d).ok(),
+                    None => std::env::current_dir()?.canonicalize().ok(),
+                } && let Some(existing) = env_at(&ctx.paths, &dir)?
+                {
+                    return redetect(&ctx, &existing, Some(&dir), &o);
+                }
+            }
+            Source::Remote(url) => {
+                if let Some(existing) = env_cloned_from(&ctx.paths, &url)? {
+                    return redetect(&ctx, &existing, None, &o);
+                }
+            }
         }
-        && let Some(existing) = env_at(&ctx.paths, &dir)?
-    {
-        return redetect(&ctx, &existing, &dir, &o);
     }
     let mut p = propose(&ctx.paths, &o)?;
     let interactive = !o.yes && std::io::stdin().is_terminal();
@@ -524,12 +659,16 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
         {
             println!("\n{hint}");
         }
+        if cfg.workspace.url.is_some() {
+            println!("\n`luoto up -e {name}` clones it");
+        }
     } else {
-        start(&ctx, &name, false)?;
+        start(&ctx, &name, false, o.yes)?;
     }
-    if let Some((_, pc)) = p.project.as_ref().filter(|_| accept_project) {
+    // The luoto.toml accepted by now: the folder's, or the clone's if `up` asked about it.
+    if let Some((_, pc)) = project::accepted(&ctx, &name) {
         let cfg = EnvFile::load(&ctx.paths, &name)?.cfg;
-        print_needs(&name, &project::missing_needs(pc, &cfg));
+        print_needs(&name, &project::missing_needs(&pc, &cfg));
     }
     println!(
         "\nYour settings for every env (shell rc files, .gitconfig, .claude/settings.json, …) go in \
@@ -540,16 +679,34 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
 }
 
 /// Offer what the project suggests now and the env's config lacks. The project is the env's
-/// own copy while it runs (work happens there), else the folder.
-fn redetect(ctx: &Ctx, name: &str, dir: &Path, o: &InitOpts) -> Result<ExitCode> {
-    let inside = ctx.rt.is_running(&names::dev(name));
-    let (found, source) = if inside {
-        (
-            crate::deps::detect_in_env(ctx, name)?,
-            "its workspace".to_string(),
-        )
-    } else {
-        (detect::detect(dir), dir.display().to_string())
+/// own copy while it runs (work happens there), else the folder; an env cloned from a remote
+/// (`dir` is `None`) has only the copy, so it is started first.
+fn redetect(ctx: &Ctx, name: &str, dir: Option<&Path>, o: &InitOpts) -> Result<ExitCode> {
+    let up = UpOptions {
+        accept_installs: o.yes,
+        ..Default::default()
+    };
+    let mut inside = ctx.rt.is_running(&names::dev(name));
+    let (found, source) = match dir {
+        Some(dir) if !inside => (detect::detect(dir), dir.display().to_string()),
+        _ => {
+            if !inside {
+                if o.no_up {
+                    println!(
+                        "env `{name}` exists for that remote, and its files are only in the env: \
+                         `luoto up -e {name}` starts it, then `luoto init` again reads them"
+                    );
+                    return Ok(ExitCode::SUCCESS);
+                }
+                println!("env `{name}` exists for that remote; starting it to read its files");
+                env::up(ctx, name, &up)?;
+                inside = true;
+            }
+            (
+                crate::deps::detect_in_env(ctx, name)?,
+                "its workspace".to_string(),
+            )
+        }
     };
     let heading = format!("env `{name}` exists; {source} now suggests:");
     if !offer(ctx, name, &found, &heading, o.yes, inside)? {
@@ -557,7 +714,7 @@ fn redetect(ctx: &Ctx, name: &str, dir: &Path, o: &InitOpts) -> Result<ExitCode>
         return Ok(ExitCode::SUCCESS);
     }
     if !o.no_up {
-        env::up(ctx, name, &UpOptions::default())?;
+        env::up(ctx, name, &up)?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -602,7 +759,10 @@ pub fn offer(
         );
     }
     if !yes && !crate::prompt::interactive() {
-        println!("  `luoto init --yes` in the env's folder adds them");
+        match &file.cfg.workspace.url {
+            Some(u) => println!("  `luoto init {} --yes` adds them", display(u)),
+            None => println!("  `luoto init --yes` in the env's folder adds them"),
+        }
         return Ok(false);
     }
     let added = yes
@@ -707,5 +867,120 @@ mod tests {
             ..Default::default()
         };
         assert!(propose(&paths, &o).is_err(), "no parent");
+    }
+
+    #[test]
+    fn an_argument_is_a_folder_when_it_can_be_one_else_a_remote() {
+        let cwd = tempfile::tempdir().unwrap();
+        let cwd = cwd.path();
+        std::fs::create_dir_all(cwd.join("have/sub")).unwrap();
+        let folder = |a: &str| Source::Folder(Some(a.to_string()));
+        let remote = |a: &str| Source::Remote(a.to_string());
+        for (arg, want) in [
+            ("new-app", folder("new-app")),
+            ("have", folder("have")),
+            ("have/sub", folder("have/sub")),
+            ("have/new", folder("have/new")),
+            ("./acme/web", folder("./acme/web")),
+            ("/abs/acme/web", folder("/abs/acme/web")),
+            ("~/acme/web", folder("~/acme/web")),
+            ("acme/web", remote("acme/web")),
+            (
+                "https://github.com/acme/web.git",
+                remote("https://github.com/acme/web.git"),
+            ),
+            (
+                "git@github.com:acme/web.git",
+                remote("git@github.com:acme/web.git"),
+            ),
+            (
+                "ssh://git@host.example:2222/x/y",
+                remote("ssh://git@host.example:2222/x/y"),
+            ),
+            (
+                "https://dev.azure.com/o/P/_git/web",
+                remote("https://dev.azure.com/o/P/_git/web"),
+            ),
+        ] {
+            assert_eq!(source(Some(arg), cwd).unwrap(), want, "{arg}");
+        }
+        assert_eq!(source(None, cwd).unwrap(), Source::Folder(None));
+        for arg in ["acme/web/more", "file:///etc", "http://github.com/acme/web"] {
+            let e = source(Some(arg), cwd).unwrap_err();
+            assert!(format!("{e:#}").contains("as a folder"), "{arg}: {e:#}");
+        }
+    }
+
+    fn paths() -> Paths {
+        Paths {
+            config: tempfile::tempdir().unwrap().keep(),
+            data: tempfile::tempdir().unwrap().keep(),
+        }
+    }
+
+    #[test]
+    fn a_remote_is_proposed_without_reading_or_making_anything_here() {
+        let paths = paths();
+        let o = InitOpts {
+            dir: Some("https://github.com/Acme/Web-App.git".into()),
+            branch: Some("develop".into()),
+            ..Default::default()
+        };
+        let p = propose(&paths, &o).unwrap();
+        assert_eq!(p.name, "web-app");
+        let ws = &p.cfg.workspace;
+        assert_eq!(ws.dir, None);
+        assert_eq!(ws.url.as_deref(), o.dir.as_deref());
+        assert_eq!(ws.branch.as_deref(), Some("develop"));
+        assert!(!p.new_folder && p.project.is_none() && p.project_error.is_none());
+        assert!(p.found.presets.is_empty() && p.found.tools.is_empty());
+        assert!(p.found.defaults.is_empty());
+        assert_eq!(p.cfg.presets, DEFAULT_PRESETS);
+        assert!(p.cfg.tools.is_empty());
+        assert!(!paths.envs_dir().exists(), "a proposal writes nothing");
+        assert!(!Path::new("Web-App").exists() && !Path::new("web-app").exists());
+
+        let named = InitOpts {
+            name: Some("site".into()),
+            ..o
+        };
+        assert_eq!(propose(&paths, &named).unwrap().name, "site");
+        let no_project = InitOpts {
+            dir: Some("acme/web".into()),
+            no_project: true,
+            ..Default::default()
+        };
+        assert!(propose(&paths, &no_project).is_err());
+        let folder = tempfile::tempdir().unwrap();
+        let branch_on_folder = InitOpts {
+            dir: Some(folder.path().display().to_string()),
+            branch: Some("main".into()),
+            ..Default::default()
+        };
+        assert!(propose(&paths, &branch_on_folder).is_err());
+    }
+
+    #[test]
+    fn the_same_remote_again_finds_its_env() {
+        let paths = paths();
+        let mut cfg = EnvConfig::default();
+        cfg.workspace.url = Some("acme/web".into());
+        EnvFile::create(&paths, "web", &cfg).unwrap();
+        for same in [
+            "acme/web",
+            "ACME/Web",
+            "https://github.com/acme/web.git",
+            "https://github.com/acme/web",
+            "git@github.com:Acme/web.git",
+        ] {
+            assert_eq!(
+                env_cloned_from(&paths, same).unwrap().as_deref(),
+                Some("web"),
+                "{same}"
+            );
+        }
+        for other in ["acme/api", "https://gitlab.com/acme/web.git"] {
+            assert_eq!(env_cloned_from(&paths, other).unwrap(), None, "{other}");
+        }
     }
 }

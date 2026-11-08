@@ -42,9 +42,14 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   A `[[mute]]` only hides: every view of denials (egress, UI, notifications, run summary)
   filters through `events::Mutes`.
 - Every env has a folder (`[workspace] dir`), copied into its workspace volume on the first
-  `up`; `luoto init` creates a missing one. `workspace.rs` owns env-from-cwd resolution and
+  `up` (`luoto init` creates a missing one), or a remote (`[workspace] url`), cloned into
+  `/workspace` inside the env on the first `up` (`repos::clone_workspace`), never both. Of a
+  clone, nothing reaches the host but `read_files` text and luoto.toml, and nothing it wrote
+  runs, installs or is granted before the user's yes to its luoto.toml (`project::review`)
+  and to its installs (`env::ask_installs`). `workspace.rs` owns env-from-cwd resolution and
   push/pull (tar over exec, so no VM file sharing needed). Anything that brings
-  sandbox-written files to the host goes through its `risky_nested()` and path/symlink checks.
+  sandbox-written files to the host goes through its `risky_nested()` and path/symlink checks;
+  `pull` never writes into the home folder or one that holds it.
 - `repos.rs` owns an env's repos at `/workspace/<name>`: a host folder copied in, or a remote
   cloned in the env (through the gate, as the dev user) on `up`; seeded names live in the env's
   state. A `luoto.toml` names remotes only, never host folders.

@@ -53,6 +53,16 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
             println!("luoto.toml (not accepted; written in the repository, so review it):");
             show(&st.current);
         }
+        project::State::Unread => {
+            println!(
+                "`{name}` is stopped and its luoto.toml is only in the env: `luoto up -e {name}` \
+                 reads it"
+            );
+            if !st.accepted.is_empty() {
+                println!("the accepted settings apply:");
+                show(&st.accepted);
+            }
+        }
     }
     crate::init::print_needs(name, &st.needs);
     let pending = st.pending();
@@ -80,8 +90,9 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
     Ok(ExitCode::SUCCESS)
 }
 
-/// Print a luoto.toml from the env's settings, or write it to the env's folder (replacing
-/// one there only with `force`, after showing what changes).
+/// Print a luoto.toml from the env's settings, or write it to the env's folder, or into the
+/// running env for an env cloned from a remote (replacing one there only with `force`, after
+/// showing what changes).
 pub fn project_suggest(name: &str, write: bool, force: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let cfg = EnvFile::load(&ctx.paths, name)?.cfg;
@@ -95,28 +106,43 @@ pub fn project_suggest(name: &str, write: bool, force: bool) -> Result<ExitCode>
         print!("{}", crate::text::lines(&s.text));
         return Ok(ExitCode::SUCCESS);
     }
-    let dir = workspace::canonical(
-        cfg.workspace
-            .dir
-            .as_deref()
-            .context("the env has no folder")?,
-    )?;
-    let path = dir.join(project::FILE);
-    if let Some(old) = project::read_host(&dir)? {
+    let (dir, path) = match &cfg.workspace.dir {
+        Some(d) => {
+            let dir = workspace::canonical(d)?;
+            let path = dir.join(project::FILE).display().to_string();
+            (Some(dir), path)
+        }
+        None => {
+            if !ctx.rt.is_running(&names::dev(name)) {
+                bail!(
+                    "env `{name}` has its workspace only in the env, and it is stopped: \
+                     `luoto up -e {name}` first"
+                );
+            }
+            (
+                None,
+                format!("/workspace/{} in env `{name}`", project::FILE),
+            )
+        }
+    };
+    let old = match &dir {
+        Some(d) => project::read_host(d)?,
+        None => project::read_env(&ctx, name)?,
+    };
+    if let Some(old) = old {
         match project::parse(&old) {
             Ok(p) if p == s.config => {
-                println!("{} already has these settings", path.display());
+                println!("{path} already has these settings");
                 return Ok(ExitCode::SUCCESS);
             }
             Ok(p) => {
-                println!("against {}:", path.display());
+                println!("against {path}:");
                 for l in project::diff(&p, &s.config) {
                     println!("  {l}");
                 }
             }
             Err(e) => println!(
-                "{} doesn't parse: {}",
-                path.display(),
+                "{path} doesn't parse: {}",
                 crate::text::lines(&format!("{e:#}"))
             ),
         }
@@ -125,8 +151,11 @@ pub fn project_suggest(name: &str, write: bool, force: bool) -> Result<ExitCode>
             return Ok(ExitCode::FAILURE);
         }
     }
-    project::write_host(&dir, &s.text)?;
-    println!("wrote {}: review it, then commit it", path.display());
+    match &dir {
+        Some(d) => project::write_host(d, &s.text)?,
+        None => project::write_env(&ctx, name, &s.text)?,
+    }
+    println!("wrote {path}: review it, then commit it");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -153,11 +182,38 @@ pub fn pull(
     yes: bool,
 ) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
+    let ws = EnvFile::load(&ctx.paths, name)?.cfg.workspace;
+    if let (None, Some(url)) = (&ws.dir, &ws.url)
+        && to.is_none()
+    {
+        bail!(
+            "env `{name}` is cloned from {} and has no folder on this machine: `luoto pull --to \
+             <new folder>` copies its files out (its work leaves by git push)",
+            crate::text::display(url)
+        );
+    }
     crate::connect::ensure_running(&ctx, name)?;
     let to = match to {
         Some(t) => {
             std::fs::create_dir_all(workspace::expand(t))?;
-            Some(workspace::canonical(t)?)
+            let dest = workspace::canonical(t)?;
+            workspace::check_pull_dest(&dest)?;
+            // The env's files have no folder of theirs here, so they go somewhere new unless
+            // you say otherwise: in a folder that holds other things, a file of theirs could
+            // be one a tool of yours acts on.
+            if ws.dir.is_none()
+                && std::fs::read_dir(&dest)?.next().is_some()
+                && !confirm(&format!(
+                    "{} is not empty. Pull the env's files into it?",
+                    dest.display()
+                ))
+            {
+                bail!(
+                    "nothing written: pick a new or empty folder (a folder with files in it \
+                     needs a yes on a terminal)"
+                );
+            }
+            Some(dest)
         }
         None => None,
     };
@@ -244,6 +300,7 @@ fn up_env(ctx: &Ctx, name: &str, selftest: bool, recreate: bool, quiet: bool) ->
         &UpOptions {
             no_selftest: !selftest,
             quiet,
+            ..Default::default()
         },
     )
 }
@@ -338,6 +395,31 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
     if !cfg.exists() {
         bail!("no env `{name}` (`luoto ls` lists them)");
     }
+    // An env cloned from a remote has no folder: what isn't pushed exists only in the env.
+    if let Ok(f) = EnvFile::load(&ctx.paths, name)
+        && let (None, Some(url)) = (&f.cfg.workspace.dir, &f.cfg.workspace.url)
+    {
+        println!(
+            "`{name}` is cloned from {}: its work exists only in the env, unless pushed",
+            crate::text::display(url)
+        );
+        if ctx.rt.is_running(&names::dev(name)) {
+            match crate::repos::workspace_status(&ctx, name) {
+                Ok((branch, changed)) => {
+                    println!("  branch {branch}");
+                    println!("  {changed} file(s) changed and not committed");
+                }
+                Err(e) => println!(
+                    "  git status failed in the env: {}",
+                    crate::text::lines(&format!("{e:#}"))
+                ),
+            }
+        } else {
+            println!(
+                "  it is stopped: `luoto up -e {name}`, then `git status` in it, shows what isn't pushed"
+            );
+        }
+    }
     if !yes
         && !confirm(&format!(
             "Delete env `{name}` with its workspace, home and config? \
@@ -396,19 +478,48 @@ pub fn ls() -> Result<ExitCode> {
     if states.vm_stopped {
         println!("luoto's VM is stopped; `luoto up` starts it with the env\n");
     }
+    let rows: Vec<(String, String, String, String)> = envs
+        .iter()
+        .map(|e| match EnvFile::load(&ctx.paths, e) {
+            Ok(f) => (
+                e.clone(),
+                from(&f.cfg.workspace),
+                env::env_image(&ctx, &f.cfg),
+                f.cfg.presets.join(","),
+            ),
+            Err(_) => (
+                e.clone(),
+                String::new(),
+                "(invalid config)".into(),
+                String::new(),
+            ),
+        })
+        .collect();
+    let width = rows
+        .iter()
+        .map(|r| r.1.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(4);
     println!(
-        "{:<20} {:<10} {:<10} {:<28} PRESETS",
-        "ENV", "DEV", "GATE", "IMAGE"
+        "{:<20} {:<10} {:<10} {:<width$} {:<28} PRESETS",
+        "ENV", "DEV", "GATE", "FROM", "IMAGE"
     );
-    for e in envs {
+    for (e, from, image, presets) in rows {
         let (dev, gate) = states.env(&e);
-        let (image, presets) = match EnvFile::load(&ctx.paths, &e) {
-            Ok(f) => (env::env_image(&ctx, &f.cfg), f.cfg.presets.join(",")),
-            Err(_) => ("(invalid config)".into(), String::new()),
-        };
-        println!("{e:<20} {dev:<10} {gate:<10} {image:<28} {presets}");
+        println!("{e:<20} {dev:<10} {gate:<10} {from:<width$} {image:<28} {presets}");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Where an env's workspace comes from, for `ls`: its folder (`~` for home), or the remote
+/// cloned in it.
+fn from(ws: &config::Workspace) -> String {
+    match (&ws.dir, &ws.url) {
+        (Some(d), _) => crate::ssh::tilde(std::path::Path::new(d)),
+        (None, Some(u)) => crate::text::display(u),
+        (None, None) => "-".into(),
+    }
 }
 
 pub fn status(name: &str, json: bool) -> Result<ExitCode> {
@@ -446,10 +557,22 @@ pub fn status(name: &str, json: bool) -> Result<ExitCode> {
             None => "never stops on its own".into(),
         }
     );
-    println!(
-        "  folder: {} (copied in; `luoto pull` brings changes back)",
-        f.cfg.workspace.dir.as_deref().unwrap_or("none")
-    );
+    let ws = &f.cfg.workspace;
+    match (&ws.dir, &ws.url) {
+        (None, Some(url)) => println!(
+            "  workspace: cloned from {}{} in the env; nothing on this machine (work leaves by \
+             git push, or `luoto pull --to <new folder>`)",
+            crate::text::display(url),
+            ws.branch
+                .as_deref()
+                .map(|b| format!(" ({})", crate::text::display(b)))
+                .unwrap_or_default()
+        ),
+        (dir, _) => println!(
+            "  folder: {} (copied in; `luoto pull` brings changes back)",
+            dir.as_deref().unwrap_or("none")
+        ),
+    }
     let ca_dir = ctx.paths.env_state(name);
     if let Some(n) = crate::ca::notice(&ca_dir, name) {
         println!("  CA:     {n}");

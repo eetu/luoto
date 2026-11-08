@@ -6,11 +6,12 @@ import env from "./fixtures/env";
 import meta from "./fixtures/meta";
 import overview from "./fixtures/overview";
 import project from "./fixtures/project";
+import remote from "./fixtures/remote";
 import requests from "./fixtures/requests";
 
 // Fixtures are real `luoto ui` responses (env renamed to `web`), each checked against its
 // generated API type by `yarn typecheck`, so one that drifts from the Rust types fails there.
-const fixtures = { detect, egress, env, meta, overview, project, requests };
+const fixtures = { detect, egress, env, meta, overview, project, remote, requests };
 
 export const fixture = <K extends keyof typeof fixtures>(name: K): (typeof fixtures)[K] =>
   structuredClone(fixtures[name]);

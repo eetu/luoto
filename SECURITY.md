@@ -98,9 +98,21 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   reviewed `pull`. `pull` reviews changes, holds back risky files in any folder within the pull
   (compared case-insensitively, as macOS and Windows name them), refuses `.git` under any
   spelling, names that collide by case, and paths and symlinks that leave the folder. A
-  pulled `.gitignore` decides what later copies leave out, so review its changes. With podman on macOS and Windows, envs run only in
+  pulled `.gitignore` decides what later copies leave out, so review its changes. `pull`
+  never writes into your home folder or a folder that holds it. With podman on macOS and Windows, envs run only in
   luoto's own VM, which mounts none of your folders (`luoto doctor` checks), so an escape
   doesn't reach your home directory.
+- **Repositories cloned inside** (`luoto init <remote>`). The env's workspace is cloned in the
+  env, through the gate, as the unprivileged user, with nothing on the host: git brings no
+  hooks, submodules aren't fetched and LFS files stay pointers, and `.gitattributes` filters
+  need git config the repository can't set. Of the clone, only what detection reads (as the
+  dev user, never through a symlink, size-capped, escaped) and its `luoto.toml` reach the host
+  before a reviewed `pull --to`, which goes into a new or empty folder unless you confirm.
+  Nothing in it runs, installs or is granted before your yes, at two steps of the first `up`:
+  its `luoto.toml` (Enter answers no; `--yes` leaves it pending), then what installing would
+  do, where mise reads its version files and `mise.toml` (which can run commands in the env).
+  Until then the env has its default presets and the access you gave the remote. A shell or
+  editor you open in it starts mise there.
 - **Isolation.** With podman, dev containers run on gVisor (in luoto's VM on macOS and
   Windows; on Linux once `runsc` is installed): the sandbox's system calls reach gVisor's
   user-space kernel, not the VM's or the host's. In luoto's VM each env's dev container has its
@@ -117,7 +129,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   exact version the user accepted, never carries credentials or secret refs, and its rules
   pass the sandbox's own request checks. Its denies only tighten; it can't mute denials,
   which would hide what code from the repository tries. luoto reads it as the unprivileged
-  user, refuses symlinks and caps its size.
+  user, refuses symlinks and caps its size. The review spells out what reaches past the gate:
+  an `image` is pulled by the runtime outside the gate and becomes the dev container, `ports`
+  are published on your machine's 127.0.0.1, `[deps] run` commands run in the env, and its
+  repositories are cloned.
 - **Self-test.** `luoto up` verifies from inside, whenever a container restarts (skip with
   `--no-selftest`), that raw-IP TCP, UDP and DNS cannot leave before any secret, dotfile or SSH
   key enters the env; an env that fails is stopped.
@@ -150,6 +165,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   with a role scoped to the env's resource groups. Whatever the identity reads reaches the
   sandbox, Key Vault secret values included. A storage SAS URL (`sig=` in its query) works
   from anywhere, as any secret the sandbox reads does.
+- **Large clones.** A repository cloned in an env can fill the disk of luoto's VM, which the
+  other envs and the vault share: their availability, not their isolation.
 - **Exhausting the gate.** Code in the sandbox can hold the gate's 1024 connections and
   so stop the env's own traffic, which it could break anyway; other envs have their own gates.
   The event queue, cached certificates and the logs of the gate, the vault and the dev container

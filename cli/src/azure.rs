@@ -265,12 +265,14 @@ pub fn rewrites(
 /// SSH host aliases from `~/.ssh/config` that the project's own remotes use for Azure DevOps
 /// (`git@my-azure:v3/org/…`), as (organization as the remote writes it, alias): read from the
 /// `.git/config` and `.gitmodules` of the folder and its repos' folders, and from the remotes
-/// its repos clone. The env has no SSH config, so these are rewritten like the standard hosts.
+/// the env and its repos clone. The env has no SSH config, so these are rewritten like the
+/// standard hosts.
 pub fn aliases(workspace: &crate::config::Workspace) -> Vec<(String, String)> {
     let mut urls: Vec<String> = workspace
-        .repos
-        .values()
-        .filter_map(|r| r.url.clone())
+        .url
+        .iter()
+        .chain(workspace.repos.values().filter_map(|r| r.url.as_ref()))
+        .cloned()
         .collect();
     let folders = workspace
         .dir
@@ -451,6 +453,14 @@ mod tests {
         assert_eq!(
             aliases(&ws),
             [("invinite".to_string(), "azure-invinite".to_string())]
+        );
+        let cloned = crate::config::Workspace {
+            url: Some("git@my-azure:v3/acme/P/web".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            aliases(&cloned),
+            [("acme".to_string(), "my-azure".to_string())]
         );
     }
 
