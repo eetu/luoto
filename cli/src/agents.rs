@@ -712,11 +712,11 @@ pub fn headless(
     ))
 }
 
-/// Send `signal` to the processes of the run `mark` names in the env's dev container, as root
-/// for what the agent started with sudo.
+/// Send `signal` to the processes of the run `mark` names in the env's dev container. As the
+/// dev user: root there lacks CAP_SYS_PTRACE, so it can't read another user's environ.
 fn signal_run(ctx: &Ctx, dev: &str, mark: &str, signal: &str) {
     ctx.rt.succeeds([
-        "exec", "-u", "0", dev, "sh", "-c", SIGNAL_RUN, "sh", signal, mark,
+        "exec", "-u", UID, dev, "sh", "-c", SIGNAL_RUN, "sh", signal, mark,
     ]);
 }
 

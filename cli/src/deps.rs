@@ -36,7 +36,9 @@ const VERSION: u32 = 2;
 const SYSTEM: &str = r#"set -e
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -q
+  # A source the env doesn't allow (luoto-base lists cli.github.com) fails the update; apt
+  # leaves that source out and installs from the rest.
+  apt-get update -q || echo "luoto: a package source could not be read; using the others" >&2
   apt-get install -y -q --no-install-recommends "$@"
 elif command -v apk >/dev/null 2>&1; then
   apk add --no-cache "$@"
