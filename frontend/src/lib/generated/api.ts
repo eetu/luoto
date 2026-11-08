@@ -378,6 +378,8 @@ export type Reloaded = {
   changed: number;
   /** The references that couldn't be read, and the gates that weren't flushed. */
   failed: string[];
+  /** When the values read expire, for those whose source says (`azcli:` tokens). */
+  expires: Record<string, string>;
 };
 
 export type Repo = {
