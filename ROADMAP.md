@@ -38,7 +38,7 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   host tools act on (`.git/config`, hooks, `.envrc`, editor and pre-commit configs).
 - **`luoto run` jobs:** a clean-checkout start, a CI recipe.
 - **Detached agents:** `agent run --detach`, `agent ps`, `agent attach`.
-- **More commands:** `push` (a reviewed copy-in), `doctor --report`, `uninstall`.
+- **`luoto push`:** a reviewed copy-in.
 - **The UI does what the CLI does:** editing an env's presets, tools, agents, ports,
   credentials and repos, removing it, and the questions `init` and installs ask (prompts and
   progress the UI streams).

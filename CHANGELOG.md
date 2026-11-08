@@ -49,6 +49,13 @@ Your own deny and mute rules, notifications for requests, and commands for every
   already expired; the gate signs with the new one at once and a running dev container
   restarts to trust it. `luoto status` and `doctor` show the expiry when it is that close.
   The vault's and dev container's logs are capped (1 MB, 10 MB; podman).
+- **`luoto doctor --report`:** writes doctor's checks, versions, the VM, each env's config
+  and state, the watcher's log and the gates' and vault's recent lifecycle and error events
+  to a file only you can read, with secret refs, tokens, your home folder, user names and
+  emails taken out.
+- **`luoto uninstall`:** removes luoto's envs, vault, images, keychain entries, config and
+  data after one question, and its VM only when the other instance (a release or a source
+  build) has nothing in it; the binary stays.
 - **luoto.toml review:** an `up` that can't ask (the UI, `up --all`) leaves a changed
   `luoto.toml` unapplied without recording a decline.
 
