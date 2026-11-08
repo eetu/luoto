@@ -662,11 +662,22 @@ impl<W: Write> Writer<W> {
     }
 }
 
+/// A symlink of a volume and its owner: tar in luoto's tools image doesn't give a symlink
+/// its owner when it unpacks one, so the sink sets them afterwards.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkOwner {
+    pub uid: u64,
+    pub gid: u64,
+    /// As unpacked, relative to the volume.
+    pub name: Vec<u8>,
+}
+
 /// Where `read_volumes` sends each volume's contents: a tar stream to unpack into it.
 pub trait Sink {
     fn open(&mut self, part: Part) -> Result<Box<dyn Write>>;
-    /// `part`'s stream `w` is complete: the sink checks that it was unpacked.
-    fn close(&mut self, part: Part, w: Box<dyn Write>) -> Result<()>;
+    /// `part`'s stream `w` is complete: the sink checks that it was unpacked, then gives
+    /// `links` their owners.
+    fn close(&mut self, part: Part, w: Box<dyn Write>, links: &[LinkOwner]) -> Result<()>;
 }
 
 /// What an archive holds before its volumes.
@@ -725,6 +736,7 @@ pub fn read_volumes<R: Read>(
     {
         let prefix = part.entry().as_bytes();
         let mut vol = Volume::default();
+        let mut links = Vec::new();
         let mut out = tar::Builder::new(sink.open(part)?);
         while let Some(mut it) = item.take_if(|it| it.name.starts_with(prefix)) {
             let link = match (it.kind, &it.link) {
@@ -735,6 +747,13 @@ pub fn read_volumes<R: Read>(
             };
             let c = vol.check(it.kind, &it.name[prefix.len()..], link)?;
             let name = inner_name(&c.rel, it.kind == Kind::Dir);
+            if it.kind == Kind::Symlink {
+                links.push(LinkOwner {
+                    uid: it.uid,
+                    gid: it.gid,
+                    name: name.clone(),
+                });
+            }
             vol.count.bytes += put(&mut out, &mut it, &name, c.link.as_deref(), tick)?;
             item = dec.next()?;
         }
@@ -743,7 +762,7 @@ pub fn read_volumes<R: Read>(
         }
         let mut w = out.into_inner()?;
         w.flush()?;
-        sink.close(part, w)?;
+        sink.close(part, w, &links)?;
         seen.insert(part, vol.count);
     }
     let end: End = serde_json::from_slice(
@@ -801,6 +820,7 @@ mod tests {
     #[derive(Default, Clone)]
     struct Memory {
         streams: Rc<RefCell<BTreeMap<Part, Vec<u8>>>>,
+        links: Rc<RefCell<BTreeMap<Part, Vec<LinkOwner>>>>,
         open: Option<Part>,
     }
 
@@ -825,8 +845,9 @@ mod tests {
             assert!(self.open.replace(part).is_none());
             Ok(Box::new(Into(self.streams.clone(), part)))
         }
-        fn close(&mut self, part: Part, _: Box<dyn Write>) -> Result<()> {
+        fn close(&mut self, part: Part, _: Box<dyn Write>, links: &[LinkOwner]) -> Result<()> {
             assert_eq!(self.open.take(), Some(part));
+            self.links.borrow_mut().insert(part, links.to_vec());
             Ok(())
         }
     }
@@ -893,6 +914,30 @@ mod tests {
 
     fn import_err(bytes: &[u8]) -> String {
         format!("{:#}", import(bytes).unwrap_err())
+    }
+
+    #[test]
+    fn symlinks_reach_the_sink_with_their_owners() {
+        let work = volume(&[
+            (b'2', b"./abs", b"/etc/hosts", b""),
+            (b'0', b"./file", b"", b"x"),
+            (b'2', b"./up", b"../x", b""),
+        ]);
+        let bytes = export(&work, None);
+        let mut archive = tar::Archive::new(bytes.as_slice());
+        let mut dec = Decoder::new(&mut archive).unwrap();
+        let head = read_head(&mut dec).unwrap();
+        let mut sink = Memory::default();
+        read_volumes(&mut dec, &head.manifest, &mut sink, &mut |_| {}).unwrap();
+        let links = sink.links.borrow()[&Part::Work].clone();
+        let named: Vec<(&[u8], u64, u64)> = links
+            .iter()
+            .map(|l| (l.name.as_slice(), l.uid, l.gid))
+            .collect();
+        assert_eq!(
+            named,
+            [(b"abs".as_slice(), 1000, 1000), (b"up", 1000, 1000)]
+        );
     }
 
     #[test]

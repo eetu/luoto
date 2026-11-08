@@ -6,7 +6,7 @@
 //! Secret values, the CA and the vault token don't move: import makes a new CA and token, and
 //! the config's refs are read on this machine at `up`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -39,6 +39,38 @@ const REF_SCHEMES: [&str; 6] = ["op://", "vault://", "keyring:", "env:", "file:"
 /// namespace (`id_map`): no network, a read-only root and only the capabilities tar needs to
 /// read (or `write`) every file. Its output isn't logged: it is the volume's contents.
 fn tar_args(rt: &Runtime, image: &str, vol: &str, id_map: Option<u32>, write: bool) -> Vec<String> {
+    let mut a = volume_container(rt, image, vol, id_map, write);
+    let tar: &[&str] = if write {
+        &["tar", "-x", "--numeric-owner", "-f", "-", "-C", MOUNT]
+    } else {
+        &["tar", "-c", "-f", "-", "-C", MOUNT, "."]
+    };
+    a.extend(tar.iter().map(|s| s.to_string()));
+    a
+}
+
+/// [`tar_args`]' container giving the NUL-separated paths on its input the owner
+/// `uid:gid`, the links themselves (`chown -h`).
+fn chown_args(
+    rt: &Runtime,
+    image: &str,
+    vol: &str,
+    id_map: Option<u32>,
+    uid: u64,
+    gid: u64,
+) -> Vec<String> {
+    let mut a = volume_container(rt, image, vol, id_map, true);
+    a.extend(["xargs", "-0", "chown", "-h", &format!("{uid}:{gid}")].map(String::from));
+    a
+}
+
+fn volume_container(
+    rt: &Runtime,
+    image: &str,
+    vol: &str,
+    id_map: Option<u32>,
+    write: bool,
+) -> Vec<String> {
     let mut a: Vec<String> = vec!["run".into(), "--rm".into()];
     if write {
         a.push("-i".into());
@@ -70,12 +102,6 @@ fn tar_args(rt: &Runtime, image: &str, vol: &str, id_map: Option<u32>, write: bo
         format!("{vol}:{MOUNT}{}", if write { "" } else { ":ro" }),
         image.into(),
     ]);
-    let tar: &[&str] = if write {
-        &["tar", "-x", "--numeric-owner", "-f", "-", "-C", MOUNT]
-    } else {
-        &["tar", "-c", "-f", "-", "-C", MOUNT, "."]
-    };
-    a.extend(tar.iter().map(|s| s.to_string()));
     a
 }
 
@@ -423,7 +449,7 @@ impl archive::Sink for Extract<'_> {
         Ok(Box::new(BufWriter::with_capacity(1 << 20, stdin)))
     }
 
-    fn close(&mut self, part: Part, w: Box<dyn Write>) -> Result<()> {
+    fn close(&mut self, part: Part, w: Box<dyn Write>, links: &[archive::LinkOwner]) -> Result<()> {
         // Its end of input: tar finishes.
         drop(w);
         let (ok, said) = self.wait();
@@ -432,6 +458,33 @@ impl archive::Sink for Extract<'_> {
         }
         if !said.is_empty() {
             eprintln!("note: tar, writing the {}: {said}", part.label());
+        }
+        let what = part.volume().context("not a volume")?;
+        let vol = names::volume(self.env, what);
+        // One container per owner, nearly always the dev user's alone.
+        let mut by_owner: BTreeMap<(u64, u64), Vec<u8>> = BTreeMap::new();
+        for l in links {
+            let paths = by_owner.entry((l.uid, l.gid)).or_default();
+            paths.extend_from_slice(format!("{MOUNT}/").as_bytes());
+            paths.extend_from_slice(l.name.strip_prefix(b"./").unwrap_or(&l.name));
+            paths.push(0);
+        }
+        for ((uid, gid), paths) in by_owner {
+            let args = chown_args(
+                &self.ctx.rt,
+                &self.ctx.image("tools"),
+                &vol,
+                self.id_map,
+                uid,
+                gid,
+            );
+            let out = self.ctx.rt.run_stdin(args, &paths);
+            if let Err(e) = out {
+                eprintln!(
+                    "note: the {}'s links keep root as their owner ({e:#})",
+                    part.label()
+                );
+            }
         }
         Ok(())
     }
