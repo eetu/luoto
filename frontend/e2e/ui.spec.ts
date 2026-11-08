@@ -34,7 +34,7 @@ test("the env panel shows how to connect", async ({ page }) => {
 
 test("a new env waits until its folder's luoto.toml is on screen", async ({ page }) => {
   const writes = await mockApi(page);
-  const proposal = fixture("detect") as { project_sha: string };
+  const proposal = fixture("detect");
   let answer = () => {};
   const answered = new Promise<void>((resolve) => (answer = resolve));
   await page.route("**/api/detect", async (route) => {
@@ -88,7 +88,7 @@ test("applying luoto.toml names the text that was reviewed", async ({ page }) =>
 
 test("a TLS reject hints at a tunnel without choosing one", async ({ page }) => {
   const writes = await mockApi(page);
-  const [blocked] = fixture("egress") as object[];
+  const [blocked] = fixture("egress");
   await page.route(
     (url) => url.pathname === "/api/envs/web/egress",
     (route) =>
@@ -311,7 +311,7 @@ test("a new access request notifies once the user turned notifications on", asyn
   });
   await mockApi(page);
   let pending = 0;
-  const overview = fixture("overview") as { envs: { pending: number }[] };
+  const overview = fixture("overview");
   await page.route(
     (url) => url.pathname === "/api/overview",
     (route) =>
@@ -340,7 +340,7 @@ test("with desktop notifications on, the page shows none of its own", async ({ p
   await page.route(
     (url) => url.pathname === "/api/overview",
     (route) =>
-      route.fulfill({ json: { ...(fixture("overview") as object), desktop_notifications: true } }),
+      route.fulfill({ json: { ...fixture("overview"), desktop_notifications: true } }),
   );
   await open(page);
   const bell = page.getByRole("button", { name: "browser notifications" });

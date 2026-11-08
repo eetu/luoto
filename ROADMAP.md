@@ -79,4 +79,3 @@ Each change is a format migration (`cli/src/format.rs`); the first one also brin
 
 - Windows verified end to end, or documented as WSL2-only.
 - `sandbox provision`: one call into the env instead of the 26 an unchanged `up` makes.
-- Generated frontend types.

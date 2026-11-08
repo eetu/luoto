@@ -112,6 +112,9 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   duration; each call is a round trip into the VM, so `up` is as fast as its call count.
 - `just dev`: `luoto ui` API on :7878 + Vite on :5173 (proxying /api). Open the token link
   printed by the backend on :5173 instead of :7878.
+- `just types` regenerates the UI's API types (`frontend/src/lib/generated/api.ts`) from the
+  Rust types `ui/api.rs` sends and takes (`cli/tests/api_types.rs`); `cargo test` fails while
+  the committed file differs, and `yarn typecheck` checks the UI and the e2e fixtures against it.
 - `just test` (unit), `just it` (integration), `just test-ui` (Playwright), `just lint`,
   `just format`, `just shots` (README screenshots; needs a runtime).
 - After changing gate/vault/tools code, rebuild images and `luoto up <env>` to pick them up;

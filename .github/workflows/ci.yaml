@@ -59,6 +59,8 @@ jobs:
               - cli/**
               - tools/**
               - integration/**
+              # Generated from the Rust types; a cli test holds it to them.
+              - frontend/src/lib/generated/**
             integration:
               - *workflow
               - *cargo

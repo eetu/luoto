@@ -1,8 +1,11 @@
-[
+import type { HostSummary } from "../../src/lib/types";
+
+export default [
   {
     "host": "example.com",
     "allowed": 0,
     "denied": 1,
+    "muted": 0,
     "dns_only": false,
     "methods": ["GET"],
     "ports": [443],
@@ -22,6 +25,7 @@
     "host": "deb.debian.org",
     "allowed": 1,
     "denied": 0,
+    "muted": 0,
     "dns_only": false,
     "methods": ["GET"],
     "ports": [443],
@@ -37,4 +41,4 @@
     "wants_write": false,
     "tls_rejected": false
   }
-]
+] satisfies HostSummary[];

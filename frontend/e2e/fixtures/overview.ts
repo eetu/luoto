@@ -1,4 +1,6 @@
-{
+import type { Overview } from "../../src/lib/types";
+
+export default {
   "envs": [
     {
       "denied_recent": 1,
@@ -21,4 +23,4 @@
     "started": "2026-11-03T14:51:04.846862344Z",
     "version": "0.1.0"
   }
-}
+} satisfies Overview;

@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use luoto_shared::ctl::{GateCtl, VaultCtl};
 use luoto_shared::policy::Rule;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::azure_identity::AZCLI;
@@ -151,6 +152,7 @@ fn flush_gates(ctx: &Ctx) -> Result<Vec<String>> {
 }
 
 /// What [`reload`] did.
+#[derive(Serialize)]
 pub struct Reloaded {
     pub read: usize,
     pub changed: usize,
