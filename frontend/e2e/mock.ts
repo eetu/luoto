@@ -1,12 +1,19 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
 import type { Page, Request } from "@playwright/test";
 
-// Fixtures are real `luoto ui` responses (env renamed to `web`), so a change to a Rust struct
-// that the frontend types miss shows up here.
-export const fixture = (name: string): unknown =>
-  JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", `${name}.json`), "utf8"));
+import detect from "./fixtures/detect";
+import egress from "./fixtures/egress";
+import env from "./fixtures/env";
+import meta from "./fixtures/meta";
+import overview from "./fixtures/overview";
+import project from "./fixtures/project";
+import requests from "./fixtures/requests";
+
+// Fixtures are real `luoto ui` responses (env renamed to `web`), each checked against its
+// generated API type by `yarn typecheck`, so one that drifts from the Rust types fails there.
+const fixtures = { detect, egress, env, meta, overview, project, requests };
+
+export const fixture = <K extends keyof typeof fixtures>(name: K): (typeof fixtures)[K] =>
+  structuredClone(fixtures[name]);
 
 type Route = { method: string; path: RegExp; body: (req: Request) => unknown };
 

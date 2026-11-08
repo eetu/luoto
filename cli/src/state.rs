@@ -32,6 +32,10 @@ pub struct EnvState {
     /// What the tools volume was filled from: the tools image and the env's CA, hashed.
     #[serde(default)]
     pub tools: Option<String>,
+    /// The CA (`EnvCa::pem_sha256`) the dev container last started with: init.sh puts it in
+    /// the container's trust stores at each start.
+    #[serde(default)]
+    pub dev_ca: Option<String>,
 }
 
 impl EnvState {
@@ -91,6 +95,7 @@ pub fn ensure(ctx: &Ctx, env: &str, image: &str) -> Result<EnvState> {
         repos: BTreeSet::new(),
         user: None,
         tools: None,
+        dev_ca: None,
     };
     s.save(&ctx.paths, env)?;
     Ok(s)

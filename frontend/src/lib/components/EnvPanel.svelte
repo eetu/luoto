@@ -2,6 +2,7 @@
   import { api } from "$lib/api";
   import ConnectSection from "$lib/components/ConnectSection.svelte";
   import CredentialsSection from "$lib/components/CredentialsSection.svelte";
+  import PortsSection from "$lib/components/PortsSection.svelte";
   import ProjectSection from "$lib/components/ProjectSection.svelte";
   import RulesSection from "$lib/components/RulesSection.svelte";
   import SelftestSection from "$lib/components/SelftestSection.svelte";
@@ -42,6 +43,7 @@
 
       <WorkspaceSection />
       <ProjectSection />
+      <PortsSection />
       <ConnectSection />
       <CredentialsSection />
       <RulesSection />

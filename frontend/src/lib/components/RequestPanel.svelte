@@ -1,13 +1,31 @@
 <script lang="ts">
   import { api } from "$lib/api";
   import Risks from "$lib/components/Risks.svelte";
-  import { act, ago, app, installLabel, say, TTLS } from "$lib/stores/app.svelte";
+  import Segmented from "$lib/components/Segmented.svelte";
+  import { act, ago, app, installLabel, requestTarget, say, TTLS } from "$lib/stores/app.svelte";
+  import type { Narrowing } from "$lib/types";
 
   let { id }: { id: number } = $props();
 
   const req = $derived(app.requests.find((r) => r.id === id) ?? null);
   let ttl = $state(60);
   let risks = $state<string[]>([]);
+  // Less than asked: read for a write request, some of its paths. The backend refuses wider.
+  let grant = $state<"asked" | "read">("asked");
+  let paths = $state("");
+
+  $effect(() => {
+    void id;
+    grant = "asked";
+    paths = "";
+    risks = [];
+  });
+
+  function narrowing(): Narrowing | undefined {
+    const globs = paths.split(/[\s,]+/).filter(Boolean);
+    if (grant === "asked" && globs.length === 0) return undefined;
+    return { read: grant === "read" || undefined, paths: globs.length ? globs : undefined };
+  }
 
   async function approve(force: boolean) {
     const env = app.env;
@@ -22,10 +40,11 @@
     }
     const host = req.host;
     const shown = req;
+    const narrow = narrowing();
     const rule = await act(
       "approving…",
-      () => api.approve(env, shown, ttl ? `${ttl}m` : undefined, force),
-      `approved #${id}: ${host}`,
+      () => api.approve(env, shown, ttl ? `${ttl}m` : undefined, force, narrow),
+      `approved #${id}: ${requestTarget(shown)}${narrow ? " (narrowed)" : ""}`,
       (found) => (risks = found),
     );
     if (rule) {
@@ -79,12 +98,20 @@
       </div>
     {/if}
   {:else if req}
-    <h2>{req.host}</h2>
+    <h2>{requestTarget(req)}</h2>
     <dl>
       <dt>access</dt>
-      <dd>{req.access === "write" ? "write (any method)" : "read-only"}</dd>
-      <dt>paths</dt>
-      <dd>{req.paths?.length ? req.paths.join(", ") : "all"}</dd>
+      <dd>
+        {req.port
+          ? "uninspected tunnel"
+          : req.access === "write"
+            ? "write (any method)"
+            : "read-only"}
+      </dd>
+      {#if !req.port}
+        <dt>paths</dt>
+        <dd>{req.paths?.length ? req.paths.join(", ") : "all"}</dd>
+      {/if}
       <dt>filed</dt>
       <dd>{ago(req.created)}</dd>
       <dt>status</dt>
@@ -94,12 +121,42 @@
       <p class="label">reason — written by code in the sandbox, not by you</p>
       <p class="reason">{req.reason}</p>
     </div>
-    {#if req.access === "write"}
+    {#if req.port}
+      <p class="warn">
+        A tunnel is not inspected: anything in the sandbox gets full access to {requestTarget(req)},
+        any protocol and any data.
+      </p>
+    {:else if req.access === "write" && grant === "asked"}
       <p class="warn">
         Write access lets anything in the sandbox upload data to {req.host}.
       </p>
     {/if}
     {#if req.status === "pending"}
+      {#if !req.port}
+        {#if req.access === "write"}
+          <div class="field">
+            <span>grant</span>
+            <Segmented
+              label="grant"
+              options={[
+                { value: "asked", label: "write" },
+                { value: "read", label: "read-only" },
+              ]}
+              value={grant}
+              onchange={(v) => ((grant = v), (risks = []))}
+            />
+          </div>
+        {/if}
+        <label class="field">
+          <span>paths</span>
+          <input
+            type="text"
+            bind:value={paths}
+            oninput={() => (risks = [])}
+            placeholder={req.paths?.length ? "as asked, or some of them" : "all, or e.g. /v1/**"}
+          />
+        </label>
+      {/if}
       <label class="field">
         <span>for</span>
         <select bind:value={ttl}>

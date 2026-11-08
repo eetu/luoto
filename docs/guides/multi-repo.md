@@ -47,7 +47,8 @@ $ git clone https://github.com/acme/platform && cd platform && luoto init
 ```
 
 `luoto.toml` is reviewed before it applies, like any repository's, and names remotes only,
-never your folders. Presets, agents, ports, `[deps]` and `allow` rules can go there too.
+never your folders. Presets, agents, ports, `[deps]`, `allow` rules and denies can go there
+too; `luoto project suggest` drafts one from an env that works.
 `mise.toml` at the launchpad applies to every repo under it; a repo's own version files win.
 Once `up` has cloned the repos, it offers the presets and toolchains their files suggest (the
 `npm` preset for a `package.json`), as `luoto init` does for a folder.

@@ -453,65 +453,108 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn doctor() -> Result<ExitCode> {
-    let ctx = Ctx::load()?;
+/// What `doctor` found, each line printed as it comes; `--report` keeps them.
+#[derive(Default)]
+struct Checks(Vec<String>);
+
+impl Checks {
+    fn say(&mut self, line: String) {
+        println!("{line}");
+        self.0.push(line);
+    }
+}
+
+/// `luoto doctor`; with `report` (`--report [FILE]`), its checks and more go to a redacted
+/// file for a bug report (`report.rs`), also when the checks can't run.
+pub fn doctor(report: Option<Option<String>>) -> Result<ExitCode> {
+    let mut out = Checks::default();
+    let ctx = Ctx::load();
+    let checked = match &ctx {
+        Ok(ctx) => checks(ctx, &mut out),
+        Err(e) => Err(anyhow::anyhow!("{e:#}")),
+    };
+    let ok = match (checked, &report) {
+        (Ok(ok), _) => ok,
+        (Err(e), Some(_)) => {
+            out.say(format!("doctor could not go on: {e:#}"));
+            false
+        }
+        (Err(e), None) => return Err(e),
+    };
+    if let Some(file) = report {
+        crate::report::write(ctx.as_ref().ok(), &out.0, file.as_deref())?;
+    }
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// The checks, printed and kept in `out`; whether all passed.
+fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
     let mut ok = true;
     let current = luoto_shared::VERSION;
-    match crate::upgrade::latest() {
+    out.say(match crate::upgrade::latest() {
         Ok(Some(l)) if crate::upgrade::newer(&l, current) => {
-            println!("luoto {current}: {l} is out (`luoto upgrade`)");
+            format!("luoto {current}: {l} is out (`luoto upgrade`)")
         }
-        Ok(Some(_)) => println!("luoto {current} (latest)"),
-        Ok(None) => println!("luoto {current} (no release published yet)"),
-        Err(_) => println!("luoto {current} (could not check for a newer release)"),
-    }
+        Ok(Some(_)) => format!("luoto {current} (latest)"),
+        Ok(None) => format!("luoto {current} (no release published yet)"),
+        Err(_) => format!("luoto {current} (could not check for a newer release)"),
+    });
     if ctx.rt.flavor == Flavor::Podman && machine::supported() {
         if !machine::is_luoto(ctx.rt.connection.as_deref()) {
-            println!("VM: not luoto's own (run `luoto setup`); envs refuse to start");
-            return Ok(ExitCode::FAILURE);
+            out.say("VM: not luoto's own (run `luoto setup`); envs refuse to start".into());
+            return Ok(false);
         }
         if !machine::running(&ctx.rt.bin) {
-            println!("VM: luoto's VM is stopped; `luoto up` starts it");
-            return Ok(ExitCode::SUCCESS);
+            out.say("VM: luoto's VM is stopped; `luoto up` starts it".into());
+            return Ok(true);
         }
         match machine::host_mounts(&ctx.rt.bin) {
-            Ok(m) if m.is_empty() => println!("VM: luoto's own, none of your folders mounted"),
+            Ok(m) if m.is_empty() => {
+                out.say("VM: luoto's own, none of your folders mounted".into())
+            }
             Ok(m) => {
                 ok = false;
-                println!(
+                out.say(format!(
                     "VM: MOUNTS HOST FOLDERS ({}): an escape reaches them; `podman machine rm {}`, then `luoto setup`",
                     m.join(", "),
                     machine::NAME
-                );
+                ));
             }
             Err(e) => {
                 ok = false;
-                println!("VM: could not check its mounts: {e:#}");
+                out.say(format!("VM: could not check its mounts: {e:#}"));
             }
         }
     }
-    println!(
+    out.say(format!(
         "runtime: {} ({})",
         ctx.rt.name(),
         ctx.rt.version().unwrap_or_else(|e| format!("error: {e}"))
-    );
-    match &ctx.global.gvisor {
-        Some(p) => println!("gVisor: {p} (dev containers run on it unless an env opts out)"),
-        None => println!("gVisor: not set up; dev containers share the VM's kernel"),
-    }
+    ));
+    out.say(match &ctx.global.gvisor {
+        Some(p) => format!("gVisor: {p} (dev containers run on it unless an env opts out)"),
+        None => "gVisor: not set up; dev containers share the VM's kernel".into(),
+    });
     for c in ["gate", "vault", "tools", "base"] {
         let img = ctx.image(c);
         let present = ctx.rt.image_exists(&img);
         ok &= present || c == "base";
-        println!("image {img}: {}", if present { "ok" } else { "missing" });
+        out.say(format!(
+            "image {img}: {}",
+            if present { "ok" } else { "missing" }
+        ));
     }
-    match crate::ctl::vault_status(&ctx.rt) {
-        Ok(v) => println!(
+    out.say(match crate::ctl::vault_status(&ctx.rt) {
+        Ok(v) => format!(
             "vault: running, {}",
             if v.locked { "locked" } else { "unlocked" }
         ),
-        Err(_) => println!("vault: not running (starts with the first `luoto up`)"),
-    }
+        Err(_) => "vault: not running (starts with the first `luoto up`)".into(),
+    });
     let probe_port = 47_000 + (rand::random::<u16>() % 1000);
     let probe_name = format!("luoto-probe-{probe_port}");
     let probe = ctx.rt.run([
@@ -528,8 +571,11 @@ pub fn doctor() -> Result<ExitCode> {
         &format!("while true; do echo luoto-probe | nc -l -p {probe_port}; done"),
     ]);
     for env_name in config::list_envs(&ctx.paths)? {
+        if let Some(n) = crate::ca::notice(&ctx.paths.env_state(&env_name), &env_name) {
+            out.say(format!("env {env_name}: CA {n}"));
+        }
         if !ctx.rt.is_running(&names::dev(&env_name)) {
-            println!("env {env_name}: not running");
+            out.say(format!("env {env_name}: not running"));
             continue;
         }
         let Some(st) = crate::state::EnvState::load(&ctx.paths, &env_name)? else {
@@ -537,7 +583,7 @@ pub fn doctor() -> Result<ExitCode> {
         };
         let gw = names::addrs(st.octet).gateway;
         let probe_addr = probe.is_ok().then(|| format!("{gw}:{probe_port}"));
-        match env::selftest(&ctx, &env_name, probe_addr.as_deref()) {
+        match env::selftest(ctx, &env_name, probe_addr.as_deref()) {
             Ok(r) => {
                 ok &= r.ok;
                 let isolation = config::EnvFile::load(&ctx.paths, &env_name)
@@ -546,26 +592,22 @@ pub fn doctor() -> Result<ExitCode> {
                         config::Isolation::Gvisor => "gVisor",
                         config::Isolation::Container => "container",
                     });
-                println!(
+                out.say(format!(
                     "env {env_name}: {} ({isolation})\n{}",
                     if r.ok { "isolated" } else { "NOT ISOLATED" },
                     r.render()
-                );
+                ));
             }
             Err(e) => {
                 ok = false;
-                println!("env {env_name}: self-test failed to run: {e:#}");
+                out.say(format!("env {env_name}: self-test failed to run: {e:#}"));
             }
         }
     }
     if probe.is_ok() {
         let _ = ctx.rt.run(["rm", "-f", &probe_name]);
     }
-    Ok(if ok {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+    Ok(ok)
 }
 
 /// Full path of `bin` on PATH.

@@ -1,4 +1,6 @@
-{
+import type { ProjectStatus } from "../../src/lib/types";
+
+export default {
   "state": "none",
   "accepted": [],
   "current": [],
@@ -6,4 +8,4 @@
   "error": null,
   "needs": [],
   "sha": null
-}
+} satisfies ProjectStatus;

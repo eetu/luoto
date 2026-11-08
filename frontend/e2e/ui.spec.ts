@@ -34,7 +34,7 @@ test("the env panel shows how to connect", async ({ page }) => {
 
 test("a new env waits until its folder's luoto.toml is on screen", async ({ page }) => {
   const writes = await mockApi(page);
-  const proposal = fixture("detect") as { project_sha: string };
+  const proposal = fixture("detect");
   let answer = () => {};
   const answered = new Promise<void>((resolve) => (answer = resolve));
   await page.route("**/api/detect", async (route) => {
@@ -88,7 +88,7 @@ test("applying luoto.toml names the text that was reviewed", async ({ page }) =>
 
 test("a TLS reject hints at a tunnel without choosing one", async ({ page }) => {
   const writes = await mockApi(page);
-  const [blocked] = fixture("egress") as object[];
+  const [blocked] = fixture("egress");
   await page.route(
     (url) => url.pathname === "/api/envs/web/egress",
     (route) =>
@@ -151,6 +151,91 @@ test("approving a request whose rule has risks shows them and resends with force
   await expect.poll(() => forced).toEqual([false, true]);
 });
 
+test("a port request reads as an uninspected tunnel and needs its risk confirmed", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const request = {
+    id: 8,
+    host: "db.example.com",
+    port: 5432,
+    access: "write",
+    reason: "run the migrations",
+    status: "pending",
+    created: new Date().toISOString(),
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [request] }),
+  );
+  const risks = [
+    "a tunnel to db.example.com:5432 is not inspected: code in the sandbox gets full access to it, any protocol and any data",
+  ];
+  const bodies: { force: boolean; narrow?: unknown }[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/8/approve",
+    (route, req) => {
+      const body = req.postDataJSON() as { force: boolean; narrow?: unknown };
+      bodies.push(body);
+      return body.force
+        ? route.fulfill({ json: { host: request.host, port: 5432, mode: "tunnel" } })
+        : route.fulfill({ status: 409, json: { error: "confirm risks", risks } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: /tunnel to db\.example\.com:5432/ }).click();
+
+  await expect(page.getByRole("heading", { name: "db.example.com:5432" })).toBeVisible();
+  await expect(page.getByRole("group", { name: "grant" })).toHaveCount(0);
+  await page.getByRole("button", { name: "approve", exact: true }).click();
+  await expect(page.getByText(risks[0])).toBeVisible();
+  await page.getByRole("button", { name: "approve anyway" }).click();
+
+  await expect.poll(() => bodies.map((b) => b.force)).toEqual([false, true]);
+  expect(bodies.every((b) => b.narrow === undefined)).toBe(true);
+});
+
+test("a write request can be approved as read-only on some of its paths", async ({ page }) => {
+  await mockApi(page);
+  const request = {
+    id: 9,
+    host: "api.example.com",
+    access: "write",
+    reason: "post the results",
+    status: "pending",
+    created: new Date().toISOString(),
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [request] }),
+  );
+  const sent: unknown[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/9/approve",
+    (route, req) => {
+      sent.push(req.postDataJSON());
+      return route.fulfill({ json: { host: request.host, access: "read", paths: ["/v1/**"] } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: /access to api\.example\.com/ }).click();
+  await page
+    .getByRole("group", { name: "grant" })
+    .getByRole("button", { name: "read-only" })
+    .click();
+  await expect(page.getByText(/Write access lets anything/)).toHaveCount(0);
+  await page.getByRole("textbox", { name: "paths" }).fill("/v1/**");
+  await page.getByRole("button", { name: "approve", exact: true }).click();
+
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toMatchObject({
+    created: request.created,
+    narrow: { read: true, paths: ["/v1/**"] },
+  });
+});
+
 test("selected requests are approved together, each as it was shown", async ({ page }) => {
   await mockApi(page);
   const created = new Date().toISOString();
@@ -187,4 +272,78 @@ test("selected requests are approved together, each as it was shown", async ({ p
   expect(sent[0]).toMatchObject({ id: "3", body: { created, ttl: "60m" } });
   expect(sent[1]).toMatchObject({ id: "4", body: { created } });
   expect((sent[1].body as { ttl?: string }).ttl).toBeUndefined();
+});
+
+test("the env panel links the ports forwarded from the env", async ({ page }) => {
+  await mockApi(page);
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  await expect(page.getByRole("link", { name: "http://localhost:5173" })).toHaveAttribute(
+    "href",
+    "http://localhost:5173",
+  );
+  await expect(page.getByText("3000 is taken on this machine")).toBeVisible();
+  await expect(page.getByText("luoto forward -e web <port>:3000")).toBeVisible();
+});
+
+test("a new access request notifies once the user turned notifications on", async ({ page }) => {
+  // A stand-in for the browser's notifications, and a tab out of sight.
+  await page.addInitScript(() => {
+    const w = window as unknown as { shown: string[]; asked: number };
+    w.shown = [];
+    w.asked = 0;
+    class Stub {
+      static permission = "default";
+      static requestPermission = () => {
+        w.asked += 1;
+        Stub.permission = "granted";
+        return Promise.resolve("granted");
+      };
+      onclick: (() => void) | null = null;
+      constructor(title: string) {
+        w.shown.push(title);
+      }
+      close() {}
+    }
+    Object.defineProperty(window, "Notification", { value: Stub });
+    document.hasFocus = () => false;
+  });
+  await mockApi(page);
+  let pending = 0;
+  const overview = fixture("overview");
+  await page.route(
+    (url) => url.pathname === "/api/overview",
+    (route) =>
+      route.fulfill({
+        json: { ...overview, envs: overview.envs.map((e) => ({ ...e, pending })) },
+      }),
+  );
+  await open(page);
+  const bell = page.getByRole("button", { name: "browser notifications" });
+  await expect(bell).toHaveAttribute("aria-pressed", "false");
+  expect(await page.evaluate(() => (window as unknown as { asked: number }).asked)).toBe(0);
+
+  await bell.click();
+  await expect(bell).toHaveAttribute("aria-pressed", "true");
+  pending = 1;
+
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { shown: string[] }).shown), {
+      timeout: 10_000,
+    })
+    .toEqual(["luoto: web asks for access"]);
+});
+
+test("with desktop notifications on, the page shows none of its own", async ({ page }) => {
+  await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/overview",
+    (route) =>
+      route.fulfill({ json: { ...fixture("overview"), desktop_notifications: true } }),
+  );
+  await open(page);
+  const bell = page.getByRole("button", { name: "browser notifications" });
+  await expect(bell).toBeDisabled();
+  await expect(bell).toHaveAttribute("title", /notifications = false/);
 });

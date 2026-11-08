@@ -57,6 +57,49 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
         || dp_match(pattern, path)
 }
 
+/// Does `outer` match every path `inner` matches? A `true` is always right; a `false` may only
+/// mean the containment could not be shown, which is the safe answer for a grant that must stay
+/// within what was asked.
+pub fn covers(outer: &str, inner: &str) -> bool {
+    // What `glob_match` matches: the pattern itself, and for `dir/**` also `dir`.
+    let parts = |p: &str| {
+        let dir = p.strip_suffix("/**").filter(|d| !d.is_empty());
+        std::iter::once(tokenize(p))
+            .chain(dir.map(tokenize))
+            .collect::<Vec<_>>()
+    };
+    let outer = parts(outer);
+    parts(inner)
+        .iter()
+        .all(|i| outer.iter().any(|o| tokens_cover(o, i)))
+}
+
+/// Every token of `inner` taken whole by a token of `outer`: a literal by the same literal, a
+/// run of `*` and literals other than `/` by `*`, any run by `**`.
+fn tokens_cover(outer: &[Tok], inner: &[Tok]) -> bool {
+    // prev[j]: outer's tokens so far cover inner[..j]
+    let mut prev = vec![false; inner.len() + 1];
+    prev[0] = true;
+    for tok in outer {
+        let mut cur = vec![false; inner.len() + 1];
+        cur[0] = prev[0] && !matches!(tok, Tok::Lit(_));
+        for j in 1..=inner.len() {
+            let t = &inner[j - 1];
+            cur[j] = match tok {
+                Tok::Lit(_) => prev[j - 1] && t == tok,
+                Tok::Star => {
+                    prev[j]
+                        || (cur[j - 1]
+                            && (*t == Tok::Star || matches!(t, Tok::Lit(c) if *c != b'/')))
+                }
+                Tok::DoubleStar => prev[j] || cur[j - 1],
+            };
+        }
+        prev = cur;
+    }
+    prev[inner.len()]
+}
+
 fn dp_match(pattern: &str, path: &str) -> bool {
     let toks = tokenize(pattern);
     let s = path.as_bytes();
@@ -123,6 +166,36 @@ mod tests {
         assert!(!glob_match("/basedpyright/**", "/based"));
         assert!(glob_match("/repos/*/**", "/repos/eetu"));
         assert!(!glob_match("/**", ""));
+    }
+
+    #[test]
+    fn covers_only_what_the_outer_pattern_matches() {
+        use super::covers;
+        for (outer, inner) in [
+            ("/a/**", "/a/b/**"),
+            ("/a/**", "/a/b"),
+            ("/a/**", "/a"),
+            ("/a/**", "/a/*/c"),
+            ("/a/*", "/a/b"),
+            ("/a/*", "/a/b*"),
+            ("/v1/*/x", "/v1/foo/x"),
+            ("**", "/anything/**"),
+            ("/a/b", "/a/b"),
+        ] {
+            assert!(covers(outer, inner), "{outer} covers {inner}");
+        }
+        for (outer, inner) in [
+            ("/a/*", "/a/**"),
+            ("/a/*", "/a/b/c"),
+            ("/a/b", "/a/*"),
+            ("/a/**", "/ab"),
+            ("/a/**", "**"),
+            ("/a/**", "/b/**"),
+            ("/a/*/c", "/a/**/c"),
+            ("/a", "/a/**"),
+        ] {
+            assert!(!covers(outer, inner), "{outer} doesn't cover {inner}");
+        }
     }
 
     #[test]

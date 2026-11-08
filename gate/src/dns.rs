@@ -15,7 +15,9 @@ use luoto_shared::events::{Event, EventKind, Intake};
 use luoto_shared::host::normalize_host;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
+use tokio::time::timeout;
 
+use crate::limits::{self, DNS_TCP_IDLE};
 use crate::state::{State, lock};
 
 const BASE: u32 = u32::from_be_bytes([198, 18, 0, 16]);
@@ -142,18 +144,26 @@ pub async fn serve_udp(state: Arc<State>, socket: UdpSocket) {
 
 pub async fn serve_tcp(state: Arc<State>, listener: TcpListener) {
     loop {
-        let Ok((mut stream, _peer)) = listener.accept().await else {
+        let (mut stream, _peer) = limits::accept(&listener).await;
+        let Some(slot) = limits::admit(&state, Intake::Dns) else {
             continue;
         };
         let state = state.clone();
         tokio::spawn(async move {
+            let _slot = slot;
             loop {
                 let mut len = [0u8; 2];
-                if stream.read_exact(&mut len).await.is_err() {
+                if !matches!(
+                    timeout(DNS_TCP_IDLE, stream.read_exact(&mut len)).await,
+                    Ok(Ok(_))
+                ) {
                     return;
                 }
                 let mut buf = vec![0u8; u16::from_be_bytes(len) as usize];
-                if stream.read_exact(&mut buf).await.is_err() {
+                if !matches!(
+                    timeout(DNS_TCP_IDLE, stream.read_exact(&mut buf)).await,
+                    Ok(Ok(_))
+                ) {
                     return;
                 }
                 let Some(reply) = answer(&state, &buf) else {
@@ -161,7 +171,10 @@ pub async fn serve_tcp(state: Arc<State>, listener: TcpListener) {
                 };
                 let mut out = (reply.len() as u16).to_be_bytes().to_vec();
                 out.extend_from_slice(&reply);
-                if stream.write_all(&out).await.is_err() {
+                if !matches!(
+                    timeout(DNS_TCP_IDLE, stream.write_all(&out)).await,
+                    Ok(Ok(()))
+                ) {
                     return;
                 }
             }

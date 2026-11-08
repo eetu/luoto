@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::creds::Injection;
 use crate::forges;
 use crate::glob;
-use crate::host::{WildcardRisk, host_matches, normalize_host, wildcard_risk};
+use crate::host::{WildcardRisk, host_matches, normalize_host, normalize_pattern, wildcard_risk};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -101,9 +101,42 @@ pub struct Rule {
     /// (Azure DevOps organizations, projects and repositories).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ignore_case: bool,
+    /// How long the host may stay silent (`30m`, `2h`) before the gate closes the connection,
+    /// in place of its default: for long polls such as `kubectl logs -f`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle: Option<String>,
+}
+
+/// The longest `idle` a rule may set.
+pub const MAX_IDLE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// A rule's `idle`: a whole number of seconds, minutes or hours (`90s`, `30m`, `2h`), above
+/// zero and at most [`MAX_IDLE`].
+pub fn parse_idle(s: &str) -> Result<std::time::Duration, String> {
+    let s = s.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num, unit) = s.split_at(split);
+    let n: u64 = num
+        .parse()
+        .map_err(|_| format!("idle `{s}`: give a duration such as 30m or 2h"))?;
+    let secs = match unit {
+        "s" => Some(n),
+        "m" => n.checked_mul(60),
+        "h" => n.checked_mul(3600),
+        _ => return Err(format!("idle `{s}`: use s, m or h")),
+    };
+    match secs.map(std::time::Duration::from_secs) {
+        Some(d) if !d.is_zero() && d <= MAX_IDLE => Ok(d),
+        _ => Err(format!("idle `{s}`: above zero and at most 24h")),
+    }
 }
 
 impl Rule {
+    /// The rule's valid `idle`, if it sets one.
+    pub fn idle_limit(&self) -> Option<std::time::Duration> {
+        self.idle.as_deref().and_then(|s| parse_idle(s).ok())
+    }
+
     pub fn read(host: &str) -> Self {
         Rule {
             host: host.into(),
@@ -147,6 +180,104 @@ pub struct DenyRule {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub methods: Vec<String>,
     pub reason: String,
+}
+
+/// A `[[deny]]` of the user's config, `config.toml` or a `luoto.toml`: refused whatever allows
+/// it, a preset included. It only tightens, so a repository may write one.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Deny {
+    pub host: String,
+    /// Empty: the whole host. Matched in any case, as every explicit deny is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// Empty: every method.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<String>,
+    /// Shown with every request it refuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Deny {
+    /// What the gate enforces, or why the entry is refused.
+    pub fn rule(&self) -> Result<DenyRule, String> {
+        let host = pattern(&self.host)?;
+        paths_ok(&self.paths)?;
+        if let Some(m) = self
+            .methods
+            .iter()
+            .find(|m| m.is_empty() || !m.bytes().all(|b| b.is_ascii_alphabetic()))
+        {
+            return Err(format!("`{m}` is not an HTTP method"));
+        }
+        Ok(DenyRule {
+            host,
+            paths: self.paths.clone(),
+            methods: self
+                .methods
+                .iter()
+                .map(|m| m.to_ascii_uppercase())
+                .collect(),
+            reason: match &self.note {
+                Some(n) => format!("denied by a [[deny]] rule: {n}"),
+                None => "denied by a [[deny]] rule".into(),
+            },
+        })
+    }
+}
+
+/// A `[[mute]]`: denials left out of egress views, for telemetry the user keeps denied. They
+/// are still denied and recorded. Only the user's own config mutes: a repository's could hide
+/// what its code tries.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Mute {
+    pub host: String,
+    /// Empty: every denial at the host, and its lookups.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Mute {
+    /// The entry with its host in the form events carry hosts, or why it is refused.
+    pub fn checked(&self) -> Result<Mute, String> {
+        let host = pattern(&self.host)?;
+        paths_ok(&self.paths)?;
+        if host == "*" && self.paths.is_empty() {
+            return Err("`*` without paths would hide every denial".into());
+        }
+        Ok(Mute {
+            host,
+            ..self.clone()
+        })
+    }
+
+    /// Does it hide a denial at canonical `host`, of `path` if the denial was a request's?
+    pub fn covers(&self, host: &str, path: Option<&str>) -> bool {
+        host_matches(&self.host, host)
+            && match path {
+                Some(p) => glob::matches_any(&self.paths, true, p),
+                None => self.paths.is_empty(),
+            }
+    }
+}
+
+fn pattern(host: &str) -> Result<String, String> {
+    normalize_pattern(host).ok_or_else(|| format!("invalid host pattern `{host}`"))
+}
+
+fn paths_ok(paths: &[String]) -> Result<(), String> {
+    match paths.iter().find(|p| !path_pattern_ok(p)) {
+        Some(p) => Err(format!("path pattern `{p}` must start with `/`")),
+        None => Ok(()),
+    }
+}
+
+fn path_pattern_ok(p: &str) -> bool {
+    p.starts_with('/') || p == "**"
 }
 
 /// JSON request bodies a host refuses: ones that ask a model API to reach the network for the
@@ -375,6 +506,8 @@ pub enum Decision {
         rule: String,
         max_body: Option<u64>,
         allow_private: bool,
+        /// The rule's `idle`, in place of the gate's.
+        idle: Option<std::time::Duration>,
     },
     Deny(DenyReason),
 }
@@ -440,10 +573,18 @@ impl Policy {
                 body_bad = Some(max);
                 continue;
             }
+            // A rule's `idle` is for its host, whichever rule allows the request (a preset's
+            // usually comes first).
+            let idle = self
+                .live_rules(req.host, req.port, now)
+                .filter(|o| o.rule.path_matches(req.path))
+                .filter_map(|o| o.rule.idle_limit())
+                .max();
             return Decision::Allow {
                 rule: r.id.clone(),
                 max_body: r.rule.max_body,
                 allow_private: r.rule.allow_private,
+                idle,
             };
         }
 
@@ -487,6 +628,23 @@ impl Policy {
     /// Hosts carrying credentials: client-supplied auth headers are always stripped there.
     pub fn is_credentialed_host(&self, host: &str) -> bool {
         self.injections.iter().any(|i| host_matches(&i.host, host))
+    }
+
+    /// The explicit deny that refuses all of `host`, every method and path: no rule or
+    /// approved request can open it.
+    pub fn wholly_denied(&self, host: &str) -> Option<&DenyRule> {
+        let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        self.denies.iter().find(|d| {
+            host_matches(&d.host, &host)
+                && d.methods.is_empty()
+                && (d.paths.is_empty() || d.paths.iter().any(|p| p == "**" || p == "/**"))
+        })
+    }
+
+    /// Whether an explicit deny refuses some of `host`.
+    pub fn partly_denied(&self, host: &str) -> bool {
+        let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        self.denies.iter().any(|d| host_matches(&d.host, &host))
     }
 
     /// Why a tunnel rule for `pattern` is refused, if it is: the gate only passes a tunnel's
@@ -619,21 +777,32 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
         issues.push(err("the sandbox may not request address ranges".into()));
     }
     for p in &rule.paths {
-        if !p.starts_with('/') && p != "**" {
+        if !path_pattern_ok(p) {
             issues.push(err(format!("path pattern `{p}` must start with `/`")));
         }
     }
-    if rule.mode == Mode::Tunnel && rule.access != Access::Level(AccessLevel::Write) {
-        issues.push(risk(
-            "tunnel mode cannot enforce methods or paths; it grants full access to the host".into(),
-        ));
+    if rule.mode == Mode::Tunnel {
+        let to = match rule.port {
+            Some(port) => format!("{}:{port}", rule.host),
+            None => rule.host.clone(),
+        };
+        issues.push(risk(format!(
+            "a tunnel to {to} is not inspected: code in the sandbox gets full access to it, \
+             any protocol and any data"
+        )));
+    }
+    if let Some(Err(e)) = rule.idle.as_deref().map(parse_idle) {
+        issues.push(err(e));
     }
     if rule.allow_private {
         issues.push(host_risk(
             "allows dialing private/host addresses (e.g. services on your machine)".into(),
         ));
     }
-    if rule.access == Access::Level(AccessLevel::Write) && origin == RuleOrigin::Host {
+    if rule.mode != Mode::Tunnel
+        && rule.access == Access::Level(AccessLevel::Write)
+        && origin == RuleOrigin::Host
+    {
         issues.push(risk(format!(
             "write access lets code in the sandbox upload data to {}",
             rule.host
@@ -645,6 +814,91 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_is_wholly_denied_only_by_a_deny_on_every_path_and_method() {
+        let deny = |paths: &[&str], methods: &[&str]| DenyRule {
+            host: "telemetry.example".into(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+            methods: methods.iter().map(|m| m.to_string()).collect(),
+            reason: "r".into(),
+        };
+        let p = |d: DenyRule| Policy {
+            denies: vec![d],
+            ..Default::default()
+        };
+        assert!(
+            p(deny(&[], &[]))
+                .wholly_denied("Telemetry.Example.")
+                .is_some()
+        );
+        assert!(
+            p(deny(&["/**"], &[]))
+                .wholly_denied("telemetry.example")
+                .is_some()
+        );
+        for partial in [deny(&["/v1/**"], &[]), deny(&[], &["POST"])] {
+            let p = p(partial);
+            assert!(p.wholly_denied("telemetry.example").is_none());
+            assert!(p.partly_denied("telemetry.example"));
+            assert!(!p.partly_denied("example.com"));
+        }
+    }
+
+    #[test]
+    fn a_rules_idle_is_a_duration_up_to_a_day() {
+        assert_eq!(parse_idle("90s"), Ok(std::time::Duration::from_secs(90)));
+        assert_eq!(parse_idle("30m"), Ok(std::time::Duration::from_secs(1800)));
+        assert_eq!(parse_idle("24h"), Ok(MAX_IDLE));
+        for bad in [
+            "0m",
+            "25h",
+            "1d",
+            "soon",
+            "",
+            "-5m",
+            "99999999999999999999h",
+        ] {
+            assert!(parse_idle(bad).is_err(), "{bad}");
+        }
+        let mut r = Rule::read("k8s.example");
+        r.idle = Some("2d".into());
+        assert!(
+            validate_rule(&r, RuleOrigin::Host)
+                .iter()
+                .any(|i| i.severity == Severity::Error)
+        );
+        r.idle = Some("2h".into());
+        assert!(validate_rule(&r, RuleOrigin::Host).is_empty());
+        let p = Policy {
+            rules: vec![CompiledRule {
+                id: "k".into(),
+                origin: "test".into(),
+                rule: r,
+            }],
+            ..Default::default()
+        };
+        assert!(matches!(
+            p.decide(&req("k8s.example", "GET", "/logs"), Utc::now()),
+            Decision::Allow { idle: Some(d), .. } if d == std::time::Duration::from_secs(7200)
+        ));
+
+        // Behind a preset's rule for the host, which allows the request first.
+        let mut idle = Rule::read("registry.npmjs.org");
+        idle.idle = Some("2h".into());
+        let p = Policy {
+            rules: vec![
+                rule("preset", Rule::read("registry.npmjs.org")),
+                rule("mine", idle),
+            ],
+            ..Default::default()
+        };
+        assert!(matches!(
+            p.decide(&req("registry.npmjs.org", "GET", "/react"), Utc::now()),
+            Decision::Allow { rule, idle: Some(d), .. }
+                if rule == "preset" && d == std::time::Duration::from_secs(7200)
+        ));
+    }
     use chrono::Duration;
 
     fn rule(id: &str, r: Rule) -> CompiledRule {
@@ -796,6 +1050,79 @@ mod tests {
     }
 
     #[test]
+    fn a_deny_of_your_own_beats_an_allow_in_any_case() {
+        let mut p = policy();
+        let now = Utc::now();
+        let d = Deny {
+            host: "Registry.NPMjs.org.".into(),
+            paths: vec!["/-/npm/v1/security/**".into()],
+            methods: vec!["post".into()],
+            note: Some("no audits".into()),
+        };
+        p.denies.push(d.rule().unwrap());
+        let mut audit = req("registry.npmjs.org", "POST", "/-/NPM/v1/security/audits");
+        audit.content_length = Some(10);
+        assert_eq!(
+            p.decide(&audit, now),
+            Decision::Deny(DenyReason::Explicit {
+                reason: "denied by a [[deny]] rule: no audits".into()
+            })
+        );
+        assert!(matches!(
+            p.decide(
+                &req("registry.npmjs.org", "GET", "/-/npm/v1/security/x"),
+                now
+            ),
+            Decision::Allow { .. }
+        ));
+        assert!(p.tunnel_bypass("*.npmjs.org").unwrap().contains("[[deny]]"));
+    }
+
+    #[test]
+    fn denies_and_mutes_name_hosts_and_paths() {
+        let deny = |host: &str, paths: &[&str], methods: &[&str]| {
+            Deny {
+                host: host.into(),
+                paths: paths.iter().map(|p| p.to_string()).collect(),
+                methods: methods.iter().map(|m| m.to_string()).collect(),
+                note: None,
+            }
+            .rule()
+        };
+        assert!(deny("*", &[], &[]).is_ok());
+        assert!(deny("*.github.io", &["/x/**"], &["DELETE"]).is_ok());
+        for (host, paths, methods) in [
+            ("a b", &[][..], &[][..]),
+            ("x.example", &["v1/**"][..], &[][..]),
+            ("x.example", &[][..], &["GET POST"][..]),
+            ("x.example", &[][..], &[""][..]),
+        ] {
+            assert!(
+                deny(host, paths, methods).is_err(),
+                "{host} {paths:?} {methods:?}"
+            );
+        }
+        let mute = |host: &str, paths: &[&str]| {
+            Mute {
+                host: host.into(),
+                paths: paths.iter().map(|p| p.to_string()).collect(),
+                note: None,
+            }
+            .checked()
+        };
+        assert!(mute("*", &[]).is_err());
+        assert!(mute("x.example", &["v1"]).is_err());
+        let all = mute("Telemetry.Example.", &[]).unwrap();
+        assert!(all.covers("telemetry.example", None));
+        assert!(all.covers("telemetry.example", Some("/v1/x")));
+        assert!(!all.covers("other.example", None));
+        let some = mute("*", &["/telemetry/**"]).unwrap();
+        assert!(some.covers("a.example", Some("/Telemetry/1")));
+        assert!(!some.covers("a.example", Some("/api")));
+        assert!(!some.covers("a.example", None));
+    }
+
+    #[test]
     fn ports_and_websockets() {
         let p = policy();
         let now = Utc::now();
@@ -852,6 +1179,27 @@ mod tests {
                 .any(|i| i.severity == Severity::Error)
         );
         assert!(validate_rule(&Rule::read("docs.rs"), RuleOrigin::Sandbox).is_empty());
+    }
+
+    #[test]
+    fn a_tunnel_is_one_risk_naming_its_port() {
+        let tunnel = Rule {
+            host: "db.example.com".into(),
+            port: Some(5432),
+            access: Access::Level(AccessLevel::Write),
+            mode: Mode::Tunnel,
+            ..Default::default()
+        };
+        for origin in [RuleOrigin::Host, RuleOrigin::Sandbox] {
+            let issues = validate_rule(&tunnel, origin);
+            assert_eq!(issues.len(), 1, "{issues:?}");
+            assert_eq!(issues[0].severity, Severity::Risk);
+            assert!(
+                issues[0]
+                    .message
+                    .contains("db.example.com:5432 is not inspected")
+            );
+        }
     }
 
     #[test]

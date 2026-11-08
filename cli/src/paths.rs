@@ -21,9 +21,14 @@ impl Paths {
                 data: base.join("data"),
             });
         }
+        Self::of(crate::names::instance())
+    }
+
+    /// Where instance `inst` keeps things, `LUOTO_HOME` aside.
+    pub fn of(inst: &str) -> Result<Self> {
         #[cfg(windows)]
         {
-            let dirs = directories::ProjectDirs::from("", "", crate::names::instance())
+            let dirs = directories::ProjectDirs::from("", "", inst)
                 .context("cannot determine the user profile directory")?;
             Ok(Paths {
                 config: dirs.config_dir().to_path_buf(),
@@ -39,11 +44,11 @@ impl Paths {
             let config = std::env::var_os("XDG_CONFIG_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".config"))
-                .join(crate::names::instance());
+                .join(inst);
             let data = std::env::var_os("XDG_DATA_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".local/share"))
-                .join(crate::names::instance());
+                .join(inst);
             Ok(Paths { config, data })
         }
     }
@@ -71,6 +76,16 @@ impl Paths {
 
     pub fn events_db(&self) -> PathBuf {
         self.data.join("events.db")
+    }
+
+    /// The background watcher's log (`watch.rs`), one for every env.
+    pub fn watch_log(&self) -> PathBuf {
+        self.data.join("watch.log")
+    }
+
+    /// What the env's installs printed (`logs::InstallLog`).
+    pub fn install_log(&self, env: &str) -> PathBuf {
+        self.env_state(env).join("install.log")
     }
 }
 

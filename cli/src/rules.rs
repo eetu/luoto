@@ -3,9 +3,10 @@
 
 use anyhow::{Context, Result, bail};
 use chrono::{TimeDelta, Utc};
-use luoto_shared::api::{AccessRequest, Install, RequestStatus};
+use luoto_shared::api::{AccessRequest, Install, Narrowing, RequestStatus};
 use luoto_shared::ctl::GateCtl;
 use luoto_shared::policy::{Access, AccessLevel, Mode, Rule, RuleOrigin, Severity, validate_rule};
+use serde::Serialize;
 
 use crate::config::{EnvFile, new_rule_id};
 use crate::env::{self, Ctx};
@@ -18,13 +19,14 @@ pub fn parse_ttl(s: &str) -> Result<TimeDelta> {
     let n: i64 = num
         .parse()
         .with_context(|| format!("bad duration `{s}` (use 30m, 1h, 2d)"))?;
-    Ok(match unit {
-        "s" => TimeDelta::seconds(n),
-        "m" | "" => TimeDelta::minutes(n),
-        "h" => TimeDelta::hours(n),
-        "d" => TimeDelta::days(n),
+    let d = match unit {
+        "s" => TimeDelta::try_seconds(n),
+        "m" | "" => TimeDelta::try_minutes(n),
+        "h" => TimeDelta::try_hours(n),
+        "d" => TimeDelta::try_days(n),
         _ => bail!("bad duration unit in `{s}` (use s, m, h, d)"),
-    })
+    };
+    d.with_context(|| format!("duration `{s}` is too long"))
 }
 
 #[derive(clap::Args)]
@@ -42,15 +44,21 @@ pub struct AllowOpts {
     /// Expire after a duration: 30m, 1h, 2d.
     #[arg(long)]
     pub ttl: Option<String>,
-    /// Opaque tunnel (no inspection) for certificate-pinning clients.
+    /// Opaque tunnel (no inspection) for any client and protocol: certificate-pinning
+    /// clients, gRPC, a database with --port.
     #[arg(long)]
     pub tunnel: bool,
     /// Allow websocket upgrades.
     #[arg(long)]
     pub ws: bool,
+    /// How long the host may stay silent before the gate closes the connection (30m, 2h; at
+    /// most 24h), for long polls such as `kubectl logs -f`.
+    #[arg(long, value_name = "DURATION")]
+    pub idle: Option<String>,
     /// Allow private/host addresses (e.g. a service on your machine).
     #[arg(long)]
     pub private: bool,
+    /// The one port it covers (default: 80 and 443).
     #[arg(long)]
     pub port: Option<u16>,
     #[arg(long)]
@@ -67,6 +75,9 @@ pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
     } else {
         luoto_shared::host::normalize_host(luoto_shared::host::host_of(host))?
     };
+    if let Some(idle) = &o.idle {
+        luoto_shared::policy::parse_idle(idle).map_err(anyhow::Error::msg)?;
+    }
     let access = if !o.methods.is_empty() {
         Access::Methods(o.methods.iter().map(|m| m.to_ascii_uppercase()).collect())
     } else if o.write || o.tunnel {
@@ -96,6 +107,7 @@ pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
         allow_private: o.private,
         note: o.note.clone(),
         ignore_case: false,
+        idle: o.idle.clone(),
     })
 }
 
@@ -191,43 +203,101 @@ pub fn request(ctx: &Ctx, name: &str, id: u64) -> Result<AccessRequest> {
         .with_context(|| format!("no request #{id} in `{name}`"))
 }
 
-/// Grant a pending request as a rule (failing with [`Risks`] unless `force`) and mark it
-/// approved.
+/// What a rule grants, for people: `docs.rs read-only (GET, HEAD, OPTIONS) paths /serde/**`,
+/// `a tunnel to db.example.com:5432`. Its host and paths may come from the sandbox.
+pub fn describe(rule: &Rule) -> String {
+    let at = match rule.port {
+        Some(port) => format!("{}:{port}", rule.host),
+        None => rule.host.clone(),
+    };
+    if rule.mode == Mode::Tunnel {
+        return format!("a tunnel to {}", crate::text::display(&at));
+    }
+    let paths = if rule.paths.is_empty() {
+        String::new()
+    } else {
+        format!(" paths {}", rule.paths.join(","))
+    };
+    crate::text::display(&format!("{at} {}{paths}", rule.access.describe()))
+}
+
+/// The rule a pending access request grants, narrowed by `narrow`; refused if `narrow` would
+/// widen it.
+pub fn grant(req: &AccessRequest, narrow: &Narrowing) -> Result<Rule> {
+    if req.status != RequestStatus::Pending {
+        bail!("request #{} is already {:?}", req.id, req.status);
+    }
+    req.grant(narrow).map_err(anyhow::Error::msg)
+}
+
+/// What approving a request did.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum Approved {
+    /// The rule an access request became.
+    Rule(Rule),
+    /// What an install request did, for people.
+    Installed { installed: String },
+}
+
+/// Approve a pending request: an access request becomes a rule, narrowed by `narrow` and
+/// failing with [`Risks`] unless `force`; an install request installs.
 pub fn approve(
     ctx: &Ctx,
     name: &str,
     req: &AccessRequest,
     ttl: Option<&str>,
+    narrow: &Narrowing,
     force: bool,
-) -> Result<Rule> {
-    if req.status != RequestStatus::Pending {
-        bail!("request #{} is already {:?}", req.id, req.status);
+) -> Result<Approved> {
+    if req.install.is_some() {
+        if !narrow.is_empty() {
+            bail!(
+                "request #{} asks for an install: there is no access to narrow",
+                req.id
+            );
+        }
+        return approve_install(ctx, name, req).map(|installed| Approved::Installed { installed });
     }
-    let rule = Rule {
-        host: req.host.clone(),
-        access: Access::Level(req.access),
-        paths: req.paths.clone(),
-        expires: ttl.map(parse_ttl).transpose()?.map(|d| Utc::now() + d),
-        note: Some(format!("approved request #{}", req.id)),
-        ..Default::default()
-    };
+    let policy = env::plan(ctx, name)?.compiled.policy;
+    if let Some(d) = policy.wholly_denied(&req.host) {
+        bail!(
+            "{} is refused by a [[deny]] rule ({}): approving request #{} would open nothing; \
+             reject it, or remove the deny first",
+            crate::text::display(&req.host),
+            d.reason,
+            req.id
+        );
+    }
+    let mut rule = grant(req, narrow)?;
+    rule.expires = ttl.map(parse_ttl).transpose()?.map(|d| Utc::now() + d);
+    rule.note = Some(format!("approved request #{}", req.id));
     let rule = add_rule_checked(ctx, name, rule, force)?;
+    // The sandbox reads the note: it learns what it got, if less than it asked for.
+    let mut notes = Vec::new();
+    if !narrow.is_empty() {
+        notes.push(format!("granted less: {}", describe(&rule)));
+    }
+    if policy.partly_denied(&req.host) {
+        notes.push("[[deny]] rules still refuse some of it".to_string());
+    }
+    let note = (!notes.is_empty()).then(|| notes.join("; "));
     ctl::gate::<AccessRequest>(
         &ctx.rt,
         name,
         &GateCtl::Resolve {
             id: req.id,
             approved: true,
-            note: None,
+            note,
         },
     )?;
-    Ok(rule)
+    Ok(Approved::Rule(rule))
 }
 
 /// Grant a pending install request: the package or toolchain joins the env's config, so every
 /// recreated container gets it too, and is installed now. The request is approved either way;
 /// its note tells the sandbox whether the install worked. What happened, for people.
-pub fn approve_install(ctx: &Ctx, name: &str, req: &AccessRequest) -> Result<String> {
+fn approve_install(ctx: &Ctx, name: &str, req: &AccessRequest) -> Result<String> {
     if req.status != RequestStatus::Pending {
         bail!("request #{} is already {:?}", req.id, req.status);
     }
@@ -307,5 +377,48 @@ mod tests {
         assert_eq!(parse_ttl("2h").unwrap(), TimeDelta::hours(2));
         assert_eq!(parse_ttl("1d").unwrap(), TimeDelta::days(1));
         assert!(parse_ttl("1y").is_err());
+        assert!(parse_ttl("-5m").is_err());
+        assert!(parse_ttl("99999999999999d").is_err());
+    }
+
+    #[test]
+    fn a_granted_request_reads_as_what_it_grants() {
+        let req = AccessRequest {
+            id: 3,
+            host: "api.example.com".into(),
+            port: None,
+            access: AccessLevel::Write,
+            paths: vec![],
+            reason: "r".into(),
+            status: RequestStatus::Pending,
+            created: Utc::now(),
+            resolved: None,
+            note: None,
+            install: None,
+        };
+        let narrow = Narrowing {
+            read: true,
+            paths: vec!["/v1/**".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            describe(&grant(&req, &narrow).unwrap()),
+            "api.example.com read-only (GET, HEAD, OPTIONS) paths /v1/**"
+        );
+        let tunnel = AccessRequest {
+            host: "db.example.com".into(),
+            port: Some(5432),
+            ..req.clone()
+        };
+        assert_eq!(
+            describe(&grant(&tunnel, &Narrowing::default()).unwrap()),
+            "a tunnel to db.example.com:5432"
+        );
+        assert!(grant(&tunnel, &narrow).is_err());
+        let done = AccessRequest {
+            status: RequestStatus::Approved,
+            ..req
+        };
+        assert!(grant(&done, &Narrowing::default()).is_err());
     }
 }

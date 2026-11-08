@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use luoto_shared::policy::Rule;
+use luoto_shared::policy::{Deny, Mute, Rule};
 use serde::{Deserialize, Serialize};
 use toml_edit::DocumentMut;
 
@@ -31,6 +31,10 @@ pub struct GlobalConfig {
     /// Forward each port an env listens on to localhost here (default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_forward: Option<bool>,
+    /// Desktop notifications for access requests and the first denial at each host (default
+    /// true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<bool>,
     /// gVisor's `runsc` inside the runtime, which dev containers run on; set by `luoto setup`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gvisor: Option<String>,
@@ -56,8 +60,39 @@ pub struct GlobalConfig {
     /// the agent; its luoto.toml and its own config take precedence. Adds no agent to an env.
     #[serde(default, skip_serializing_if = "Agents::is_empty")]
     pub agents: Agents,
+    /// Denies for every env, under each env's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<Deny>,
+    /// Mutes for every env, beside each env's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mute: Vec<Mute>,
     #[serde(default)]
     pub sources: Sources,
+}
+
+impl GlobalConfig {
+    /// The mutes an env with config `cfg` has: these and its own (a luoto.toml has none).
+    pub fn mutes_for(&self, cfg: &EnvConfig) -> Vec<Mute> {
+        self.mute.iter().chain(&cfg.mute).cloned().collect()
+    }
+
+    /// Put these denies and mutes under an env's, each deny noting where it came from.
+    pub fn layer_under(&self, cfg: &mut EnvConfig) {
+        let mut deny: Vec<Deny> = self
+            .deny
+            .iter()
+            .map(|d| Deny {
+                note: Some(match &d.note {
+                    Some(n) => format!("config.toml: {n}"),
+                    None => "config.toml".into(),
+                }),
+                ..d.clone()
+            })
+            .collect();
+        deny.append(&mut cfg.deny);
+        cfg.deny = deny;
+        cfg.mute = self.mutes_for(cfg);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -405,6 +440,12 @@ pub struct EnvConfig {
     pub auto_forward: Option<bool>,
     #[serde(default, rename = "allow", skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<Rule>,
+    /// Requests refused whatever allows them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<Deny>,
+    /// Denials left out of `luoto egress` and the UI.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mute: Vec<Mute>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub credentials: Credentials,
     /// Secrets deliberately exposed to code in the sandbox as env vars.
@@ -579,7 +620,7 @@ impl EnvConfig {
     }
 }
 
-fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+pub(crate) fn is_default<T: Default + PartialEq>(v: &T) -> bool {
     *v == T::default()
 }
 
@@ -1240,6 +1281,47 @@ oauth_token = "op://Private/claude/token"
         assert_eq!(f.cfg.allow.len(), 2);
         assert_eq!(f.remove_rules("r1").unwrap(), 1);
         assert_eq!(f.cfg.allow.len(), 1);
+    }
+
+    #[test]
+    fn denies_and_mutes_parse_and_layer_under_the_env() {
+        let env = r#"
+[[deny]]
+host = "registry.npmjs.org"
+paths = ["/-/npm/v1/security/**"]
+methods = ["POST"]
+
+[[mute]]
+host = "telemetry.example"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = EnvFile::parse(dir.path().join("t.toml"), env).unwrap().cfg;
+        assert_eq!(cfg.deny[0].methods, ["POST"]);
+        for bad in [
+            "[[deny]]\nhost = \"x.example\"\naccess = \"write\"",
+            "[[mute]]\nhost = \"x.example\"\nmethods = [\"GET\"]",
+        ] {
+            assert!(
+                EnvFile::parse(dir.path().join("t.toml"), bad).is_err(),
+                "{bad}"
+            );
+        }
+
+        let text = "[[deny]]\nhost = \"collector.example\"\n\n[[mute]]\nhost = \"stats.example\"\npaths = [\"/v1/**\"]\n";
+        let global: GlobalConfig = toml::from_str(text).unwrap();
+        // `luoto setup` writes config.toml back whole: the entries survive it.
+        let again: GlobalConfig =
+            toml::from_str(&toml::to_string_pretty(&global).unwrap()).unwrap();
+        assert_eq!(
+            (again.deny, again.mute),
+            (global.deny.clone(), global.mute.clone())
+        );
+        global.layer_under(&mut cfg);
+        let hosts: Vec<&str> = cfg.deny.iter().map(|d| d.host.as_str()).collect();
+        assert_eq!(hosts, ["collector.example", "registry.npmjs.org"]);
+        assert_eq!(cfg.deny[0].note.as_deref(), Some("config.toml"));
+        let muted: Vec<&str> = cfg.mute.iter().map(|m| m.host.as_str()).collect();
+        assert_eq!(muted, ["stats.example", "telemetry.example"]);
     }
 
     #[test]

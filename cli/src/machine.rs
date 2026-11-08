@@ -179,6 +179,41 @@ pub fn stop(bin: &str) -> Result<()> {
     run(c, "podman machine stop")
 }
 
+/// Delete the machine with everything in it, and its podman connections.
+pub fn remove(bin: &str) -> Result<()> {
+    let mut c = Command::new(bin);
+    c.args(["machine", "rm", "-f", NAME]).stdout(Stdio::null());
+    run(c, "podman machine rm")
+}
+
+/// The machine's state and size in a line, from `podman machine inspect`.
+pub fn info(bin: &str) -> Option<String> {
+    let out = Command::new(bin)
+        .args(["machine", "inspect", NAME])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    describe(&serde_json::from_slice(&out.stdout).ok()?)
+}
+
+fn describe(v: &Value) -> Option<String> {
+    let m = v.as_array()?.first()?;
+    let r = &m["Resources"];
+    let n = |v: &Value| v.as_u64().map_or_else(|| "?".into(), |n| n.to_string());
+    Some(format!(
+        "{}, {} CPUs, {} MiB memory, {} GiB disk, {}",
+        m["State"].as_str().unwrap_or("?"),
+        n(&r["CPUs"]),
+        n(&r["Memory"]),
+        n(&r["DiskSize"]),
+        if m["Rootful"].as_bool() == Some(true) {
+            "rootful"
+        } else {
+            "rootless"
+        }
+    ))
+}
+
 /// Run a shell command inside the machine as its user; returns stdout.
 pub fn ssh(bin: &str, script: &str) -> Result<String> {
     let out = Command::new(bin)
@@ -258,4 +293,21 @@ pub fn host_mounts(bin: &str) -> Result<Vec<String>> {
         })
         .map(|(t, _)| t.to_string())
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn describes_the_machine_in_a_line_without_its_paths() {
+        let v = serde_json::json!([{
+            "Name": "luoto", "State": "running", "Rootful": false,
+            "Resources": {"CPUs": 6, "Memory": 8192, "DiskSize": 100},
+            "ConfigDir": {"Path": "/Users/someone/.config/containers/podman/machine"}
+        }]);
+        assert_eq!(
+            super::describe(&v).unwrap(),
+            "running, 6 CPUs, 8192 MiB memory, 100 GiB disk, rootless"
+        );
+        assert!(super::describe(&serde_json::json!([])).is_none());
+    }
 }

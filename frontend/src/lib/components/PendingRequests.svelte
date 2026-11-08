@@ -2,7 +2,7 @@
   import ShieldQuestion from "@lucide/svelte/icons/shield-question";
 
   import { api } from "$lib/api";
-  import { act, ago, app, installLabel, say, TTLS } from "$lib/stores/app.svelte";
+  import { act, ago, app, installLabel, requestTarget, say, TTLS } from "$lib/stores/app.svelte";
 
   // Requests ticked for one decision; ids no longer pending drop out.
   let picked = $state<number[]>([]);
@@ -98,6 +98,10 @@
             <span
               >{r.install.kind === "preset" ? "" : "install "}<b>{installLabel(r.install)}</b> requested
               from inside the sandbox</span
+            >
+          {:else if r.port}
+            <span
+              >an uninspected tunnel to <b>{requestTarget(r)}</b> requested from inside the sandbox</span
             >
           {:else}
             <span

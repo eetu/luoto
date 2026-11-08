@@ -4,16 +4,43 @@
 without asking anything, installs the agent if the env lacks it, runs the agent's
 non-interactive mode with its own permission prompts off (the sandbox is the boundary) and
 prints its answer. Progress goes to stderr, the answer to stdout (or `--output FILE`), and
-the exit code is the agent's. `--down` stops the env after.
+the exit code is the agent's. `--timeout` caps the agent's time; `--down` stops the env after.
 
 ```console
 $ luoto run --agent claude --prompt "Summarize what changed on main this week"
 $ luoto run -e web --agent codex --prompt-file task.md --output answer.md --down
+$ luoto run -e web --agent claude --prompt-file task.md --timeout 45m
 $ git diff | luoto run --agent claude          # the prompt from stdin
 ```
 
 Claude Code, Codex, OpenCode and Copilot CLI have a headless mode; the agent's profile says
 how it is started (`headless` in `shared/agents/<agent>.toml`).
+
+## Timeout, exit code and denials
+
+`--timeout 30m` (or `90s`, `2h`) counts from the agent's start, so bringing the env up and
+installing the agent don't use it. When it passes, luoto stops the agent and everything it
+started in the env, even processes in a group of their own: SIGTERM, then SIGKILL 10 seconds
+later. Ctrl-C stops it the same way (a second one doesn't wait), and so does an answer that
+can't be written. The env keeps running unless `--down` is given.
+
+| exit code   | when                                                                             |
+| ----------- | -------------------------------------------------------------------------------- |
+| the agent's | the agent finished                                                               |
+| 124         | the agent ran past `--timeout` and was stopped (as `timeout(1)` exits)           |
+| 130         | Ctrl-C stopped it                                                                |
+| 1           | luoto itself failed, the reason on stderr: the env didn't come up, no credential |
+
+After the run, stderr lists what the gate denied while the agent ran, without what a
+`[[mute]]` hides: each host, how often, the requests (or ports) it refused and why. stdout and
+`--output` keep only the answer.
+
+```text
+the gate denied 4 attempts to reach 2 hosts during the run:
+  docs.rs          3  GET /serde (2), GET /tokio: no rule allows docs.rs
+  evil.example     1  port 22: no rule allows evil.example
+`luoto egress -e web --denied` says how to allow each.
+```
 
 ## Before it runs unattended
 
@@ -26,8 +53,8 @@ how it is started (`headless` in `shared/agents/<agent>.toml`).
   a source is read again once an upstream refuses the old one.
 - **Access up front.** An agent that hits a blocked host asks for it (`sandbox request`), and
   only you can approve, so an unattended run would wait for nobody. Give the env the presets
-  and rules the task needs first; `luoto egress -e <env> --denied` after a trial run shows
-  what was missing.
+  and rules the task needs first; a trial run ends with what the gate denied, and
+  `--timeout` ends a run that waits anyway.
 - **A login inside, done once.** An agent that logs in inside the env (`login_inside`) needs
   that login done by hand first: `luoto shell`, then the agent.
 
@@ -74,7 +101,8 @@ command in a script, as cron treats `%` specially.
 ```sh
 #!/bin/sh
 # ~/jobs/weekly-deps.sh, from cron: 0 6 * * 1 ~/jobs/weekly-deps.sh
-luoto run -e web --agent claude --down --output "$HOME/jobs/deps-$(date +%F).md" \
+luoto run -e web --agent claude --down --timeout 1h \
+  --output "$HOME/jobs/deps-$(date +%F).md" \
   --prompt "Update the npm dependencies that have patch releases, run the tests, and open
   a pull request with what changed."
 ```

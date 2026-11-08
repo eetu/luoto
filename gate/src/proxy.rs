@@ -16,21 +16,32 @@ use tokio::net::TcpListener;
 
 use crate::body::{Body, empty};
 use crate::handler::{ConnCtx, Target, handle, serve_http1};
+use crate::limits::{self, End, Slot};
 use crate::mitm::{self, Expect};
 use crate::state::State;
 use crate::upstream::{DialError, dial_tcp};
 use crate::{api, respond};
 
+/// The answer to a connection over the cap, written without reading its request.
+const BUSY: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nconnection: close\r\n\r\n\
+luoto gate: too many open connections\n";
+
 pub async fn serve(state: Arc<State>, listener: TcpListener) {
     loop {
-        let Ok((stream, _peer)) = listener.accept().await else {
+        let (stream, _peer) = limits::accept(&listener).await;
+        let Some(slot) = limits::admit(&state, Intake::Proxy) else {
+            let _ = stream.try_write(BUSY);
             continue;
         };
         let _ = stream.set_nodelay(true);
         let state = state.clone();
         tokio::spawn(async move {
-            let ctx = Arc::new(ConnCtx::new(Intake::Proxy));
-            serve_http1(stream, move |req| route(state.clone(), ctx.clone(), req)).await;
+            let ctx = Arc::new(ConnCtx::new(Intake::Proxy, slot));
+            let (activity, lim) = (ctx.activity.clone(), state.cfg.limits);
+            serve_http1(stream, activity, lim, move |req| {
+                route(state.clone(), ctx.clone(), req)
+            })
+            .await;
         });
     }
 }
@@ -41,7 +52,7 @@ async fn route(
     req: Request<Incoming>,
 ) -> Result<Response<Body>, Infallible> {
     if req.method() == Method::CONNECT {
-        return Ok(connect(state, req).await);
+        return Ok(connect(state, ctx.slot(), req).await);
     }
     let absolute = req
         .uri()
@@ -73,7 +84,8 @@ async fn route(
     Ok(api::handle(state, req).await)
 }
 
-async fn connect(state: Arc<State>, req: Request<Incoming>) -> Response<Body> {
+/// The client connection's `slot` goes with it into the tunnel or interception.
+async fn connect(state: Arc<State>, slot: Slot, req: Request<Incoming>) -> Response<Body> {
     let authority = req.uri().authority().map(|a| a.as_str().to_string());
     let Some(Ok((host, port))) = authority.as_deref().map(split_authority) else {
         // No destination to record: the authority itself, clipped, says what was asked.
@@ -124,6 +136,7 @@ async fn connect(state: Arc<State>, req: Request<Incoming>) -> Response<Body> {
             }
         };
         tokio::spawn(async move {
+            let _slot = slot;
             if let Ok(upgraded) = hyper::upgrade::on(req).await {
                 let client = TokioIo::new(upgraded);
                 splice(state, client, upstream, host, port, rule_id, Intake::Proxy).await;
@@ -146,6 +159,7 @@ async fn connect(state: Arc<State>, req: Request<Incoming>) -> Response<Body> {
                 Expect::Host(host),
                 port,
                 Intake::Proxy,
+                slot,
             )
             .await;
         }
@@ -154,10 +168,11 @@ async fn connect(state: Arc<State>, req: Request<Incoming>) -> Response<Body> {
 }
 
 /// Copy both ways between the client and the upstream a tunnel rule allowed, until either
-/// side closes or the rule is removed or expires; one event at the end.
+/// side closes, nothing moves for the tunnel idle limit, or the rule is removed or expires;
+/// one event at the end.
 pub async fn splice<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     state: Arc<State>,
-    mut client: C,
+    client: C,
     upstream: tokio::net::TcpStream,
     host: String,
     port: u16,
@@ -178,9 +193,19 @@ pub async fn splice<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
             }
         }
     };
-    let (up, down) = tokio::select! {
-        r = tokio::io::copy_bidirectional(&mut client, &mut upstream) => r.unwrap_or((0, 0)),
-        _ = watchdog => (0, 0),
+    let idle = state
+        .policy()
+        .tunnel_rule(&host, port, Utc::now())
+        .and_then(|r| r.rule.idle_limit())
+        .unwrap_or(state.cfg.limits.tunnel_idle);
+    let piped = limits::pipe(client, &mut upstream, idle, watchdog).await;
+    let message = match piped.end {
+        End::Closed => None,
+        End::Idle => Some(format!(
+            "closed after {} without traffic",
+            limits::spell(idle)
+        )),
+        End::Stopped => Some("closed: no tunnel rule admits it any more".to_string()),
     };
     state.events.emit(Event {
         kind: Some(EventKind::Tunnel),
@@ -189,8 +214,9 @@ pub async fn splice<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
         host: Some(host),
         port: Some(port),
         rule: Some(rule_id),
-        bytes_up: Some(up),
-        bytes_down: Some(down),
+        message,
+        bytes_up: Some(piped.up),
+        bytes_down: Some(piped.down),
         ms: Some(started.elapsed().as_millis() as u64),
         ..Default::default()
     });

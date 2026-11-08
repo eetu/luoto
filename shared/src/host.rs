@@ -107,6 +107,25 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
     pattern == host
 }
 
+/// A host pattern in the form [`host_matches`] compares it with canonical hosts (`Example.COM.`
+/// becomes `example.com`), or `None` if it is not one.
+pub fn normalize_pattern(pattern: &str) -> Option<String> {
+    let pattern = pattern.trim();
+    if pattern == "*" {
+        return Some(pattern.into());
+    }
+    if pattern.contains('/') {
+        return pattern.parse::<IpNet>().ok().map(|n| n.to_string());
+    }
+    match pattern.strip_prefix("*.") {
+        Some(domain) => normalize_host(domain)
+            .ok()
+            .filter(|d| d.parse::<IpAddr>().is_err())
+            .map(|d| format!("*.{d}")),
+        None => normalize_host(pattern).ok(),
+    }
+}
+
 /// Domains whose subdomains belong to unrelated tenants but which are not on the Public
 /// Suffix List. A wildcard over one of these hands any tenant (an attacker included) a
 /// destination, and with attacker-run DNS, a lookup channel.
@@ -366,6 +385,15 @@ mod tests {
             "xn--bcher-kva.example"
         );
         assert_eq!(normalize_host("[::1]").unwrap(), "::1");
+        assert_eq!(
+            normalize_pattern("*.Example.COM.").unwrap(),
+            "*.example.com"
+        );
+        assert_eq!(normalize_pattern("*").unwrap(), "*");
+        assert_eq!(normalize_pattern("10.0.0.0/8").unwrap(), "10.0.0.0/8");
+        for bad in ["*.10.0.0.1", "*.", "10.0.0.0/99", "a b", "*x.example"] {
+            assert!(normalize_pattern(bad).is_none(), "{bad}");
+        }
         assert_eq!(normalize_host("user@evil.com"), Err(HostError::Userinfo));
         assert!(normalize_host("a..b").is_err());
         assert!(normalize_host("bad host").is_err());

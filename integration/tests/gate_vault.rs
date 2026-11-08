@@ -1,5 +1,5 @@
-//! The real gate and vault binaries, spawned locally, in front of wiremock and plain TCP
-//! upstreams. `#[ignore]`d because they build and spawn binaries: `just it`.
+//! The real gate and vault binaries, spawned locally, in front of wiremock, HTTPS and plain
+//! TCP upstreams. `#[ignore]`d because they build and spawn binaries: `just it`.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
@@ -7,17 +7,25 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Once;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
+use chrono::{TimeDelta, Utc};
 use luoto_shared::creds::{BindingSpec, Injection, Placement};
 use luoto_shared::ctl::{GateCtl, VaultCtl};
 use luoto_shared::policy::{
     Access, AccessLevel, BodyDeny, CompiledRule, GithubGuard, Mode, Policy, Rule,
 };
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
+use rustls::crypto::CryptoProvider;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::{
+    ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
+};
 use sha2::{Digest, Sha256};
 use wiremock::matchers::{header, method, path, path_regex, query_param};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
 const ENV: &str = "it";
 const TOKEN: &str = "test-env-token";
@@ -42,7 +50,7 @@ fn build() {
                 "-p",
                 "luoto-vault",
                 "--features",
-                "luoto-gate/test-hooks",
+                "luoto-gate/test-hooks,luoto-vault/test-hooks",
             ])
             .status()
             .unwrap()
@@ -114,6 +122,22 @@ impl Reply {
 fn send(port: u16, raw: &[u8]) -> Reply {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    exchange(&mut s, raw)
+}
+
+/// Read a message head, up to and including its blank line.
+fn read_head(s: &mut impl Read) -> std::io::Result<String> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        s.read_exact(&mut byte)?;
+        head.push(byte[0]);
+    }
+    Ok(String::from_utf8_lossy(&head).into_owned())
+}
+
+/// Write `raw` on `s` and read the reply until the server closes.
+fn exchange(s: &mut (impl Read + Write), raw: &[u8]) -> Reply {
     s.write_all(raw).unwrap();
     let mut buf = Vec::new();
     let _ = s.read_to_end(&mut buf);
@@ -161,6 +185,16 @@ struct Env {
 
 impl Env {
     fn start(resolve: &[(&str, SocketAddr)]) -> Env {
+        Env::start_with(resolve, &[])
+    }
+
+    /// With the gate's limits shrunk by `limits` (`conns=2,idle_ms=300,…`).
+    fn start_limited(resolve: &[(&str, SocketAddr)], limits: &str) -> Env {
+        Env::start_with(resolve, &[("LUOTO_TEST_LIMITS", limits)])
+    }
+
+    /// With `gate_env` added to the gate's environment.
+    fn start_with(resolve: &[(&str, SocketAddr)], gate_env: &[(&str, &str)]) -> Env {
         build();
         let dir = tempfile::tempdir().unwrap();
         let vault_sock = dir.path().join("v.sock");
@@ -185,6 +219,7 @@ impl Env {
                 .env("LUOTO_STATE_DIR", dir.path().join("gate"))
                 .env("LUOTO_CTL_SOCKET", &gate_sock)
                 .env("LUOTO_TEST_RESOLVE", resolve.join(","))
+                .envs(gate_env.iter().copied())
                 .stdout(Stdio::null())
                 .spawn()
                 .unwrap(),
@@ -264,6 +299,32 @@ impl Env {
 
     fn get(&self, url: &str) -> Reply {
         self.request("GET", url, &[], b"")
+    }
+
+    /// A GET to `host` in TLS through a CONNECT tunnel, trusting only `ca`, with the host as
+    /// SNI and as `Host` unless `headers` names one.
+    fn https(&self, ca: &TestCa, host: &str, path: &str, headers: &[(&str, &str)]) -> Reply {
+        let mut tls = connect_tls(self.gate_port, &format!("{host}:443"), host, ca).unwrap();
+        let mut req = format!("GET {path} HTTP/1.1\r\nConnection: close\r\n");
+        if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("host")) {
+            req.push_str(&format!("Host: {host}\r\n"));
+        }
+        for (k, v) in headers {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
+        req.push_str("\r\n");
+        exchange(&mut tls, req.as_bytes())
+    }
+
+    /// What the vault answers the env's gate for `binding`.
+    fn credential(&self, binding: &str) -> Reply {
+        let body = serde_json::json!({ "binding": binding }).to_string();
+        let raw = format!(
+            "POST /v1/credential HTTP/1.1\r\nHost: vault\r\nAuthorization: Bearer {TOKEN}\r\n\
+             Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        send(self.vault_port, raw.as_bytes())
     }
 }
 
@@ -563,13 +624,7 @@ async fn the_ssh_key_signs_in_the_vault_and_is_never_handed_out() {
     let message = r.json()["message"].as_str().unwrap().to_string();
     assert!(message.starts_with("DAAAAAE"), "{message}");
 
-    let body = r#"{"binding":"ssh"}"#;
-    let raw = format!(
-        "POST /v1/credential HTTP/1.1\r\nHost: vault\r\nAuthorization: Bearer {TOKEN}\r\n\
-         Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    );
-    let r = send(env.vault_port, raw.as_bytes());
+    let r = env.credential("ssh");
     assert_eq!(
         r.status, 404,
         "an SSH key is not a credential the vault hands out"
@@ -859,32 +914,752 @@ async fn a_tunnel_closes_once_its_rule_is_revoked() {
         ..Default::default()
     });
 
-    let mut s = TcpStream::connect(("127.0.0.1", env.gate_port)).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    s.write_all(b"CONNECT tunnel.test:443 HTTP/1.1\r\nHost: tunnel.test:443\r\n\r\n")
-        .unwrap();
-    let mut head = Vec::new();
-    let mut byte = [0u8; 1];
-    while !head.ends_with(b"\r\n\r\n") {
-        s.read_exact(&mut byte).unwrap();
-        head.push(byte[0]);
-    }
-    assert!(head.starts_with(b"HTTP/1.1 200"), "{head:?}");
-    s.write_all(b"ping").unwrap();
-    let mut echo = [0u8; 4];
-    s.read_exact(&mut echo).unwrap();
-    assert_eq!(&echo, b"ping");
-
+    let mut s = open_tunnel(&env);
     env.apply(Policy::default());
     let revoked = Instant::now();
-    let closed = match s.read(&mut echo) {
-        Ok(n) => n == 0,
-        Err(e) => !matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut),
-    };
-    assert!(closed, "the tunnel stayed open");
+    assert!(closed(&mut s), "the tunnel stayed open");
     assert!(
         revoked.elapsed() < Duration::from_secs(7),
         "closed after {:?}",
         revoked.elapsed()
     );
+}
+
+/// A tunnel to `tunnel.test:443` through the proxy, checked to echo.
+fn open_tunnel(env: &Env) -> TcpStream {
+    let mut s = TcpStream::connect(("127.0.0.1", env.gate_port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    s.write_all(b"CONNECT tunnel.test:443 HTTP/1.1\r\nHost: tunnel.test:443\r\n\r\n")
+        .unwrap();
+    let head = read_head(&mut s).unwrap();
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    s.write_all(b"ping").unwrap();
+    let mut echo = [0u8; 4];
+    s.read_exact(&mut echo).unwrap();
+    assert_eq!(&echo, b"ping");
+    s
+}
+
+/// Whether the gate closed `s` (within its 10 s read timeout).
+fn closed(s: &mut TcpStream) -> bool {
+    let mut buf = [0u8; 16];
+    match s.read(&mut buf) {
+        Ok(n) => n == 0,
+        Err(e) => !matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn a_quiet_tunnel_is_closed() {
+    let env = Env::start_limited(&[("tunnel.test", echo_server())], "tunnel_idle_ms=500");
+    let mut tunnel_rule = read("tunnel", "tunnel.test");
+    tunnel_rule.rule.access = Access::Level(AccessLevel::Write);
+    tunnel_rule.rule.mode = Mode::Tunnel;
+    env.apply(Policy {
+        rules: vec![tunnel_rule],
+        ..Default::default()
+    });
+
+    let mut s = open_tunnel(&env);
+    let quiet = Instant::now();
+    assert!(closed(&mut s), "the tunnel stayed open");
+    let after = quiet.elapsed();
+    assert!(
+        after >= Duration::from_millis(400),
+        "closed after {after:?}"
+    );
+    assert!(after < Duration::from_secs(5), "closed after {after:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn connections_past_the_cap_are_refused_and_reported() {
+    let env = Env::start_limited(&[], "conns=2");
+    let held: Vec<TcpStream> = (0..2)
+        .map(|_| TcpStream::connect(("127.0.0.1", env.gate_port)).unwrap())
+        .collect();
+    // Accepted in order, so this one finds both places taken. It sends nothing: the gate
+    // answers without reading, and unread bytes would turn its close into a reset.
+    let mut third = TcpStream::connect(("127.0.0.1", env.gate_port)).unwrap();
+    third
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut reply = String::new();
+    third.read_to_string(&mut reply).unwrap();
+    assert!(reply.starts_with("HTTP/1.1 503"), "{reply}");
+    assert!(reply.contains("too many open connections"), "{reply}");
+
+    drop(held);
+    // Time for the gate to see them close, so the next request finds a place.
+    std::thread::sleep(Duration::from_millis(200));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let denial = loop {
+        let r = send(
+            env.gate_port,
+            b"GET /_sandbox/status HTTP/1.1\r\nHost: gate\r\nConnection: close\r\n\r\n",
+        );
+        let found = (r.status == 200)
+            .then(|| r.json()["recent_denials"].as_array().cloned())
+            .flatten()
+            .and_then(|ds| ds.into_iter().find(|d| d["reason"] == "conn_limit"));
+        if let Some(d) = found {
+            break d;
+        }
+        assert!(Instant::now() < deadline, "no refusal reported: {}", r.body);
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(denial["intake"], "proxy");
+    let message = denial["message"].as_str().unwrap();
+    assert!(message.contains("2 connections were open"), "{message}");
+}
+
+/// An HTTP server that answers by path: `/silent` never, `/stall` with a head and part of
+/// the body it announces, anything else ten bytes, one every 100 ms.
+fn timing_server() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 2 {
+                    line.clear();
+                }
+                let mut s = stream;
+                match first.split_whitespace().nth(1).unwrap_or("") {
+                    "/silent" => std::thread::sleep(Duration::from_secs(30)),
+                    "/late" => {
+                        std::thread::sleep(Duration::from_millis(1500));
+                        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nlate");
+                    }
+                    "/pause" => {
+                        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na");
+                        std::thread::sleep(Duration::from_millis(1500));
+                        let _ = s.write_all(b"b");
+                    }
+                    "/stall" => {
+                        let _ =
+                            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial");
+                        std::thread::sleep(Duration::from_secs(30));
+                    }
+                    _ => {
+                        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n");
+                        for _ in 0..10 {
+                            std::thread::sleep(Duration::from_millis(100));
+                            let _ = s.write_all(b"x");
+                        }
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn a_stalled_exchange_is_cut_but_a_slow_one_is_not() {
+    let env = Env::start_limited(
+        &[("timing.test", timing_server())],
+        "response_head_ms=500,idle_ms=500",
+    );
+    env.apply(Policy {
+        rules: vec![read("timing", "timing.test")],
+        ..Default::default()
+    });
+
+    let started = Instant::now();
+    let r = env.get("http://timing.test/silent");
+    assert_eq!(r.status, 504, "{}", r.head);
+    assert!(r.body.contains("no response within 500 ms"), "{}", r.body);
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    let started = Instant::now();
+    let r = env.get("http://timing.test/stall");
+    assert_eq!((r.status, r.body.as_str()), (200, "partial"));
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    // Twice the idle limit in all, but never idle for it.
+    let r = env.get("http://timing.test/slow");
+    assert_eq!((r.status, r.body.as_str()), (200, "xxxxxxxxxx"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn a_rules_idle_lets_its_host_stay_silent_longer() {
+    let env = Env::start_limited(
+        &[("timing.test", timing_server())],
+        "response_head_ms=500,idle_ms=500",
+    );
+    env.apply(Policy {
+        rules: vec![read("timing", "timing.test")],
+        ..Default::default()
+    });
+    assert_eq!(env.get("http://timing.test/late").status, 504);
+    assert_eq!(env.get("http://timing.test/pause").body, "a");
+
+    let mut patient = read("patient", "timing.test");
+    patient.rule.idle = Some("3s".into());
+    env.apply(Policy {
+        rules: vec![patient],
+        ..Default::default()
+    });
+    let r = env.get("http://timing.test/late");
+    assert_eq!((r.status, r.body.as_str()), (200, "late"), "{}", r.head);
+    let r = env.get("http://timing.test/pause");
+    assert_eq!((r.status, r.body.as_str()), (200, "ab"));
+}
+
+fn provider() -> Arc<CryptoProvider> {
+    Arc::new(rustls::crypto::ring::default_provider())
+}
+
+/// A CA made as `luoto` makes an env's (`cli/src/ca.rs`).
+struct TestCa {
+    issuer: Issuer<'static, KeyPair>,
+    cert: CertificateDer<'static>,
+    cert_pem: String,
+    key_pem: String,
+}
+
+impl TestCa {
+    fn new(name: &str) -> TestCa {
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+        params.distinguished_name.push(DnType::CommonName, name);
+        let cert = params.self_signed(&key).unwrap();
+        TestCa {
+            cert: cert.der().clone(),
+            cert_pem: cert.pem(),
+            key_pem: key.serialize_pem(),
+            issuer: Issuer::new(params, key),
+        }
+    }
+
+    /// A server certificate for `name`, and its key.
+    fn leaf(&self, name: &str) -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
+        let key = KeyPair::generate().unwrap();
+        let cert = CertificateParams::new(vec![name.to_string()])
+            .unwrap()
+            .signed_by(&key, &self.issuer)
+            .unwrap();
+        (
+            cert.der().clone(),
+            PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+        )
+    }
+
+    /// Make this the CA the gate intercepts TLS with.
+    fn install(&self, env: &Env) {
+        env.gate(&GateCtl::InstallCa {
+            cert_pem: self.cert_pem.clone(),
+            key_pem: self.key_pem.clone(),
+        });
+    }
+}
+
+/// `LUOTO_UPSTREAM_CAS`: each host's own upstream CA.
+fn upstream_cas(cas: &[(&str, &TestCa)]) -> String {
+    let map: BTreeMap<&str, &str> = cas
+        .iter()
+        .map(|(h, ca)| (*h, ca.cert_pem.as_str()))
+        .collect();
+    serde_json::to_string(&map).unwrap()
+}
+
+#[derive(Clone)]
+struct Seen {
+    sni: Option<String>,
+    /// The request head.
+    head: String,
+}
+
+/// An HTTPS server presenting a certificate for `name` that `ca` signed: it keeps what each
+/// request it reads came with and answers it `200 ok`.
+struct Https {
+    addr: SocketAddr,
+    seen: Arc<Mutex<Vec<Seen>>>,
+}
+
+impl Https {
+    fn start(ca: &TestCa, name: &str) -> Https {
+        let (cert, key) = ca.leaf(name);
+        let cfg = Arc::new(
+            ServerConfig::builder_with_provider(provider())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key)
+                .unwrap(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for tcp in listener.incoming().flatten() {
+                let (cfg, log) = (cfg.clone(), log.clone());
+                std::thread::spawn(move || {
+                    let mut tls = StreamOwned::new(ServerConnection::new(cfg).unwrap(), tcp);
+                    let Ok(head) = read_head(&mut tls) else {
+                        return;
+                    };
+                    let sni = tls.conn.server_name().map(str::to_string);
+                    log.lock().unwrap().push(Seen { sni, head });
+                    let _ = tls.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    );
+                    tls.conn.send_close_notify();
+                    let _ = tls.flush();
+                });
+            }
+        });
+        Https { addr, seen }
+    }
+
+    fn seen(&self) -> Vec<Seen> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+/// Through the gate's proxy: CONNECT to `authority`, then TLS in the tunnel as `sni`, trusting
+/// only `ca`.
+fn connect_tls(
+    gate_port: u16,
+    authority: &str,
+    sni: &str,
+    ca: &TestCa,
+) -> std::io::Result<StreamOwned<ClientConnection, TcpStream>> {
+    let mut tcp = TcpStream::connect(("127.0.0.1", gate_port))?;
+    tcp.set_read_timeout(Some(Duration::from_secs(10)))?;
+    tcp.write_all(format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").as_bytes())?;
+    let head = read_head(&mut tcp)?;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let mut roots = RootCertStore::empty();
+    roots.add(ca.cert.clone()).unwrap();
+    let cfg = ClientConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let name = ServerName::try_from(sni.to_string()).unwrap();
+    let mut conn = ClientConnection::new(Arc::new(cfg), name).unwrap();
+    while conn.is_handshaking() {
+        conn.complete_io(&mut tcp)?;
+    }
+    Ok(StreamOwned::new(conn, tcp))
+}
+
+/// What the client found wrong with the certificate, when that ended its handshake.
+fn certificate_error(e: &std::io::Error) -> Option<&rustls::CertificateError> {
+    match e.get_ref()?.downcast_ref::<rustls::Error>()? {
+        rustls::Error::InvalidCertificate(c) => Some(c),
+        _ => None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn intercepted_tls_shows_a_leaf_for_the_destination_signed_by_the_env_ca() {
+    let env_ca = TestCa::new("luoto sandbox CA (it)");
+    let forge_ca = TestCa::new("forge CA");
+    let forge = Https::start(&forge_ca, "forge.test");
+    let cas = upstream_cas(&[("forge.test", &forge_ca)]);
+    let env = Env::start_with(
+        &[("forge.test", forge.addr)],
+        &[("LUOTO_UPSTREAM_CAS", &cas)],
+    );
+    env_ca.install(&env);
+    env.apply(Policy {
+        rules: vec![read("read", "forge.test")],
+        ..Default::default()
+    });
+
+    // Trusting only the env CA, the client verifies the chain and the name it asked for.
+    let r = env.https(&env_ca, "forge.test", "/ok", &[]);
+    assert_eq!(r.status, 200, "{}", r.head);
+    assert_eq!(r.body, "ok");
+    let seen = forge.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].sni.as_deref(), Some("forge.test"));
+    assert!(
+        seen[0].head.starts_with("GET /ok HTTP/1.1\r\n"),
+        "{}",
+        seen[0].head
+    );
+
+    // The gate's own leaf, not the upstream's passed through.
+    let Err(e) = connect_tls(env.gate_port, "forge.test:443", "forge.test", &forge_ca) else {
+        panic!("the forge's CA verified the gate's certificate");
+    };
+    assert_eq!(
+        certificate_error(&e),
+        Some(&rustls::CertificateError::UnknownIssuer),
+        "{e}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn a_renewed_env_ca_signs_every_leaf_from_its_install_on() {
+    // A renewal keeps the CA's name and changes its key, as `luoto up` does.
+    let old = TestCa::new("luoto sandbox CA (it)");
+    let new = TestCa::new("luoto sandbox CA (it)");
+    let forge_ca = TestCa::new("forge CA");
+    let forge = Https::start(&forge_ca, "forge.test");
+    let cas = upstream_cas(&[("forge.test", &forge_ca)]);
+    let env = Env::start_with(
+        &[("forge.test", forge.addr)],
+        &[("LUOTO_UPSTREAM_CAS", &cas)],
+    );
+    let reported = |env: &Env| env.gate(&GateCtl::Status)["data"]["ca_pem_sha256"].clone();
+    let sha = |ca: &TestCa| hex::encode(Sha256::digest(ca.cert_pem.as_bytes()));
+    assert_eq!(reported(&env), serde_json::Value::Null);
+    old.install(&env);
+    env.apply(Policy {
+        rules: vec![read("read", "forge.test")],
+        ..Default::default()
+    });
+    assert_eq!(env.https(&old, "forge.test", "/ok", &[]).status, 200);
+    assert_eq!(reported(&env), sha(&old));
+
+    // The leaf cached for the host a moment ago went with the old CA.
+    new.install(&env);
+    assert_eq!(reported(&env), sha(&new));
+    let r = env.https(&new, "forge.test", "/ok", &[]);
+    assert_eq!(r.status, 200, "{}", r.head);
+    let Err(e) = connect_tls(env.gate_port, "forge.test:443", "forge.test", &old) else {
+        panic!("a client trusting only the old CA verified the gate's certificate");
+    };
+    assert!(certificate_error(&e).is_some(), "{e}");
+    // Kept for a restarted gate.
+    let kept = std::fs::read_to_string(env._dir.path().join("gate/ca.crt")).unwrap();
+    assert_eq!(kept, new.cert_pem);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn sni_and_host_must_name_the_connect_destination() {
+    let env_ca = TestCa::new("luoto sandbox CA (it)");
+    let api_ca = TestCa::new("api CA");
+    let api = Https::start(&api_ca, "api.test");
+    let cas = upstream_cas(&[("api.test", &api_ca)]);
+    let env = Env::start_with(
+        &[("api.test", api.addr), ("other.test", api.addr)],
+        &[("LUOTO_UPSTREAM_CAS", &cas)],
+    );
+    env_ca.install(&env);
+    env.apply(Policy {
+        rules: vec![read("api", "api.test"), read("other", "other.test")],
+        ..Default::default()
+    });
+
+    // Domain fronting: the gate ends the handshake instead of choosing either name.
+    let fronted = connect_tls(env.gate_port, "api.test:443", "other.test", &env_ca);
+    let Err(e) = fronted else {
+        panic!("a handshake for another name than the CONNECT's completed");
+    };
+    assert_eq!(e.kind(), ErrorKind::UnexpectedEof, "{e}");
+    let r = env.https(&env_ca, "api.test", "/ok", &[("Host", "other.test")]);
+    assert!(r.status == 421 && r.denied("invalid_host"), "{}", r.head);
+    assert!(api.seen().is_empty());
+
+    assert_eq!(env.https(&env_ca, "api.test", "/ok", &[]).status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn credentials_go_only_over_tls_in_place_of_the_clients_own() {
+    let env_ca = TestCa::new("luoto sandbox CA (it)");
+    let api_ca = TestCa::new("api CA");
+    let api = Https::start(&api_ca, "api.test");
+    let cas = upstream_cas(&[("api.test", &api_ca)]);
+    let env = Env::start_with(&[("api.test", api.addr)], &[("LUOTO_UPSTREAM_CAS", &cas)]);
+    env_ca.install(&env);
+    env.credentials(
+        &[(
+            "t.key",
+            BindingSpec::Static {
+                secret_ref: "env:X".into(),
+            },
+        )],
+        &[("env:X", "real-secret")],
+    );
+    let mut policy = credentialed_policy();
+    policy.rules.push(read("plain", "plain.test"));
+    policy.injections.push(Injection {
+        binding: "t.key".into(),
+        host: "plain.test".into(),
+        paths: vec![],
+        ignore_case: false,
+        place: Placement::Header {
+            name: "x-api-key".into(),
+            format: "{secret}".into(),
+        },
+    });
+    env.apply(policy);
+
+    let attacker = [
+        ("x-api-key", "attacker"),
+        ("Authorization", "Bearer attacker"),
+        ("Cookie", "session=attacker"),
+    ];
+    let r = env.https(&env_ca, "api.test", "/secret", &attacker);
+    assert_eq!(r.status, 200, "{}", r.head);
+    let sent = api.seen()[0].head.to_ascii_lowercase();
+    assert!(sent.contains("\r\nx-api-key: real-secret\r\n"), "{sent}");
+    for absent in ["attacker", "authorization", "cookie"] {
+        assert!(!sent.contains(absent), "{absent}: {sent}");
+    }
+
+    // Plain HTTP would carry it readable: refused before the gate resolves the name.
+    let r = env.get("http://plain.test/secret");
+    assert!(r.status == 403 && r.denied("guard"), "{}", r.head);
+    assert!(r.body.contains("only over HTTPS"), "{}", r.body);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn upstream_certificates_verify_only_for_the_host_their_ca_is_trusted_for() {
+    let env_ca = TestCa::new("luoto sandbox CA (it)");
+    let forge_ca = TestCa::new("forge CA");
+    let forge = Https::start(&forge_ca, "forge.test");
+    // The forge's CA, signing for a host it isn't trusted for.
+    let other = Https::start(&forge_ca, "other.test");
+    // Trusted for `alias.test`, but its certificate names another host.
+    let alias = Https::start(&forge_ca, "forge.test");
+    let cas = upstream_cas(&[("forge.test", &forge_ca), ("alias.test", &forge_ca)]);
+    let env = Env::start_with(
+        &[
+            ("forge.test", forge.addr),
+            ("other.test", other.addr),
+            ("alias.test", alias.addr),
+        ],
+        &[("LUOTO_UPSTREAM_CAS", &cas)],
+    );
+    env_ca.install(&env);
+    env.apply(Policy {
+        rules: vec![
+            read("forge", "forge.test"),
+            read("other", "other.test"),
+            read("alias", "alias.test"),
+        ],
+        ..Default::default()
+    });
+
+    assert_eq!(env.https(&env_ca, "forge.test", "/", &[]).status, 200);
+    for host in ["other.test", "alias.test"] {
+        let r = env.https(&env_ca, host, "/", &[]);
+        assert_eq!(r.status, 502, "{host}: {}", r.head);
+        assert!(
+            r.body
+                .contains(&format!("TLS handshake with {host} failed")),
+            "{}",
+            r.body
+        );
+    }
+    assert!(other.seen().is_empty() && alias.seen().is_empty());
+}
+
+const APP_KEY: &str = include_str!("keys/app_rsa");
+const APP_PUB: &str = include_str!("keys/app_rsa.pub");
+const ROTATED_KEY: &str = include_str!("keys/app_rsa_rotated");
+const ROTATED_PUB: &str = include_str!("keys/app_rsa_rotated.pub");
+
+/// GitHub's access-token endpoint: a new token on each call (`ghs_1`, `ghs_2`, …), valid for
+/// `ttl`.
+struct Mint {
+    minted: AtomicUsize,
+    ttl: TimeDelta,
+}
+
+impl Respond for Mint {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        let n = self.minted.fetch_add(1, Ordering::SeqCst) + 1;
+        ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "token": format!("ghs_{n}"),
+            "expires_at": Utc::now() + self.ttl,
+        }))
+    }
+}
+
+fn access_tokens(installation: u64) -> String {
+    format!("/app/installations/{installation}/access_tokens")
+}
+
+/// GitHub minting tokens for `installation`, each valid for `ttl`.
+async fn github_mints(api: &MockServer, installation: u64, ttl: TimeDelta) {
+    Mock::given(method("POST"))
+        .and(path(access_tokens(installation)))
+        .respond_with(Mint {
+            minted: AtomicUsize::new(0),
+            ttl,
+        })
+        .mount(api)
+        .await;
+}
+
+/// A binding to tokens from `installation` of App 123 (key `env:APP`) for `repos`.
+fn app(api: &MockServer, installation: u64, repos: &[&str], perms: &[(&str, &str)]) -> BindingSpec {
+    BindingSpec::GithubApp {
+        app_id: "123".into(),
+        installation_id: installation,
+        key_ref: "env:APP".into(),
+        repos: repos.iter().map(|r| r.to_string()).collect(),
+        permissions: perms
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        api_base: api.uri(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AppClaims {
+    iat: i64,
+    exp: i64,
+}
+
+/// The claims of the App JWT `req` bore, if `public_pem` verifies it as RS256 from App 123.
+fn app_jwt(req: &wiremock::Request, public_pem: &str) -> jsonwebtoken::errors::Result<AppClaims> {
+    use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+    let auth = req.headers.get("authorization").unwrap().to_str().unwrap();
+    let jwt = auth.strip_prefix("Bearer ").unwrap();
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_issuer(&["123"]);
+    validation.set_required_spec_claims(&["iat", "exp", "iss"]);
+    let key = DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap();
+    decode::<AppClaims>(jwt, &key, &validation).map(|t| t.claims)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn app_tokens_are_minted_with_the_app_keys_jwt_for_each_bindings_repos_and_permissions() {
+    let api = MockServer::start().await;
+    github_mints(&api, 42, TimeDelta::hours(1)).await;
+    let env = Env::start(&[]);
+    let write = [
+        ("contents", "write"),
+        ("metadata", "read"),
+        ("pull_requests", "write"),
+    ];
+    let read = [
+        ("contents", "read"),
+        ("metadata", "read"),
+        ("pull_requests", "read"),
+    ];
+    env.credentials(
+        &[
+            ("github", app(&api, 42, &["web"], &write)),
+            ("github-read", app(&api, 42, &["lib"], &read)),
+            ("unknown", app(&api, 7, &["web"], &write)),
+        ],
+        &[("env:APP", APP_KEY)],
+    );
+
+    let before = Utc::now().timestamp();
+    let r = env.credential("github");
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["value"], "ghs_1");
+    assert_eq!(env.credential("github-read").json()["value"], "ghs_2");
+    let after = Utc::now().timestamp();
+
+    let seen = api.received_requests().await.unwrap();
+    assert_eq!(seen.len(), 2);
+    for (req, repos, perms) in [(&seen[0], "web", write), (&seen[1], "lib", read)] {
+        assert_eq!(req.url.path(), access_tokens(42));
+        let claims = app_jwt(req, APP_PUB).unwrap();
+        // Backdated a minute for clock drift, and GitHub's ten-minute maximum.
+        assert!(
+            (before - 60..=after - 60).contains(&claims.iat),
+            "iat {} between {before} and {after}",
+            claims.iat
+        );
+        assert_eq!(claims.exp - claims.iat, 600);
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        let perms: BTreeMap<&str, &str> = perms.into_iter().collect();
+        assert_eq!(
+            body,
+            serde_json::json!({ "repositories": [repos], "permissions": perms })
+        );
+    }
+
+    let r = env.credential("unknown");
+    assert_eq!(r.status, 502, "{}", r.body);
+    assert!(
+        r.body.contains("GitHub refused the token request (404)"),
+        "{}",
+        r.body
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn an_app_token_is_reused_until_ten_minutes_before_it_expires() {
+    let api = MockServer::start().await;
+    github_mints(&api, 42, TimeDelta::minutes(11)).await;
+    github_mints(&api, 43, TimeDelta::minutes(9)).await;
+    let env = Env::start(&[]);
+    let perms = [("contents", "read")];
+    env.credentials(
+        &[
+            ("eleven", app(&api, 42, &["web"], &perms)),
+            ("nine", app(&api, 43, &["web"], &perms)),
+        ],
+        &[("env:APP", APP_KEY)],
+    );
+    let value = |binding| {
+        let r = env.credential(binding);
+        assert_eq!(r.status, 200, "{}", r.body);
+        r.json()["value"].as_str().unwrap().to_string()
+    };
+
+    assert_eq!(value("eleven"), value("eleven"));
+    assert_ne!(value("nine"), value("nine"));
+    let seen = api.received_requests().await.unwrap();
+    let mints = |installation| {
+        seen.iter()
+            .filter(|r| r.url.path() == access_tokens(installation))
+            .count()
+    };
+    assert_eq!((mints(42), mints(43)), (1, 2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn a_new_app_key_retires_the_minted_token_and_signs_the_next() {
+    let api = MockServer::start().await;
+    github_mints(&api, 42, TimeDelta::hours(1)).await;
+    let env = Env::start(&[]);
+    env.credentials(
+        &[("github", app(&api, 42, &["web"], &[("contents", "write")]))],
+        &[("env:APP", APP_KEY)],
+    );
+    let value = || env.credential("github").json()["value"].clone();
+    let load = |key: &str| {
+        let secrets = BTreeMap::from([("env:APP".to_string(), key.to_string())]);
+        env.vault(&VaultCtl::Load { secrets });
+    };
+
+    assert_eq!(value(), "ghs_1");
+    load(APP_KEY);
+    assert_eq!(value(), "ghs_1", "the same key again keeps the token");
+    load(ROTATED_KEY);
+    assert_eq!(value(), "ghs_2");
+
+    let seen = api.received_requests().await.unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(app_jwt(&seen[0], APP_PUB).is_ok());
+    assert!(app_jwt(&seen[1], ROTATED_PUB).is_ok());
+    assert!(app_jwt(&seen[1], APP_PUB).is_err());
 }

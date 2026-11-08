@@ -60,6 +60,9 @@ pub struct RunSpec {
     pub id_map: Option<u32>,
     pub restart: Option<String>,
     pub security_opts: Vec<String>,
+    /// The most of the container's log podman keeps, in MB. Docker keeps the daemon's own
+    /// log driver and its settings.
+    pub log_mb: Option<u32>,
 }
 
 /// The state (`running`, `exited`, …) of every luoto container, read in one call.
@@ -85,6 +88,10 @@ impl States {
 
     pub fn running(&self, name: &str) -> bool {
         self.by_name.get(name).is_some_and(|s| s == "running")
+    }
+
+    pub fn exists(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
     }
 
     /// An env's dev and gate container states, `absent` for one that doesn't exist.
@@ -287,6 +294,62 @@ impl Runtime {
         S: AsRef<std::ffi::OsStr>,
     {
         Ok(self.command().args(args).status()?)
+    }
+
+    /// Run with stdout and stderr read as they come: `each` gets every chunk and whether it
+    /// came from stderr. When `each` returns false the command is killed.
+    pub fn stream<I, S>(
+        &self,
+        args: I,
+        each: &(dyn Fn(bool, &[u8]) -> bool + Sync),
+    ) -> Result<ExitStatus>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let args: Vec<std::ffi::OsString> =
+            args.into_iter().map(|a| a.as_ref().to_owned()).collect();
+        traced(&args, || -> Result<ExitStatus> {
+            let mut child = self
+                .command()
+                .args(&args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .with_context(|| format!("run {}", self.bin))?;
+            let out = child.stdout.take().context("stdout")?;
+            let err = child.stderr.take().context("stderr")?;
+            let child = std::sync::Mutex::new(child);
+            fn pump(
+                mut r: impl std::io::Read,
+                is_err: bool,
+                each: &(dyn Fn(bool, &[u8]) -> bool + Sync),
+                child: &std::sync::Mutex<std::process::Child>,
+            ) {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match r.read(&mut buf) {
+                        Ok(0) => return,
+                        Ok(n) if !each(is_err, &buf[..n]) => {
+                            let _ = child.lock().map(|mut c| c.kill());
+                            return;
+                        }
+                        Ok(_) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => return,
+                    }
+                }
+            }
+            std::thread::scope(|s| {
+                s.spawn(|| pump(err, true, each, &child));
+                pump(out, false, each, &child);
+            });
+            let mut child = child
+                .into_inner()
+                .map_err(|_| anyhow::anyhow!("child lock"))?;
+            Ok(child.wait()?)
+        })
     }
 
     /// Pull `image` with the runtime's own progress on the terminal: a first pull can take
@@ -562,6 +625,12 @@ impl Runtime {
                 }
             }
         }
+        // Podman takes `max-size` with every log driver (journald keeps its own bounds).
+        if let Some(mb) = spec.log_mb
+            && self.flavor == Flavor::Podman
+        {
+            a.extend(["--log-opt".into(), format!("max-size={mb}m")]);
+        }
         if let Some(r) = &spec.restart {
             a.extend(["--restart".into(), r.clone()]);
         }
@@ -728,6 +797,23 @@ mod tests {
         let docker = rt(Flavor::Docker).run_args(&s, false).join(" ");
         assert!(docker.contains("--runtime /r/runsc"));
         assert!(!docker.contains("--uidmap"));
+    }
+
+    #[test]
+    fn a_log_cap_goes_to_podman_and_docker_keeps_its_drivers() {
+        let s = RunSpec {
+            log_mb: Some(50),
+            ..spec()
+        };
+        let podman = rt(Flavor::Podman).run_args(&s, false).join(" ");
+        assert!(podman.contains("--log-opt max-size=50m"));
+        assert!(!podman.contains("--log-driver"));
+        assert!(
+            !rt(Flavor::Docker)
+                .run_args(&s, true)
+                .join(" ")
+                .contains("--log")
+        );
     }
 
     #[test]

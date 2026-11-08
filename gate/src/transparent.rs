@@ -16,6 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::dns::FakeIps;
 use crate::handler::{ConnCtx, Target, handle, serve_http1};
+use crate::limits::{self, Slot};
 use crate::mitm::{self, Expect};
 use crate::respond;
 use crate::state::{State, lock};
@@ -53,11 +54,12 @@ fn looks_like_http(b: &[u8]) -> bool {
 
 pub async fn serve(state: Arc<State>, listener: TcpListener) {
     loop {
-        let Ok((stream, _peer)) = listener.accept().await else {
+        let (stream, _peer) = limits::accept(&listener).await;
+        let Some(slot) = limits::admit(&state, Intake::Transparent) else {
             continue;
         };
         let state = state.clone();
-        tokio::spawn(async move { conn(state, stream).await });
+        tokio::spawn(async move { conn(state, stream, slot).await });
     }
 }
 
@@ -72,7 +74,7 @@ fn direct(state: &State, host: &str, port: u16, message: String) {
     );
 }
 
-async fn conn(state: Arc<State>, stream: TcpStream) {
+async fn conn(state: Arc<State>, stream: TcpStream, slot: Slot) {
     let Ok(dst) = original_dst(&stream) else {
         return;
     };
@@ -96,6 +98,38 @@ async fn conn(state: Arc<State>, stream: TcpStream) {
     };
     let label = name.clone().unwrap_or_else(|| ip.to_string());
 
+    // A tunnel rule for the name and port passes the connection through before a byte is
+    // read: any protocol, including ones whose server speaks first, and TLS a client pins.
+    let port = dst.port();
+    let rule = name.as_deref().and_then(|h| {
+        state
+            .policy()
+            .tunnel_rule(h, port, chrono::Utc::now())
+            .map(|r| (h.to_string(), r.id.clone(), r.rule.allow_private))
+    });
+    if let Some((host, rule_id, allow_private)) = rule {
+        match crate::upstream::dial_tcp(&state, &host, port, allow_private).await {
+            Ok(upstream) => {
+                let _slot = slot;
+                crate::proxy::splice(
+                    state,
+                    stream,
+                    upstream,
+                    host,
+                    port,
+                    rule_id,
+                    Intake::Transparent,
+                )
+                .await;
+            }
+            Err(crate::upstream::DialError::Denied(reason)) => {
+                direct(&state, &label, port, reason.message(&host));
+            }
+            Err(crate::upstream::DialError::Failed(msg)) => direct(&state, &label, port, msg),
+        }
+        return;
+    }
+
     let mut peek = [0u8; 8];
     let n = match tokio::time::timeout(Duration::from_secs(10), stream.peek(&mut peek)).await {
         Ok(Ok(n)) if n > 0 => n,
@@ -116,48 +150,19 @@ async fn conn(state: Arc<State>, stream: TcpStream) {
                 fallback: ip.to_string(),
             },
         };
-        mitm::serve(state, stream, expect, dst.port(), Intake::Transparent).await;
+        mitm::serve(state, stream, expect, dst.port(), Intake::Transparent, slot).await;
         return;
     }
-    // Git over SSH, to hosts `[credentials.ssh]` names (as tunnel rules on their port),
-    // passed through as it is: the vault's agent signs the login, for pinned host keys only.
+    // Git over SSH passes only on the tunnel rules `[credentials.ssh]` compiles (above).
     if peek[..n].starts_with(b"SSH-") {
-        let port = dst.port();
-        let rule = name.as_deref().and_then(|h| {
-            state
-                .policy()
-                .tunnel_rule(h, port, chrono::Utc::now())
-                .map(|r| (h.to_string(), r.id.clone(), r.rule.allow_private))
-        });
-        let Some((host, rule_id, allow_private)) = rule else {
-            direct(
-                &state,
-                &label,
-                port,
-                format!(
-                    "SSH to {label}:{port} was refused; `[credentials.ssh] hosts` lists where git over SSH may go"
-                ),
-            );
-            return;
-        };
-        match crate::upstream::dial_tcp(&state, &host, port, allow_private).await {
-            Ok(upstream) => {
-                crate::proxy::splice(
-                    state,
-                    stream,
-                    upstream,
-                    host,
-                    port,
-                    rule_id,
-                    Intake::Transparent,
-                )
-                .await;
-            }
-            Err(crate::upstream::DialError::Denied(reason)) => {
-                direct(&state, &label, port, reason.message(&host));
-            }
-            Err(crate::upstream::DialError::Failed(msg)) => direct(&state, &label, port, msg),
-        }
+        direct(
+            &state,
+            &label,
+            port,
+            format!(
+                "SSH to {label}:{port} was refused; `[credentials.ssh] hosts` lists where git over SSH may go"
+            ),
+        );
         return;
     }
     if !looks_like_http(&peek[..n]) {
@@ -173,40 +178,45 @@ async fn conn(state: Arc<State>, stream: TcpStream) {
         return;
     }
 
-    let ctx = Arc::new(ConnCtx::new(Intake::Transparent));
-    let port = dst.port();
-    serve_http1(stream, move |req: http::Request<hyper::body::Incoming>| {
-        let state = state.clone();
-        let ctx = ctx.clone();
-        let name = name.clone();
-        async move {
-            let host = match name {
-                Some(n) => Some(n),
-                None => req
-                    .headers()
-                    .get(http::header::HOST)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| split_authority(v).ok())
-                    .map(|(h, _)| h),
-            };
-            let Some(host) = host else {
-                return Ok(respond::plain(
-                    http::StatusCode::BAD_REQUEST,
-                    "luoto gate: request without a Host header\n",
-                ));
-            };
-            handle(
-                state,
-                ctx,
-                req,
-                Target {
-                    host,
-                    port,
-                    tls: false,
-                },
-            )
-            .await
-        }
-    })
+    let ctx = Arc::new(ConnCtx::new(Intake::Transparent, slot));
+    let (activity, lim) = (ctx.activity.clone(), state.cfg.limits);
+    serve_http1(
+        stream,
+        activity,
+        lim,
+        move |req: http::Request<hyper::body::Incoming>| {
+            let state = state.clone();
+            let ctx = ctx.clone();
+            let name = name.clone();
+            async move {
+                let host = match name {
+                    Some(n) => Some(n),
+                    None => req
+                        .headers()
+                        .get(http::header::HOST)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| split_authority(v).ok())
+                        .map(|(h, _)| h),
+                };
+                let Some(host) = host else {
+                    return Ok(respond::plain(
+                        http::StatusCode::BAD_REQUEST,
+                        "luoto gate: request without a Host header\n",
+                    ));
+                };
+                handle(
+                    state,
+                    ctx,
+                    req,
+                    Target {
+                        host,
+                        port,
+                        tls: false,
+                    },
+                )
+                .await
+            }
+        },
+    )
     .await;
 }

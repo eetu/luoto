@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use luoto_shared::{PROXY_PORT, TRANSPARENT_PORT};
 
+use crate::limits::Limits;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub env: String,
@@ -30,6 +32,7 @@ pub struct Config {
     /// Drop to this uid/gid after binding sockets (Linux).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub run_as: Option<u32>,
+    pub limits: Limits,
     #[cfg(feature = "test-hooks")]
     pub test_resolve: Vec<(String, SocketAddr)>,
 }
@@ -88,6 +91,10 @@ impl Config {
                 .map(|v| v.parse())
                 .transpose()
                 .context("LUOTO_RUN_AS")?,
+            #[cfg(not(feature = "test-hooks"))]
+            limits: Limits::default(),
+            #[cfg(feature = "test-hooks")]
+            limits: var("LUOTO_TEST_LIMITS").map_or_else(Limits::default, |v| Limits::parse(&v)),
             #[cfg(feature = "test-hooks")]
             test_resolve: var("LUOTO_TEST_RESOLVE")
                 .map(|v| {

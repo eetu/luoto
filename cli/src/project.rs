@@ -5,14 +5,15 @@
 //! the env's copy, and a `git pull` there brings any commit). So it only proposes: the user
 //! reviews it, luoto keeps the exact accepted text in the env's state, and a changed file
 //! applies only after the user accepts the difference. It cannot hold credentials or secret
-//! refs, and its rules pass the same checks as the sandbox's access requests.
+//! refs, and its rules pass the same checks as the sandbox's access requests. Its denies only
+//! tighten; it can't mute, which would hide denials from the user.
 //! Layering: config.toml < the accepted luoto.toml < the env's own config.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use luoto_shared::policy::{Access, AccessLevel, Mode, Rule, RuleOrigin, rule_error};
+use luoto_shared::policy::{Access, AccessLevel, Deny, Mode, Rule, RuleOrigin, rule_error};
 use luoto_shared::{presets, profiles};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -37,12 +38,14 @@ pub struct ProjectConfig {
     #[serde(default, rename = "allow", skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<Rule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<Deny>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<u16>,
     #[serde(default, skip_serializing_if = "crate::config::Agents::is_empty")]
     pub agents: crate::config::Agents,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "crate::config::is_default")]
     pub deps: Deps,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "crate::config::is_default")]
     pub needs: Needs,
     /// Repositories cloned beside the project in the env, each at `/workspace/<name>`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -86,6 +89,12 @@ pub fn parse(text: &str) -> Result<ProjectConfig> {
             );
         }
     }
+    if table.contains_key("mute") {
+        bail!(
+            "luoto.toml can't hold `mute`: muted denials are hidden from you, so only your own \
+             config mutes"
+        );
+    }
     if table.contains_key("tools") {
         bail!("luoto.toml doesn't take [tools]: pin toolchains in mise.toml or .tool-versions");
     }
@@ -121,6 +130,11 @@ fn validate(p: &ProjectConfig) -> Result<()> {
     for r in &p.allow {
         if let Some(i) = rule_error(r, RuleOrigin::Sandbox) {
             bail!("luoto.toml: allow {}: {}", display(&r.host), i.message);
+        }
+    }
+    for d in &p.deny {
+        if let Err(e) = d.rule() {
+            bail!("luoto.toml: deny {}: {}", display(&d.host), display(&e));
         }
     }
     deps::check(&p.deps, RuleOrigin::Sandbox).context("luoto.toml")?;
@@ -197,6 +211,32 @@ pub fn read_host(dir: &Path) -> Result<Option<String>> {
         bail!("{} is larger than {MAX_BYTES} bytes", path.display());
     }
     Ok(Some(std::fs::read_to_string(&path)?))
+}
+
+/// Write `text` as the project folder's luoto.toml, replacing a regular file there: a new file
+/// renamed into place, so a failed write leaves the old one and no link is written through.
+pub fn write_host(dir: &Path, text: &str) -> Result<()> {
+    let path = dir.join(FILE);
+    if let Ok(meta) = std::fs::symlink_metadata(&path)
+        && !meta.is_file()
+    {
+        bail!("{} is not a regular file", path.display());
+    }
+    let tmp = dir.join(format!(
+        ".{FILE}.{}",
+        hex::encode(rand::random::<[u8; 4]>())
+    ));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()))
+        .and_then(|()| std::fs::rename(&tmp, &path));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("write {}", path.display()));
+    }
+    Ok(())
 }
 
 /// The file as the env's workspace has it now (a `git pull` inside may have changed it):
@@ -286,6 +326,19 @@ pub fn layer(cfg: &mut EnvConfig, p: &ProjectConfig) {
         .collect();
     rules.append(&mut cfg.allow);
     cfg.allow = rules;
+    let mut denies: Vec<Deny> = p
+        .deny
+        .iter()
+        .map(|d| Deny {
+            note: Some(match &d.note {
+                Some(n) => format!("luoto.toml: {}", display(n)),
+                None => "luoto.toml".into(),
+            }),
+            ..d.clone()
+        })
+        .collect();
+    denies.append(&mut cfg.deny);
+    cfg.deny = denies;
     cfg.deps = deps::merged(&p.deps, &cfg.deps);
     for (name, r) in &p.repos {
         // The env's own repo of a name (a folder of yours, say) replaces the project's, also
@@ -306,6 +359,159 @@ pub fn layer(cfg: &mut EnvConfig, p: &ProjectConfig) {
             );
         }
     }
+}
+
+/// A luoto.toml for the team from what an env has: `luoto project suggest`.
+#[derive(Debug)]
+pub struct Suggestion {
+    pub config: ProjectConfig,
+    /// The file: a header comment, then `config`.
+    pub text: String,
+    /// What the env has that the file leaves out, and why, one item each.
+    pub left_out: Vec<String>,
+}
+
+/// The settings `env` works with that a team can share: the accepted luoto.toml's, with the
+/// env's own file (`own`) on top. Rules luoto adds itself (a preset's, an agent's, a
+/// credential's) compile from the config and aren't in it, so none is copied as a rule.
+/// Nothing personal or secret goes in, and the text passes `parse`.
+pub fn suggest(env: &str, own: &EnvConfig, accepted: Option<&ProjectConfig>) -> Result<Suggestion> {
+    let mut p = accepted.cloned().unwrap_or_default();
+    let mut left_out = Vec::new();
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    extend_unique(&mut p.presets, own.presets.iter().cloned());
+    let mut agents = own.agents.clone();
+    agents.layer_under(&p.agents);
+    p.agents = agents;
+    extend_unique(&mut p.ports, own.ports.iter().copied());
+
+    let mut expiring = 0;
+    for r in &own.allow {
+        if r.expires.is_some() {
+            expiring += 1;
+        } else if let Some(i) = rule_error(r, RuleOrigin::Sandbox) {
+            left_out.push(format!("rule {}: {}", display(&r.host), i.message));
+        } else {
+            extend_unique(
+                &mut p.allow,
+                [Rule {
+                    id: None,
+                    ..r.clone()
+                }],
+            );
+        }
+    }
+    if expiring > 0 {
+        left_out.push(format!(
+            "{expiring} expiring rule{} (grants for a while, not for the team)",
+            plural(expiring)
+        ));
+    }
+    extend_unique(&mut p.deny, own.deny.iter().cloned());
+
+    extend_unique(&mut p.deps.system, own.deps.system.iter().cloned());
+    extend_unique(&mut p.deps.run, own.deps.run.iter().cloned());
+    for h in &own.deps.hosts {
+        match rule_error(&Rule::read(h), RuleOrigin::Sandbox) {
+            Some(i) => left_out.push(format!("install host {}: {}", display(h), i.message)),
+            None => extend_unique(&mut p.deps.hosts, [h.clone()]),
+        }
+    }
+
+    let mut folders = Vec::new();
+    for (name, r) in &own.workspace.repos {
+        let Some(url) = r.url.as_ref().filter(|_| r.dir.is_none()) else {
+            if !p.repos.keys().any(|n| n.eq_ignore_ascii_case(name)) {
+                folders.push(display(name));
+            }
+            continue;
+        };
+        if let Err(e) = crate::repos::check_project_url(url) {
+            left_out.push(format!("repo {}: {e:#}", display(name)));
+            continue;
+        }
+        // The env's own repo of a name replaces the project's, as in `layer`.
+        p.repos.retain(|n, _| !n.eq_ignore_ascii_case(name));
+        p.repos.insert(
+            name.clone(),
+            ProjectRepo {
+                url: url.clone(),
+                branch: r.branch.clone(),
+            },
+        );
+    }
+    if !folders.is_empty() {
+        left_out.push(format!(
+            "repo{} {}: your folder{} (a luoto.toml names remotes)",
+            plural(folders.len()),
+            folders.join(", "),
+            plural(folders.len())
+        ));
+    }
+
+    if let Some(i) = own.image.as_ref().filter(|i| p.image.as_ref() != Some(*i)) {
+        left_out.push(format!(
+            "image {}: your env's (`image = …` gives the team one)",
+            display(i)
+        ));
+    }
+    if !own.tools.is_empty() {
+        let tools: Vec<String> = own
+            .tools
+            .iter()
+            .map(|(k, v)| display(&format!("{k} = {v}")))
+            .collect();
+        left_out.push(format!(
+            "toolchain defaults ({}): the project pins toolchains in mise.toml",
+            tools.join(", ")
+        ));
+    }
+    let c = &own.credentials;
+    let mut creds: Vec<String> = Vec::new();
+    if !c.github.is_empty() {
+        creds.push("github".into());
+    }
+    if c.azure_devops.is_some() {
+        creds.push("azure_devops".into());
+    }
+    if c.ssh.is_some() {
+        creds.push("ssh".into());
+    }
+    creds.extend(c.git.iter().map(|g| format!("git {}", display(&g.host))));
+    creds.extend(c.providers.keys().map(|k| display(k)));
+    creds.extend(c.custom.keys().map(|k| format!("custom.{}", display(k))));
+    if !creds.is_empty() {
+        left_out.push(format!(
+            "credentials ({}): each developer's own; [needs] can list what the project expects",
+            creds.join(", ")
+        ));
+    }
+    if !own.sandbox_secrets.is_empty() {
+        let names: Vec<String> = own.sandbox_secrets.keys().map(|k| display(k)).collect();
+        left_out.push(format!(
+            "sandbox secrets ({}): each developer's own; [needs] can list them",
+            names.join(", ")
+        ));
+    }
+    if !own.mute.is_empty() {
+        left_out.push(format!(
+            "{} mute{} (only your own config mutes)",
+            own.mute.len(),
+            plural(own.mute.len())
+        ));
+    }
+
+    let text = format!(
+        "# Suggested by `luoto project suggest` from env `{env}`: the settings it works with that a\n\
+         # team can share. Review it before you commit it: everyone who accepts it allows this.\n\n{}",
+        toml::to_string(&p).context("write the suggested luoto.toml")?
+    );
+    parse(&text).context("the suggested luoto.toml doesn't pass luoto's checks")?;
+    Ok(Suggestion {
+        config: p,
+        text,
+        left_out,
+    })
 }
 
 /// Every setting of a rule, so no change to it can pass the review unseen.
@@ -330,6 +536,9 @@ fn rule_line(r: &Rule) -> String {
     if let Some(m) = r.max_body {
         parts.push(format!("bodies up to {m} bytes"));
     }
+    if let Some(i) = &r.idle {
+        parts.push(format!("silent up to {}", display(i)));
+    }
     if let Some(e) = r.expires {
         parts.push(format!("until {}", e.to_rfc3339()));
     }
@@ -342,6 +551,22 @@ fn rule_line(r: &Rule) -> String {
     format!("{} ({})", display(&r.host), parts.join(", "))
 }
 
+/// Every setting of a deny: what it refuses, and its note.
+pub fn deny_line(d: &Deny) -> String {
+    let mut parts = vec![if d.methods.is_empty() {
+        "every method".to_string()
+    } else {
+        display(&d.methods.join(",").to_uppercase())
+    }];
+    if !d.paths.is_empty() {
+        parts.push(display(&d.paths.join(" ")));
+    }
+    if let Some(n) = &d.note {
+        parts.push(format!("note: {}", display(n)));
+    }
+    format!("{} ({})", display(&d.host), parts.join(", "))
+}
+
 /// Everything accepting `p` sets, as `(label, item)` pairs, egress first.
 fn items(p: &ProjectConfig) -> Vec<(&'static str, String)> {
     let mut out: Vec<(&'static str, String)> = Vec::new();
@@ -350,6 +575,7 @@ fn items(p: &ProjectConfig) -> Vec<(&'static str, String)> {
     };
     add("presets", p.presets.iter().map(|s| display(s)).collect());
     add("allow", p.allow.iter().map(rule_line).collect());
+    add("deny", p.deny.iter().map(deny_line).collect());
     add(
         "install",
         p.deps
@@ -445,7 +671,7 @@ pub fn summary(p: &ProjectConfig) -> Vec<(String, String)> {
 
 /// Settings added (`+`) and removed (`-`) between two versions; a changed setting shows as
 /// both. Complete: two configs with the same lines here are equal.
-fn diff(old: &ProjectConfig, new: &ProjectConfig) -> Vec<String> {
+pub fn diff(old: &ProjectConfig, new: &ProjectConfig) -> Vec<String> {
     let (a, b) = (items(old), items(new));
     let mut out: Vec<String> = b
         .iter()
@@ -663,7 +889,7 @@ pub fn review(ctx: &Ctx, env: &str) -> Result<bool> {
                 println!("applied");
                 return Ok(true);
             }
-            if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            if crate::prompt::interactive() {
                 set_declined(ctx, env, Some(sha(text)))?;
                 println!(
                     "kept the previous settings (`luoto project apply -e {env}` applies it later)"
@@ -718,6 +944,32 @@ mod tests {
         assert!(parse("presets = [\"nope\"]").is_err());
         assert!(parse("image = \"x; rm\"").is_err());
         assert!(parse("[needs]\ngithub = [\"no-slash\"]").is_err());
+    }
+
+    #[test]
+    fn denies_only_tighten_but_mutes_would_hide() {
+        let err = parse("[[mute]]\nhost = \"telemetry.example\"").unwrap_err();
+        assert!(format!("{err:#}").contains("can't hold `mute`"), "{err:#}");
+        assert!(parse("[[deny]]\nhost = \"x.example\"\npaths = [\"v1\"]").is_err());
+        let p = parse(
+            "[[deny]]\nhost = \"registry.npmjs.org\"\nmethods = [\"POST\"]\nnote = \"no audits\"",
+        )
+        .unwrap();
+        let mut cfg = EnvConfig {
+            deny: vec![Deny {
+                host: "mine.example".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        layer(&mut cfg, &p);
+        assert_eq!(cfg.deny.len(), 2);
+        assert_eq!(cfg.deny[0].note.as_deref(), Some("luoto.toml: no audits"));
+        assert_eq!(cfg.deny[1].host, "mine.example");
+        assert_eq!(
+            diff(&ProjectConfig::default(), &p),
+            ["+ deny     registry.npmjs.org (POST, note: no audits)"]
+        );
     }
 
     #[test]
@@ -808,8 +1060,256 @@ credentials = ["anthropic"]
             assert_ne!(a, b);
             assert_eq!(diff(&a, &b).len(), 2, "{extra} must show in the diff");
         }
+        let a = parse("[[deny]]\nhost = \"api.example\"").unwrap();
+        for extra in [
+            "paths = [\"/v1/**\"]",
+            "methods = [\"GET\"]",
+            "note = \"x\"",
+        ] {
+            let b = parse(&format!("[[deny]]\nhost = \"api.example\"\n{extra}")).unwrap();
+            assert_ne!(a, b);
+            assert_eq!(diff(&a, &b).len(), 2, "{extra} must show in the diff");
+        }
         let image = parse("image = \"x\"").unwrap();
         assert_eq!(diff(&ProjectConfig::default(), &image), ["+ image    x"]);
+    }
+
+    const FULL_ENV: &str = r#"
+image = "localhost/mine:dev"
+presets = ["debian", "npm"]
+ports = [5173]
+idle_stop = "2h"
+
+[agents.claude]
+model = "opus"
+
+[tools]
+node = "lts"
+
+[workspace]
+dir = "/home/me/web"
+
+[workspace.repos.api]
+url = "acme/api"
+branch = "dev"
+
+[workspace.repos.lib]
+dir = "/home/me/lib"
+
+[workspace.repos.lan]
+url = "https://10.0.0.5/acme/lan.git"
+
+[[allow]]
+id = "r1a2b3"
+host = "api.stripe.com"
+note = "payments test API"
+
+[[allow]]
+id = "r4"
+host = "docs.example"
+paths = ["/v2/**"]
+note = "approved request #3"
+
+[[allow]]
+host = "grpc.example"
+access = "write"
+mode = "tunnel"
+port = 8443
+
+[[allow]]
+host = "docs.rs"
+expires = "2030-01-01T00:00:00Z"
+
+[[allow]]
+host = "db.example"
+allow_private = true
+
+[[allow]]
+host = "*.workers.dev"
+
+[[allow]]
+host = "10.0.0.0/8"
+
+[[deny]]
+host = "registry.npmjs.org"
+methods = ["POST"]
+
+[[mute]]
+host = "telemetry.example"
+
+[credentials.github]
+token = "op://Dev/gh/token"
+repos = ["acme/web"]
+
+[credentials.azure_devops]
+token = "op://Dev/ado/pat"
+repos = ["acme/Platform/infra"]
+
+[credentials.anthropic]
+oauth_token = "op://Private/claude/token"
+
+[credentials.custom.stripe]
+host = "api.stripe.com"
+secret = "op://Dev/stripe/key"
+
+[sandbox_secrets]
+DATABASE_URL = "op://Dev/db/url"
+
+[env]
+RUST_LOG = "debug"
+
+[deps]
+system = ["libpq-dev"]
+run = ["git config --global pull.rebase true"]
+hosts = ["dl.k8s.io", "*"]
+"#;
+
+    #[test]
+    fn a_suggestion_parses_as_a_luoto_toml_and_keeps_nothing_personal() {
+        let own: EnvConfig = toml::from_str(FULL_ENV).unwrap();
+        let s = suggest("web", &own, None).unwrap();
+        assert_eq!(parse(&s.text).unwrap(), s.config);
+        assert!(
+            s.text
+                .starts_with("# Suggested by `luoto project suggest` from env `web`")
+        );
+        for secret in [
+            "op://",
+            "DATABASE_URL",
+            "RUST_LOG",
+            "telemetry",
+            "/home/me",
+            "10.0.",
+        ] {
+            assert!(!s.text.contains(secret), "{secret} in:\n{}", s.text);
+        }
+        let p = &s.config;
+        assert_eq!(p.presets, ["debian", "npm"]);
+        assert_eq!(p.ports, [5173]);
+        assert_eq!(
+            p.agents.get("claude").unwrap().model.as_deref(),
+            Some("opus")
+        );
+        assert_eq!(p.image, None);
+        // Only the rules written in the env; none a credential or preset compiles to.
+        let hosts: Vec<&str> = p.allow.iter().map(|r| r.host.as_str()).collect();
+        assert_eq!(hosts, ["api.stripe.com", "docs.example", "grpc.example"]);
+        assert!(p.allow.iter().all(|r| r.id.is_none()));
+        assert_eq!(p.allow[1].note.as_deref(), Some("approved request #3"));
+        assert_eq!(p.allow[2].mode, Mode::Tunnel);
+        assert_eq!(p.deny.len(), 1);
+        assert_eq!(p.deps.hosts, ["dl.k8s.io"]);
+        assert_eq!(p.deps.run.len(), 1);
+        assert_eq!(p.repos.keys().collect::<Vec<_>>(), ["api"]);
+        assert_eq!(p.repos["api"].branch.as_deref(), Some("dev"));
+        assert_eq!(p.needs, Needs::default());
+        let out = s.left_out.join("\n");
+        for said in [
+            "1 expiring rule ",
+            "rule db.example: allows dialing private",
+            "rule *.workers.dev:",
+            "rule 10.0.0.0/8:",
+            "install host *:",
+            "repo lib: your folder",
+            "repo lan:",
+            "image localhost/mine:dev",
+            "toolchain defaults (node = \"lts\")",
+            "credentials (github, azure_devops, anthropic, custom.stripe)",
+            "sandbox secrets (DATABASE_URL)",
+            "1 mute ",
+        ] {
+            assert!(out.contains(said), "`{said}` not in:\n{out}");
+        }
+    }
+
+    #[test]
+    fn a_suggestion_keeps_the_accepted_luoto_toml_under_the_envs_own() {
+        let accepted = parse(
+            r#"presets = ["npm"]
+image = "ghcr.io/acme/dev:1"
+[[allow]]
+host = "api.stripe.com"
+note = "payments test API"
+[agents.claude]
+model = "sonnet"
+effort = "high"
+[deps]
+run = ["make setup"]
+[needs]
+credentials = ["anthropic"]
+[repos.api]
+url = "acme/api"
+[repos.web]
+url = "acme/web"
+"#,
+        )
+        .unwrap();
+        let own: EnvConfig = toml::from_str(
+            r#"presets = ["debian", "npm"]
+[agents.claude]
+model = "opus"
+[[allow]]
+id = "r1"
+host = "api.stripe.com"
+note = "payments test API"
+[[allow]]
+id = "r2"
+host = "pypi.org"
+[deps]
+run = ["make setup"]
+[workspace.repos.API]
+dir = "/home/me/api"
+[workspace.repos.WEB]
+url = "acme/web"
+branch = "next"
+"#,
+        )
+        .unwrap();
+        let s = suggest("web", &own, Some(&accepted)).unwrap();
+        let p = &s.config;
+        assert_eq!(p.presets, ["npm", "debian"]);
+        assert_eq!(p.image.as_deref(), Some("ghcr.io/acme/dev:1"));
+        let claude = p.agents.get("claude").unwrap();
+        assert_eq!(claude.model.as_deref(), Some("opus"));
+        assert_eq!(claude.effort.as_deref(), Some("high"));
+        assert_eq!(p.allow.len(), 2);
+        assert_eq!(p.deps.run, ["make setup"]);
+        assert_eq!(p.needs.credentials, ["anthropic"]);
+        assert_eq!(p.repos.keys().collect::<Vec<_>>(), ["WEB", "api"]);
+        assert_eq!(p.repos["WEB"].branch.as_deref(), Some("next"));
+        assert!(s.left_out.is_empty(), "{:?}", s.left_out);
+        assert_eq!(
+            diff(&accepted, p),
+            [
+                "+ presets  debian",
+                "+ allow    pypi.org (read)",
+                "+ agents   claude (model opus, effort high)",
+                "+ repos    WEB cloned from acme/web (next)",
+                "- agents   claude (model sonnet, effort high)",
+                "- repos    web cloned from acme/web",
+            ]
+        );
+        assert_eq!(
+            suggest("web", &EnvConfig::default(), None).unwrap().config,
+            ProjectConfig::default()
+        );
+    }
+
+    #[test]
+    fn a_suggestion_is_written_in_place_never_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        write_host(dir.path(), "presets = [\"npm\"]\n").unwrap();
+        write_host(dir.path(), "ports = [5173]\n").unwrap();
+        assert_eq!(read_host(dir.path()).unwrap().unwrap(), "ports = [5173]\n");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            let other = tempfile::tempdir().unwrap();
+            std::fs::create_dir(other.path().join("target")).unwrap();
+            std::os::unix::fs::symlink(other.path().join("target"), other.path().join(FILE))
+                .unwrap();
+            assert!(write_host(other.path(), "x = 1\n").is_err());
+        }
     }
 
     #[test]

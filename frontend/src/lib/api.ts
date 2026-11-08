@@ -3,17 +3,29 @@
 
 import type {
   AccessRequest,
+  Approved,
+  CreatedEnv,
+  Decision,
   EnvDetail,
   HostSummary,
+  InstallOutput,
   LuotoEvent,
   Meta,
+  Narrowing,
+  NewEnv,
+  NewRule,
   Overview,
+  ProjectAction,
   ProjectStatus,
   Proposal,
+  PullApply,
+  Pulled,
   PullPlans,
+  Reloaded,
   Rule,
   SelftestReport,
   SetupInfo,
+  Shown,
 } from "./types";
 
 const TOKEN_KEY = "luoto:token";
@@ -49,7 +61,11 @@ function token(): string {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T, B = Record<string, never>>(
+  method: string,
+  path: string,
+  body?: B,
+): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method,
     headers: {
@@ -84,20 +100,13 @@ export const api = {
   overview: () => request<Overview>("GET", "/overview"),
   meta: () => request<Meta>("GET", "/meta"),
   setup: () => request<SetupInfo>("GET", "/setup"),
-  setupInstall: () => request<{ output: string }>("POST", "/setup/install", {}),
-  createEnv: (body: {
-    name?: string;
-    dir?: string;
-    presets: string[];
-    agents: string[];
-    ports: number[];
-    project_sha?: string;
-  }) => request<{ name: string }>("POST", "/envs", body),
-  detect: (body: { name?: string; dir?: string }) => request<Proposal>("POST", "/detect", body),
+  setupInstall: () => request<InstallOutput>("POST", "/setup/install", {}),
+  createEnv: (body: NewEnv) => request<CreatedEnv, NewEnv>("POST", "/envs", body),
+  detect: (body: NewEnv) => request<Proposal, NewEnv>("POST", "/detect", body),
   env: (name: string) => request<EnvDetail>("GET", env(name)),
   projectStatus: (name: string) => request<ProjectStatus>("GET", `${env(name)}/project`),
   projectAction: (name: string, action: "accept" | "forget", sha?: string) =>
-    request<ProjectStatus>("POST", `${env(name)}/project`, { action, sha }),
+    request<ProjectStatus, ProjectAction>("POST", `${env(name)}/project`, { action, sha }),
   egress: (name: string, minutes: number) =>
     request<HostSummary[]>("GET", `${env(name)}/egress?minutes=${minutes}`),
   events: (name: string, host: string, minutes: number) =>
@@ -107,18 +116,19 @@ export const api = {
     ),
   requests: (name: string) => request<AccessRequest[]>("GET", `${env(name)}/requests`),
   // `created` names the request shown: the gate numbers requests anew when it restarts.
-  approve: (name: string, req: AccessRequest, ttl?: string, force = false) =>
-    request<Rule | { installed: string }>("POST", `${env(name)}/requests/${req.id}/approve`, {
+  approve: (name: string, req: AccessRequest, ttl?: string, force = false, narrow?: Narrowing) =>
+    request<Approved, Decision>("POST", `${env(name)}/requests/${req.id}/approve`, {
       created: req.created,
       ttl,
       force,
+      narrow,
     }),
   reject: (name: string, req: AccessRequest) =>
-    request<AccessRequest>("POST", `${env(name)}/requests/${req.id}/reject`, {
+    request<AccessRequest, Shown>("POST", `${env(name)}/requests/${req.id}/reject`, {
       created: req.created,
     }),
   addRule: (name: string, rule: Rule, force = false) =>
-    request<Rule>("POST", `${env(name)}/rules`, { rule, force }),
+    request<Rule, NewRule>("POST", `${env(name)}/rules`, { rule, force }),
   deleteRule: (name: string, id: string) =>
     request<number>("DELETE", `${env(name)}/rules/${encodeURIComponent(id)}`),
   action: (name: string, action: "up" | "down" | "rebuild") =>
@@ -126,13 +136,12 @@ export const api = {
   selftest: (name: string) => request<SelftestReport>("POST", `${env(name)}/selftest`, {}),
   pullPlan: (name: string) => request<PullPlans>("GET", `${env(name)}/pull`),
   pull: (name: string, digest: string, includeRisky: boolean) =>
-    request<{ written: number; skipped: number }>("POST", `${env(name)}/pull`, {
+    request<Pulled, PullApply>("POST", `${env(name)}/pull`, {
       digest,
       include_risky: includeRisky,
     }),
   vault: (action: "unlock" | "lock") => request<unknown>("POST", `/vault/${action}`, {}),
-  reloadVault: () =>
-    request<{ read: number; changed: number; failed: string[] }>("POST", "/vault/reload", {}),
+  reloadVault: () => request<Reloaded>("POST", "/vault/reload", {}),
 };
 
 /** Follow the live event stream (fetch-based SSE, so the token can travel in a header). */

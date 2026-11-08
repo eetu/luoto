@@ -1,4 +1,6 @@
-{
+import type { Meta } from "../../src/lib/types";
+
+export default {
   "agents": [
     { "description": "Claude Code", "name": "claude" },
     { "description": "OpenCode", "name": "opencode" },
@@ -35,4 +37,4 @@
       "name": "composer"
     }
   ]
-}
+} satisfies Meta;

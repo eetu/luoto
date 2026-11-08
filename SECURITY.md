@@ -18,9 +18,12 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 
 - **Network.** The dev container sits on an internal network with no route out. Its default
   route and resolver are the env's gate. The gate is the only egress: HTTP(S) is inspected
-  (per-env CA, key only in the gate) and checked against a default-deny policy of host, port,
-  method, path, body size and expiry. Non-HTTP TCP goes nowhere except through tunnel rules
-  you grant (`luoto allow --tunnel`, a host and port) and SSH to the hosts an SSH credential
+  (per-env CA, key only in the gate, renewed by `up` 60 days before its two years end) and
+  checked against a default-deny policy of host, port, method, path, body size and expiry;
+  explicit denies, luoto's and the user's `[[deny]]`, beat
+  every allow. Non-HTTP TCP goes nowhere except through tunnel rules
+  you grant (`luoto allow --tunnel`, a host and port, or an approved port request, after you
+  confirm it goes uninspected) and SSH to the hosts an SSH credential
   names, on port 22; both pass through uninspected. UDP goes nowhere. DNS is answered locally
   with fake addresses and never forwarded. Destinations are resolved by the gate only after a
   request is allowed, every resolved address is checked against private, loopback,
@@ -94,8 +97,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   strict CSP.
 - **Project settings.** A repository's `luoto.toml` is untrusted input: it applies only in the
   exact version the user accepted, never carries credentials or secret refs, and its rules
-  pass the sandbox's own request checks. luoto reads it as the unprivileged user, refuses
-  symlinks and caps its size.
+  pass the sandbox's own request checks. Its denies only tighten; it can't mute denials,
+  which would hide what code from the repository tries. luoto reads it as the unprivileged
+  user, refuses symlinks and caps its size.
 - **Self-test.** `luoto up` verifies from inside, whenever a container restarts (skip with
   `--no-selftest`), that raw-IP TCP, UDP and DNS cannot leave before any secret, dotfile or SSH
   key enters the env; an env that fails is stopped.
@@ -116,6 +120,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   spent by anything in the sandbox. Anthropic's, OpenAI's and Gemini's file and batch
   endpoints are denied, and so are requests asking them to fetch a URL or call an MCP server
   (unless `server_tools = true`); the other providers' are not.
+- **Exhausting the gate.** Code in the sandbox can hold the gate's 1024 connections and
+  so stop the env's own traffic, which it could break anyway; other envs have their own gates.
+  The event queue, cached certificates and the logs of the gate, the vault and the dev container
+  (which root in the sandbox can write to) stay bounded; Docker keeps its daemon's log settings.
 - **Container or VM escape.** An exploit that escapes gVisor (or a plain container) lands in
   luoto's VM as the env's own unprivileged IDs; one more kernel exploit there reaches the other
   envs and the vault, which share the VM, and through podman's network helper also the
@@ -129,6 +137,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   sandbox. Ports already taken on the host are never taken over: a port anything on this
   machine answers on at localhost is skipped. `luoto ui` defaults to a port outside the range,
   so no env can serve a page on its origin. `auto_forward = false` turns this off.
+- **Notifications.** A desktop notification shows the host and reason of a request, and a
+  denied host, as the sandbox wrote them: control and format characters become spaces, the
+  text is capped, and it reaches the notifier as an argument, never as script. Denials notify
+  at most twice a minute per env. The UI's browser notifications carry no sandbox text.
 - **IDE attachment.** VS Code's host-side client talks to the server in the container; UI
   extensions run on the host. Keep host-side extensions minimal.
 - **SSH logins relayed out.** The vault checks that a session is bound to a pinned host key,
@@ -140,10 +152,12 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   checked to stay in the folder as written, but it can lead through another link (one on the
   host, or one the same pull writes) that points elsewhere.
 - **Social engineering.** Access requests are written by code in the sandbox. Read the host
-  and access, not the reason. An install request names a package or toolchain the gate has
-  checked to be a plain name; approving it runs that package's install scripts as root inside
-  the env (still the sandbox), and its downloads take the env's usual presets and install
-  windows.
+  and access, not the reason; grant less than asked where that will do (`luoto approve --read`,
+  `--path`). A request can't name an address range or a private address, and one for a port
+  is an uninspected tunnel to that host and port, never 80 or 443. An install request names a
+  package or toolchain the gate has checked to be a plain name; approving it runs that
+  package's install scripts as root inside the env (still the sandbox), and its downloads take
+  the env's usual presets and install windows.
 - **Images.** Release images are pinned by digest in the binary; images from
   `luoto setup --build` are as trustworthy as your source tree.
 - **Install windows.** The project's version files, which the sandbox controls, decide which

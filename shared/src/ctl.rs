@@ -90,6 +90,10 @@ impl CtlResponse {
 pub struct GateStatus {
     pub rules: usize,
     pub ca_installed: bool,
+    /// SHA-256 (hex) of the installed CA certificate's PEM text: the host installs the env's
+    /// CA again when it differs, as after a renewal.
+    #[serde(default)]
+    pub ca_pem_sha256: Option<String>,
     pub vault_configured: bool,
     pub pending_requests: usize,
 }

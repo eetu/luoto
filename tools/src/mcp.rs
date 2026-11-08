@@ -10,8 +10,8 @@ use luoto_shared::api::SandboxStatus;
 use serde_json::{Value, json};
 
 use crate::{
-    check_url, describe, describe_check, gate, parse_tool, render_status, request_access,
-    request_install,
+    check_url, describe, describe_check, gate, parse_target, parse_tool, render_status,
+    request_access, request_install,
 };
 
 const INSTRUCTIONS: &str = "You are inside a luoto sandbox: network egress is filtered by a \
@@ -48,11 +48,12 @@ fn tools() -> Value {
         },
         {
             "name": "sandbox_request_access",
-            "description": "Ask the user to allow egress to a host, or to add one of luoto's presets (a registry's hosts, e.g. npm). Only the user can approve, on the host. Use the narrowest access: read unless writes are required; one exact host.",
+            "description": "Ask the user to allow egress to a host, or to add one of luoto's presets (a registry's hosts, e.g. npm). Only the user can approve, on the host. Use the narrowest access: read unless writes are required; one exact host. For a protocol other than HTTP(S), such as a database, give its port: approved, that host and port get an uninspected tunnel, and clients connect to them as they are.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "host": {"type": "string", "description": "Exact host, e.g. docs.rs"},
+                    "port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Only for a protocol other than HTTP(S): its port, never 80 or 443"},
                     "preset": {"type": "string", "description": "Instead of a host, one of luoto's presets for a registry or service: npm, pypi, crates, go, maven, …"},
                     "access": {"type": "string", "enum": ["read", "write"], "default": "read"},
                     "paths": {"type": "array", "items": {"type": "string"}, "description": "Optional path globs, e.g. /serde/**"},
@@ -130,10 +131,26 @@ fn call(name: &str, args: &Value) -> Value {
                 .unwrap_or_default();
             let wait = args["wait_seconds"].as_u64().unwrap_or(0).min(900);
             let wait = (wait > 0).then(|| Duration::from_secs(wait));
-            Ok(match request_access(host, write, paths, reason, wait) {
-                Ok(o) => text(describe(&o), false),
-                Err(e) => text(format!("request refused: {e:#}"), true),
-            })
+            let (host, in_host) = parse_target(host)?;
+            let port = match (args["port"].as_u64(), in_host) {
+                (None, port) => port,
+                (Some(p), None) => Some(
+                    u16::try_from(p)
+                        .ok()
+                        .filter(|p| *p != 0)
+                        .ok_or_else(|| anyhow::anyhow!("`{p}` is not a port (1-65535)"))?,
+                ),
+                (Some(p), Some(q)) if p == u64::from(q) => Some(q),
+                (Some(_), Some(_)) => {
+                    return Ok(text("`host` names another port than `port`".into(), true));
+                }
+            };
+            Ok(
+                match request_access(&host, port, write, paths, reason, wait) {
+                    Ok(o) => text(describe(&o), false),
+                    Err(e) => text(format!("request refused: {e:#}"), true),
+                },
+            )
         }
         "sandbox_request_install" => {
             let reason = args["reason"].as_str().unwrap_or_default();

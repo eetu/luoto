@@ -69,6 +69,10 @@ format:
 test:
     cargo test --workspace
 
+# Generate the UI's TypeScript types from the API's Rust types (`cargo test` checks them).
+types:
+    LUOTO_WRITE_TYPES=1 cargo test -p luoto --test api_types
+
 # Gate + vault integration tests (spawned binaries, local test upstreams).
 it:
     cargo test -p luoto-integration -- --ignored --test-threads=1

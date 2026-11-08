@@ -23,6 +23,7 @@ use crate::config::{Deps, EnvConfig, EnvFile, extend_unique};
 use crate::connect::LOGIN;
 use crate::detect::{self, DEPTH, Detected, IDIOMATIC_TOOLS, SKIP_DIRS};
 use crate::env::{Ctx, UID};
+use crate::logs::InstallLog;
 use crate::prompt::confirm;
 use crate::workspace::{self, Oversize};
 use crate::{events, names, sync};
@@ -35,7 +36,9 @@ const VERSION: u32 = 2;
 const SYSTEM: &str = r#"set -e
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -q
+  # A source the env doesn't allow (luoto-base lists cli.github.com) fails the update; apt
+  # leaves that source out and installs from the rest.
+  apt-get update -q || echo "luoto: a package source could not be read; using the others" >&2
   apt-get install -y -q --no-install-recommends "$@"
 elif command -v apk >/dev/null 2>&1; then
   apk add --no-cache "$@"
@@ -227,6 +230,7 @@ struct Env<'a> {
     home: &'a str,
     /// `HOME=<home>`, for exec.
     home_env: String,
+    log: InstallLog,
 }
 
 impl<'a> Env<'a> {
@@ -236,6 +240,7 @@ impl<'a> Env<'a> {
             dev: names::dev(env),
             home_env: format!("HOME={home}"),
             home,
+            log: InstallLog::new(&ctx.paths, env),
         }
     }
 
@@ -257,7 +262,9 @@ impl<'a> Env<'a> {
     }
 
     fn step(&self, args: &[&str], what: &str) -> Result<()> {
-        if !self.ctx.rt.interactive(args)?.success() {
+        let status = self.log.run(&self.ctx.rt, args)?;
+        if !status.success() {
+            self.log.note(&format!("{what} failed ({status})"));
             bail!("{what} failed");
         }
         Ok(())
@@ -422,11 +429,19 @@ fn run_job(e: &Env, d: &Deps, job: &mut Job) -> Result<()> {
     Ok(())
 }
 
-/// Hosts the gate denied for this env since `since`, as install-grant candidates.
-fn denied_since(ctx: &Ctx, env: &str, since: chrono::DateTime<Utc>) -> Vec<String> {
+/// Hosts the gate denied for this env since `since`, as install-grant candidates: neither a
+/// muted denial nor an explicit deny's, which no grant lifts.
+fn denied_since(
+    ctx: &Ctx,
+    env: &str,
+    since: chrono::DateTime<Utc>,
+    mutes: &events::Mutes,
+) -> Vec<String> {
     let since = (since - TimeDelta::seconds(5)).to_rfc3339();
-    let evs = events::gate_events(&ctx.rt, env, Some(&since)).unwrap_or_default();
-    events::summarize(&evs)
+    let mut evs = events::gate_events(&ctx.rt, env, Some(&since)).unwrap_or_default();
+    mutes.hide(&mut evs);
+    evs.retain(|e| e.reason.as_deref() != Some("explicit"));
+    events::summarize(&evs, mutes)
         .into_iter()
         .filter(|s| s.denied > 0 && host_issue(&s.host, RuleOrigin::Sandbox).is_none())
         .map(|s| s.host)
@@ -439,6 +454,7 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
     let d = merged(&ctx.global.deps, &cfg.deps);
     check(&d, RuleOrigin::Host)?;
     let e = Env::new(ctx, env, home);
+    let mutes = events::Mutes::new(&cfg.mute);
     let tools = tools_for(ctx, cfg);
     let found = e.probe()?;
     let missing = if found.mise {
@@ -498,8 +514,8 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
             .chain(hosts.iter())
             .map(String::as_str)
             .collect();
-        println!(
-            "installing in `{env}`: {}{}…",
+        let what = format!(
+            "installing in `{env}`: {}{}",
             job.describe(),
             if access.is_empty() {
                 String::new()
@@ -507,6 +523,8 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
                 format!(" (temporary access: {})", access.join(", "))
             }
         );
+        println!("{what}…");
+        e.log.note(&what);
         let since = Utc::now();
         let res = sync::with_grants(
             ctx,
@@ -517,14 +535,16 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
             || run_job(&e, &d, &mut job),
         )?;
         let Err(err) = res else { break };
-        let denied: Vec<String> = denied_since(ctx, env, since)
+        let denied: Vec<String> = denied_since(ctx, env, since, &mutes)
             .into_iter()
             .filter(|h| !hosts.contains(h))
             .collect();
         if denied.is_empty() {
             return Err(err);
         }
-        println!("the install was denied: {}", denied.join(", "));
+        let note = format!("the install was denied: {}", denied.join(", "));
+        println!("{note}");
+        e.log.note(&note);
         if asked
             || !confirm(&format!(
                 "Allow them for installs in `{env}` (saved to [deps] hosts) and retry?"
@@ -554,6 +574,7 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
         ])?;
     }
     println!("installed");
+    e.log.note("installed");
     Ok(())
 }
 
