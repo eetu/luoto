@@ -944,8 +944,9 @@ fn hint(
         ""
     };
     Some(format!(
-        "To fetch and push from the env, give it HTTPS credentials (`luoto edit -e {env}`, or \
-         `luoto up` on a terminal asks); each reaches only the repos it lists:\n\n{}{ssh_note}",
+        "Public repos need none of these. For a private one, or to push from the env, give it \
+         HTTPS credentials (`luoto edit -e {env}`, or `luoto up` on a terminal asks); each \
+         reaches only the repos it lists:\n\n{}{ssh_note}",
         blocks
             .iter()
             .map(|b| format!("  {}", b.replace('\n', "\n  ")))
