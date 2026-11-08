@@ -88,6 +88,10 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   format and `--fix` rewrites them (a copy kept); a `luoto.toml` is only shown as a diff for
   the team to commit. Unknown keys stay errors.
 - `personal.rs` data only flows host → sandbox, on every `up`.
+- `archive.rs` is the file `luoto export` writes and `luoto import` reads (`transfer.rs`):
+  untrusted input, so every entry is decoded, checked and written anew. Volume contents move
+  only through a container in the env's user namespace (`env::dev_id_map`), never onto the
+  host; secrets, the CA and the vault token never go in.
 - `ssh.rs` owns `<config>/ssh_config`; never edit the user's `~/.ssh/config`.
 - Secret values never touch disk or argv: host resolves refs and pipes them over `exec -i`
   stdin to the vault. Per-run env for the sandbox goes to its `/run/luoto` tmpfs.

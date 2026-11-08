@@ -108,11 +108,8 @@ fn ensure_images(ctx: &Ctx, dev: &str) -> Result<ImageIds> {
     let (ids, pulled) = match image_ids(&ctx.rt, &all) {
         Some(ids) => (ids, false),
         None => {
-            for img in all.iter().filter(|img| !ctx.rt.image_exists(img)) {
-                if img.starts_with("localhost/") {
-                    bail!("missing image {img}: a local image (`luoto setup` builds luoto's own)");
-                }
-                ctx.rt.pull(img)?;
+            for img in &all {
+                ensure_image(ctx, img)?;
             }
             let ids = image_ids(&ctx.rt, &all).context("inspect the env's images")?;
             (ids, true)
@@ -126,6 +123,32 @@ fn ensure_images(ctx: &Ctx, dev: &str) -> Result<ImageIds> {
         dev,
         pulled,
     })
+}
+
+/// `image`, pulled (with progress) when missing. A local image (`localhost/…`, a source
+/// build's) can't be pulled.
+pub fn ensure_image(ctx: &Ctx, image: &str) -> Result<()> {
+    if ctx.rt.image_exists(image) {
+        return Ok(());
+    }
+    if image.starts_with("localhost/") {
+        bail!("missing image {image}: a local image (`luoto setup` builds luoto's own)");
+    }
+    ctx.rt.pull(image)
+}
+
+/// Create the env's volume `what` (`work`, `home`, …) unless it exists; true when it was
+/// created.
+pub fn create_volume(ctx: &Ctx, env: &str, what: &str) -> Result<bool> {
+    ctx.rt
+        .create_volume(&names::volume(env, what), &labels(env, what))
+}
+
+/// Where the user namespace of env `octet`'s dev container starts. In luoto's VM each env's
+/// dev container has its own ID range, and its root is not the VM user that owns podman (so
+/// not the vault's or other envs' owner either).
+pub fn dev_id_map(rt: &Runtime, octet: u8) -> Option<u32> {
+    machine::is_luoto(rt.connection.as_deref()).then(|| machine::dev_id_start(octet))
 }
 
 pub fn ensure_vault(ctx: &Ctx) -> Result<()> {
@@ -440,9 +463,9 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     rt.create_bridge_network(&names::egress_net(env), &labels(env, "net"))?;
     // The workspace is filled once per volume: the host remembers that it did, but a volume
     // created now (a new VM, a removed volume) starts empty whatever the host remembers.
-    let fresh_work = rt.create_volume(&names::volume(env, "work"), &labels(env, "work"))?;
+    let fresh_work = create_volume(ctx, env, "work")?;
     for v in ["home", "gate"] {
-        rt.create_volume(&names::volume(env, v), &labels(env, v))?;
+        create_volume(ctx, env, v)?;
     }
     populate_tools(ctx, env, &state, &ids.tools, &env_ca.cert_pem)?;
 
@@ -852,10 +875,7 @@ fn dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &str) ->
         } else {
             Vec::new()
         },
-        // In luoto's VM each env's dev container has its own ID range, and its root is not
-        // the VM user that owns podman (so not the vault's or other envs' owner either).
-        id_map: machine::is_luoto(rt.connection.as_deref())
-            .then(|| machine::dev_id_start(state.octet)),
+        id_map: dev_id_map(rt, state.octet),
         // init.sh comes from the tools image and runs only at container start, so a new
         // tools image makes the container's spec stale.
         labels: [

@@ -618,12 +618,7 @@ impl Runtime {
                     a.extend(["--runtime".into(), r.clone()]);
                 }
             }
-            Flavor::Podman => {
-                if let Some(start) = spec.id_map {
-                    let map = format!("0:{start}:{}", crate::machine::ID_RANGE);
-                    a.extend(["--uidmap".into(), map.clone(), "--gidmap".into(), map]);
-                }
-            }
+            Flavor::Podman => a.extend(self.id_map_args(spec.id_map)),
         }
         // Podman takes `max-size` with every log driver (journald keeps its own bounds).
         if let Some(mb) = spec.log_mb
@@ -643,6 +638,18 @@ impl Runtime {
         a.push(spec.image.clone());
         a.extend(spec.cmd.iter().cloned());
         a
+    }
+
+    /// Podman's flags that map container IDs 0..65536 to `start` onward ([`RunSpec::id_map`]);
+    /// none for Docker.
+    pub fn id_map_args(&self, start: Option<u32>) -> Vec<String> {
+        match (self.flavor, start) {
+            (Flavor::Podman, Some(start)) => {
+                let map = format!("0:{start}:{}", crate::machine::ID_RANGE);
+                vec!["--uidmap".into(), map.clone(), "--gidmap".into(), map]
+            }
+            _ => Vec::new(),
+        }
     }
 
     pub fn create_and_start(&self, spec: &RunSpec) -> Result<()> {

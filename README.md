@@ -175,6 +175,7 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | image or config changes applied (volumes are kept)                                                   | `luoto up --recreate`                                                                                                              |
 | a fresh home: dotfiles, shell history, agents' logins and state, toolchains (the workspace stays)    | `luoto reset-home`                                                                                                                 |
 | to stop an env, or delete it with its volumes and config (your folder stays)                         | `luoto down` (`--all`: every env)<br>`luoto rm`                                                                                    |
+| an env in another luoto (a source build's in the release) or on another machine, in one file         | `luoto export` (`--no-home`)<br>`luoto import web.luoto.tar`                                                                       |
 | the env back after a reboot or an idle stop (unlocks the vault if needed)                            | `luoto up` (`--all`: every env)<br>`luoto vault unlock`                                                                            |
 | a secret you rotated in your secret store, in use                                                    | `luoto vault reload` (`-e <env>` for one env's)                                                                                    |
 | the gate's log, the background watcher's, or what the env's installs printed                         | `luoto logs`<br>`luoto logs watcher`<br>`luoto logs installs -f`                                                                   |
@@ -727,7 +728,9 @@ A source build runs as `luoto-dev`, beside a release in the same VM: its config 
 keeps new keychain entries under `luoto-dev`, and serves `luoto ui` on port 47879;
 `luoto-dev uninstall` removes only what it made, and `luoto-dev prune` only its superseded
 builds and older build cache. Its tab completion calls `luoto-dev`;
-`just link-dev` links that name to the checkout's debug build.
+`just link-dev` links that name to the checkout's debug build. `luoto-dev export -e web`, then
+`luoto import web.luoto.tar`, moves its env `web` to the release
+([docs/guides/moving-envs.md](docs/guides/moving-envs.md)).
 
 Tab completion covers commands, flags, env names, agents, editors and presets. Homebrew
 installs it; otherwise add one line to your shell's startup file:

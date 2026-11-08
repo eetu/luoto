@@ -274,12 +274,12 @@ pub fn read_env(ctx: &Ctx, env: &str) -> Result<Option<String>> {
 }
 
 /// The accepted text.
-fn snapshot_path(ctx: &Ctx, env: &str) -> PathBuf {
+pub fn snapshot_path(ctx: &Ctx, env: &str) -> PathBuf {
     ctx.paths.env_state(env).join("project.toml")
 }
 
 /// `sha` of a text the user declined, so it isn't offered again.
-fn declined_path(ctx: &Ctx, env: &str) -> PathBuf {
+pub fn declined_path(ctx: &Ctx, env: &str) -> PathBuf {
     ctx.paths.env_state(env).join("project.declined")
 }
 

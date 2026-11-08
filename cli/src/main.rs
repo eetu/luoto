@@ -2,6 +2,7 @@
 //! way out is a policy gate you control; secrets stay in a vault outside the sandbox.
 
 mod agents;
+mod archive;
 mod azure;
 mod azure_identity;
 mod ca;
@@ -39,6 +40,7 @@ mod ssh;
 mod state;
 mod sync;
 mod text;
+mod transfer;
 mod ui;
 mod uninstall;
 mod upgrade;
@@ -141,6 +143,30 @@ enum Cmd {
     /// Discard the env's home (dotfiles, shell history, agents' logins and state, toolchains)
     /// and recreate its dev container with an empty one; the workspace stays.
     ResetHome {
+        /// Don't ask first.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Write the env to one file, to import into another luoto (a source build's into the
+    /// release, say) or on another machine: its config, workspace and home; secrets stay refs.
+    /// A running env is stopped first, after asking.
+    Export {
+        /// The archive (default: <env>.luoto.tar here; in a folder, that name there).
+        file: Option<String>,
+        /// Leave the home out: the imported env starts with a new one.
+        #[arg(long)]
+        no_home: bool,
+        /// Stop a running env without asking.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Make an env from a file `luoto export` wrote, with its own subnet, CA and vault token;
+    /// `luoto up` starts it.
+    Import {
+        file: String,
+        /// Its name here (default: the one it had).
+        #[arg(long)]
+        name: Option<String>,
         /// Don't ask first.
         #[arg(long, short)]
         yes: bool,
@@ -478,6 +504,13 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Down { all: false } => c::down(&env()?),
         Cmd::Rm { yes } => c::rm(&env()?, yes),
         Cmd::ResetHome { yes } => c::reset_home(&env()?, yes),
+        Cmd::Export { file, no_home, yes } => {
+            transfer::export(&env()?, file.as_deref(), no_home, yes)
+        }
+        Cmd::Import { .. } if env_arg.is_some() => {
+            anyhow::bail!("`import` names the env with --name, not -e")
+        }
+        Cmd::Import { file, name, yes } => transfer::import(&file, name.as_deref(), yes),
         Cmd::Ls { size } => c::ls(size),
         Cmd::Status { json, size } => c::status(&env()?, json, size),
         Cmd::Edit => c::edit(&env()?),
@@ -698,6 +731,30 @@ mod tests {
         assert!(matches!(
             parse(&["list", "--size"]).cmd,
             Cmd::Ls { size: true }
+        ));
+    }
+
+    #[test]
+    fn import_names_its_env_with_name_and_export_takes_a_file() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat()).unwrap();
+        let cli = parse(&["import", "web.luoto.tar", "-e", "web"]);
+        let e = run(cli.env, cli.cmd).unwrap_err().to_string();
+        assert!(e.contains("--name, not -e"), "{e}");
+        assert!(matches!(
+            parse(&["import", "web.luoto.tar", "--name", "api", "-y"]).cmd,
+            Cmd::Import { name: Some(n), yes: true, .. } if n == "api"
+        ));
+        assert!(matches!(
+            parse(&["export", "--no-home", "-y"]).cmd,
+            Cmd::Export {
+                file: None,
+                no_home: true,
+                yes: true
+            }
+        ));
+        assert!(matches!(
+            parse(&["-e", "web", "export", "/tmp"]).cmd,
+            Cmd::Export { file: Some(f), .. } if f == "/tmp"
         ));
     }
 }

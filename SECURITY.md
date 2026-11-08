@@ -113,6 +113,15 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   do, where mise reads its version files and `mise.toml` (which can run commands in the env).
   Until then the env has its default presets and the access you gave the remote. A shell or
   editor you open in it starts mise there.
+- **Moving an env** (`luoto export`, `luoto import`). An archive holds no secret value, CA
+  key or vault token: the config's refs stay refs, read where the env is imported, and import
+  makes a new CA, vault token and subnet. The archive is untrusted input (the sandbox wrote
+  its volumes, and it may come from elsewhere): each entry is decoded with capped names,
+  checked (a plain relative path, nothing under a symbolic link the archive made, hard links
+  within their volume, only files, folders, links and FIFOs) and written anew to a container
+  that mounts only the new volume, with no network, in the new env's user namespace. Nothing
+  of a volume is unpacked on the host. Before it asks, import lists the secret refs the config
+  reads on this machine.
 - **Isolation.** With podman, dev containers run on gVisor (in luoto's VM on macOS and
   Windows; on Linux once `runsc` is installed): the sandbox's system calls reach gVisor's
   user-space kernel, not the VM's or the host's. In luoto's VM each env's dev container has its
@@ -209,6 +218,11 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   package or toolchain the gate has checked to be a plain name; approving it runs that
   package's install scripts as root inside the env (still the sandbox), and its downloads take
   the env's usual presets and install windows.
+- **Env archives.** A `luoto export` file holds the env's whole workspace and home: work not
+  pushed, files the sandbox wrote, shell history and agents' logins, which work from it. It is
+  written readable only by you; keep it as a secret and delete it once imported. Importing
+  someone else's adopts their config, which decides which of your secrets `up` reads and which
+  hosts get them: read the refs import lists.
 - **Images.** Release images are pinned by digest in the binary; images from
   `luoto setup --build` are as trustworthy as your source tree.
 - **Install windows.** The project's version files, which the sandbox controls, decide which

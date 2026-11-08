@@ -15,3 +15,5 @@ Step by step, for a task; the reference is the [README](../../README.md) and
   and terraform, read-only unless the env writes, with the tokens outside the env.
 - [Agent settings](agent-settings.md): model and effort, credentials without the prompt, your
   own settings in every env, commits without AI attribution.
+- [Moving an env](moving-envs.md): to the release from a source build, or to another machine,
+  with its workspace and home, and what stays behind.

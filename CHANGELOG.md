@@ -26,6 +26,11 @@ on your machine.
   through the gate, with nothing on this machine. The repo's `luoto.toml` and the installs
   its files pin each wait for a yes; `--yes` installs and leaves `luoto.toml` pending.
   `luoto ls` shows where each env comes from.
+- **Moving envs:** `luoto export -e <env>` writes an env to one private file (config,
+  accepted `luoto.toml`, workspace, and home unless `--no-home`), owners kept; `luoto import
+  FILE [--name NAME]` makes it in another luoto or on another machine, with its own subnet, CA
+  and vault token, after listing the secret refs it will read. Every entry is checked, and
+  nothing is unpacked on this machine.
 - **Pull:** never writes into your home folder or one holding it; an env cloned from a remote
   needs `--to <new folder>`.
 - **Credentialed hosts:** a rule over a host that gets a credential (yours, an approved

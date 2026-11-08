@@ -956,11 +956,11 @@ fn hint(
 }
 
 /// Repos answered as public, needing no credential, as [`Forge::key`] writes them.
-fn declined_path(ctx: &Ctx, env: &str) -> PathBuf {
+pub fn declined_path(ctx: &Ctx, env: &str) -> PathBuf {
     ctx.paths.env_state(env).join("credentials.declined")
 }
 
-fn declined(ctx: &Ctx, env: &str) -> BTreeSet<String> {
+pub fn declined(ctx: &Ctx, env: &str) -> BTreeSet<String> {
     std::fs::read_to_string(declined_path(ctx, env))
         .unwrap_or_default()
         .lines()

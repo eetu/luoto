@@ -653,7 +653,7 @@ fn config_texts(paths: &Paths) -> Vec<String> {
 }
 
 /// The accounts of `keyring:<service>/<account>` refs in `text`.
-fn keyring_accounts(text: &str, service: &str) -> BTreeSet<String> {
+pub fn keyring_accounts(text: &str, service: &str) -> BTreeSet<String> {
     let needle = format!("keyring:{service}/");
     text.match_indices(&needle)
         .map(|(i, _)| {

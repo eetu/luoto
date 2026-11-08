@@ -29,8 +29,8 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   stop), then sidecars.
 - **Corporate networks:** a CA for every upstream (Zscaler, Netskope) and egress through a
   company proxy.
-- **Moving work:** `rm` names repos with unpushed work first; `export`/`import` and `fork` of
-  an env; seed from a git bundle and `luoto fetch` into `refs/remotes/luoto/<env>`.
+- **Moving work:** `rm` names repos with unpushed work first; `fork` of an env; seed from a
+  git bundle and `luoto fetch` into `refs/remotes/luoto/<env>`.
 - **A folder shared live** (Linux, or a VM that shares folders), with an audit of the files
   host tools act on (`.git/config`, hooks, `.envrc`, editor and pre-commit configs).
 - **`luoto run` jobs:** a clean-checkout start, a CI recipe.
