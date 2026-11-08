@@ -152,7 +152,7 @@ pub fn watch() -> Result<ExitCode> {
         let notifying = ctx.global.notifications.unwrap_or(true);
         if notifying {
             for name in running.iter().filter(|e| states.running(&names::gate(e))) {
-                notices.follow(&ctx.rt, name);
+                notices.follow(&ctx.rt, name, env::mutes(&ctx, name).unwrap_or_default());
             }
         }
         notices.flush(notifying);

@@ -240,6 +240,14 @@ host = "docs.rs"
 paths = ["/serde/**"]         # /serde and below; `*` stays within one path segment
 expires = "2026-12-01T00:00:00Z"
 
+[[deny]]                      # refused whatever allows it, a preset included
+host = "registry.npmjs.org"
+paths = ["/-/npm/v1/security/**"]   # matched in any case; none: the whole host
+methods = ["POST"]            # none: every method
+
+[[mute]]                      # still denied, but left out of `luoto egress` and the UI
+host = "telemetry.example.com"   # `paths` mutes only those
+
 [credentials.github]          # a GitHub App: tokens minted per env, scoped to these repos
 app_id = "123456"             # (or `token = "<ref>"` for a fine-grained token)
 installation_id = 7890123
@@ -294,10 +302,16 @@ run = ["git config --global pull.rebase true"]  # as you, in your home; keep the
 hosts = ["dl.k8s.io"]         # extra hosts readable only while installs run
 ```
 
-`config.toml` takes `[tools]`, `[deps]`, `idle_stop` and `auto_forward` too, for every env, and
-`[agents.<name>]` options (`model`, `effort`) for every env that has that agent; an env's own,
-and its `luoto.toml`'s, come on top. `notifications = false` there turns desktop notifications
-off.
+`config.toml` takes `[tools]`, `[deps]`, `[[deny]]`, `[[mute]]`, `idle_stop` and
+`auto_forward` too, for every env, and `[agents.<name>]` options (`model`, `effort`) for every
+env that has that agent; an env's own, and its `luoto.toml`'s, come on top.
+`notifications = false` there turns desktop notifications off.
+
+A `[[deny]]` beats every allow: a preset's, a rule's, an approved request's. It applies to the
+HTTP(S) the gate reads: a tunnel rule can't cover a denied host, and SSH to
+`[credentials.ssh] hosts` doesn't pass through it. A `[[mute]]` is
+for telemetry you keep denied: its denials are still recorded, but stay out of `luoto egress`,
+the UI and the offers to allow them; `luoto egress --all` shows them.
 
 Secret refs: `op://…` (1Password CLI, desktop or service account), `vault://mount/path#field`
 (OpenBao / HashiCorp Vault), `keyring:service/account` (OS keychain), `env:NAME`, `file:path`.
@@ -405,7 +419,7 @@ credentials = ["anthropic"]
 sandbox_secrets = ["DATABASE_URL"]
 ```
 
-It also takes `image`, `agents` and the team's repositories (`[repos.<name>]`,
+It also takes `image`, `agents`, `[[deny]]` and the team's repositories (`[repos.<name>]`,
 [below](#several-repositories)); toolchains belong in `mise.toml`. Layering:
 `config.toml` < the accepted `luoto.toml` < the env's own config.
 
@@ -417,9 +431,10 @@ only proposes:
 - A changed file (from a `git pull` in the env, or the sandbox itself) applies only after you
   accept the difference: `up` lists it and asks; without a terminal it waits for
   `luoto project apply`. `luoto project ignore` stops applying it.
-- It can't hold credentials or secret refs, and its rules pass the checks the sandbox's own
-  access requests get (no `*`, no multi-tenant wildcards, no private addresses). Write access
-  and uninspected tunnels are spelled out in the review.
+- It can't hold credentials, secret refs or `[[mute]]` (which would hide denials from you),
+  and its rules pass the checks the sandbox's own access requests get (no `*`, no multi-tenant
+  wildcards, no private addresses). Write access and uninspected tunnels are spelled out in
+  the review. Its denies only tighten.
 
 ## Folders
 

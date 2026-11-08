@@ -116,16 +116,20 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
         let mut envs = Vec::new();
         for name in config::list_envs(&ctx.paths)? {
             let (dev, gate) = states.env(&name);
-            let denied_recent = store.denied_since(&name, since);
             let pending = rules::requests(&ctx, &name, &states).map_or(0, |r| {
                 r.iter()
                     .filter(|r| r.status == RequestStatus::Pending)
                     .count()
             });
-            let (dir, error) = match EnvFile::load(&ctx.paths, &name) {
-                Ok(f) => (f.cfg.workspace.dir, None),
-                Err(e) => (None, Some(format!("{e:#}"))),
+            let (dir, mutes, error) = match EnvFile::load(&ctx.paths, &name) {
+                Ok(f) => (
+                    f.cfg.workspace.dir.clone(),
+                    ctx.global.mutes_for(&f.cfg),
+                    None,
+                ),
+                Err(e) => (None, ctx.global.mute.clone(), Some(format!("{e:#}"))),
             };
+            let denied_recent = store.denied_since(&name, since, &events::Mutes::new(&mutes));
             let (repos, error) = match crate::repos::listed(&ctx, &name) {
                 Ok(r) => (r, error),
                 Err(e) => (Vec::new(), error.or(Some(format!("{e:#}")))),
@@ -470,14 +474,21 @@ struct Since {
     host: Option<String>,
 }
 
+/// The env's egress per host, without what its mutes hide (`luoto egress --all` shows it).
 async fn egress(
     State(ui): State<Ui>,
     Path(name): Path<String>,
     Query(q): Query<Since>,
 ) -> ApiResult<Vec<events::HostSummary>> {
     let since = Utc::now() - TimeDelta::minutes(q.minutes.unwrap_or(1440));
-    let evs = ui.store.query(&name, since, None, 50_000);
-    Ok(Json(events::summarize(&evs)))
+    blocking(move || {
+        let mutes = env::mutes(&Ctx::load()?, &name)?;
+        let mut evs = ui.store.query(&name, since, None, 50_000);
+        mutes.hide(&mut evs);
+        Ok(events::summarize(&evs, &mutes))
+    })
+    .await
+    .map(Json)
 }
 
 async fn env_events(
@@ -486,7 +497,14 @@ async fn env_events(
     Query(q): Query<Since>,
 ) -> ApiResult<Vec<luoto_shared::events::Event>> {
     let since = Utc::now() - TimeDelta::minutes(q.minutes.unwrap_or(1440));
-    Ok(Json(ui.store.query(&name, since, q.host.as_deref(), 200)))
+    blocking(move || {
+        let mutes = env::mutes(&Ctx::load()?, &name)?;
+        let mut evs = ui.store.query(&name, since, q.host.as_deref(), 200);
+        mutes.hide(&mut evs);
+        Ok(evs)
+    })
+    .await
+    .map(Json)
 }
 
 async fn requests(Path(name): Path<String>) -> ApiResult<Vec<AccessRequest>> {

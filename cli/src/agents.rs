@@ -688,7 +688,13 @@ pub fn headless(
     let run_events = gate_at_start
         .and_then(|at| Ok(at.after(events::gate_events(&ctx.rt, env_name, Some(&since))?)));
     match run_events {
-        Ok(evs) => eprint!("{}", events::fmt_denials(env_name, &events::denials(&evs))),
+        Ok(mut evs) => {
+            // Muted denials stay out, as in `luoto egress`.
+            if let Ok(mutes) = env::mutes(&ctx, env_name) {
+                mutes.hide(&mut evs);
+            }
+            eprint!("{}", events::fmt_denials(env_name, &events::denials(&evs)));
+        }
         Err(e) => eprintln!("warning: no summary of the gate's denials ({e:#})"),
     }
     relayed?;

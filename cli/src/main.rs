@@ -246,6 +246,9 @@ enum Cmd {
         /// One line per attempt instead of the per-host summary.
         #[arg(long)]
         raw: bool,
+        /// Also the denials `[[mute]]` leaves out.
+        #[arg(long)]
+        all: bool,
         #[arg(long)]
         json: bool,
     },
@@ -501,12 +504,13 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             since,
             follow,
             raw,
+            all,
             json,
         } => {
             if follow || raw {
-                c::logs(&env()?, follow, denied, since.as_deref())
+                c::logs(&env()?, follow, denied, all, since.as_deref())
             } else {
-                c::egress(&env()?, denied, since.as_deref(), json)
+                c::egress(&env()?, denied, all, since.as_deref(), json)
             }
         }
         Cmd::Logs {

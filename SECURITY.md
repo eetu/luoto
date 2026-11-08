@@ -19,7 +19,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Network.** The dev container sits on an internal network with no route out. Its default
   route and resolver are the env's gate. The gate is the only egress: HTTP(S) is inspected
   (per-env CA, key only in the gate) and checked against a default-deny policy of host, port,
-  method, path, body size and expiry. Non-HTTP TCP goes nowhere except through tunnel rules
+  method, path, body size and expiry; explicit denies, luoto's and the user's `[[deny]]`, beat
+  every allow. Non-HTTP TCP goes nowhere except through tunnel rules
   you grant (`luoto allow --tunnel`, a host and port) and SSH to the hosts an SSH credential
   names, on port 22; both pass through uninspected. UDP goes nowhere. DNS is answered locally
   with fake addresses and never forwarded. Destinations are resolved by the gate only after a
@@ -94,8 +95,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   strict CSP.
 - **Project settings.** A repository's `luoto.toml` is untrusted input: it applies only in the
   exact version the user accepted, never carries credentials or secret refs, and its rules
-  pass the sandbox's own request checks. luoto reads it as the unprivileged user, refuses
-  symlinks and caps its size.
+  pass the sandbox's own request checks. Its denies only tighten; it can't mute denials,
+  which would hide what code from the repository tries. luoto reads it as the unprivileged
+  user, refuses symlinks and caps its size.
 - **Self-test.** `luoto up` verifies from inside, whenever a container restarts (skip with
   `--no-selftest`), that raw-IP TCP, UDP and DNS cannot leave before any secret, dotfile or SSH
   key enters the env; an env that fails is stopped.

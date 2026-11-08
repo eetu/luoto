@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::creds::Injection;
 use crate::forges;
 use crate::glob;
-use crate::host::{WildcardRisk, host_matches, normalize_host, wildcard_risk};
+use crate::host::{WildcardRisk, host_matches, normalize_host, normalize_pattern, wildcard_risk};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -147,6 +147,104 @@ pub struct DenyRule {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub methods: Vec<String>,
     pub reason: String,
+}
+
+/// A `[[deny]]` of the user's config, `config.toml` or a `luoto.toml`: refused whatever allows
+/// it, a preset included. It only tightens, so a repository may write one.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Deny {
+    pub host: String,
+    /// Empty: the whole host. Matched in any case, as every explicit deny is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// Empty: every method.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<String>,
+    /// Shown with every request it refuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Deny {
+    /// What the gate enforces, or why the entry is refused.
+    pub fn rule(&self) -> Result<DenyRule, String> {
+        let host = pattern(&self.host)?;
+        paths_ok(&self.paths)?;
+        if let Some(m) = self
+            .methods
+            .iter()
+            .find(|m| m.is_empty() || !m.bytes().all(|b| b.is_ascii_alphabetic()))
+        {
+            return Err(format!("`{m}` is not an HTTP method"));
+        }
+        Ok(DenyRule {
+            host,
+            paths: self.paths.clone(),
+            methods: self
+                .methods
+                .iter()
+                .map(|m| m.to_ascii_uppercase())
+                .collect(),
+            reason: match &self.note {
+                Some(n) => format!("denied by a [[deny]] rule: {n}"),
+                None => "denied by a [[deny]] rule".into(),
+            },
+        })
+    }
+}
+
+/// A `[[mute]]`: denials left out of egress views, for telemetry the user keeps denied. They
+/// are still denied and recorded. Only the user's own config mutes: a repository's could hide
+/// what its code tries.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Mute {
+    pub host: String,
+    /// Empty: every denial at the host, and its lookups.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Mute {
+    /// The entry with its host in the form events carry hosts, or why it is refused.
+    pub fn checked(&self) -> Result<Mute, String> {
+        let host = pattern(&self.host)?;
+        paths_ok(&self.paths)?;
+        if host == "*" && self.paths.is_empty() {
+            return Err("`*` without paths would hide every denial".into());
+        }
+        Ok(Mute {
+            host,
+            ..self.clone()
+        })
+    }
+
+    /// Does it hide a denial at canonical `host`, of `path` if the denial was a request's?
+    pub fn covers(&self, host: &str, path: Option<&str>) -> bool {
+        host_matches(&self.host, host)
+            && match path {
+                Some(p) => glob::matches_any(&self.paths, true, p),
+                None => self.paths.is_empty(),
+            }
+    }
+}
+
+fn pattern(host: &str) -> Result<String, String> {
+    normalize_pattern(host).ok_or_else(|| format!("invalid host pattern `{host}`"))
+}
+
+fn paths_ok(paths: &[String]) -> Result<(), String> {
+    match paths.iter().find(|p| !path_pattern_ok(p)) {
+        Some(p) => Err(format!("path pattern `{p}` must start with `/`")),
+        None => Ok(()),
+    }
+}
+
+fn path_pattern_ok(p: &str) -> bool {
+    p.starts_with('/') || p == "**"
 }
 
 /// JSON request bodies a host refuses: ones that ask a model API to reach the network for the
@@ -619,7 +717,7 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
         issues.push(err("the sandbox may not request address ranges".into()));
     }
     for p in &rule.paths {
-        if !p.starts_with('/') && p != "**" {
+        if !path_pattern_ok(p) {
             issues.push(err(format!("path pattern `{p}` must start with `/`")));
         }
     }
@@ -793,6 +891,79 @@ mod tests {
             p.decide(&req("docs.rs", "GET", "/serde"), now),
             Decision::Deny(DenyReason::Expired { .. })
         ));
+    }
+
+    #[test]
+    fn a_deny_of_your_own_beats_an_allow_in_any_case() {
+        let mut p = policy();
+        let now = Utc::now();
+        let d = Deny {
+            host: "Registry.NPMjs.org.".into(),
+            paths: vec!["/-/npm/v1/security/**".into()],
+            methods: vec!["post".into()],
+            note: Some("no audits".into()),
+        };
+        p.denies.push(d.rule().unwrap());
+        let mut audit = req("registry.npmjs.org", "POST", "/-/NPM/v1/security/audits");
+        audit.content_length = Some(10);
+        assert_eq!(
+            p.decide(&audit, now),
+            Decision::Deny(DenyReason::Explicit {
+                reason: "denied by a [[deny]] rule: no audits".into()
+            })
+        );
+        assert!(matches!(
+            p.decide(
+                &req("registry.npmjs.org", "GET", "/-/npm/v1/security/x"),
+                now
+            ),
+            Decision::Allow { .. }
+        ));
+        assert!(p.tunnel_bypass("*.npmjs.org").unwrap().contains("[[deny]]"));
+    }
+
+    #[test]
+    fn denies_and_mutes_name_hosts_and_paths() {
+        let deny = |host: &str, paths: &[&str], methods: &[&str]| {
+            Deny {
+                host: host.into(),
+                paths: paths.iter().map(|p| p.to_string()).collect(),
+                methods: methods.iter().map(|m| m.to_string()).collect(),
+                note: None,
+            }
+            .rule()
+        };
+        assert!(deny("*", &[], &[]).is_ok());
+        assert!(deny("*.github.io", &["/x/**"], &["DELETE"]).is_ok());
+        for (host, paths, methods) in [
+            ("a b", &[][..], &[][..]),
+            ("x.example", &["v1/**"][..], &[][..]),
+            ("x.example", &[][..], &["GET POST"][..]),
+            ("x.example", &[][..], &[""][..]),
+        ] {
+            assert!(
+                deny(host, paths, methods).is_err(),
+                "{host} {paths:?} {methods:?}"
+            );
+        }
+        let mute = |host: &str, paths: &[&str]| {
+            Mute {
+                host: host.into(),
+                paths: paths.iter().map(|p| p.to_string()).collect(),
+                note: None,
+            }
+            .checked()
+        };
+        assert!(mute("*", &[]).is_err());
+        assert!(mute("x.example", &["v1"]).is_err());
+        let all = mute("Telemetry.Example.", &[]).unwrap();
+        assert!(all.covers("telemetry.example", None));
+        assert!(all.covers("telemetry.example", Some("/v1/x")));
+        assert!(!all.covers("other.example", None));
+        let some = mute("*", &["/telemetry/**"]).unwrap();
+        assert!(some.covers("a.example", Some("/Telemetry/1")));
+        assert!(!some.covers("a.example", Some("/api")));
+        assert!(!some.covers("a.example", None));
     }
 
     #[test]

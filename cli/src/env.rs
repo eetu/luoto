@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::ca::EnvCa;
 use crate::compile::{Compiled, compile};
 use crate::config::{self, EnvConfig, EnvFile, GlobalConfig, Isolation};
+use crate::events::Mutes;
 use crate::paths::Paths;
 use crate::runtime::{Flavor, RunSpec, Runtime};
 use crate::state::{self, EnvState};
@@ -272,14 +273,22 @@ pub struct Plan {
     pub image: String,
 }
 
-/// The env's config as `up` applies it: the user's file with the accepted luoto.toml layered in.
+/// The env's config as `up` applies it: the user's file with the accepted luoto.toml layered
+/// in, and config.toml's options for its agents, denies and mutes.
 pub fn layered(ctx: &Ctx, env: &str) -> Result<EnvConfig> {
     let mut cfg = EnvFile::load(&ctx.paths, env)?.cfg;
     if let Some((_, p)) = project::accepted(ctx, env) {
         project::layer(&mut cfg, &p);
     }
     cfg.agents.fill_options(&ctx.global.agents);
+    ctx.global.layer_under(&mut cfg);
     Ok(cfg)
+}
+
+/// What the env's egress views leave out.
+pub fn mutes(ctx: &Ctx, env: &str) -> Result<Mutes> {
+    let cfg = EnvFile::load(&ctx.paths, env)?.cfg;
+    Ok(Mutes::new(&ctx.global.mutes_for(&cfg)))
 }
 
 /// What the env's config compiles to, changing nothing: expired grants are left out here (`up`

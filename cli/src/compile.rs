@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use luoto_shared::creds::{
     BindingSpec, FORBIDDEN_GITHUB_PERMISSIONS, Injection, Placement, SSH_BINDING,
@@ -175,6 +175,18 @@ pub fn compile(
             "user"
         };
         b.rule(id, origin, r.clone());
+    }
+    for d in &cfg.deny {
+        let rule = d
+            .rule()
+            .map_err(|e| anyhow!("deny for `{}`: {e}", crate::text::display(&d.host)))?;
+        b.denies.push(rule);
+    }
+    // Mutes only filter what egress views show; checked here so a bad one is reported.
+    for m in &cfg.mute {
+        if let Err(e) = m.checked() {
+            bail!("mute for `{}`: {e}", crate::text::display(&m.host));
+        }
     }
     b.dev_env.extend(cfg.env.clone());
 
@@ -1966,5 +1978,74 @@ login_inside = true
     fn user_rules_are_validated() {
         let bad = cfg("[[allow]]\nhost = \"*.github.io\"\n");
         assert!(compile("t", &bad, GATE, &[]).is_err());
+    }
+
+    #[test]
+    fn your_deny_beats_a_preset_and_a_rule() {
+        let c = compile(
+            "t",
+            &cfg(r#"
+presets = ["npm"]
+
+[[allow]]
+host = "registry.npmjs.org"
+access = "write"
+
+[[deny]]
+host = "Registry.npmjs.org"
+paths = ["/-/npm/v1/security/**"]
+note = "no audits"
+"#),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        let p = &c.policy;
+        for method in ["POST", "GET"] {
+            assert_eq!(
+                decide(
+                    p,
+                    "registry.npmjs.org",
+                    method,
+                    "/-/npm/v1/Security/audits/quick"
+                ),
+                Decision::Deny(DenyReason::Explicit {
+                    reason: "denied by a [[deny]] rule: no audits".into()
+                }),
+                "{method}"
+            );
+        }
+        assert!(matches!(
+            decide(p, "registry.npmjs.org", "GET", "/react"),
+            Decision::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn denies_and_mutes_are_validated_and_tunnels_cannot_skip_a_deny() {
+        for bad in [
+            "[[deny]]\nhost = \"not a host\"",
+            "[[deny]]\nhost = \"x.example\"\npaths = [\"v1/**\"]",
+            "[[deny]]\nhost = \"x.example\"\nmethods = [\"GET,POST\"]",
+            "[[mute]]\nhost = \"*\"",
+            "[[mute]]\nhost = \"x.example\"\npaths = [\"v1\"]",
+        ] {
+            assert!(compile("t", &cfg(bad), GATE, &[]).is_err(), "{bad}");
+        }
+        let tunnel = cfg(r#"
+[[allow]]
+host = "grpc.example.com"
+mode = "tunnel"
+access = "write"
+
+[[deny]]
+host = "*.example.com"
+methods = ["DELETE"]
+"#);
+        let err = compile("t", &tunnel, GATE, &[]).err().expect("refused");
+        assert!(err.to_string().contains("[[deny]]"), "{err}");
+        let muted = cfg("[[mute]]\nhost = \"telemetry.example\"\npaths = [\"/v1/**\"]");
+        let c = compile("t", &muted, GATE, &[]).unwrap();
+        assert!(c.policy.denies.is_empty());
     }
 }

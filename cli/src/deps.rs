@@ -427,11 +427,19 @@ fn run_job(e: &Env, d: &Deps, job: &mut Job) -> Result<()> {
     Ok(())
 }
 
-/// Hosts the gate denied for this env since `since`, as install-grant candidates.
-fn denied_since(ctx: &Ctx, env: &str, since: chrono::DateTime<Utc>) -> Vec<String> {
+/// Hosts the gate denied for this env since `since`, as install-grant candidates: neither a
+/// muted denial nor an explicit deny's, which no grant lifts.
+fn denied_since(
+    ctx: &Ctx,
+    env: &str,
+    since: chrono::DateTime<Utc>,
+    mutes: &events::Mutes,
+) -> Vec<String> {
     let since = (since - TimeDelta::seconds(5)).to_rfc3339();
-    let evs = events::gate_events(&ctx.rt, env, Some(&since)).unwrap_or_default();
-    events::summarize(&evs)
+    let mut evs = events::gate_events(&ctx.rt, env, Some(&since)).unwrap_or_default();
+    mutes.hide(&mut evs);
+    evs.retain(|e| e.reason.as_deref() != Some("explicit"));
+    events::summarize(&evs, mutes)
         .into_iter()
         .filter(|s| s.denied > 0 && host_issue(&s.host, RuleOrigin::Sandbox).is_none())
         .map(|s| s.host)
@@ -444,6 +452,7 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
     let d = merged(&ctx.global.deps, &cfg.deps);
     check(&d, RuleOrigin::Host)?;
     let e = Env::new(ctx, env, home);
+    let mutes = events::Mutes::new(&cfg.mute);
     let tools = tools_for(ctx, cfg);
     let found = e.probe()?;
     let missing = if found.mise {
@@ -524,7 +533,7 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
             || run_job(&e, &d, &mut job),
         )?;
         let Err(err) = res else { break };
-        let denied: Vec<String> = denied_since(ctx, env, since)
+        let denied: Vec<String> = denied_since(ctx, env, since, &mutes)
             .into_iter()
             .filter(|h| !hosts.contains(h))
             .collect();

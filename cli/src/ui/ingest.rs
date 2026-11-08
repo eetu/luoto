@@ -14,6 +14,7 @@ use rusqlite::{Connection, params};
 use tokio::sync::broadcast;
 
 use crate::env::Ctx;
+use crate::events::Mutes;
 use crate::{config, events, names};
 
 #[derive(Clone)]
@@ -113,22 +114,32 @@ impl Store {
         out
     }
 
-    /// Denied attempts in `env` since `since`, the self-test's probes left out.
-    pub fn denied_since(&self, env: &str, since: DateTime<Utc>) -> usize {
-        self.lock()
-            .query_row(
-                "SELECT count(*) FROM events WHERE env = ?1 AND ts >= ?2
-                   AND json_extract(json, '$.verdict') = 'deny'
-                   AND (host IS NULL OR (host <> ?3 AND substr(host, -length(?4)) <> ?4))",
-                params![
-                    env,
-                    since.to_rfc3339(),
-                    SELFTEST_DOMAIN,
-                    format!(".{SELFTEST_DOMAIN}")
-                ],
-                |r| r.get::<_, i64>(0),
-            )
-            .map_or(0, |n| usize::try_from(n).unwrap_or(0))
+    /// Denied attempts in `env` since `since`, the self-test's probes and what `mutes` hides
+    /// left out.
+    pub fn denied_since(&self, env: &str, since: DateTime<Utc>, mutes: &Mutes) -> usize {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT json FROM events WHERE env = ?1 AND ts >= ?2
+               AND json_extract(json, '$.verdict') = 'deny'
+               AND (host IS NULL OR (host <> ?3 AND substr(host, -length(?4)) <> ?4))",
+        ) else {
+            return 0;
+        };
+        let rows = stmt.query_map(
+            params![
+                env,
+                since.to_rfc3339(),
+                SELFTEST_DOMAIN,
+                format!(".{SELFTEST_DOMAIN}")
+            ],
+            |r| r.get::<_, String>(0),
+        );
+        rows.map_or(0, |rows| {
+            rows.flatten()
+                .filter_map(|json| serde_json::from_str::<Event>(&json).ok())
+                .filter(|e| !mutes.hides(e))
+                .count()
+        })
     }
 
     fn prune(&self) {
@@ -225,11 +236,18 @@ mod tests {
             ev(5, Some("probe.selftest.luoto.invalid"), Verdict::Deny, 1),
             ev(6, Some("selftest.luoto.invalid"), Verdict::Deny, 1),
             ev(7, Some("old.example"), Verdict::Deny, 60),
+            ev(8, Some("telemetry.example"), Verdict::Deny, 1),
         ] {
             assert!(store.insert(&e));
         }
         let since = now - TimeDelta::minutes(15);
-        assert_eq!(store.denied_since("e", since), 3);
-        assert_eq!(store.denied_since("other", since), 0);
+        let none = Mutes::default();
+        assert_eq!(store.denied_since("e", since, &none), 4);
+        assert_eq!(store.denied_since("other", since, &none), 0);
+        let mutes = Mutes::new(&[luoto_shared::policy::Mute {
+            host: "telemetry.example".into(),
+            ..Default::default()
+        }]);
+        assert_eq!(store.denied_since("e", since, &mutes), 3);
     }
 }

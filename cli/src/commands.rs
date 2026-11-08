@@ -489,8 +489,31 @@ fn print_rules(p: &env::Plan) {
             println!("  {:<38} binding {}", i.host, i.binding);
         }
     }
-    if !p.compiled.policy.denies.is_empty() {
-        println!("\nfixed denies: {}", p.compiled.policy.denies.len());
+    if !p.cfg.deny.is_empty() {
+        println!("\ndenied whatever allows them:");
+        for d in &p.cfg.deny {
+            println!("  {}", project::deny_line(d));
+        }
+    }
+    if !p.cfg.mute.is_empty() {
+        println!("\nmuted (still denied; `luoto egress --all` shows them):");
+        for m in &p.cfg.mute {
+            let paths = if m.paths.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", m.paths.join(" "))
+            };
+            println!("  {}{paths}", m.host);
+        }
+    }
+    let fixed = p
+        .compiled
+        .policy
+        .denies
+        .len()
+        .saturating_sub(p.cfg.deny.len());
+    if fixed > 0 {
+        println!("\nfixed denies: {fixed}");
     }
 }
 
@@ -629,10 +652,19 @@ pub fn reject(name: &str, id: u64, note: Option<String>) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn egress(name: &str, denied: bool, since: Option<&str>, json: bool) -> Result<ExitCode> {
+/// `all`: also the denials the env's mutes hide.
+pub fn egress(
+    name: &str,
+    denied: bool,
+    all: bool,
+    since: Option<&str>,
+    json: bool,
+) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
-    let evs = events::gate_events(&ctx.rt, name, since)?;
-    let mut summary = events::summarize(&evs);
+    let mutes = env::mutes(&ctx, name)?;
+    let mut evs = events::gate_events(&ctx.rt, name, since)?;
+    let hidden = if all { 0 } else { mutes.hide(&mut evs) };
+    let mut summary = events::summarize(&evs, &mutes);
     if denied {
         summary.retain(|s| s.denied > 0 || s.dns_only);
     }
@@ -640,6 +672,14 @@ pub fn egress(name: &str, denied: bool, since: Option<&str>, json: bool) -> Resu
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(ExitCode::SUCCESS);
     }
+    let footer = || {
+        if hidden > 0 {
+            println!(
+                "{hidden} muted denial{} left out (`luoto egress --all` shows them)",
+                if hidden == 1 { "" } else { "s" }
+            );
+        }
+    };
     if summary.is_empty() {
         println!(
             "no egress recorded{}",
@@ -647,6 +687,7 @@ pub fn egress(name: &str, denied: bool, since: Option<&str>, json: bool) -> Resu
                 .map(|s| format!(" in the last {s}"))
                 .unwrap_or_default()
         );
+        footer();
         return Ok(ExitCode::SUCCESS);
     }
     println!(
@@ -658,6 +699,8 @@ pub fn egress(name: &str, denied: bool, since: Option<&str>, json: bool) -> Resu
         let via: Vec<&str> = s.intakes.iter().map(String::as_str).collect();
         let hint = if s.dns_only {
             "looked up, never connected".to_string()
+        } else if s.denied > 0 && s.muted == s.denied {
+            format!("muted: {}", s.last_message.clone().unwrap_or_default())
         } else if s.tls_rejected {
             format!(
                 "client rejected our CA → luoto allow -e {name} {} --tunnel",
@@ -697,12 +740,27 @@ pub fn egress(name: &str, denied: bool, since: Option<&str>, json: bool) -> Resu
             crate::text::display(&hint)
         );
     }
+    footer();
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn logs(name: &str, follow: bool, denied: bool, since: Option<&str>) -> Result<ExitCode> {
+/// `all`: also the denials the env's mutes hide.
+pub fn logs(
+    name: &str,
+    follow: bool,
+    denied: bool,
+    all: bool,
+    since: Option<&str>,
+) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
-    let show = |e: &luoto_shared::events::Event| !denied || e.verdict == Some(Verdict::Deny);
+    let mutes = if all {
+        events::Mutes::default()
+    } else {
+        env::mutes(&ctx, name)?
+    };
+    let show = |e: &luoto_shared::events::Event| {
+        (!denied || e.verdict == Some(Verdict::Deny)) && !mutes.hides(e)
+    };
     if follow {
         events::follow(&ctx.rt, &names::gate(name), since, |e| {
             if show(&e) {

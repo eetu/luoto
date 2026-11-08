@@ -7,6 +7,7 @@ use std::process::Stdio;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use luoto_shared::events::{Event, EventKind, Intake, Verdict};
+use luoto_shared::policy::Mute;
 use serde::Serialize;
 
 use crate::names;
@@ -80,11 +81,65 @@ pub fn follow(
     Ok(())
 }
 
+/// An env's `[[mute]]` entries, as egress views apply them.
+#[derive(Debug, Clone, Default)]
+pub struct Mutes(Vec<Mute>);
+
+impl Mutes {
+    /// The valid entries of `entries` (`compile` reports the others).
+    pub fn new(entries: &[Mute]) -> Self {
+        Mutes(entries.iter().filter_map(|m| m.checked().ok()).collect())
+    }
+
+    /// Is `e` a denial a mute hides? A mute of a whole host also hides its lookups and the
+    /// certificates its clients reject (the gate intercepts a denied host to explain itself).
+    pub fn hides(&self, e: &Event) -> bool {
+        let Some(host) = e.host.as_deref() else {
+            return false;
+        };
+        self.0.iter().any(|m| match e.kind {
+            Some(EventKind::Dns | EventKind::TlsReject) => m.covers(host, None),
+            _ => e.verdict == Some(Verdict::Deny) && m.covers(host, e.path.as_deref()),
+        })
+    }
+
+    /// Drop what the mutes hide from `events`, and the lookups of hosts left with nothing
+    /// else; the number of denials dropped.
+    pub fn hide(&self, events: &mut Vec<Event>) -> usize {
+        let mut muted: BTreeSet<String> = BTreeSet::new();
+        let mut denials = 0;
+        events.retain(|e| {
+            let hidden = self.hides(e);
+            if hidden && e.verdict == Some(Verdict::Deny) {
+                denials += 1;
+                muted.extend(e.host.clone());
+            }
+            !hidden
+        });
+        let used: BTreeSet<&str> = events
+            .iter()
+            .filter(|e| e.kind != Some(EventKind::Dns))
+            .filter_map(|e| e.host.as_deref())
+            .collect();
+        let lookups_only: BTreeSet<String> = muted
+            .into_iter()
+            .filter(|h| !used.contains(h.as_str()))
+            .collect();
+        events.retain(|e| {
+            e.kind != Some(EventKind::Dns)
+                || !e.host.as_ref().is_some_and(|h| lookups_only.contains(h))
+        });
+        denials
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct HostSummary {
     pub host: String,
     pub allowed: u64,
     pub denied: u64,
+    /// Of `denied`, those a mute hides when they are not left out.
+    pub muted: u64,
     pub dns_only: bool,
     pub methods: BTreeSet<String>,
     pub ports: BTreeSet<u16>,
@@ -101,7 +156,7 @@ pub struct HostSummary {
     pub tls_rejected: bool,
 }
 
-pub fn summarize(events: &[Event]) -> Vec<HostSummary> {
+pub fn summarize(events: &[Event], mutes: &Mutes) -> Vec<HostSummary> {
     let mut by: BTreeMap<String, (HostSummary, BTreeMap<String, u64>)> = BTreeMap::new();
     for e in events {
         let Some(host) = e.host.clone() else { continue };
@@ -161,6 +216,7 @@ pub fn summarize(events: &[Event]) -> Vec<HostSummary> {
             }
             Some(Verdict::Deny) => {
                 s.denied += 1;
+                s.muted += u64::from(mutes.hides(e));
                 s.last_reason = e.reason.clone();
                 s.last_message = e.message.clone();
                 if e.reason.as_deref() == Some("method_not_allowed") {
@@ -364,7 +420,7 @@ mod tests {
 "#;
         let events = parse_lines(text);
         assert_eq!(events.len(), 4);
-        let s = summarize(&events);
+        let s = summarize(&events, &Mutes::default());
         assert_eq!(s.len(), 3);
         let npm = s.iter().find(|h| h.host == "registry.npmjs.org").unwrap();
         assert_eq!((npm.allowed, npm.denied), (1, 1));
@@ -446,5 +502,41 @@ mod tests {
             "{line}"
         );
         assert!(!line.contains('\u{1b}') && !line.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn mutes_hide_denials_but_not_what_was_allowed() {
+        let text = r#"{"seq":1,"run":"r","env":"e","kind":"dns","host":"t.example","ts":"2026-11-03T10:00:00Z"}
+{"seq":2,"run":"r","env":"e","kind":"http","verdict":"deny","method":"POST","host":"t.example","path":"/v1/x","reason":"no_rule","ts":"2026-11-03T10:00:01Z"}
+{"seq":3,"run":"r","env":"e","kind":"dns","host":"api.example","ts":"2026-11-03T10:00:02Z"}
+{"seq":4,"run":"r","env":"e","kind":"http","verdict":"deny","method":"POST","host":"api.example","path":"/telemetry/1","reason":"no_rule","ts":"2026-11-03T10:00:03Z"}
+{"seq":5,"run":"r","env":"e","kind":"http","verdict":"allow","method":"GET","host":"api.example","path":"/telemetry/2","ts":"2026-11-03T10:00:04Z"}
+{"seq":6,"run":"r","env":"e","kind":"dns","host":"stats.example","ts":"2026-11-03T10:00:05Z"}
+{"seq":7,"run":"r","env":"e","kind":"http","verdict":"deny","method":"GET","host":"stats.example","path":"/Telemetry/3","reason":"no_rule","ts":"2026-11-03T10:00:06Z"}
+{"seq":8,"run":"r","env":"e","kind":"http","verdict":"deny","method":"GET","host":"evil.example","path":"/telemetry/4","reason":"no_rule","ts":"2026-11-03T10:00:07Z"}
+"#;
+        let mute = |host: &str, paths: &[&str]| Mute {
+            host: host.into(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+            note: None,
+        };
+        let mutes = Mutes::new(&[
+            mute("T.Example", &[]),
+            mute("*.example", &["/telemetry/**"]),
+            mute("bad host", &[]),
+        ]);
+        let all = parse_lines(text);
+        let marked = summarize(&all, &mutes);
+        let api = marked.iter().find(|h| h.host == "api.example").unwrap();
+        assert_eq!((api.denied, api.muted), (1, 1));
+
+        let mut evs = all.clone();
+        assert_eq!(mutes.hide(&mut evs), 4);
+        let seqs: Vec<u64> = evs.iter().map(|e| e.seq).collect();
+        // A path mute leaves the host's lookups while it has other traffic.
+        assert_eq!(seqs, [3, 5]);
+        let s = summarize(&evs, &mutes);
+        assert_eq!(s.len(), 1);
+        assert_eq!((s[0].allowed, s[0].denied), (1, 0));
     }
 }

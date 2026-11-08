@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, TimeDelta, Utc};
 use luoto_shared::events::{Event, EventKind, Verdict, is_selftest};
 
+use crate::events::Mutes;
 use crate::runtime::Runtime;
 use crate::{events, names, text};
 
@@ -235,18 +236,18 @@ impl Notices {
     }
 
     /// Follow `env`'s gate events in the background, unless that runs already.
-    pub fn follow(&self, rt: &Runtime, env: &str) {
+    pub fn follow(&self, rt: &Runtime, env: &str, mutes: Mutes) {
         if !self.lock().following.insert(env.to_string()) {
             return;
         }
         let (me, rt, env) = (self.clone(), rt.clone(), env.to_string());
         std::thread::spawn(move || {
-            me.read(&rt, &env);
+            me.read(&rt, &env, &mutes);
             me.lock().following.remove(&env);
         });
     }
 
-    fn read(&self, rt: &Runtime, env: &str) {
+    fn read(&self, rt: &Runtime, env: &str, mutes: &Mutes) {
         let seeded = self.lock().envs.get(env).is_some_and(|n| n.seeded);
         if !seeded {
             // A day back: requests filed then, and hosts denied then, are not news.
@@ -273,7 +274,7 @@ impl Notices {
         let since = since.timestamp().to_string();
         let _ = events::follow(rt, &names::gate(env), Some(&since), |ev| {
             if let Some(news) = self.lock().envs.get_mut(env) {
-                news.take(&ev, true);
+                news.take(&ev, !mutes.hides(&ev));
             }
             true
         });

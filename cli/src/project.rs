@@ -5,14 +5,15 @@
 //! the env's copy, and a `git pull` there brings any commit). So it only proposes: the user
 //! reviews it, luoto keeps the exact accepted text in the env's state, and a changed file
 //! applies only after the user accepts the difference. It cannot hold credentials or secret
-//! refs, and its rules pass the same checks as the sandbox's access requests.
+//! refs, and its rules pass the same checks as the sandbox's access requests. Its denies only
+//! tighten; it can't mute, which would hide denials from the user.
 //! Layering: config.toml < the accepted luoto.toml < the env's own config.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use luoto_shared::policy::{Access, AccessLevel, Mode, Rule, RuleOrigin, rule_error};
+use luoto_shared::policy::{Access, AccessLevel, Deny, Mode, Rule, RuleOrigin, rule_error};
 use luoto_shared::{presets, profiles};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -36,6 +37,8 @@ pub struct ProjectConfig {
     pub presets: Vec<String>,
     #[serde(default, rename = "allow", skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<Rule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<Deny>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<u16>,
     #[serde(default, skip_serializing_if = "crate::config::Agents::is_empty")]
@@ -86,6 +89,12 @@ pub fn parse(text: &str) -> Result<ProjectConfig> {
             );
         }
     }
+    if table.contains_key("mute") {
+        bail!(
+            "luoto.toml can't hold `mute`: muted denials are hidden from you, so only your own \
+             config mutes"
+        );
+    }
     if table.contains_key("tools") {
         bail!("luoto.toml doesn't take [tools]: pin toolchains in mise.toml or .tool-versions");
     }
@@ -121,6 +130,11 @@ fn validate(p: &ProjectConfig) -> Result<()> {
     for r in &p.allow {
         if let Some(i) = rule_error(r, RuleOrigin::Sandbox) {
             bail!("luoto.toml: allow {}: {}", display(&r.host), i.message);
+        }
+    }
+    for d in &p.deny {
+        if let Err(e) = d.rule() {
+            bail!("luoto.toml: deny {}: {}", display(&d.host), display(&e));
         }
     }
     deps::check(&p.deps, RuleOrigin::Sandbox).context("luoto.toml")?;
@@ -286,6 +300,19 @@ pub fn layer(cfg: &mut EnvConfig, p: &ProjectConfig) {
         .collect();
     rules.append(&mut cfg.allow);
     cfg.allow = rules;
+    let mut denies: Vec<Deny> = p
+        .deny
+        .iter()
+        .map(|d| Deny {
+            note: Some(match &d.note {
+                Some(n) => format!("luoto.toml: {}", display(n)),
+                None => "luoto.toml".into(),
+            }),
+            ..d.clone()
+        })
+        .collect();
+    denies.append(&mut cfg.deny);
+    cfg.deny = denies;
     cfg.deps = deps::merged(&p.deps, &cfg.deps);
     for (name, r) in &p.repos {
         // The env's own repo of a name (a folder of yours, say) replaces the project's, also
@@ -342,6 +369,22 @@ fn rule_line(r: &Rule) -> String {
     format!("{} ({})", display(&r.host), parts.join(", "))
 }
 
+/// Every setting of a deny: what it refuses, and its note.
+pub fn deny_line(d: &Deny) -> String {
+    let mut parts = vec![if d.methods.is_empty() {
+        "every method".to_string()
+    } else {
+        display(&d.methods.join(",").to_uppercase())
+    }];
+    if !d.paths.is_empty() {
+        parts.push(display(&d.paths.join(" ")));
+    }
+    if let Some(n) = &d.note {
+        parts.push(format!("note: {}", display(n)));
+    }
+    format!("{} ({})", display(&d.host), parts.join(", "))
+}
+
 /// Everything accepting `p` sets, as `(label, item)` pairs, egress first.
 fn items(p: &ProjectConfig) -> Vec<(&'static str, String)> {
     let mut out: Vec<(&'static str, String)> = Vec::new();
@@ -350,6 +393,7 @@ fn items(p: &ProjectConfig) -> Vec<(&'static str, String)> {
     };
     add("presets", p.presets.iter().map(|s| display(s)).collect());
     add("allow", p.allow.iter().map(rule_line).collect());
+    add("deny", p.deny.iter().map(deny_line).collect());
     add(
         "install",
         p.deps
@@ -721,6 +765,32 @@ mod tests {
     }
 
     #[test]
+    fn denies_only_tighten_but_mutes_would_hide() {
+        let err = parse("[[mute]]\nhost = \"telemetry.example\"").unwrap_err();
+        assert!(format!("{err:#}").contains("can't hold `mute`"), "{err:#}");
+        assert!(parse("[[deny]]\nhost = \"x.example\"\npaths = [\"v1\"]").is_err());
+        let p = parse(
+            "[[deny]]\nhost = \"registry.npmjs.org\"\nmethods = [\"POST\"]\nnote = \"no audits\"",
+        )
+        .unwrap();
+        let mut cfg = EnvConfig {
+            deny: vec![Deny {
+                host: "mine.example".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        layer(&mut cfg, &p);
+        assert_eq!(cfg.deny.len(), 2);
+        assert_eq!(cfg.deny[0].note.as_deref(), Some("luoto.toml: no audits"));
+        assert_eq!(cfg.deny[1].host, "mine.example");
+        assert_eq!(
+            diff(&ProjectConfig::default(), &p),
+            ["+ deny     registry.npmjs.org (POST, note: no audits)"]
+        );
+    }
+
+    #[test]
     fn the_format_is_not_project_content() {
         assert_eq!(parse("version = 1\n").unwrap(), ProjectConfig::default());
         assert!(parse("version = 99\n").is_err());
@@ -805,6 +875,16 @@ credentials = ["anthropic"]
             "note = \"x\"",
         ] {
             let b = parse(&format!("[[allow]]\nhost = \"api.example\"\n{extra}")).unwrap();
+            assert_ne!(a, b);
+            assert_eq!(diff(&a, &b).len(), 2, "{extra} must show in the diff");
+        }
+        let a = parse("[[deny]]\nhost = \"api.example\"").unwrap();
+        for extra in [
+            "paths = [\"/v1/**\"]",
+            "methods = [\"GET\"]",
+            "note = \"x\"",
+        ] {
+            let b = parse(&format!("[[deny]]\nhost = \"api.example\"\n{extra}")).unwrap();
             assert_ne!(a, b);
             assert_eq!(diff(&a, &b).len(), 2, "{extra} must show in the diff");
         }
