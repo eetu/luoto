@@ -153,6 +153,9 @@ enum Cmd {
         /// Write the agent's answer to this file here instead of stdout.
         #[arg(long, value_name = "FILE")]
         output: Option<String>,
+        /// Stop the agent after this long (30m, 2h) and exit with 124.
+        #[arg(long, value_name = "DURATION")]
+        timeout: Option<String>,
         /// Stop the env when the run ends.
         #[arg(long)]
         down: bool,
@@ -384,6 +387,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             prompt,
             prompt_file,
             output,
+            timeout,
             down,
         } => {
             let prompt = match (prompt, prompt_file) {
@@ -395,7 +399,14 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
                 }
                 (None, None) => anyhow::bail!("give the prompt: --prompt, --prompt-file or stdin"),
             };
-            agents::headless(&env()?, &agent, &prompt, output.as_deref(), down)
+            agents::headless(
+                &env()?,
+                &agent,
+                &prompt,
+                output.as_deref(),
+                timeout.as_deref(),
+                down,
+            )
         }
         Cmd::Agent { action } => match action {
             AgentCmd::Run { agent, yolo, args } => agents::run(&env()?, &agent, yolo, &args),

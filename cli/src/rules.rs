@@ -18,13 +18,14 @@ pub fn parse_ttl(s: &str) -> Result<TimeDelta> {
     let n: i64 = num
         .parse()
         .with_context(|| format!("bad duration `{s}` (use 30m, 1h, 2d)"))?;
-    Ok(match unit {
-        "s" => TimeDelta::seconds(n),
-        "m" | "" => TimeDelta::minutes(n),
-        "h" => TimeDelta::hours(n),
-        "d" => TimeDelta::days(n),
+    let d = match unit {
+        "s" => TimeDelta::try_seconds(n),
+        "m" | "" => TimeDelta::try_minutes(n),
+        "h" => TimeDelta::try_hours(n),
+        "d" => TimeDelta::try_days(n),
         _ => bail!("bad duration unit in `{s}` (use s, m, h, d)"),
-    })
+    };
+    d.with_context(|| format!("duration `{s}` is too long"))
 }
 
 #[derive(clap::Args)]
@@ -307,5 +308,7 @@ mod tests {
         assert_eq!(parse_ttl("2h").unwrap(), TimeDelta::hours(2));
         assert_eq!(parse_ttl("1d").unwrap(), TimeDelta::days(1));
         assert!(parse_ttl("1y").is_err());
+        assert!(parse_ttl("-5m").is_err());
+        assert!(parse_ttl("99999999999999d").is_err());
     }
 }

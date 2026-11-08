@@ -192,6 +192,135 @@ pub fn summarize(events: &[Event]) -> Vec<HostSummary> {
     out
 }
 
+/// Where a container's event stream stood when read: the last `seq` of each gate or vault run
+/// (a restarted one counts from 1 under a new `run`). Reads that start at the same `since` see
+/// the same lines up to it, whatever the VM's clock says.
+#[derive(Debug, Default)]
+pub struct Mark(BTreeMap<String, u64>);
+
+impl Mark {
+    pub fn of(events: &[Event]) -> Self {
+        let mut last = BTreeMap::new();
+        for e in events {
+            let seq: &mut u64 = last.entry(e.run.clone()).or_default();
+            *seq = (*seq).max(e.seq);
+        }
+        Mark(last)
+    }
+
+    /// The events written after the mark.
+    pub fn after(&self, events: Vec<Event>) -> Vec<Event> {
+        events
+            .into_iter()
+            .filter(|e| self.0.get(&e.run).is_none_or(|s| e.seq > *s))
+            .collect()
+    }
+}
+
+/// A host the gate denied, as the summary after `luoto run` shows it.
+#[derive(Debug, PartialEq)]
+pub struct Denied {
+    pub host: String,
+    pub count: u64,
+    /// What was refused (`METHOD /path`, or `port N` for a connection), most often first.
+    pub targets: Vec<(String, u64)>,
+    /// The gate's explanation of the latest one.
+    pub message: Option<String>,
+}
+
+/// The gate's denials in `events` per host, most denied first.
+pub fn denials(events: &[Event]) -> Vec<Denied> {
+    let mut by: BTreeMap<&str, (Denied, BTreeMap<String, u64>)> = BTreeMap::new();
+    for e in events.iter().filter(|e| e.verdict == Some(Verdict::Deny)) {
+        let Some(host) = e
+            .host
+            .as_deref()
+            .filter(|h| !luoto_shared::events::is_selftest(h))
+        else {
+            continue;
+        };
+        let target = match (&e.method, &e.path, e.port) {
+            (Some(m), Some(p), _) => format!("{m} {p}"),
+            (Some(x), None, _) | (None, Some(x), _) => x.clone(),
+            (None, None, Some(port)) => format!("port {port}"),
+            (None, None, None) => String::new(),
+        };
+        let (d, targets) = by.entry(host).or_insert_with(|| {
+            let d = Denied {
+                host: host.to_string(),
+                count: 0,
+                targets: Vec::new(),
+                message: None,
+            };
+            (d, BTreeMap::new())
+        });
+        d.count += 1;
+        if !target.is_empty() {
+            *targets.entry(target).or_default() += 1;
+        }
+        if e.message.is_some() {
+            d.message = e.message.clone();
+        }
+    }
+    let mut out: Vec<Denied> = by
+        .into_values()
+        .map(|(mut d, targets)| {
+            d.targets = targets.into_iter().collect();
+            d.targets.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+            d
+        })
+        .collect();
+    out.sort_by_key(|d| std::cmp::Reverse(d.count));
+    out
+}
+
+/// The summary of `denied` for stderr, one line per host (the sandbox's strings escaped);
+/// empty when there is none.
+pub fn fmt_denials(env: &str, denied: &[Denied]) -> String {
+    use crate::text::display;
+    const TARGETS: usize = 3;
+    if denied.is_empty() {
+        return String::new();
+    }
+    let total: u64 = denied.iter().map(|d| d.count).sum();
+    let hosts: Vec<String> = denied.iter().map(|d| display(&d.host)).collect();
+    let width = hosts.iter().map(|h| h.chars().count()).max().unwrap_or(0);
+    let mut out = format!(
+        "the gate denied {total} attempt{} to reach {} host{} during the run:\n",
+        if total == 1 { "" } else { "s" },
+        denied.len(),
+        if denied.len() == 1 { "" } else { "s" },
+    );
+    for (d, host) in denied.iter().zip(&hosts) {
+        let mut what: Vec<String> = d
+            .targets
+            .iter()
+            .take(TARGETS)
+            .map(|(t, n)| match n {
+                1 => display(t),
+                n => format!("{} ({n})", display(t)),
+            })
+            .collect();
+        if d.targets.len() > TARGETS {
+            what.push(format!("{} more", d.targets.len() - TARGETS));
+        }
+        let why = d
+            .message
+            .as_deref()
+            .map(|m| format!(": {}", display(m)))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "  {host:<width$} {:>5}  {}{why}\n",
+            d.count,
+            what.join(", ")
+        ));
+    }
+    out.push_str(&format!(
+        "`luoto egress -e {env} --denied` says how to allow each.\n"
+    ));
+    out
+}
+
 pub fn fmt_event(e: &Event) -> String {
     let ts =
         e.ts.map(|t| t.format("%H:%M:%S").to_string())
@@ -246,5 +375,76 @@ mod tests {
                 .unwrap()
                 .dns_only
         );
+    }
+
+    #[test]
+    fn a_mark_keeps_what_came_after_it_across_a_gate_restart() {
+        let before = parse_lines(
+            r#"{"seq":7,"run":"a","env":"e","kind":"http","host":"x.example"}
+{"seq":8,"run":"a","env":"e","kind":"http","host":"x.example"}"#,
+        );
+        let now = parse_lines(
+            r#"{"seq":7,"run":"a","env":"e","kind":"http","host":"x.example"}
+{"seq":8,"run":"a","env":"e","kind":"http","host":"x.example"}
+{"seq":9,"run":"a","env":"e","kind":"http","host":"y.example"}
+{"seq":1,"run":"b","env":"e","kind":"http","host":"z.example"}"#,
+        );
+        let after = Mark::of(&before).after(now);
+        let seen: Vec<(&str, u64)> = after.iter().map(|e| (e.run.as_str(), e.seq)).collect();
+        assert_eq!(seen, [("a", 9), ("b", 1)]);
+    }
+
+    #[test]
+    fn denials_count_per_host_with_what_was_refused() {
+        let text = r#"{"seq":1,"run":"r","env":"e","kind":"http","verdict":"allow","method":"GET","host":"docs.rs","path":"/ok"}
+{"seq":2,"run":"r","env":"e","kind":"http","verdict":"deny","method":"GET","host":"docs.rs","path":"/serde","message":"no rule allows docs.rs"}
+{"seq":3,"run":"r","env":"e","kind":"http","verdict":"deny","method":"GET","host":"docs.rs","path":"/serde","message":"no rule allows docs.rs"}
+{"seq":4,"run":"r","env":"e","kind":"http","verdict":"deny","method":"GET","host":"docs.rs","path":"/tokio","message":"no rule allows docs.rs"}
+{"seq":5,"run":"r","env":"e","kind":"direct","verdict":"deny","host":"evil.example","port":22,"message":"no rule allows evil.example"}
+{"seq":6,"run":"r","env":"e","kind":"dns","host":"looked.up"}
+{"seq":7,"run":"r","env":"e","kind":"http","verdict":"deny","host":"selftest.luoto.invalid","path":"/"}"#;
+        let d = denials(&parse_lines(text));
+        assert_eq!(
+            d,
+            [
+                Denied {
+                    host: "docs.rs".into(),
+                    count: 3,
+                    targets: vec![("GET /serde".into(), 2), ("GET /tokio".into(), 1)],
+                    message: Some("no rule allows docs.rs".into()),
+                },
+                Denied {
+                    host: "evil.example".into(),
+                    count: 1,
+                    targets: vec![("port 22".into(), 1)],
+                    message: Some("no rule allows evil.example".into()),
+                },
+            ]
+        );
+        assert_eq!(
+            fmt_denials("web", &d),
+            "the gate denied 4 attempts to reach 2 hosts during the run:\n\
+             \x20 docs.rs          3  GET /serde (2), GET /tokio: no rule allows docs.rs\n\
+             \x20 evil.example     1  port 22: no rule allows evil.example\n\
+             `luoto egress -e web --denied` says how to allow each.\n"
+        );
+        assert_eq!(fmt_denials("web", &[]), "");
+    }
+
+    #[test]
+    fn the_denial_summary_escapes_the_sandbox_and_folds_long_lists() {
+        let d = Denied {
+            host: "x\u{1b}[2J.example".into(),
+            count: 5,
+            targets: (1..=5).map(|i| (format!("GET /{i}"), 1)).collect(),
+            message: Some("no\u{202e}pe".into()),
+        };
+        let line = fmt_denials("web", &[d]);
+        assert!(line.contains("x\\u{1b}[2J.example"), "{line}");
+        assert!(
+            line.contains("GET /1, GET /2, GET /3, 2 more: no\\u{202e}pe"),
+            "{line}"
+        );
+        assert!(!line.contains('\u{1b}') && !line.contains('\u{202e}'));
     }
 }

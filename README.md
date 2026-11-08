@@ -192,7 +192,9 @@ effort, your own agent settings and commits without AI attribution:
 
 Without a terminal, `luoto run --agent claude --prompt "…"` runs one prompt: it brings the env
 up (asking nothing), runs the agent in its non-interactive mode and prints its answer (or
-writes it with `--output FILE`), exiting with the agent's code; `--down` stops the env after.
+writes it with `--output FILE`), exiting with the agent's code; `--timeout 30m` stops the agent
+and what it started once it has run that long (exit 124), `--down` stops the env after, and
+what the gate denied during the run is listed on stderr.
 A cron job or CI step can run it; pull requests it opens go through the gate as any other.
 [docs/guides/headless.md](docs/guides/headless.md) has examples, what an unattended run needs,
 and how to let GitHub merge its pull requests.

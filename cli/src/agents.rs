@@ -1,8 +1,9 @@
 //! Coding agents inside envs: install (through short-lived egress grants), link the luoto
 //! briefing into the agent's global instructions, register the sandbox MCP server, run.
 
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use chrono::TimeDelta;
@@ -15,7 +16,7 @@ use crate::config::{EnvFile, ProviderValue};
 use crate::connect::exec_login;
 use crate::env::{self, Ctx, UID};
 use crate::text::sh_quote;
-use crate::{names, secrets, sync};
+use crate::{events, names, secrets, sync};
 
 pub fn list() -> Result<ExitCode> {
     println!("agents:");
@@ -500,14 +501,54 @@ pub fn add(env_name: &str, agent: &str, credential: Option<&str>) -> Result<Exit
     Ok(ExitCode::SUCCESS)
 }
 
+/// What `luoto run` exits with when the agent ran out of `--timeout`, as `timeout(1)` does.
+pub const TIMED_OUT: u8 = 124;
+
+/// The variable that marks the processes of one `luoto run` in the env, whatever group or
+/// session they moved to.
+const RUN_MARK: &str = "LUOTO_RUN";
+
+/// Signals `$1` to each process whose environment holds `$2` (the run's mark) and to the
+/// process group each leads, which takes in children that dropped the mark.
+const SIGNAL_RUN: &str = r#"for d in /proc/[0-9]*; do
+  tr '\0' '\n' 2>/dev/null <"$d/environ" | grep -qxF "$2" || continue
+  p=${d#/proc/}
+  kill -s "$1" -- "-$p" 2>/dev/null
+  kill -s "$1" "$p" 2>/dev/null
+done
+true"#;
+
+/// How long after its timeout a run gets SIGTERM, SIGKILL, and then has the runtime's client
+/// here killed, for an env that no longer answers.
+const STOP_STEPS: [Duration; 3] = [
+    Duration::ZERO,
+    Duration::from_secs(10),
+    Duration::from_secs(15),
+];
+
+/// How far back the denial summary reads the gate's log: the VM's clock may lag this one.
+const CLOCK_SLACK: TimeDelta = TimeDelta::minutes(10);
+
+/// `--timeout`: a duration as rules take it (30m, 2h), above zero.
+fn parse_timeout(s: &str) -> Result<Duration> {
+    crate::rules::parse_ttl(s)?
+        .to_std()
+        .ok()
+        .filter(|d| !d.is_zero())
+        .with_context(|| format!("--timeout {s}: give a duration above zero"))
+}
+
 /// `luoto run`: one prompt, no terminal. Lists the agent if the env doesn't, brings the env up
 /// (as a child whose output goes to stderr, with nothing to answer on), then runs the agent's
-/// headless command line: its answer on stdout or in `output`, its exit code returned.
+/// headless command line: its answer on stdout or in `output`, its exit code returned, or
+/// [`TIMED_OUT`] once it ran past `timeout` and was stopped. What the gate denied meanwhile
+/// is listed on stderr.
 pub fn headless(
     env_name: &str,
     agent: &str,
     prompt: &str,
     output: Option<&str>,
+    timeout: Option<&str>,
     down: bool,
 ) -> Result<ExitCode> {
     use std::process::Stdio;
@@ -520,6 +561,7 @@ pub fn headless(
     if prompt.is_empty() || prompt.len() > 100_000 {
         bail!("the prompt is empty or longer than 100 kB");
     }
+    let limit = timeout.map(parse_timeout).transpose()?;
     // The answer's file, made before the run: a path that can't be written fails now.
     let out_file = output.map(crate::workspace::expand).unwrap_or_default();
     if output.is_some() {
@@ -548,6 +590,11 @@ pub fn headless(
         .collect();
     let script = format!("exec {}", argv.join(" "));
     let dev = names::dev(env_name);
+    let mark = format!("{RUN_MARK}={}", hex::encode(rand::random::<[u8; 8]>()));
+    // The gate's log as the agent starts, so the summary leaves out what `up` did.
+    let since = (chrono::Utc::now() - CLOCK_SLACK).to_rfc3339();
+    let gate_at_start =
+        events::gate_events(&ctx.rt, env_name, Some(&since)).map(|evs| events::Mark::of(&evs));
     let mut cmd = ctx.rt.command();
     cmd.args([
         "exec",
@@ -555,6 +602,8 @@ pub fn headless(
         UID,
         "-w",
         "/workspace",
+        "-e",
+        &mark,
         dev.as_str(),
         "sh",
         "-c",
@@ -571,38 +620,64 @@ pub fn headless(
         Stdio::inherit()
     });
     let mut child = cmd.spawn()?;
+    let started = Instant::now();
     let errs = child
         .stderr
         .take()
         .map(|e| std::thread::spawn(move || relay(e, &mut std::io::stderr(), true)));
-    let mut out = child.stdout.take().context("the agent's output")?;
-    let relayed = match output {
-        Some(path) => {
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(&out_file);
-            match file.map(|mut f| relay(&mut out, &mut f, false)) {
-                Ok(Ok(())) => Ok(()),
-                // A write that fails leaves the rest on stderr rather than lost.
-                Ok(Err(e)) | Err(e) => {
-                    eprintln!("warning: {path} not written whole ({e}); the rest follows");
-                    relay(&mut out, &mut std::io::stderr(), err_tty)
+    let out = child.stdout.take().context("the agent's output")?;
+    let (status, relayed, timed_out) = std::thread::scope(|s| -> Result<_> {
+        let mut relayer = Some(s.spawn(|| answer(out, output, &out_file, err_tty)));
+        let mut relayed = Ok(());
+        let mut steps = 0;
+        let status = loop {
+            if let Some(r) = relayer.take_if(|r| r.is_finished()) {
+                relayed = r
+                    .join()
+                    .unwrap_or_else(|_| Err(io::Error::other("relay failed")));
+                if relayed.is_err() {
+                    let _ = child.kill();
                 }
             }
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            let over = limit.and_then(|l| started.elapsed().checked_sub(l));
+            while let Some(over) = over
+                && STOP_STEPS.get(steps).is_some_and(|at| over >= *at)
+            {
+                match steps {
+                    0 => {
+                        eprintln!(
+                            "the agent ran past --timeout {}; stopping it",
+                            timeout.unwrap_or_default().trim()
+                        );
+                        signal_run(&ctx, &dev, &mark, "TERM");
+                    }
+                    1 => signal_run(&ctx, &dev, &mark, "KILL"),
+                    _ => {
+                        let _ = child.kill();
+                    }
+                }
+                steps += 1;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        if let Some(r) = relayer {
+            relayed = r
+                .join()
+                .unwrap_or_else(|_| Err(io::Error::other("relay failed")));
         }
-        None => relay(
-            &mut out,
-            &mut std::io::stdout().lock(),
-            std::io::stdout().is_terminal(),
-        ),
-    };
-    if relayed.is_err() {
-        let _ = child.kill();
-    }
-    let status = child.wait()?;
+        Ok((status, relayed, steps > 0))
+    })?;
     if let Some(t) = errs {
         let _ = t.join();
+    }
+    let run_events = gate_at_start
+        .and_then(|at| Ok(at.after(events::gate_events(&ctx.rt, env_name, Some(&since))?)));
+    match run_events {
+        Ok(evs) => eprint!("{}", events::fmt_denials(env_name, &events::denials(&evs))),
+        Err(e) => eprintln!("warning: no summary of the gate's denials ({e:#})"),
     }
     relayed?;
     if down {
@@ -611,9 +686,46 @@ pub fn headless(
             Err(e) => eprintln!("warning: env `{env_name}` not stopped ({e:#})"),
         }
     }
+    if timed_out {
+        return Ok(ExitCode::from(TIMED_OUT));
+    }
     Ok(ExitCode::from(
         status.code().unwrap_or(1).clamp(0, 255) as u8
     ))
+}
+
+/// Send `signal` to the processes of the run `mark` names in the env's dev container, as root
+/// for what the agent started with sudo.
+fn signal_run(ctx: &Ctx, dev: &str, mark: &str, signal: &str) {
+    ctx.rt.succeeds([
+        "exec", "-u", "0", dev, "sh", "-c", SIGNAL_RUN, "sh", signal, mark,
+    ]);
+}
+
+/// Write the agent's answer to `path` when given (the rest to stderr should that fail), else
+/// to stdout.
+fn answer(
+    mut out: impl io::Read,
+    path: Option<&str>,
+    file: &std::path::Path,
+    err_tty: bool,
+) -> io::Result<()> {
+    let Some(path) = path else {
+        let terminal = io::stdout().is_terminal();
+        return relay(&mut out, &mut io::stdout().lock(), terminal);
+    };
+    let opened = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(file);
+    match opened.map(|mut f| relay(&mut out, &mut f, false)) {
+        Ok(Ok(())) => Ok(()),
+        // A write that fails leaves the rest on stderr rather than lost.
+        Ok(Err(e)) | Err(e) => {
+            eprintln!("warning: {path} not written whole ({e}); the rest follows");
+            relay(&mut out, &mut io::stderr(), err_tty)
+        }
+    }
 }
 
 /// The most of an agent's answer `luoto run` writes.
@@ -720,4 +832,19 @@ pub fn run(env_name: &str, agent: &str, yolo: bool, args: &[String]) -> Result<E
     }
     argv.extend(args.iter().map(|s| sh_quote(s)));
     exec_login(&ctx, env_name, &format!("exec {}", argv.join(" ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_timeout_is_a_duration_above_zero() {
+        assert_eq!(parse_timeout("30m").unwrap(), Duration::from_secs(1800));
+        assert_eq!(parse_timeout("90s").unwrap(), Duration::from_secs(90));
+        assert_eq!(parse_timeout("2h").unwrap(), Duration::from_secs(7200));
+        assert!(parse_timeout("0").is_err());
+        assert!(parse_timeout("1y").is_err());
+        assert!(parse_timeout("soon").is_err());
+    }
 }
