@@ -4,10 +4,9 @@
 use chrono::Utc;
 use luoto_shared::api::{
     AccessRequest, MAX_PENDING_REQUESTS, MAX_REASON_LEN, NewAccessRequest, RequestStatus,
+    requested_rule,
 };
-use luoto_shared::host::normalize_host;
-use luoto_shared::policy::AccessLevel;
-use luoto_shared::policy::{Access, Rule, RuleOrigin, rule_error};
+use luoto_shared::policy::{Access, AccessLevel};
 
 const KEEP: usize = 100;
 
@@ -44,6 +43,7 @@ impl Requests {
             return self.file(AccessRequest {
                 id: 0,
                 host: String::new(),
+                port: None,
                 access: AccessLevel::Read,
                 paths: Vec::new(),
                 reason,
@@ -54,33 +54,29 @@ impl Requests {
                 install: Some(install.clone()),
             });
         }
-        let host = match new.host.strip_prefix("*.") {
-            Some(rest) => format!("*.{}", normalize_host(rest).map_err(|e| e.to_string())?),
-            None => normalize_host(&new.host).map_err(|e| e.to_string())?,
+        let rule = requested_rule(&new.host, new.port, new.access, &new.paths)?;
+        let access = match rule.access {
+            Access::Level(level) => level,
+            Access::Methods(_) => new.access,
         };
-        let rule = Rule {
-            host: host.clone(),
-            access: Access::Level(new.access),
-            paths: new.paths.clone(),
-            ..Default::default()
-        };
-        if let Some(e) = rule_error(&rule, RuleOrigin::Sandbox) {
-            return Err(e.message);
-        }
         let reason = clean_reason(&new.reason);
         if reason.is_empty() {
             return Err("a reason is required".into());
         }
         if let Some(existing) = self.items.iter().find(|r| {
-            r.status == RequestStatus::Pending && r.host == host && r.access == new.access
+            r.status == RequestStatus::Pending
+                && r.host == rule.host
+                && r.port == rule.port
+                && r.access == access
         }) {
             return Ok(existing.clone());
         }
         self.file(AccessRequest {
             id: 0,
-            host,
-            access: new.access,
-            paths: new.paths,
+            host: rule.host,
+            port: rule.port,
+            access,
+            paths: rule.paths,
             reason,
             status: RequestStatus::Pending,
             created: Utc::now(),
@@ -157,11 +153,45 @@ mod tests {
     fn new(host: &str) -> NewAccessRequest {
         NewAccessRequest {
             host: host.into(),
+            port: None,
             access: AccessLevel::Read,
             paths: vec![],
             reason: "read the docs\n\u{1b}[31m".into(),
             install: None,
         }
+    }
+
+    #[test]
+    fn a_port_request_is_kept_as_a_tunnel_request() {
+        let mut r = Requests::default();
+        let port = |host: &str, port: u16| NewAccessRequest {
+            port: Some(port),
+            ..new(host)
+        };
+        let a = r.create(port("DB.example.com", 5432)).unwrap();
+        assert_eq!(
+            (a.host.as_str(), a.port, a.access),
+            ("db.example.com", Some(5432), AccessLevel::Write)
+        );
+        assert_eq!(r.create(port("db.example.com", 5432)).unwrap().id, a.id);
+        assert_ne!(r.create(port("db.example.com", 6379)).unwrap().id, a.id);
+        assert_ne!(r.create(new("db.example.com")).unwrap().id, a.id);
+        assert_eq!(r.get(a.id).unwrap().port, Some(5432));
+        for (host, p) in [
+            ("db.example.com", 443),
+            ("db.example.com", 80),
+            ("*.example.com", 5432),
+            ("10.0.0.5", 5432),
+            ("10.0.0.0/8", 5432),
+        ] {
+            assert!(r.create(port(host, p)).is_err(), "{host}:{p}");
+        }
+        let with_paths = NewAccessRequest {
+            paths: vec!["/x/**".into()],
+            ..port("db.example.com", 5432)
+        };
+        assert!(r.create(with_paths).is_err());
+        assert_eq!(r.pending(), 3);
     }
 
     #[test]
@@ -186,6 +216,7 @@ mod tests {
         let mut r = Requests::default();
         let ask = |install: Install| NewAccessRequest {
             host: String::new(),
+            port: None,
             access: AccessLevel::Read,
             paths: vec![],
             reason: "psql for the migrations".into(),

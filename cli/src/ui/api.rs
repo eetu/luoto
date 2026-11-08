@@ -11,7 +11,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures_util::Stream;
-use luoto_shared::api::{AccessRequest, RequestStatus};
+use luoto_shared::api::{AccessRequest, Narrowing, RequestStatus};
 use luoto_shared::ctl::{GateStatus, VaultStatus};
 use luoto_shared::policy::{CompiledRule, Rule};
 use luoto_shared::{presets, profiles};
@@ -525,6 +525,9 @@ struct Decision {
     /// an id alone could name another request than the one reviewed.
     created: DateTime<Utc>,
     ttl: Option<String>,
+    /// Less than the request asked for.
+    #[serde(default)]
+    narrow: Narrowing,
     #[serde(default)]
     force: bool,
 }
@@ -538,27 +541,14 @@ fn shown(ctx: &Ctx, name: &str, id: u64, created: DateTime<Utc>) -> anyhow::Resu
     Ok(req)
 }
 
-/// An approved request: the rule it became, or what an install request did.
-#[derive(Serialize)]
-#[serde(untagged)]
-enum Approved {
-    Rule(Rule),
-    Installed { installed: String },
-}
-
 async fn approve(
     Path((name, id)): Path<(String, u64)>,
     Json(d): Json<Decision>,
-) -> ApiResult<Approved> {
+) -> ApiResult<rules::Approved> {
     blocking(move || {
         let ctx = Ctx::load()?;
         let req = shown(&ctx, &name, id, d.created)?;
-        if req.install.is_some() {
-            return Ok(Approved::Installed {
-                installed: rules::approve_install(&ctx, &name, &req)?,
-            });
-        }
-        rules::approve(&ctx, &name, &req, d.ttl.as_deref(), d.force).map(Approved::Rule)
+        rules::approve(&ctx, &name, &req, d.ttl.as_deref(), &d.narrow, d.force)
     })
     .await
     .map(Json)

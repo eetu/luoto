@@ -29,6 +29,7 @@ const HELP: &str = "luoto sandbox gate. Endpoints:\n\
   GET  /_sandbox/status          policy, credentials, recent denials, requests\n\
   POST /_sandbox/check           {\"url\":\"https://…\",\"method\":\"GET\"}\n\
   POST /_sandbox/requests        {\"host\":\"docs.rs\",\"access\":\"read\",\"reason\":\"…\"}\n\
+                                 ({\"host\":\"db.example.com\",\"port\":5432,…}: a tunnel)\n\
   GET  /_sandbox/requests/<id>   request status\n\
   GET  /_sandbox/ca.pem          the env CA certificate\n\
   POST /_sandbox/ssh-agent       one ssh-agent message for the vault (`sandbox ssh-agent`)\n\
@@ -54,9 +55,13 @@ pub async fn handle(state: Arc<State>, req: Request<Incoming>) -> Response<Body>
                         state.events.emit(Event {
                             kind: Some(EventKind::Request),
                             host: Some(r.host.clone()),
+                            port: r.port,
                             request_id: Some(r.id),
                             message: Some(r.reason.clone()),
-                            reason: Some(format!("{:?}", r.access).to_lowercase()),
+                            reason: Some(match r.port {
+                                Some(_) => "tunnel".into(),
+                                None => format!("{:?}", r.access).to_lowercase(),
+                            }),
                             ..Default::default()
                         });
                         json(StatusCode::CREATED, &r)
@@ -123,6 +128,7 @@ fn status(state: &State) -> SandboxStatus {
             id: r.id.clone(),
             origin: r.origin.clone(),
             host: r.rule.host.clone(),
+            port: r.rule.port,
             access: r.rule.access.describe(),
             paths: r.rule.paths.clone(),
             expires: r.rule.expires,

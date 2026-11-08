@@ -93,6 +93,8 @@ export type AccessRequest = {
   id: number;
   /** Empty for an install request. */
   host: string;
+  /** Set for a request for an uninspected tunnel to `host:port`. */
+  port?: number | null;
   access: AccessLevel;
   paths?: string[];
   reason: string;
@@ -100,6 +102,13 @@ export type AccessRequest = {
   created: string;
   note?: string | null;
   install?: Install | null;
+};
+
+/** Less than an access request asked for; the backend refuses anything wider. */
+export type Narrowing = {
+  read?: boolean;
+  methods?: string[];
+  paths?: string[];
 };
 
 /** A repository beside the env's folder, at `/workspace/<name>`. */

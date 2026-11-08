@@ -216,11 +216,20 @@ enum Cmd {
         #[arg(long)]
         watch: bool,
     },
-    /// Approve an access request (adds a rule).
+    /// Approve an access request (adds a rule), as asked or narrowed.
     Approve {
         id: u64,
         #[arg(long)]
         ttl: Option<String>,
+        /// Grant read-only access (GET, HEAD, OPTIONS) to a write request.
+        #[arg(long, conflicts_with = "methods")]
+        read: bool,
+        /// Grant only these methods (repeatable), among those the request asked for.
+        #[arg(long = "method")]
+        methods: Vec<String>,
+        /// Grant only these path globs (repeatable), within the request's paths.
+        #[arg(long = "path")]
+        paths: Vec<String>,
         #[arg(long, short)]
         yes: bool,
         /// Accept the rule's risks without asking.
@@ -506,9 +515,19 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Approve {
             id,
             ttl,
+            read,
+            methods,
+            paths,
             yes,
             force,
-        } => c::approve(&env()?, id, ttl.as_deref(), yes, force),
+        } => {
+            let narrow = luoto_shared::api::Narrowing {
+                read,
+                methods,
+                paths,
+            };
+            c::approve(&env()?, id, ttl.as_deref(), &narrow, yes, force)
+        }
         Cmd::Reject { id, note } => c::reject(&env()?, id, note),
         Cmd::Egress {
             denied,
@@ -547,6 +566,30 @@ mod tests {
     #[test]
     fn the_cli_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn approve_takes_what_narrows_a_request() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat());
+        let Ok(Cli {
+            cmd:
+                Cmd::Approve {
+                    id: 3,
+                    read: true,
+                    methods,
+                    paths,
+                    ..
+                },
+            ..
+        }) = parse(&[
+            "approve", "3", "--read", "--path", "/v1/**", "--path", "/v2",
+        ])
+        else {
+            panic!("approve didn't parse");
+        };
+        assert!(methods.is_empty());
+        assert_eq!(paths, ["/v1/**", "/v2"]);
+        assert!(parse(&["approve", "3", "--read", "--method", "GET"]).is_err());
     }
 
     #[test]

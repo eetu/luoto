@@ -7,6 +7,7 @@ import type {
   HostSummary,
   LuotoEvent,
   Meta,
+  Narrowing,
   Overview,
   ProjectStatus,
   Proposal,
@@ -107,11 +108,12 @@ export const api = {
     ),
   requests: (name: string) => request<AccessRequest[]>("GET", `${env(name)}/requests`),
   // `created` names the request shown: the gate numbers requests anew when it restarts.
-  approve: (name: string, req: AccessRequest, ttl?: string, force = false) =>
+  approve: (name: string, req: AccessRequest, ttl?: string, force = false, narrow?: Narrowing) =>
     request<Rule | { installed: string }>("POST", `${env(name)}/requests/${req.id}/approve`, {
       created: req.created,
       ttl,
       force,
+      narrow,
     }),
   reject: (name: string, req: AccessRequest) =>
     request<AccessRequest>("POST", `${env(name)}/requests/${req.id}/reject`, {

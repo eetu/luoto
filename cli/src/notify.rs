@@ -179,10 +179,12 @@ fn clean(s: &str) -> String {
     cut
 }
 
-/// `read access to docs.rs: <reason>`; a request without a host asks for software or a preset.
+/// `read access to docs.rs: <reason>`, `a tunnel to db.example.com:5432: <reason>`; a request
+/// without a host asks for software or a preset.
 fn describe_request(ev: &Event) -> String {
-    let what = match ev.host.as_deref().filter(|h| !h.is_empty()) {
-        Some(host) => {
+    let what = match (ev.host.as_deref().filter(|h| !h.is_empty()), ev.port) {
+        (Some(host), Some(port)) => format!("a tunnel to {}:{port}", clean(host)),
+        (Some(host), None) => {
             let access = if ev.reason.as_deref() == Some("write") {
                 "write"
             } else {
@@ -190,7 +192,7 @@ fn describe_request(ev: &Event) -> String {
             };
             format!("{access} access to {}", clean(host))
         }
-        None => "software or a preset".to_string(),
+        (None, _) => "software or a preset".to_string(),
     };
     match clean(ev.message.as_deref().unwrap_or_default()) {
         reason if reason.is_empty() => what,
@@ -422,6 +424,19 @@ mod tests {
         };
         n.take(&later, true);
         assert_eq!(n.requests.len(), 2);
+    }
+
+    #[test]
+    fn a_port_request_reads_as_a_tunnel() {
+        let tunnel = Event {
+            port: Some(5432),
+            reason: Some("tunnel".into()),
+            ..request(1, "db.example.com", "migrations")
+        };
+        assert_eq!(
+            describe_request(&tunnel),
+            "a tunnel to db.example.com:5432: migrations"
+        );
     }
 
     #[test]

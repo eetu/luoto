@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use luoto_shared::api::{AccessRequest, RequestStatus};
+use luoto_shared::api::{AccessRequest, Narrowing, RequestStatus};
 use luoto_shared::events::Verdict;
 use luoto_shared::policy::Mode;
 
@@ -619,16 +619,22 @@ fn fmt_request(r: &AccessRequest) -> String {
             "install {}, kept in the env's config",
             crate::text::display(&i.describe())
         ),
-        None => format!(
-            "{} {:?}{}",
-            crate::text::display(&r.host),
-            r.access,
-            if r.paths.is_empty() {
-                String::new()
-            } else {
-                format!(" paths {}", crate::text::display(&r.paths.join(",")))
-            }
-        ),
+        None => match r.port {
+            Some(port) => format!(
+                "a tunnel to {}:{port}, uninspected: any protocol and any data",
+                crate::text::display(&r.host)
+            ),
+            None => format!(
+                "{} {:?}{}",
+                crate::text::display(&r.host),
+                r.access,
+                if r.paths.is_empty() {
+                    String::new()
+                } else {
+                    format!(" paths {}", crate::text::display(&r.paths.join(",")))
+                }
+            ),
+        },
     };
     format!(
         "{what}\n   reason (written by the sandbox, untrusted): {:?}",
@@ -691,19 +697,31 @@ pub fn requests(name: Option<&str>, watch: bool) -> Result<ExitCode> {
     }
 }
 
-pub fn approve(name: &str, id: u64, ttl: Option<&str>, yes: bool, force: bool) -> Result<ExitCode> {
+pub fn approve(
+    name: &str,
+    id: u64,
+    ttl: Option<&str>,
+    narrow: &Narrowing,
+    yes: bool,
+    force: bool,
+) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let req = rules::request(&ctx, name, id)?;
     println!("request #{id}: {}", fmt_request(&req));
+    if !narrow.is_empty() {
+        // Before asking: a narrowing that would widen the request is refused here.
+        let rule = rules::grant(&req, narrow)?;
+        println!("grants less: {}", rules::describe(&rule));
+    }
     if !yes && !confirm("Approve?") {
         bail!("not approved (use --yes to skip the prompt)");
     }
-    if req.install.is_some() {
-        println!("{}", rules::approve_install(&ctx, name, &req)?);
-        return Ok(ExitCode::SUCCESS);
+    match rules::accepting_risks(force, |force| {
+        rules::approve(&ctx, name, &req, ttl, narrow, force)
+    })? {
+        rules::Approved::Installed { installed } => println!("{installed}"),
+        rules::Approved::Rule(rule) => println!("approved: {}", rules::describe(&rule)),
     }
-    let rule = rules::accepting_risks(force, |force| rules::approve(&ctx, name, &req, ttl, force))?;
-    println!("approved: {} {}", rule.host, rule.access.describe());
     Ok(ExitCode::SUCCESS)
 }
 

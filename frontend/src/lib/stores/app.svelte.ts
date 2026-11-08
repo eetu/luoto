@@ -224,6 +224,12 @@ export function installLabel(i: Install): string {
   return `${i.name} ${i.version} (mise)`;
 }
 
+/** Where an access request asks to go: its host, or `host:port` for a tunnel. */
+export function requestTarget(r: AccessRequest): string {
+  if (!r.port) return r.host;
+  return r.host.includes(":") ? `[${r.host}]:${r.port}` : `${r.host}:${r.port}`;
+}
+
 export function ago(ts?: string | null): string {
   if (!ts) return "";
   const s = Math.max(0, (Date.now() - Date.parse(ts)) / 1000);

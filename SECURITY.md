@@ -22,7 +22,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   checked against a default-deny policy of host, port, method, path, body size and expiry;
   explicit denies, luoto's and the user's `[[deny]]`, beat
   every allow. Non-HTTP TCP goes nowhere except through tunnel rules
-  you grant (`luoto allow --tunnel`, a host and port) and SSH to the hosts an SSH credential
+  you grant (`luoto allow --tunnel`, a host and port, or an approved port request, after you
+  confirm it goes uninspected) and SSH to the hosts an SSH credential
   names, on port 22; both pass through uninspected. UDP goes nowhere. DNS is answered locally
   with fake addresses and never forwarded. Destinations are resolved by the gate only after a
   request is allowed, every resolved address is checked against private, loopback,
@@ -151,10 +152,12 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   checked to stay in the folder as written, but it can lead through another link (one on the
   host, or one the same pull writes) that points elsewhere.
 - **Social engineering.** Access requests are written by code in the sandbox. Read the host
-  and access, not the reason. An install request names a package or toolchain the gate has
-  checked to be a plain name; approving it runs that package's install scripts as root inside
-  the env (still the sandbox), and its downloads take the env's usual presets and install
-  windows.
+  and access, not the reason; grant less than asked where that will do (`luoto approve --read`,
+  `--path`). A request can't name an address range or a private address, and one for a port
+  is an uninspected tunnel to that host and port, never 80 or 443. An install request names a
+  package or toolchain the gate has checked to be a plain name; approving it runs that
+  package's install scripts as root inside the env (still the sandbox), and its downloads take
+  the env's usual presets and install windows.
 - **Images.** Release images are pinned by digest in the binary; images from
   `luoto setup --build` are as trustworthy as your source tree.
 - **Install windows.** The project's version files, which the sandbox controls, decide which

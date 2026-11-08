@@ -757,10 +757,15 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
             issues.push(err(format!("path pattern `{p}` must start with `/`")));
         }
     }
-    if rule.mode == Mode::Tunnel && rule.access != Access::Level(AccessLevel::Write) {
-        issues.push(risk(
-            "tunnel mode cannot enforce methods or paths; it grants full access to the host".into(),
-        ));
+    if rule.mode == Mode::Tunnel {
+        let to = match rule.port {
+            Some(port) => format!("{}:{port}", rule.host),
+            None => rule.host.clone(),
+        };
+        issues.push(risk(format!(
+            "a tunnel to {to} is not inspected: code in the sandbox gets full access to it, \
+             any protocol and any data"
+        )));
     }
     if let Some(Err(e)) = rule.idle.as_deref().map(parse_idle) {
         issues.push(err(e));
@@ -770,7 +775,10 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
             "allows dialing private/host addresses (e.g. services on your machine)".into(),
         ));
     }
-    if rule.access == Access::Level(AccessLevel::Write) && origin == RuleOrigin::Host {
+    if rule.mode != Mode::Tunnel
+        && rule.access == Access::Level(AccessLevel::Write)
+        && origin == RuleOrigin::Host
+    {
         issues.push(risk(format!(
             "write access lets code in the sandbox upload data to {}",
             rule.host
@@ -1101,6 +1109,27 @@ mod tests {
                 .any(|i| i.severity == Severity::Error)
         );
         assert!(validate_rule(&Rule::read("docs.rs"), RuleOrigin::Sandbox).is_empty());
+    }
+
+    #[test]
+    fn a_tunnel_is_one_risk_naming_its_port() {
+        let tunnel = Rule {
+            host: "db.example.com".into(),
+            port: Some(5432),
+            access: Access::Level(AccessLevel::Write),
+            mode: Mode::Tunnel,
+            ..Default::default()
+        };
+        for origin in [RuleOrigin::Host, RuleOrigin::Sandbox] {
+            let issues = validate_rule(&tunnel, origin);
+            assert_eq!(issues.len(), 1, "{issues:?}");
+            assert_eq!(issues[0].severity, Severity::Risk);
+            assert!(
+                issues[0]
+                    .message
+                    .contains("db.example.com:5432 is not inspected")
+            );
+        }
     }
 
     #[test]
