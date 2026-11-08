@@ -413,3 +413,48 @@ test("with desktop notifications on, the page shows none of its own", async ({ p
   await expect(bell).toBeDisabled();
   await expect(bell).toHaveAttribute("title", /notifications = false/);
 });
+
+test("an env's disk use is measured when its panel shows and on refresh", async ({ page }) => {
+  await mockApi(page);
+  let reads = 0;
+  await page.route(
+    (url) => url.pathname === "/api/disk/envs",
+    (route) => {
+      reads += 1;
+      return route.fulfill({ json: fixture("envDisk") });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  const parts = page.locator("dl.parts");
+  await expect(page.getByText("3.0 GB", { exact: true })).toBeVisible();
+  await expect(parts).toContainText("workspace");
+  await expect(parts).toContainText("2.1 GB");
+  await expect(page.getByText("45.5 GB free of 106.8 GB")).toBeVisible();
+  await expect(page.getByText(/nearly full/)).toHaveCount(0);
+  expect(reads).toBe(1);
+
+  await page.getByRole("button", { name: "measure disk use again" }).click();
+  await expect.poll(() => reads).toBe(2);
+});
+
+test("a nearly full VM disk is flagged beside the envs, with what frees it", async ({ page }) => {
+  await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/disk",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...fixture("disk"),
+          space: { size: 106769133568, used: 102569133568, free: 4200000000 },
+          low: true,
+        },
+      }),
+  );
+  await open(page);
+  await expect(page.getByText("4.2 GB free of 106.8 GB")).toBeVisible();
+  await expect(page.getByText(/nearly full, and a full disk stops every env/)).toBeVisible();
+  await expect(page.getByText(/41 superseded image\(s\), up to 18\.3 GB/)).toBeVisible();
+  await expect(page.getByText("luoto prune", { exact: true })).toBeVisible();
+});

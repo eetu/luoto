@@ -3,6 +3,7 @@
 //! container its own, and gVisor for the dev containers. Podman runs one machine at a time, so
 //! starting luoto's stops whichever other machine is running, after asking.
 
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
@@ -214,6 +215,47 @@ fn describe(v: &Value) -> Option<String> {
     ))
 }
 
+/// The machine's disk file and the bytes it takes on this machine's disk: a sparse file takes
+/// what was written to it and not trimmed since, however little the VM still uses. None where
+/// podman's config for the machine doesn't name the file, or off unix (Windows' WSL and
+/// Hyper-V disks are no sparse files).
+pub fn disk_file(bin: &str) -> Option<(PathBuf, u64)> {
+    let out = Command::new(bin)
+        .args(["machine", "inspect", NAME])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    let dir = v.as_array()?.first()?["ConfigDir"]["Path"].as_str()?;
+    let config = std::fs::read(Path::new(dir).join(format!("{NAME}.json"))).ok()?;
+    let path = PathBuf::from(image_path(&serde_json::from_slice(&config).ok()?)?);
+    allocated(&path).map(|n| (path, n))
+}
+
+/// The disk image in podman's config for a machine (`<config dir>/<name>.json`).
+fn image_path(config: &Value) -> Option<&str> {
+    config["ImagePath"]["Path"].as_str()
+}
+
+#[cfg(unix)]
+fn allocated(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.blocks() * 512)
+}
+
+#[cfg(not(unix))]
+fn allocated(_: &Path) -> Option<u64> {
+    None
+}
+
+/// Tell the VM's disk which blocks its filesystems no longer use, so the disk file on this
+/// machine can shrink: without it the file keeps every block ever written to it.
+pub fn trim(bin: &str) -> Result<()> {
+    ssh(bin, "sudo fstrim -a")
+        .map(drop)
+        .context("trim luoto's VM disk")
+}
+
 /// Run a shell command inside the machine as its user; returns stdout.
 pub fn ssh(bin: &str, script: &str) -> Result<String> {
     let out = Command::new(bin)
@@ -309,5 +351,26 @@ mod tests {
             "running, 6 CPUs, 8192 MiB memory, 100 GiB disk, rootless"
         );
         assert!(super::describe(&serde_json::json!([])).is_none());
+    }
+
+    #[test]
+    fn the_disk_image_comes_from_podmans_machine_config() {
+        // `<config dir>/luoto.json` as podman 5 writes it (trimmed).
+        let config = serde_json::json!({
+            "ConfigPath": {"Path": "/Users/someone/.config/containers/podman/machine/applehv/luoto.json"},
+            "Created": "2026-10-01T09:12:40.123456+03:00",
+            "ImagePath": {"Path": "/Users/someone/.local/share/containers/podman/machine/applehv/luoto-arm64.raw"},
+            "Name": "luoto",
+            "Resources": {"CPUs": 6, "DiskSize": 100, "Memory": 8192, "USBs": []},
+            "AppleHypervisor": {"Vfkit": {"Endpoint": "http://localhost:51244"}}
+        });
+        assert_eq!(
+            super::image_path(&config),
+            Some("/Users/someone/.local/share/containers/podman/machine/applehv/luoto-arm64.raw")
+        );
+        assert_eq!(
+            super::image_path(&serde_json::json!({"Name": "luoto"})),
+            None
+        );
     }
 }

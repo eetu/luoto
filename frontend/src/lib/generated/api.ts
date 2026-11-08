@@ -74,6 +74,18 @@ export type Detection = {
   wsl: string | null;
 };
 
+export type DiskPart = {
+  what: string;
+  bytes: number;
+};
+
+/** Used and free bytes of the disk that holds the runtime's images, containers and volumes. */
+export type DiskSpace = {
+  size: number;
+  used: number;
+  free: number;
+};
+
 export type EnvDetail = {
   name: string;
   path: string;
@@ -88,6 +100,16 @@ export type EnvDetail = {
   missing_secrets: string[];
   sandbox_secrets: string[];
   ports: EnvPorts;
+};
+
+/** One env's disk use. */
+export type EnvDisk = {
+  /**
+   * Its volumes (`workspace`, `home`, `tools`, `gate`) and `containers` (the writable
+   * layers of its dev and gate containers); what doesn't exist yet is left out.
+   */
+  parts: DiskPart[];
+  total: number;
 };
 
 /** Where an env's servers answer on this machine. */
@@ -498,3 +520,16 @@ export type VaultStatus = {
 };
 
 export type Verdict = "allow" | "deny";
+
+/** The disk holding envs, as the UI shows it. */
+export type VmDisk = {
+  /** `luoto's VM`, or `the runtime's disk` (Linux). */
+  place: string;
+  /** None while luoto's VM is stopped, or where the runtime doesn't tell (Docker Desktop). */
+  space: DiskSpace | null;
+  /** Under 10 GB is free (`LOW_FREE`). */
+  low: boolean;
+  /** The images `luoto prune` removes, and up to how many bytes that frees. */
+  prunable: number;
+  prunable_bytes: number;
+};

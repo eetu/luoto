@@ -13,6 +13,7 @@ mod connect;
 mod ctl;
 mod deps;
 mod detect;
+mod disk;
 mod env;
 mod events;
 mod format;
@@ -90,6 +91,13 @@ enum Cmd {
         #[arg(long, short)]
         yes: bool,
     },
+    /// Remove luoto's superseded images (none a container uses or this luoto runs), after
+    /// listing them, and return the freed space to this machine; volumes stay.
+    Prune {
+        /// Don't ask first.
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// Start the local web UI.
     Ui {
         /// Outside the ports envs forward to this machine (1024–32767), so no env can serve
@@ -139,12 +147,21 @@ enum Cmd {
     },
     /// List envs.
     #[command(visible_alias = "list")]
-    Ls,
+    Ls {
+        /// Also what each env takes on disk (the runtime walks every volume, which takes a
+        /// while).
+        #[arg(long)]
+        size: bool,
+    },
     /// Show the env's state, workspace, forwarded ports, credentials, rules, denies and mutes.
     Status {
         /// The compiled policy as JSON.
         #[arg(long)]
         json: bool,
+        /// Also what the env takes on disk, part by part (the runtime walks every volume,
+        /// which takes a while).
+        #[arg(long)]
+        size: bool,
     },
     /// Open the env's config in $EDITOR, validate and apply it.
     Edit,
@@ -423,6 +440,10 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             anyhow::bail!("uninstall removes every env: leave out -e")
         }
         Cmd::Uninstall { yes } => uninstall::uninstall(yes),
+        Cmd::Prune { .. } if env_arg.is_some() => {
+            anyhow::bail!("prune acts on luoto's images, not an env: leave out -e")
+        }
+        Cmd::Prune { yes } => disk::prune(yes),
         Cmd::Ui { port, no_open } => ui::serve(port, !no_open),
         Cmd::Init(o) => {
             if env_arg.is_some() {
@@ -457,8 +478,8 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Down { all: false } => c::down(&env()?),
         Cmd::Rm { yes } => c::rm(&env()?, yes),
         Cmd::ResetHome { yes } => c::reset_home(&env()?, yes),
-        Cmd::Ls => c::ls(),
-        Cmd::Status { json } => c::status(&env()?, json),
+        Cmd::Ls { size } => c::ls(size),
+        Cmd::Status { json, size } => c::status(&env()?, json, size),
         Cmd::Edit => c::edit(&env()?),
         Cmd::Project { action } => match action {
             None => c::project(&env()?, false, false, false),
@@ -665,5 +686,18 @@ mod tests {
         let cli = parse(&["uninstall", "-e", "web"]);
         let e = run(cli.env, cli.cmd).unwrap_err().to_string();
         assert!(e.contains("leave out -e"), "{e}");
+    }
+
+    #[test]
+    fn prune_takes_no_env_and_sizes_are_asked_for() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat()).unwrap();
+        let cli = parse(&["prune", "-e", "web", "--yes"]);
+        let e = run(cli.env, cli.cmd).unwrap_err().to_string();
+        assert!(e.contains("leave out -e"), "{e}");
+        assert!(matches!(parse(&["ls"]).cmd, Cmd::Ls { size: false }));
+        assert!(matches!(
+            parse(&["list", "--size"]).cmd,
+            Cmd::Ls { size: true }
+        ));
     }
 }

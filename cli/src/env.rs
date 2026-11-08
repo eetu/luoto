@@ -86,12 +86,13 @@ pub fn env_image(ctx: &Ctx, cfg: &EnvConfig) -> String {
     cfg.image.clone().unwrap_or_else(|| ctx.image("base"))
 }
 
-/// IDs of the images `up` runs.
+/// IDs of the images `up` runs, and whether it pulled any.
 struct ImageIds {
     gate: String,
     vault: String,
     tools: String,
     dev: String,
+    pulled: bool,
 }
 
 /// luoto's images and the env's own `dev` image, each pulled (with progress) when missing, as
@@ -104,8 +105,8 @@ fn ensure_images(ctx: &Ctx, dev: &str) -> Result<ImageIds> {
         dev.to_string(),
     ];
     // One call when everything is there, the common case.
-    let ids = match image_ids(&ctx.rt, &all) {
-        Some(ids) => ids,
+    let (ids, pulled) = match image_ids(&ctx.rt, &all) {
+        Some(ids) => (ids, false),
         None => {
             for img in all.iter().filter(|img| !ctx.rt.image_exists(img)) {
                 if img.starts_with("localhost/") {
@@ -113,7 +114,8 @@ fn ensure_images(ctx: &Ctx, dev: &str) -> Result<ImageIds> {
                 }
                 ctx.rt.pull(img)?;
             }
-            image_ids(&ctx.rt, &all).context("inspect the env's images")?
+            let ids = image_ids(&ctx.rt, &all).context("inspect the env's images")?;
+            (ids, true)
         }
     };
     let [gate, vault, tools, dev] = ids;
@@ -122,6 +124,7 @@ fn ensure_images(ctx: &Ctx, dev: &str) -> Result<ImageIds> {
         vault,
         tools,
         dev,
+        pulled,
     })
 }
 
@@ -402,6 +405,9 @@ fn ask_credentials(ctx: &Ctx, env: &str) -> Result<()> {
 
 pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     ensure_vm(ctx)?;
+    if !opts.quiet {
+        crate::disk::warn_if_low(ctx);
+    }
     EnvFile::load(&ctx.paths, env)?.prune_expired()?;
     ask_credentials(ctx, env)?;
     let image = env_image(ctx, &layered(ctx, env)?);
@@ -606,6 +612,10 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         );
         println!("  egress:  luoto egress -e {env}");
         println!("  web UI:  luoto ui");
+        // Now that the gate and vault run on the new images, the old ones are unused.
+        if ids.pulled {
+            crate::disk::note_superseded(ctx);
+        }
     }
     Ok(())
 }

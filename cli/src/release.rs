@@ -48,6 +48,15 @@ pub fn image(local: Option<&str>, component: &str) -> String {
     }
 }
 
+/// An image reference without its tag or digest.
+pub fn repo_of(reference: &str) -> &str {
+    let r = reference.split('@').next().unwrap_or(reference);
+    match r.rfind(':') {
+        Some(i) if i > r.rfind('/').unwrap_or(0) => &r[..i],
+        _ => r,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

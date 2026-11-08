@@ -37,6 +37,8 @@ const RENAME: &[(&str, &str)] = &[
     ("luoto::repos::Origin", "RepoOrigin"),
     ("luoto::project::Status", "ProjectStatus"),
     ("luoto::project::State", "ProjectState"),
+    ("luoto::disk::Part", "DiskPart"),
+    ("luoto::disk::Space", "DiskSpace"),
 ];
 
 /// The line width of the frontend's code (`.editorconfig`), within which a union stays on

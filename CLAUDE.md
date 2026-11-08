@@ -95,6 +95,11 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   per env, gVisor plus the `luoto-runsc` wrapper (podman keeps a container's runtime path but
   not its flags). The remote podman client can't choose a runtime, so gVisor containers are
   created by podman inside the VM (`podman machine ssh`); every later call uses the connection.
+- `disk.rs` reads sizes and free space (podman and docker print them differently; its parsers
+  read both) and picks what `luoto prune` removes: this instance's images by repository (an
+  unnamed one by podman's names history, or the build stages' `luoto.build` label), never one
+  a container uses or either instance runs, never a volume. Sizes walk every volume: never on
+  the UI's polls.
 - `watch.rs` is the one background process per config dir; port forwarding (`ports.rs`) goes
   through `exec … sandbox relay`, never a network path. Its desktop notifications
   (`notify.rs`) pass sandbox text to the OS notifier cleaned, capped and as arguments, never

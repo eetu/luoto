@@ -13,7 +13,7 @@ use crate::env::{self, Ctx, UpOptions};
 use crate::prompt::confirm;
 use crate::rules::{self, AllowOpts};
 use crate::state::EnvState;
-use crate::{ctl, events, machine, names, ports, project, sync, workspace};
+use crate::{ctl, disk, events, machine, names, ports, project, sync, workspace};
 
 /// Show, accept or drop the project's luoto.toml settings for an env.
 pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<ExitCode> {
@@ -467,7 +467,7 @@ pub fn reset_home(name: &str, yes: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn ls() -> Result<ExitCode> {
+pub fn ls(size: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let envs = config::list_envs(&ctx.paths)?;
     if envs.is_empty() {
@@ -478,6 +478,20 @@ pub fn ls() -> Result<ExitCode> {
     if states.vm_stopped {
         println!("luoto's VM is stopped; `luoto up` starts it with the env\n");
     }
+    let sizes = if size && !states.vm_stopped {
+        disk::sizes(&ctx.rt)
+            .map_err(|e| eprintln!("warning: sizes not read: {e:#}"))
+            .ok()
+    } else {
+        None
+    };
+    let size_of = |e: &str| {
+        let d = sizes.as_ref().map(|s| s.env(e));
+        match d {
+            Some(d) if !d.parts.is_empty() => disk::human(d.total),
+            _ => "-".into(),
+        }
+    };
     let rows: Vec<(String, String, String, String)> = envs
         .iter()
         .map(|e| match EnvFile::load(&ctx.paths, e) {
@@ -501,13 +515,26 @@ pub fn ls() -> Result<ExitCode> {
         .max()
         .unwrap_or(0)
         .max(4);
+    let size_col = |text: &str| {
+        if size {
+            format!("{text:<10} ")
+        } else {
+            String::new()
+        }
+    };
     println!(
-        "{:<20} {:<10} {:<10} {:<width$} {:<28} PRESETS",
-        "ENV", "DEV", "GATE", "FROM", "IMAGE"
+        "{:<20} {:<10} {:<10} {}{:<width$} {:<28} PRESETS",
+        "ENV",
+        "DEV",
+        "GATE",
+        size_col("SIZE"),
+        "FROM",
+        "IMAGE"
     );
     for (e, from, image, presets) in rows {
         let (dev, gate) = states.env(&e);
-        println!("{e:<20} {dev:<10} {gate:<10} {from:<width$} {image:<28} {presets}");
+        let sz = size_col(&size_of(&e));
+        println!("{e:<20} {dev:<10} {gate:<10} {sz}{from:<width$} {image:<28} {presets}");
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -522,7 +549,7 @@ fn from(ws: &config::Workspace) -> String {
     }
 }
 
-pub fn status(name: &str, json: bool) -> Result<ExitCode> {
+pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     if json {
         let p = env::plan(&ctx, name)?;
@@ -622,6 +649,13 @@ pub fn status(name: &str, json: bool) -> Result<ExitCode> {
             if !e.missing.is_empty() {
                 println!("  missing secrets: {}", e.missing.join(", "));
             }
+        }
+    }
+    // Last of the lines: the runtime walks every volume for it.
+    if size && !states.vm_stopped {
+        match disk::sizes(&ctx.rt) {
+            Ok(s) => println!("  disk:   {}", s.env(name).describe()),
+            Err(e) => println!("  disk:   not read ({e:#})"),
         }
     }
     print_rules(&plan?);

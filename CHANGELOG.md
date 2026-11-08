@@ -30,6 +30,12 @@ on your machine.
 - **luoto.toml review:** names `image` (pulled outside the gate), `ports` and `run`.
 - **Vault:** a changed secret retires only the tokens minted from it; a mint is shared by
   concurrent requests, bounded in time and size, and a failed one isn't retried for 30 s.
+- **Disk use:** `luoto status --size` shows what an env's workspace, home, toolchains and
+  containers take, `luoto ls --size` each env's total, `luoto doctor` the VM's disk and its
+  file on this machine; the UI shows both, and `up` warns under 10 GB free.
+- **`luoto prune`:** removes this luoto's superseded images that nothing uses, keeping the
+  other instance's, everything else in the VM and every volume, then trims the VM's disk so
+  the space returns to this machine.
 - **Quieter installs:** Python packages' byte-compile warnings stay out of `up`'s output.
 
 ## 0.3.1 (2026-11-08)

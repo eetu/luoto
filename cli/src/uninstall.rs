@@ -14,6 +14,7 @@ use anyhow::{Result, bail};
 
 use crate::paths::Paths;
 use crate::prompt::confirm;
+use crate::release::repo_of;
 use crate::runtime::{Flavor, Runtime};
 use crate::{config, machine, names, release, ssh, watch};
 
@@ -571,15 +572,6 @@ fn repos() -> Vec<String> {
 fn image_family() -> String {
     let gate = repo_of(&release::image(None, "gate")).to_string();
     format!("{}*", gate.trim_end_matches("gate"))
-}
-
-/// An image reference without its tag or digest.
-fn repo_of(reference: &str) -> &str {
-    let r = reference.split('@').next().unwrap_or(reference);
-    match r.rfind(':') {
-        Some(i) if i > r.rfind('/').unwrap_or(0) => &r[..i],
-        _ => r,
-    }
 }
 
 /// From an `images` listing (repository, tag, digest), a reference to each image of `repos`:

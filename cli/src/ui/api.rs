@@ -1,6 +1,7 @@
 //! JSON API for the UI. Handlers call the same core functions as the CLI; anything that
 //! shells out to the runtime runs on the blocking pool.
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 
 use axum::extract::{Path, Query, State};
@@ -22,7 +23,7 @@ use super::Ui;
 use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx, UpOptions};
 use crate::{
-    commands, ctl, detect, events, init, names, ports, project, rules, setup, sync, workspace,
+    commands, ctl, detect, disk, events, init, names, ports, project, rules, setup, sync, workspace,
 };
 
 pub struct ApiError(StatusCode, Value);
@@ -70,6 +71,8 @@ pub fn routes() -> Router<Ui> {
         .route("/setup/install", post(setup_install))
         .route("/envs", post(create_env))
         .route("/detect", post(detect))
+        .route("/disk", get(vm_disk))
+        .route("/disk/envs", get(envs_disk))
         .route("/envs/{name}", get(env_detail))
         .route("/envs/{name}/egress", get(egress))
         .route("/envs/{name}/events", get(env_events))
@@ -172,6 +175,17 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
     })
     .await
     .map(Json)
+}
+
+/// The disk holding envs: how full it is, and what `luoto prune` frees. Kept off the
+/// overview, which the UI polls.
+async fn vm_disk() -> ApiResult<disk::VmDisk> {
+    blocking(|| disk::vm(&Ctx::load()?)).await.map(Json)
+}
+
+/// Every env's disk use, from one walk of the runtime's storage, which takes seconds.
+async fn envs_disk() -> ApiResult<BTreeMap<String, disk::EnvDisk>> {
+    blocking(|| disk::by_env(&Ctx::load()?)).await.map(Json)
 }
 
 /// A preset or agent a new env can start with.

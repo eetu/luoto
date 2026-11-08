@@ -1,16 +1,19 @@
 // App-wide state shared by the panels: what exists (overview), which env and subject are
-// selected, the selected env's egress, requests and project status, and the status line.
+// selected, the selected env's egress, requests and project status, disk use, and the status
+// line.
 
 import { api, ApiError, followEvents, risksOf } from "$lib/api";
 import type {
   AccessRequest,
   EnvDetail,
+  EnvDisk,
   HostSummary,
   Install,
   LuotoEvent,
   Meta,
   Overview,
   ProjectStatus,
+  VmDisk,
 } from "$lib/types";
 
 export type Subject =
@@ -55,6 +58,11 @@ class AppState {
   busy = $state<string | null>(null);
   unauthorized = $state(false);
   live = $state(false);
+  vmDisk = $state<VmDisk | null>(null);
+  /** Every env's disk use, read in one walk of the runtime's storage. */
+  envDisk = $state<Record<string, EnvDisk> | null>(null);
+  envDiskBusy = $state(false);
+  envDiskError = $state<string | null>(null);
 
   pending = $derived(this.requests.filter((r) => r.status === "pending"));
   visibleEgress = $derived(
@@ -137,6 +145,30 @@ export async function selectEnv(name: string): Promise<void> {
 
 const refreshAll = (): Promise<unknown> => Promise.all([refreshOverview(), refreshEnv()]);
 
+/** The disk holding envs: several runtime calls, so read on start and every few minutes. */
+export const refreshVmDisk = async (): Promise<void> => {
+  try {
+    app.vmDisk = await api.disk();
+  } catch (e) {
+    failed(e);
+  }
+};
+
+/** Every env's disk use. The runtime walks every volume for it: read on demand, never polled. */
+export const loadEnvDisk = async (): Promise<void> => {
+  if (app.envDiskBusy) return;
+  app.envDiskBusy = true;
+  app.envDiskError = null;
+  try {
+    app.envDisk = await api.envsDisk();
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) failed(e);
+    else app.envDiskError = errorText(e);
+  } finally {
+    app.envDiskBusy = false;
+  }
+};
+
 /**
  * Run `fn` under a busy label and report a failure. Returns its value, or null when it failed.
  * A 409 carrying risks goes to `onRisks` for the user to confirm instead of being reported.
@@ -204,12 +236,15 @@ export function startSync(): () => void {
   void connect();
   void refreshOverview();
   void api.meta().then((m) => (app.meta = m), failed);
+  void refreshVmDisk();
   const overviewTimer = setInterval(() => void refreshOverview(), 5000);
   const envTimer = setInterval(() => void refreshEnv(), 8000);
+  const diskTimer = setInterval(() => void refreshVmDisk(), 300_000);
   return () => {
     ctrl.abort();
     clearInterval(overviewTimer);
     clearInterval(envTimer);
+    clearInterval(diskTimer);
   };
 }
 
@@ -244,6 +279,19 @@ export function bytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} kB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
+
+/** Disk sizes in the runtimes' decimal units, as the CLI prints them: `4.2 GB`. */
+export const diskSize = (n: number): string => {
+  if (n < 1000) return `${n} B`;
+  const units = ["kB", "MB", "GB", "TB", "PB"];
+  let v = n / 1000;
+  let unit = 0;
+  while (v >= 999.95 && unit < units.length - 1) {
+    v /= 1000;
+    unit += 1;
+  }
+  return `${v.toFixed(1)} ${units[unit]}`;
+};
 
 export function accessText(a: unknown): string {
   if (a === "write") return "any method";

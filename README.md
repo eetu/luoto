@@ -178,6 +178,8 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | the env back after a reboot or an idle stop (unlocks the vault if needed)                            | `luoto up` (`--all`: every env)<br>`luoto vault unlock`                                                                            |
 | a secret you rotated in your secret store, in use                                                    | `luoto vault reload` (`-e <env>` for one env's)                                                                                    |
 | the gate's log, the background watcher's, or what the env's installs printed                         | `luoto logs`<br>`luoto logs watcher`<br>`luoto logs installs -f`                                                                   |
+| what each env takes on disk, and how full luoto's VM is                                              | `luoto status --size`<br>`luoto ls --size`<br>`luoto doctor`                                                                             |
+| the space luoto's superseded images take, back on this machine (volumes stay)                        | `luoto prune`                                                                                                                      |
 | to check isolation, or a bug report with secrets and what identifies you taken out                   | `luoto doctor`<br>`luoto doctor --report`                                                                                          |
 | to remove luoto: envs, vault, images, keychain entries, config and data (the binary stays)           | `luoto uninstall`                                                                                                                  |
 
@@ -679,6 +681,11 @@ you use luoto: `luoto up` asks before switching.
   tunnel or websocket after an hour without traffic. A rule's `idle` (`luoto allow
   k8s.example.com --idle 2h`, at most 24h) gives its host that long instead, for long polls
   such as `kubectl logs -f`.
+- luoto's VM keeps its disk in a file on yours (up to 100 GB, podman's default) that grows as
+  images, toolchains and workspaces fill it and doesn't shrink when they go. A full VM disk
+  stops every env: `luoto doctor` shows how full it is and what the file takes here, `luoto up`
+  and the UI warn under 10 GB free, and `luoto prune` removes luoto's superseded images and
+  trims the VM so the freed space returns to this machine.
 
 ## Install details
 
@@ -691,6 +698,8 @@ container images are signed and pinned by digest in the binary.
 `scoop update luoto`); `luoto doctor` says when a newer release is out. After an update, the
 next `luoto up` pulls the release's images, showing progress, and moves the env's gate and
 the vault onto them; `luoto up --recreate` moves its dev container too, keeping its volumes.
+The images it replaced stay in luoto's VM until `luoto prune` removes them (`up` says how much
+they take).
 What each release changed is in [CHANGELOG.md](CHANGELOG.md).
 
 `luoto uninstall` lists what it removes and asks once: every env's containers and volumes,
@@ -707,7 +716,8 @@ stay, so read it before you share it.
 A source build runs as `luoto-dev`, beside a release in the same VM: its config is in
 `~/.config/luoto-dev`, its envs' containers are `luoto-dev-<env>`, it has a vault of its own,
 keeps new keychain entries under `luoto-dev`, and serves `luoto ui` on port 47879;
-`luoto-dev uninstall` removes only what it made. Its tab completion calls `luoto-dev`;
+`luoto-dev uninstall` removes only what it made, and `luoto-dev prune` only its superseded
+builds and older build cache. Its tab completion calls `luoto-dev`;
 `just link-dev` links that name to the checkout's debug build.
 
 Tab completion covers commands, flags, env names, agents, editors and presets. Homebrew
