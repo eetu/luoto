@@ -19,6 +19,9 @@ on your machine.
   federated identity credentials, Lighthouse delegations, key vault access policies and
   `elevateAccess` (unless `role_assignments = true`); template deployments, deployment
   scripts and stacks, which act beyond the listed subscriptions (unless `deployments = true`).
+- **Cloud APIs:** `[credentials.hetzner]`, `upcloud`, `digitalocean` and `cloudflare` take a
+  `token` the gate adds for each cloud's CLI and terraform/OpenTofu provider, on reads unless
+  `write = true` ([guide](docs/guides/cloud-apis.md)).
 - **Start from a remote:** `luoto init acme/web` (or any https or ssh URL) makes an env cloned
   through the gate, with nothing on this machine. The repo's `luoto.toml` and the installs
   its files pin each wait for a yes; `--yes` installs and leaves `luoto.toml` pending.

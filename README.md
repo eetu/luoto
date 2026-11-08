@@ -305,6 +305,10 @@ hosts = ["github.com"]        # GitHub's and Azure DevOps' host keys are pinned
 [credentials.anthropic]       # or openai, openrouter, gemini, mistral, groq, copilot
 oauth_token = "op://Private/claude-code/token"
 
+[credentials.hetzner]         # or upcloud, digitalocean, cloudflare: their CLI and terraform
+token = "op://Dev/hcloud-web/token"
+# write = true                # every method (apply); without it GET, HEAD and OPTIONS only
+
 [credentials.custom.stripe]   # any API: inject a header on one host
 host = "api.stripe.com"
 secret = "op://Dev/stripe-test/key"
@@ -373,6 +377,10 @@ name, with the methods `access` allows there. It comes from your `az login` on t
 refreshed before it expires, or from a service principal whose secret the vault keeps and
 mints with ([guide](docs/guides/azure.md)).
 
+A Hetzner, UpCloud, DigitalOcean or Cloudflare credential puts its API token on that cloud's
+API for its CLI and terraform provider, which see a placeholder; the token goes with GET, HEAD
+and OPTIONS only, unless `write = true` ([guide](docs/guides/cloud-apis.md)).
+
 A `[[credentials.git]]` works with any forge, as git speaks the same protocol to all: the gate
 adds the token to the listed repos' git requests only and guards pushes as on GitHub. It
 covers git, not the forge's API (merge requests), which a `[credentials.custom]` can reach.
@@ -399,8 +407,9 @@ Terraform and OpenTofu are found by `.terraform-version`, `.opentofu-version`, `
 whose providers' registry tells the two apart; an exact `required_version` sets the version.
 Their presets (`terraform`, `opentofu`) open the provider and module registry. Azure
 credentials for `plan` and `apply` come from `[credentials.azure]`
-([guide](docs/guides/azure.md)); AWS and Google Cloud ones aren't handled yet
-([ROADMAP.md](ROADMAP.md)).
+([guide](docs/guides/azure.md)); Hetzner, UpCloud, DigitalOcean and Cloudflare ones from
+`[credentials.<cloud>]` ([guide](docs/guides/cloud-apis.md)); AWS and Google Cloud ones
+aren't handled yet ([ROADMAP.md](ROADMAP.md)).
 
 - `luoto init` reads the folder first and shows what it found (toolchains with the file that
   pins each, presets for the registries it uses) before creating anything. It looks three

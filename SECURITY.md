@@ -165,6 +165,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   with a role scoped to the env's resource groups. Whatever the identity reads reaches the
   sandbox, Key Vault secret values included. A storage SAS URL (`sig=` in its query) works
   from anywhere, as any secret the sandbox reads does.
+- **Cloud API write access.** With `write = true` under a Hetzner, UpCloud, DigitalOcean or
+  Cloudflare credential, code in the sandbox can do whatever the token allows, such as create
+  a server or Worker that reaches the internet with data from the env. The token's own
+  permissions are the limit; UpCloud tokens can't be read-only.
 - **Large clones.** A repository cloned in an env can fill the disk of luoto's VM, which the
   other envs and the vault share: their availability, not their isolation.
 - **Exhausting the gate.** Code in the sandbox can hold the gate's 1024 connections and

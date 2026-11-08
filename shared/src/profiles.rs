@@ -40,6 +40,10 @@ pub struct Provider {
     /// More hosts the same credential goes to, each with its own paths.
     #[serde(default)]
     pub also: Vec<ProviderHost>,
+    /// What the env may do on `host`, and on `also` hosts without an `access` of their own:
+    /// write (the default), or read until the env sets `write = true` for the provider.
+    #[serde(default)]
+    pub access: Option<crate::policy::AccessLevel>,
     /// Request fields that have the provider reach the network for the request. The gate
     /// refuses requests that carry them, and the WebSocket API (whose messages it can't read),
     /// unless the env sets `server_tools = true` for the provider.
@@ -72,22 +76,27 @@ pub struct ProviderHost {
     /// Paths the credential may be used on (empty = every path).
     #[serde(default)]
     pub paths: Vec<String>,
-    /// What the env may do there (default: write, as on `host`).
+    /// What the env may do there (default: as on `host`).
     #[serde(default)]
     pub access: Option<crate::policy::AccessLevel>,
 }
 
 impl Provider {
     /// Every host the credential goes to, with its paths and access: `host` first, then
-    /// `also`.
-    pub fn hosts(&self) -> Vec<(&str, &[String], crate::policy::AccessLevel)> {
+    /// `also`. `write` is the env's `write = true`.
+    pub fn hosts(&self, write: bool) -> Vec<(&str, &[String], crate::policy::AccessLevel)> {
         use crate::policy::AccessLevel::Write;
-        std::iter::once((self.host.as_str(), self.paths.as_slice(), Write))
+        let access = if write {
+            Write
+        } else {
+            self.access.unwrap_or(Write)
+        };
+        std::iter::once((self.host.as_str(), self.paths.as_slice(), access))
             .chain(self.also.iter().map(|h| {
                 (
                     h.host.as_str(),
                     h.paths.as_slice(),
-                    h.access.unwrap_or(Write),
+                    h.access.unwrap_or(access),
                 )
             }))
             .collect()
@@ -113,7 +122,8 @@ pub struct ProviderAuth {
     /// Also replace this query parameter (clients that pass keys in the URL).
     #[serde(default)]
     pub query: Option<String>,
-    /// Format-valid placeholders exported in the sandbox so clients start up.
+    /// Format-valid placeholders exported in the sandbox so clients start up, and what turns
+    /// their telemetry off.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
 }
@@ -225,7 +235,7 @@ pub struct EditorSetting {
     pub snippet: String,
 }
 
-const PROVIDERS: &[(&str, &str)] = embed!("providers"; "anthropic", "openai", "openrouter", "gemini", "mistral", "groq", "copilot", "antigravity");
+const PROVIDERS: &[(&str, &str)] = embed!("providers"; "anthropic", "openai", "openrouter", "gemini", "mistral", "groq", "copilot", "antigravity", "hetzner", "upcloud", "digitalocean", "cloudflare");
 const AGENTS: &[(&str, &str)] = embed!("agents"; "claude", "opencode", "codex", "copilot", "agy");
 const EDITORS: &[(&str, &str)] = embed!("editors"; "zed", "code", "cursor", "ssh");
 
@@ -274,11 +284,56 @@ mod tests {
         assert!(editor("ssh").unwrap().launch.is_empty());
     }
 
+    /// The placeholders pass the checks the clients make before sending a token.
+    #[test]
+    fn cloud_placeholders_pass_their_clients_checks() {
+        let env = |p: &str, var: &str| provider(p).unwrap().auth["token"].env[var].clone();
+        // hcloud and terraform-provider-hcloud: exactly 64 characters.
+        assert_eq!(env("hetzner", "HCLOUD_TOKEN").len(), 64);
+        // doctl's token prompt: 64 characters, or a `do` prefix and 71; personal access
+        // tokens start `dop_v1_`.
+        for var in ["DIGITALOCEAN_ACCESS_TOKEN", "DIGITALOCEAN_TOKEN"] {
+            let t = env("digitalocean", var);
+            assert!(t.starts_with("dop_v1_") && t.len() == 71, "{var}");
+        }
+        // terraform-provider-cloudflare: ^[0-9A-Za-z\-_]{40,80}$.
+        let t = env("cloudflare", "CLOUDFLARE_API_TOKEN");
+        assert!((40..=80).contains(&t.len()));
+        assert!(
+            t.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        );
+        // UpCloud API tokens start `ucat_`; basic auth beside one is refused.
+        let up = &provider("upcloud").unwrap().auth["token"].env;
+        assert!(up["UPCLOUD_TOKEN"].starts_with("ucat_"));
+        assert!(!up.contains_key("UPCLOUD_USERNAME") && !up.contains_key("UPCLOUD_PASSWORD"));
+    }
+
+    #[test]
+    fn cloud_apis_read_until_the_env_writes() {
+        use crate::policy::AccessLevel::{Read, Write};
+        for name in ["hetzner", "upcloud", "digitalocean", "cloudflare"] {
+            let p = provider(name).unwrap();
+            assert!(p.hosts(false).iter().all(|(_, _, a)| *a == Read), "{name}");
+            assert!(p.hosts(true).iter().all(|(_, _, a)| *a == Write), "{name}");
+        }
+        // A model API writes either way; an `also` host keeps its own access.
+        let copilot = provider("copilot").unwrap();
+        let user = |w| {
+            copilot
+                .hosts(w)
+                .into_iter()
+                .find(|(_, p, _)| p == &["/user"])
+        };
+        assert_eq!(user(false).unwrap().2, Read);
+        assert_eq!(copilot.hosts(false)[0].2, Write);
+    }
+
     #[test]
     fn profiles_parse_and_reference_known_providers() {
         for name in provider_names() {
             let p = provider(name).unwrap();
-            for (h, _, _) in p.hosts() {
+            for (h, _, _) in p.hosts(false) {
                 assert!(normalize_host(h).is_ok(), "{name}: {h}");
                 assert_eq!(wildcard_risk(h), WildcardRisk::None, "{name}: {h}");
             }

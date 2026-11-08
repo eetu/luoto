@@ -25,6 +25,10 @@ env's name and its current rules.
   placeholders that work nowhere; the gate adds the real one on the subscriptions, key vaults
   and storage accounts the user named. A 403 from Azure itself (`AuthorizationFailed`) is the
   identity's Azure role, which only the user can change.
+- **Cloud APIs.** `HCLOUD_TOKEN`, `UPCLOUD_TOKEN`, `DIGITALOCEAN_*TOKEN` and
+  `CLOUDFLARE_API_TOKEN` are placeholders too: use the CLIs and terraform as they are, and
+  never log them in. They read only unless the user set `write = true` for that cloud; a
+  write the gate refuses means asking the user, not working around it.
 - **Writes.** Remote writes only work where the user granted them (for example pushing
   feature branches to one GitHub repository). Protected branches, tags, workflow files and
   GitHub Actions are off-limits.

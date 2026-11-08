@@ -11,5 +11,7 @@ Step by step, for a task; the reference is the [README](../../README.md) and
   request, and letting GitHub merge it.
 - [Azure](azure.md): `az`, terraform and the SDKs on your subscriptions as a managed identity,
   from your `az` login or a service principal, with the tokens outside the env.
+- [Cloud APIs](cloud-apis.md): Hetzner, UpCloud, DigitalOcean and Cloudflare for their CLIs
+  and terraform, read-only unless the env writes, with the tokens outside the env.
 - [Agent settings](agent-settings.md): model and effort, credentials without the prompt, your
   own settings in every env, commits without AI attribution.

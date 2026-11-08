@@ -309,8 +309,9 @@ pub fn check_agent_opts(
     Ok(())
 }
 
-/// A model provider: `[credentials.<provider>] <auth_kind> = "<ref>"` or `login_inside = true`,
-/// and `server_tools = true` to let it reach the network for the sandbox's requests.
+/// A model provider or cloud API: `[credentials.<provider>] <auth_kind> = "<ref>"` or
+/// `login_inside = true`, `server_tools = true` to let it reach the network for the sandbox's
+/// requests, and `write = true` for a provider that reads by default.
 fn compile_provider(
     b: &mut Builder,
     pname: &str,
@@ -322,14 +323,24 @@ fn compile_provider(
             profiles::provider_names().collect::<Vec<_>>().join(", ")
         );
     };
+    const SETTINGS: [&str; 3] = ["login_inside", "server_tools", "write"];
     if let Some(k) = entries.iter().find_map(|(k, v)| {
-        (matches!(v, ProviderValue::Flag(_)) && k != "login_inside" && k != "server_tools")
-            .then_some(k)
+        (matches!(v, ProviderValue::Flag(_)) && !SETTINGS.contains(&k.as_str())).then_some(k)
     }) {
-        bail!("credentials.{pname}: `{k}` is not a setting (login_inside, server_tools)");
+        bail!(
+            "credentials.{pname}: `{k}` is not a setting ({})",
+            SETTINGS.join(", ")
+        );
     }
     let login_inside = entries.get("login_inside") == Some(&ProviderValue::Flag(true));
     let server_tools = entries.get("server_tools") == Some(&ProviderValue::Flag(true));
+    let write = entries.get("write") == Some(&ProviderValue::Flag(true));
+    if write && p.access != Some(AccessLevel::Read) {
+        bail!(
+            "credentials.{pname}: `write` is for providers that only read without it; {pname} \
+             already writes"
+        );
+    }
     if login_inside
         && let Some(kind) = entries
             .iter()
@@ -341,7 +352,7 @@ fn compile_provider(
         );
     }
     let origin = format!("provider:{pname}");
-    for (i, (host, paths, access)) in p.hosts().into_iter().enumerate() {
+    for (i, (host, paths, access)) in p.hosts(write).into_iter().enumerate() {
         b.rule(
             match i {
                 0 => format!("provider-{pname}"),
@@ -422,12 +433,17 @@ fn compile_provider(
                 secret_ref: secret_ref.clone(),
             },
         );
-        for (host, paths, _) in p.hosts() {
+        for (host, paths, access) in p.hosts(write) {
+            // A rule that allows more on a read host (an approved request) gets no token.
+            let methods: Vec<String> = match access {
+                AccessLevel::Read => READ_METHODS.iter().map(|m| m.to_string()).collect(),
+                AccessLevel::Write => Vec::new(),
+            };
             b.injections.push(Injection {
                 binding: binding.clone(),
                 host: host.to_string(),
                 paths: paths.to_vec(),
-                methods: Vec::new(),
+                methods: methods.clone(),
                 place: Placement::Header {
                     name: auth.header.clone(),
                     format: auth.format.clone(),
@@ -439,7 +455,7 @@ fn compile_provider(
                     binding: binding.clone(),
                     host: host.to_string(),
                     paths: paths.to_vec(),
-                    methods: Vec::new(),
+                    methods,
                     place: Placement::Query { param: q.clone() },
                     ignore_case: false,
                 });
@@ -2216,6 +2232,157 @@ mode = "tunnel"
             decide(p, "api.github.com", "PATCH", "/user"),
             Decision::Allow { .. }
         ));
+    }
+
+    /// Each cloud API: its exact hosts and paths, the bearer token there, the placeholders its
+    /// CLI and terraform provider read, and reads until the env sets `write = true`.
+    #[test]
+    fn cloud_apis_get_their_token_on_reads_until_the_env_writes() {
+        struct Cloud {
+            name: &'static str,
+            /// (host, a path on it) for every host the token goes to.
+            hosts: &'static [(&'static str, &'static str)],
+            env: &'static [&'static str],
+        }
+        let clouds = [
+            Cloud {
+                name: "hetzner",
+                hosts: &[
+                    ("api.hetzner.cloud", "/v1/servers"),
+                    ("api.hetzner.com", "/v1/storage_boxes"),
+                ],
+                env: &["HCLOUD_TOKEN"],
+            },
+            Cloud {
+                name: "upcloud",
+                hosts: &[("api.upcloud.com", "/1.3/server")],
+                env: &["UPCLOUD_TOKEN"],
+            },
+            Cloud {
+                name: "digitalocean",
+                hosts: &[("api.digitalocean.com", "/v2/droplets")],
+                env: &["DIGITALOCEAN_ACCESS_TOKEN", "DIGITALOCEAN_TOKEN"],
+            },
+            Cloud {
+                name: "cloudflare",
+                hosts: &[("api.cloudflare.com", "/client/v4/zones")],
+                env: &[
+                    "CLOUDFLARE_API_TOKEN",
+                    "WRANGLER_SEND_METRICS",
+                    "WRANGLER_SEND_ERROR_REPORTS",
+                ],
+            },
+        ];
+        for cloud in clouds {
+            let name = cloud.name;
+            let compiled = |extra: &str| {
+                let text =
+                    format!("[credentials.{name}]\ntoken = \"op://p/{name}/token\"\n{extra}");
+                compile("t", &cfg(&text), GATE, &[]).unwrap()
+            };
+            let token = |c: &Compiled, method, host, path| {
+                let inj = c.policy.injections_for(method, host, path);
+                inj.iter().any(|i| {
+                    i.binding == format!("{name}.token")
+                        && i.place
+                            == Placement::Header {
+                                name: "authorization".into(),
+                                format: "Bearer {secret}".into(),
+                            }
+                })
+            };
+            let allowed = |c: &Compiled, method, host, path| {
+                matches!(
+                    decide(&c.policy, host, method, path),
+                    Decision::Allow { .. }
+                )
+            };
+
+            let read = compiled("");
+            let hosts: BTreeSet<&str> = read
+                .policy
+                .rules
+                .iter()
+                .filter(|r| r.origin == format!("provider:{name}"))
+                .map(|r| r.rule.host.as_str())
+                .collect();
+            let want: BTreeSet<&str> = cloud.hosts.iter().map(|(h, _)| *h).collect();
+            assert_eq!(hosts, want, "{name}: exact hosts");
+            assert!(read.bindings.contains_key(&format!("{name}.token")));
+            for var in cloud.env {
+                assert!(read.dev_env.contains_key(*var), "{name}: {var}");
+            }
+            for (host, path) in cloud.hosts {
+                assert!(read.policy.is_credentialed_host(host), "{name}: {host}");
+                assert!(
+                    allowed(&read, "GET", host, path),
+                    "{name}: GET {host}{path}"
+                );
+                assert!(
+                    token(&read, "GET", host, path),
+                    "{name}: token on GET {host}"
+                );
+                assert!(
+                    !allowed(&read, "POST", host, path),
+                    "{name}: POST {host}{path}"
+                );
+                assert!(!token(&read, "DELETE", host, path), "{name}: DELETE {host}");
+            }
+
+            let write = compiled("write = true");
+            for (host, path) in cloud.hosts {
+                for method in ["POST", "PUT", "PATCH", "DELETE"] {
+                    assert!(allowed(&write, method, host, path), "{name}: {method}");
+                    assert!(token(&write, method, host, path), "{name}: {method}");
+                }
+            }
+        }
+
+        // The token stays on Cloudflare's API paths.
+        let cf = compile(
+            "t",
+            &cfg("[credentials.cloudflare]\ntoken = \"env:T\""),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        assert!(
+            cf.policy
+                .injections_for("GET", "api.cloudflare.com", "/x")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn write_is_only_for_providers_that_read_without_it() {
+        let c = cfg("[credentials.anthropic]\napi_key = \"env:K\"\nwrite = true");
+        let err = compile("t", &c, GATE, &[]).err().expect("refused");
+        assert!(err.to_string().contains("already writes"), "{err}");
+        let c = cfg("[credentials.hetzner]\ntoken = \"env:K\"\nwrites = true");
+        let err = compile("t", &c, GATE, &[]).err().expect("refused");
+        assert!(err.to_string().contains("not a setting"), "{err}");
+    }
+
+    #[test]
+    fn a_rule_that_allows_more_on_a_read_host_gets_no_token() {
+        let c = cfg(r#"
+[credentials.hetzner]
+token = "env:K"
+
+[[allow]]
+host = "api.hetzner.cloud"
+access = "write"
+"#);
+        let c = compile("t", &c, GATE, &[]).unwrap();
+        assert!(matches!(
+            decide(&c.policy, "api.hetzner.cloud", "POST", "/v1/servers"),
+            Decision::Allow { .. }
+        ));
+        assert!(
+            c.policy
+                .injections_for("POST", "api.hetzner.cloud", "/v1/servers")
+                .is_empty()
+        );
     }
 
     #[test]

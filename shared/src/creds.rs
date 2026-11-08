@@ -71,6 +71,10 @@ pub const AUTH_HEADERS: &[&str] = &[
     "cookie",
     // Azure Resource Manager's token for another tenant, read beside the one the gate adds.
     "x-ms-authorization-auxiliary",
+    // Cloudflare's legacy key auth, which would act for another account.
+    "x-auth-key",
+    "x-auth-email",
+    "x-auth-user-service-key",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
