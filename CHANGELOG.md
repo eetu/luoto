@@ -10,7 +10,8 @@ Your own deny and mute rules, notifications for requests, and commands for every
   and allow offers; `egress --all` shows them. A `luoto.toml` can't mute.
 - **Notifications:** a desktop notification (macOS, Linux with `notify-send`) for each access
   request and the first denial at each host; `notifications = false` in `config.toml` turns
-  them off. The UI's bell adds browser notifications for requests.
+  them off; `luoto logs watcher` lists those shown. The UI's bell adds browser notifications
+  for requests.
 - **Port forwards listed:** `luoto status` and the UI's env panel show forwarded ports as
   links, and ports taken on this machine with a `luoto forward` hint.
 - **`luoto run --timeout 30m`:** stops the agent and everything it started in the env, and
@@ -22,6 +23,14 @@ Your own deny and mute rules, notifications for requests, and commands for every
   toolchains); the workspace stays.
 - **`luoto logs`:** the gate's log, the watcher's, or the env's installs (the newest 1 MiB
   kept); `-f`, `-n`.
+- **Gate limits:** at most 1024 connections per env, refused beyond with an event. A
+  response must start within 10 minutes; a stream silent for 5 minutes, or a tunnel or
+  websocket for an hour, is closed. Events never queue unbounded, and intercepted hosts'
+  certificates are renewed daily (a gate up for 30 days served expired ones). The gate's log
+  is capped at 50 MB where the runtime writes files; journald, as in luoto's VM, keeps its
+  own bounds.
+- **System packages:** `[deps] system` installs in an env without the `github` preset, whose
+  missing grant for the base image's GitHub CLI source failed the package-list update.
 - **luoto.toml review:** an `up` that can't ask (the UI, `up --all`) leaves a changed
   `luoto.toml` unapplied without recording a decline.
 

@@ -118,6 +118,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   spent by anything in the sandbox. Anthropic's, OpenAI's and Gemini's file and batch
   endpoints are denied, and so are requests asking them to fetch a URL or call an MCP server
   (unless `server_tools = true`); the other providers' are not.
+- **Exhausting the gate.** Code in the sandbox can hold the gate's 1024 connections and
+  so stop the env's own traffic, which it could break anyway; other envs have their own gates.
+  The event queue, cached certificates and the gate's log stay bounded.
 - **Container or VM escape.** An exploit that escapes gVisor (or a plain container) lands in
   luoto's VM as the env's own unprivileged IDs; one more kernel exploit there reaches the other
   envs and the vault, which share the VM, and through podman's network helper also the
