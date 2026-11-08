@@ -340,6 +340,16 @@ enum ProjectCmd {
     },
     /// Stop applying it (this version is not offered again).
     Ignore,
+    /// Print a luoto.toml for the team from the env's settings, leaving out your credentials,
+    /// secrets, folders and temporary grants.
+    Suggest {
+        /// Write it to the env's folder.
+        #[arg(long)]
+        write: bool,
+        /// Replace the folder's luoto.toml.
+        #[arg(long, requires = "write")]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -421,6 +431,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             None => c::project(&env()?, false, false, false),
             Some(ProjectCmd::Apply { yes }) => c::project(&env()?, true, false, yes),
             Some(ProjectCmd::Ignore) => c::project(&env()?, false, true, false),
+            Some(ProjectCmd::Suggest { write, force }) => c::project_suggest(&env()?, write, force),
         },
         Cmd::Shell { cmd } => connect::shell(&env()?, &cmd),
         Cmd::Open { with } => connect::open(&env()?, with.as_deref()),

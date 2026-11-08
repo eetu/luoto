@@ -158,7 +158,7 @@ Commands act on the env of the current folder; `-e NAME` picks another (`luoto s
 | an env for a folder (copied in)                                                                      | `luoto init [DIR]`                                                                                                                 |
 | related repositories beside it (a host folder, or a remote cloned in the env)                        | `luoto init --repo ~/dev/api --repo acme/web`<br>`luoto repo add acme/lib`<br>`luoto repo list`                                    |
 | a new project (the folder is created)                                                                | `luoto init ~/dev/new-app`                                                                                                         |
-| to review, apply or ignore the team's `luoto.toml`                                                   | `luoto project`<br>`luoto project apply`<br>`luoto project ignore`                                                                 |
+| to review, apply or ignore the team's `luoto.toml`, or draft one from your env                       | `luoto project`<br>`luoto project apply`<br>`luoto project ignore`<br>`luoto project suggest`                                      |
 | your editor, or a shell                                                                              | `luoto open`<br>`luoto open --with code`<br>`luoto shell`                                                                          |
 | to see what the sandbox tried to reach                                                               | `luoto egress --since 10m`<br>`luoto egress --denied`<br>`luoto egress --follow`                                                   |
 | to allow a host (read-only unless `--write`)                                                         | `luoto allow docs.rs --ttl 1h`<br>`luoto allow api.example.com --write --path '/v1/**'`<br>`luoto allow grpc.example.com --tunnel` |
@@ -422,6 +422,14 @@ sandbox_secrets = ["DATABASE_URL"]
 It also takes `image`, `agents`, `[[deny]]` and the team's repositories (`[repos.<name>]`,
 [below](#several-repositories)); toolchains belong in `mise.toml`. Layering:
 `config.toml` < the accepted `luoto.toml` < the env's own config.
+
+`luoto project suggest` drafts one from an env that works: the accepted `luoto.toml` with the
+env's own presets, agents, ports, `[deps]`, remote repos, allow rules (notes kept, such as
+`approved request #3`) and denies on top. It lists on stderr what it leaves out as yours or
+not a `luoto.toml`'s to carry: credentials and secrets, mutes, your folders, toolchain
+defaults, your own `image`, expiring grants, and rules the sandbox couldn't ask for (`*`,
+multi-tenant wildcards, address ranges, private addresses). `--write` puts it in the env's
+folder; one already there is replaced only with `--force`, after the changes are listed.
 
 Anyone who can write the repository writes this file, code in the sandbox included, so it
 only proposes:

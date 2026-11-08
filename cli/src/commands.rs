@@ -80,6 +80,56 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
     Ok(ExitCode::SUCCESS)
 }
 
+/// Print a luoto.toml from the env's settings, or write it to the env's folder (replacing
+/// one there only with `force`, after showing what changes).
+pub fn project_suggest(name: &str, write: bool, force: bool) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    let cfg = EnvFile::load(&ctx.paths, name)?.cfg;
+    let accepted = project::accepted(&ctx, name).map(|(_, p)| p);
+    let s = project::suggest(name, &cfg, accepted.as_ref())?;
+    for l in &s.left_out {
+        eprintln!("left out: {l}");
+    }
+    if !write {
+        // Paths of approved requests came from the sandbox.
+        print!("{}", crate::text::lines(&s.text));
+        return Ok(ExitCode::SUCCESS);
+    }
+    let dir = workspace::canonical(
+        cfg.workspace
+            .dir
+            .as_deref()
+            .context("the env has no folder")?,
+    )?;
+    let path = dir.join(project::FILE);
+    if let Some(old) = project::read_host(&dir)? {
+        match project::parse(&old) {
+            Ok(p) if p == s.config => {
+                println!("{} already has these settings", path.display());
+                return Ok(ExitCode::SUCCESS);
+            }
+            Ok(p) => {
+                println!("against {}:", path.display());
+                for l in project::diff(&p, &s.config) {
+                    println!("  {l}");
+                }
+            }
+            Err(e) => println!(
+                "{} doesn't parse: {}",
+                path.display(),
+                crate::text::lines(&format!("{e:#}"))
+            ),
+        }
+        if !force {
+            println!("not written: --force replaces it (its comments too)");
+            return Ok(ExitCode::FAILURE);
+        }
+    }
+    project::write_host(&dir, &s.text)?;
+    println!("wrote {}: review it, then commit it", path.display());
+    Ok(ExitCode::SUCCESS)
+}
+
 /// What `pull` writes where (`workspace::pull_targets`), from the env's config.
 pub fn pull_targets(
     ctx: &Ctx,

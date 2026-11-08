@@ -620,7 +620,7 @@ impl EnvConfig {
     }
 }
 
-fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+pub(crate) fn is_default<T: Default + PartialEq>(v: &T) -> bool {
     *v == T::default()
 }
 
