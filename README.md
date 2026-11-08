@@ -276,6 +276,7 @@ access = "read"               # GET and HEAD; "write": every method, as your Azu
 # key_vaults = ["kv-prod"]    # data planes, by name: read or write as `access` says
 # storage_accounts = ["acct"] # its blob, queue, table, file and dfs hosts
 # graph = true                # Microsoft Graph, read-only
+# role_assignments = true     # under write, also role assignments and federated credentials
 # client_id = "<app id>"      # a service principal instead of your `az login` on this machine
 # client_secret = "op://Dev/azure-sp/secret"
 

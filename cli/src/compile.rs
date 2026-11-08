@@ -1045,6 +1045,16 @@ fn compile_git(
     Ok((guards, cas))
 }
 
+/// Resource Manager paths, at any scope, that grant access to others: refused for writes
+/// unless `role_assignments = true`.
+const AZURE_ACCESS_CONTROL: &[&str] = &[
+    "/subscriptions/**/providers/Microsoft.Authorization/roleAssignments/**",
+    "/subscriptions/**/providers/Microsoft.Authorization/roleDefinitions/**",
+    "/subscriptions/**/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/**",
+    "/subscriptions/**/providers/Microsoft.Authorization/roleEligibilityScheduleRequests/**",
+    "/subscriptions/**/federatedIdentityCredentials/**",
+];
+
 /// `[credentials.azure]`: a binding per audience it grants (a token from `az` on the host, or
 /// minted by the vault for a service principal); Resource Manager's paths for its
 /// subscriptions, and the data plane hosts it names, allowed and given the audience's token.
@@ -1139,6 +1149,22 @@ fn compile_azure_identity(b: &mut Builder, c: &AzureCred) -> Result<AzureIdentit
             read,
             Vec::new(),
         );
+    }
+    // Under write, the ways to lasting access from outside stay shut unless asked for. The
+    // indirect ones (a template deployment, a deployment script) are a role's to refuse: a
+    // service principal with Contributor can't assign roles at all.
+    if c.access == AccessLevel::Write && !c.role_assignments {
+        b.denies.push(DenyRule {
+            host: ARM_HOST.into(),
+            paths: AZURE_ACCESS_CONTROL.iter().map(|p| p.to_string()).collect(),
+            methods: ["PUT", "PATCH", "POST", "DELETE"]
+                .map(String::from)
+                .to_vec(),
+            reason: "role assignments, role definitions and federated identity credentials are \
+                     refused under [credentials.azure] access = \"write\": each can give \
+                     someone outside lasting access (`role_assignments = true` allows them)"
+                .into(),
+        });
     }
     if c.access == AccessLevel::Write && c.client_id.is_none() {
         b.warnings.push(
@@ -2383,6 +2409,79 @@ key_vaults = ["kv1"]
         );
         for r in c.vault_refs() {
             crate::secrets::check_ref(&r).unwrap();
+        }
+    }
+
+    #[test]
+    fn azure_write_keeps_access_control_shut_unless_asked() {
+        let decide_with = |extra: &str, method: &str, path: &str| {
+            let text = format!(
+                "[credentials.azure]\nsubscriptions = [\"{SUB}\"]\naccess = \"write\"\n{extra}"
+            );
+            let c = compile("t", &cfg(&text), GATE, &[]).unwrap();
+            decide(&c.policy, "management.azure.com", method, path)
+        };
+        let guid = "00000000-0000-0000-0000-000000000001";
+        let rg = format!("/subscriptions/{SUB}/resourceGroups/rg");
+        let shut = [
+            (
+                "PUT",
+                format!(
+                    "/subscriptions/{SUB}/providers/Microsoft.Authorization/roleAssignments/{guid}"
+                ),
+            ),
+            (
+                "PUT",
+                format!("{rg}/providers/microsoft.authorization/ROLEASSIGNMENTS/{guid}"),
+            ),
+            (
+                "DELETE",
+                format!(
+                    "{rg}/providers/Microsoft.Storage/storageAccounts/s/providers/Microsoft.Authorization/roleAssignments/{guid}"
+                ),
+            ),
+            (
+                "PUT",
+                format!(
+                    "/subscriptions/{SUB}/providers/Microsoft.Authorization/roleDefinitions/{guid}"
+                ),
+            ),
+            (
+                "PUT",
+                format!(
+                    "{rg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id/federatedIdentityCredentials/gh"
+                ),
+            ),
+        ];
+        for (method, path) in &shut {
+            assert!(
+                matches!(
+                    decide_with("", method, path),
+                    Decision::Deny(DenyReason::Explicit { .. })
+                ),
+                "{method} {path}"
+            );
+            assert!(
+                matches!(
+                    decide_with("role_assignments = true", method, path),
+                    Decision::Allow { .. }
+                ),
+                "{method} {path}"
+            );
+        }
+        // Reading them, and every other write, stay as `access` says.
+        for (method, path) in [
+            ("GET", shut[0].1.clone()),
+            ("PUT", rg.clone()),
+            (
+                "PUT",
+                format!("{rg}/providers/Microsoft.Storage/storageAccounts/s"),
+            ),
+        ] {
+            assert!(
+                matches!(decide_with("", method, &path), Decision::Allow { .. }),
+                "{method} {path}"
+            );
         }
     }
 

@@ -132,8 +132,11 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   (unless `server_tools = true`); the other providers' are not.
 - **Azure write access.** With `access = "write"`, code in the sandbox can do on the listed
   subscriptions whatever the identity's roles allow: create resources that reach the internet,
-  assign roles, read keys that `listKeys` returns. Azure RBAC is the boundary, and with your
-  own `az` login it is your roles: prefer a service principal with a narrow role for write.
+  read keys that `listKeys` returns. The gate refuses the direct ways to lasting access from
+  outside (role assignments and definitions, federated identity credentials) unless
+  `role_assignments = true`, but an identity allowed to assign roles can still do it through
+  a template deployment or a deployment script. Azure RBAC is the boundary, and with your own
+  `az` login it is your roles: prefer a service principal with Contributor or narrower.
   Whatever the identity reads reaches the sandbox, Key Vault secret values included.
 - **Exhausting the gate.** Code in the sandbox can hold the gate's 1024 connections and
   so stop the env's own traffic, which it could break anyway; other envs have their own gates.

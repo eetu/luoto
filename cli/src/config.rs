@@ -300,6 +300,10 @@ pub struct AzureCred {
     /// Microsoft Graph, read-only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub graph: bool,
+    /// Under `access = "write"`, also role assignments, role definitions and federated
+    /// identity credentials: each can give someone outside the env lasting access.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub role_assignments: bool,
     /// A service principal's application ID, as the token source in place of `az` on this
     /// machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -71,6 +71,7 @@ smuggled in.
 | | `access = "read"` | `access = "write"` |
 | --- | --- | --- |
 | Resource Manager, under `subscriptions` | GET, HEAD | every method |
+| role assignments and definitions, federated identity credentials | read | read; every method with `role_assignments = true` |
 | `GET /subscriptions`, `/tenants`, `/providers/…` | read | read |
 | `key_vaults`, `storage_accounts` | GET, HEAD | every method |
 | Microsoft Graph | read | read |
@@ -80,6 +81,14 @@ storage account's keys (`listKeys`, which terraform does when it refreshes a sto
 Resource Graph queries, and Key Vault's `decrypt` and `sign`. Write lets code in the env do
 whatever the identity's Azure roles allow, so the role is the real limit: give a service
 principal the narrowest one that works rather than writing as yourself.
+
+Under write, role assignments, role definitions and federated identity credentials stay
+read-only, at any scope: each can give someone outside the env lasting access to the
+subscription. `role_assignments = true` allows them, for terraform that manages roles. The
+gate only sees the requests that make them directly; an identity that may assign roles
+(Owner, User Access Administrator) can still do so through a template deployment or a
+deployment script, so for write prefer a service principal with Contributor, which Azure
+itself stops from assigning roles.
 
 ## Inside the env
 
