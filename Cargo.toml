@@ -58,6 +58,7 @@ directories = "6"
 open = "5"
 keyring = "4"
 axum = { version = "0.8", features = ["tokio", "tracing"] }
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["set-header"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
