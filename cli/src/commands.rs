@@ -790,7 +790,14 @@ pub fn egress(
                 "client rejected our CA → luoto allow -e {name} {} --tunnel",
                 s.host
             )
-        } else if s.denied > 0 && s.last_reason.as_deref() == Some("explicit") {
+        } else if s.denied > 0
+            && (s.last_reason.as_deref() == Some("explicit")
+                || s.host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(luoto_shared::host::is_never_dialed))
+        {
+            // No rule opens these (the metadata service, the gate's own ranges): the message
+            // says what does, if anything.
             s.last_message.clone().unwrap_or_default()
         } else if s.denied > 0 {
             let private = s.host.ends_with(".internal")
