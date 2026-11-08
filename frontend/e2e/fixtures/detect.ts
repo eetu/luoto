@@ -1,4 +1,6 @@
-{
+import type { Proposal } from "../../src/lib/types";
+
+export default {
   "name": "api",
   "new_folder": false,
   "presets": [
@@ -14,4 +16,4 @@
   ],
   "project_sha": "2ce6dbf056e61e8ac8364bf72ca658eefc4b66767e0444ab1811c6a4c0858ef2",
   "project_error": null
-}
+} satisfies Proposal;

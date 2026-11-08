@@ -1,4 +1,6 @@
-{
+import type { EnvDetail } from "../../src/lib/types";
+
+export default {
   "name": "web",
   "path": "/home/me/.local/share/luoto/config/envs/web.toml",
   "rules": [
@@ -241,6 +243,7 @@
   "gate_status": {
     "rules": 39,
     "ca_installed": true,
+    "ca_pem_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "vault_configured": true,
     "pending_requests": 0
   },
@@ -248,4 +251,4 @@
   "missing_secrets": [],
   "sandbox_secrets": [],
   "ports": { "published": [], "forwarded": [5173], "taken": [3000] }
-}
+} satisfies EnvDetail;

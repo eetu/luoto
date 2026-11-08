@@ -21,7 +21,9 @@ use serde_json::{Value, json};
 use super::Ui;
 use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx, UpOptions};
-use crate::{commands, ctl, events, init, names, ports, project, rules, setup, sync, workspace};
+use crate::{
+    commands, ctl, detect, events, init, names, ports, project, rules, setup, sync, workspace,
+};
 
 pub struct ApiError(StatusCode, Value);
 
@@ -166,19 +168,46 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
     .map(Json)
 }
 
-async fn meta() -> Json<Value> {
-    let presets: Vec<Value> = presets::all()
-        .into_iter()
-        .map(|p| json!({ "name": p.name, "description": p.description }))
-        .collect();
-    let agents: Vec<Value> = profiles::agent_names()
-        .filter_map(profiles::agent)
-        .map(|a| json!({ "name": a.name, "description": a.description }))
-        .collect();
-    Json(json!({ "presets": presets, "agents": agents }))
+/// A preset or agent a new env can start with.
+#[derive(Serialize)]
+struct Choice {
+    name: String,
+    description: String,
 }
 
-async fn setup_info() -> ApiResult<Value> {
+#[derive(Serialize)]
+struct Meta {
+    presets: Vec<Choice>,
+    agents: Vec<Choice>,
+}
+
+async fn meta() -> Json<Meta> {
+    let presets = presets::all()
+        .into_iter()
+        .map(|p| Choice {
+            name: p.name,
+            description: p.description,
+        })
+        .collect();
+    let agents = profiles::agent_names()
+        .filter_map(profiles::agent)
+        .map(|a| Choice {
+            name: a.name,
+            description: a.description,
+        })
+        .collect();
+    Json(Meta { presets, agents })
+}
+
+#[derive(Serialize)]
+struct SetupInfo {
+    detection: setup::Detection,
+    recommendation: setup::Recommendation,
+    /// The gate, vault and tools images are there.
+    images_ok: bool,
+}
+
+async fn setup_info() -> ApiResult<SetupInfo> {
     blocking(|| {
         let d = setup::detect();
         let r = setup::recommend(&d);
@@ -189,27 +218,48 @@ async fn setup_info() -> ApiResult<Value> {
                     .all(|c| ctx.rt.image_exists(&ctx.image(c)))
             })
             .unwrap_or(false);
-        Ok(json!({ "detection": d, "recommendation": r, "images_ok": images_ok }))
+        Ok(SetupInfo {
+            detection: d,
+            recommendation: r,
+            images_ok,
+        })
     })
     .await
     .map(Json)
 }
 
-async fn setup_install() -> ApiResult<Value> {
+/// What running the recommended install printed.
+#[derive(Serialize)]
+struct InstallOutput {
+    ok: bool,
+    command: String,
+    output: String,
+}
+
+async fn setup_install() -> ApiResult<InstallOutput> {
     blocking(|| {
         let r = setup::recommend(&setup::detect());
         let Some(cmd) = r.install else {
             anyhow::bail!("nothing to install");
         };
         if cmd[0] == "sudo" {
-            anyhow::bail!("this needs your password — run it in a terminal: {}", cmd.join(" "));
+            anyhow::bail!(
+                "this needs your password — run it in a terminal: {}",
+                cmd.join(" ")
+            );
         }
-        let out = std::process::Command::new(&cmd[0]).args(&cmd[1..]).output()?;
-        Ok(json!({
-            "ok": out.status.success(),
-            "command": cmd.join(" "),
-            "output": format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
-        }))
+        let out = std::process::Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .output()?;
+        Ok(InstallOutput {
+            ok: out.status.success(),
+            command: cmd.join(" "),
+            output: format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        })
     })
     .await
     .map(Json)
@@ -254,41 +304,69 @@ fn new_opts(n: NewEnv) -> init::InitOpts {
     }
 }
 
+/// What creating an env from these choices would produce.
+#[derive(Serialize)]
+struct Proposal {
+    name: String,
+    /// The folder is missing (created with the env) or empty: nothing to detect.
+    new_folder: bool,
+    presets: Vec<ProposedPreset>,
+    tools: Vec<detect::ToolPin>,
+    /// The folder's luoto.toml as `[label, value]` lines; creating the env accepts it.
+    project: Option<Vec<(String, String)>>,
+    /// sha256 of that luoto.toml: creating the env names it, so only this text is accepted.
+    project_sha: Option<String>,
+    project_error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ProposedPreset {
+    name: String,
+    /// The file that suggested it; `None` for a preset every env starts with.
+    reason: Option<String>,
+}
+
 /// What `create` would make of these choices: name, presets (each with the file that
 /// suggested it) and the toolchains the folder pins. Touches nothing.
-async fn detect(Json(n): Json<NewEnv>) -> ApiResult<Value> {
+async fn detect(Json(n): Json<NewEnv>) -> ApiResult<Proposal> {
     blocking(move || {
         let ctx = Ctx::load()?;
         let p = init::propose(&ctx.paths, &new_opts(n))?;
-        let presets: Vec<Value> = p
+        let presets = p
             .cfg
             .presets
             .iter()
-            .map(|name| {
-                let reason = p
+            .map(|name| ProposedPreset {
+                name: name.clone(),
+                reason: p
                     .found
                     .presets
                     .iter()
                     .find(|(f, _)| f == name)
-                    .map(|(_, r)| r);
-                json!({ "name": name, "reason": reason })
+                    .map(|(_, r)| r.clone()),
             })
             .collect();
-        Ok(json!({
-            "name": p.name,
-            "new_folder": p.new_folder,
-            "presets": presets,
-            "tools": p.found.tools,
-            "project": p.project.as_ref().map(|(_, pc)| project::summary(pc)),
-            "project_sha": p.project.as_ref().map(|(text, _)| project::sha(text)),
-            "project_error": p.project_error.as_deref().map(crate::text::display),
-        }))
+        Ok(Proposal {
+            presets,
+            project: p.project.as_ref().map(|(_, pc)| project::summary(pc)),
+            project_sha: p.project.as_ref().map(|(text, _)| project::sha(text)),
+            project_error: p.project_error.as_deref().map(crate::text::display),
+            new_folder: p.new_folder,
+            tools: p.found.tools,
+            name: p.name,
+        })
     })
     .await
     .map(Json)
 }
 
-async fn create_env(Json(n): Json<NewEnv>) -> ApiResult<Value> {
+#[derive(Serialize)]
+struct CreatedEnv {
+    ok: bool,
+    name: String,
+}
+
+async fn create_env(Json(n): Json<NewEnv>) -> ApiResult<CreatedEnv> {
     blocking(move || {
         let ctx = Ctx::load()?;
         if non_empty(n.dir.clone()).is_none() {
@@ -302,7 +380,10 @@ async fn create_env(Json(n): Json<NewEnv>) -> ApiResult<Value> {
         init::create(&ctx, &mut p, true, true)?;
         crate::agents::login_inside_unless_set(&ctx, &p.name)?;
         init::start(&ctx, &p.name, true)?;
-        Ok(json!({ "ok": true, "name": p.name }))
+        Ok(CreatedEnv {
+            ok: true,
+            name: p.name,
+        })
     })
     .await
     .map(Json)
@@ -381,7 +462,13 @@ struct PullApply {
     include_risky: bool,
 }
 
-async fn pull_apply(Path(name): Path<String>, Json(a): Json<PullApply>) -> ApiResult<Value> {
+#[derive(Serialize)]
+struct Pulled {
+    written: usize,
+    skipped: usize,
+}
+
+async fn pull_apply(Path(name): Path<String>, Json(a): Json<PullApply>) -> ApiResult<Pulled> {
     blocking(move || {
         let ctx = Ctx::load()?;
         let all = pull_plans(&ctx, &name)?;
@@ -394,7 +481,7 @@ async fn pull_apply(Path(name): Path<String>, Json(a): Json<PullApply>) -> ApiRe
             written += w;
             skipped += s;
         }
-        Ok(json!({ "written": written, "skipped": skipped }))
+        Ok(Pulled { written, skipped })
     })
     .await
     .map(Json)
@@ -640,8 +727,7 @@ async fn vault_action(Path(action): Path<String>) -> ApiResult<Value> {
                     .loaded_refs
                     .into_iter()
                     .collect();
-                let r = sync::reload(&ctx, &refs)?;
-                Ok(json!({ "read": r.read, "changed": r.changed, "failed": r.failed }))
+                Ok(serde_json::to_value(sync::reload(&ctx, &refs)?)?)
             }
             "lock" => {
                 let failed = sync::lock_all(&ctx)?;
