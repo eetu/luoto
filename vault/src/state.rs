@@ -1,7 +1,7 @@
 //! What the vault holds, in memory only: root secrets by source ref, each env's token hash
 //! and bindings, the tokens minted for them, and the SSH sessions bound on agent connections.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -256,12 +256,13 @@ impl Vault {
     }
 
     /// Merge resolved secrets into memory; how many were new or changed. A changed one (a
-    /// rotated token, a new App key) also retires every minted token, as one could come from
-    /// the old key.
+    /// rotated token, a new App key) also retires the tokens minted from it, as one could
+    /// come from the old key; tokens minted from other secrets stay (`azcli:` tokens change
+    /// every hour).
     pub fn load(&self, secrets: BTreeMap<String, String>) -> usize {
         let mut inner = self.lock();
         let mut n = 0;
-        let mut rotated = false;
+        let mut rotated: BTreeSet<String> = BTreeSet::new();
         for (r, value) in secrets {
             match inner.secrets.get_mut(&r) {
                 Some(old) if *old == value => {}
@@ -269,7 +270,7 @@ impl Vault {
                     // SAFETY: zero bytes keep the String valid UTF-8.
                     unsafe { old.as_bytes_mut().fill(0) };
                     *old = value;
-                    rotated = true;
+                    rotated.insert(r);
                     n += 1;
                 }
                 None => {
@@ -278,11 +279,21 @@ impl Vault {
                 }
             }
         }
-        if rotated {
-            inner.minted.clear();
+        if !rotated.is_empty() {
             let generation = inner.next_generation();
-            for e in inner.envs.values_mut() {
-                e.generation = generation;
+            let Inner { envs, minted, .. } = &mut *inner;
+            for (env, entry) in envs.iter_mut() {
+                let from_rotated: Vec<&String> = entry
+                    .bindings
+                    .iter()
+                    .filter(|(_, spec)| rotated.contains(spec.secret_ref()))
+                    .map(|(b, _)| b)
+                    .collect();
+                if from_rotated.is_empty() {
+                    continue;
+                }
+                minted.retain(|(e, b), _| !(e == env && from_rotated.contains(&b)));
+                entry.generation = generation;
             }
         }
         n
@@ -354,22 +365,41 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_secret_retires_minted_tokens() {
+    fn a_changed_secret_retires_the_tokens_minted_from_it() {
         let v = Vault::new(client_tls());
-        v.bind("e", [0; 32], BTreeMap::new());
-        let load = |val: &str| v.load(BTreeMap::from([("op://a/b/c".into(), val.into())]));
+        let static_ref = |r: &str| BindingSpec::Static {
+            secret_ref: r.into(),
+        };
+        v.bind(
+            "e",
+            [0; 32],
+            BTreeMap::from([
+                ("github".into(), static_ref("op://a/b/c")),
+                (
+                    "azure-arm".into(),
+                    static_ref("azcli:https://management.azure.com/"),
+                ),
+            ]),
+        );
+        let load = |r: &str, val: &str| v.load(BTreeMap::from([(r.into(), val.into())]));
         let mint = || {
             v.lock()
                 .minted
                 .insert(("e".into(), "github".into()), ("ghs_x".into(), Utc::now()));
         };
-        assert_eq!(load("one"), 1);
+        assert_eq!(load("op://a/b/c", "one"), 1);
+        assert_eq!(load("azcli:https://management.azure.com/", "t1"), 1);
         mint();
         let before = v.lock().generation_of("e");
-        assert_eq!(load("one"), 0);
+        assert_eq!(load("op://a/b/c", "one"), 0);
         assert_eq!(v.lock().minted.len(), 1);
-        assert_eq!(load("two"), 1);
+        // Another secret's change (an hourly az token) keeps it.
+        assert_eq!(load("azcli:https://management.azure.com/", "t2"), 1);
+        assert_eq!(v.lock().minted.len(), 1);
+        let kept = v.lock().generation_of("e");
+        assert_eq!(load("op://a/b/c", "two"), 1);
         assert!(v.lock().minted.is_empty());
+        assert_ne!(v.lock().generation_of("e"), kept);
         assert_ne!(v.lock().generation_of("e"), before);
         assert_eq!(v.lock().secrets["op://a/b/c"], "two");
     }
