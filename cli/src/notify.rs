@@ -290,24 +290,31 @@ impl Notices {
             .flat_map(|(env, news)| news.due(env, now))
             .collect();
         if show {
+            // To the watcher's log, so `luoto logs watcher` says what was shown.
             for n in &due {
-                post(n);
+                match post(n) {
+                    Ok(true) => println!("{} notified: {}", Utc::now(), n.title),
+                    Ok(false) => {}
+                    Err(e) => println!("{} not notified ({e}): {}", Utc::now(), n.title),
+                }
             }
         }
     }
 }
 
-fn post(n: &Note) {
+/// Show `n`; whether this OS has a notifier. A missing one (no notify-send) only goes to the
+/// log: a notification is a convenience.
+fn post(n: &Note) -> std::io::Result<bool> {
     let Some(mut cmd) = notifier(std::env::consts::OS, n) else {
-        return;
+        return Ok(false);
     };
-    cmd.stdin(Stdio::null())
+    let mut child = cmd
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // Missing (no notify-send) or refused: a notification is a convenience.
-    if let Ok(mut child) = cmd.spawn() {
-        std::thread::spawn(move || child.wait());
-    }
+        .stderr(Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || child.wait());
+    Ok(true)
 }
 
 /// The OS's notifier with the note as its arguments, never as script source, so no text can
