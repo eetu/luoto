@@ -1,8 +1,9 @@
 # Changelog
 
-## 0.3.1
+## 0.3.1 (2026-11-08)
 
-Your own deny and mute rules, notifications for requests, and commands for every env at once.
+Your own deny and mute rules, notifications and port requests, gate limits, and commands for
+every env at once.
 
 - **Deny and mute rules:** `[[deny]]` (in an env, `config.toml` or a project's `luoto.toml`)
   refuses a host, its paths or methods whatever allows them. `[[mute]]` keeps denials you
