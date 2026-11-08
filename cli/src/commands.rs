@@ -450,6 +450,10 @@ pub fn status(name: &str, json: bool) -> Result<ExitCode> {
         "  folder: {} (copied in; `luoto pull` brings changes back)",
         f.cfg.workspace.dir.as_deref().unwrap_or("none")
     );
+    let ca_dir = ctx.paths.env_state(name);
+    if let Some(n) = crate::ca::notice(&ca_dir, name) {
+        println!("  CA:     {n}");
+    }
     let plan = env::plan(&ctx, name);
     if dev == "running" {
         let published = plan.as_ref().map_or(&f.cfg.ports, |p| &p.cfg.ports);
@@ -460,10 +464,17 @@ pub fn status(name: &str, json: bool) -> Result<ExitCode> {
     }
     if gate == "running" {
         let s = ctl::gate_status(&ctx.rt, name)?;
+        let current = crate::ca::load(&ca_dir).ok().flatten();
+        let ca = match (&s.ca_pem_sha256, current) {
+            _ if !s.ca_installed => "missing",
+            (Some(gate), Some(c)) if *gate != c.pem_sha256() => {
+                "outdated (`luoto up` installs the current one)"
+            }
+            _ => "ok",
+        };
         println!(
-            "  policy: {} rules, CA {}, vault {}, {} pending request(s)",
+            "  policy: {} rules, CA {ca}, vault {}, {} pending request(s)",
             s.rules,
-            if s.ca_installed { "ok" } else { "missing" },
             if s.vault_configured {
                 "configured"
             } else {

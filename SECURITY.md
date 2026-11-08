@@ -18,8 +18,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 
 - **Network.** The dev container sits on an internal network with no route out. Its default
   route and resolver are the env's gate. The gate is the only egress: HTTP(S) is inspected
-  (per-env CA, key only in the gate) and checked against a default-deny policy of host, port,
-  method, path, body size and expiry; explicit denies, luoto's and the user's `[[deny]]`, beat
+  (per-env CA, key only in the gate, renewed by `up` 60 days before its two years end) and
+  checked against a default-deny policy of host, port, method, path, body size and expiry;
+  explicit denies, luoto's and the user's `[[deny]]`, beat
   every allow. Non-HTTP TCP goes nowhere except through tunnel rules
   you grant (`luoto allow --tunnel`, a host and port) and SSH to the hosts an SSH credential
   names, on port 22; both pass through uninspected. UDP goes nowhere. DNS is answered locally
@@ -120,7 +121,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   (unless `server_tools = true`); the other providers' are not.
 - **Exhausting the gate.** Code in the sandbox can hold the gate's 1024 connections and
   so stop the env's own traffic, which it could break anyway; other envs have their own gates.
-  The event queue, cached certificates and the gate's log stay bounded.
+  The event queue, cached certificates and the logs of the gate, the vault and the dev container
+  (which root in the sandbox can write to) stay bounded; Docker keeps its daemon's log settings.
 - **Container or VM escape.** An exploit that escapes gVisor (or a plain container) lands in
   luoto's VM as the env's own unprivileged IDs; one more kernel exploit there reaches the other
   envs and the vault, which share the VM, and through podman's network helper also the

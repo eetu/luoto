@@ -12,6 +12,7 @@ use rcgen::{
 };
 use rustls::ServerConfig;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 
 use crate::state::lock;
@@ -32,6 +33,8 @@ struct Leaf {
 pub struct Ca {
     issuer: Issuer<'static, KeyPair>,
     pub cert_pem: String,
+    /// Hex SHA-256 of `cert_pem`, which the host compares with the env's current CA.
+    pub pem_sha256: String,
     cache: Mutex<LruCache<String, Leaf>>,
 }
 
@@ -42,6 +45,7 @@ impl Ca {
         Ok(Ca {
             issuer,
             cert_pem: cert_pem.to_string(),
+            pem_sha256: hex::encode(Sha256::digest(cert_pem.as_bytes())),
             cache: Mutex::new(LruCache::new(NonZeroUsize::new(2048).expect("nonzero"))),
         })
     }

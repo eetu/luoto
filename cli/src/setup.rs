@@ -528,6 +528,9 @@ pub fn doctor() -> Result<ExitCode> {
         &format!("while true; do echo luoto-probe | nc -l -p {probe_port}; done"),
     ]);
     for env_name in config::list_envs(&ctx.paths)? {
+        if let Some(n) = crate::ca::notice(&ctx.paths.env_state(&env_name), &env_name) {
+            println!("env {env_name}: CA {n}");
+        }
         if !ctx.rt.is_running(&names::dev(&env_name)) {
             println!("env {env_name}: not running");
             continue;

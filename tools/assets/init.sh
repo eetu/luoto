@@ -159,9 +159,11 @@ mkdir -p /etc/claude-code
 [ -e /etc/claude-code/CLAUDE.md ] || ln -s "$T/AGENTS.md" /etc/claude-code/CLAUDE.md
 
 # --- Chromium/NSS trust (VS Code webviews, Electron tools) --------------------------------
+# The db is in the home volume, which outlives renewed CAs: the ones it holds go first.
 if have certutil && [ -f "$CA" ]; then
   su -s /bin/sh "$USER_NAME" -c "mkdir -p \"$HOME_DIR/.pki/nssdb\" &&
     (certutil -d sql:$HOME_DIR/.pki/nssdb -L >/dev/null 2>&1 || certutil -d sql:$HOME_DIR/.pki/nssdb -N --empty-password) &&
+    for i in 1 2 3; do certutil -d sql:$HOME_DIR/.pki/nssdb -D -n luoto-env 2>/dev/null || break; done &&
     certutil -d sql:$HOME_DIR/.pki/nssdb -A -t C,, -n luoto-env -i $CA" >/dev/null 2>&1 || true
 fi
 

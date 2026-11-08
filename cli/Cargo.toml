@@ -23,6 +23,7 @@ clap_complete.workspace = true
 inquire.workspace = true
 directories.workspace = true
 rcgen.workspace = true
+x509-parser.workspace = true
 time.workspace = true
 rand.workspace = true
 hex.workspace = true
@@ -45,4 +46,6 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rcgen = { workspace = true, features = ["x509-parser"] }
+x509-parser = { workspace = true, features = ["verify"] }
 tower.workspace = true
