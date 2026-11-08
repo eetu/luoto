@@ -34,6 +34,8 @@ const MISE_CONF: &str = "/etc/mise/conf.d/luoto.toml";
 const VERSION: u32 = 2;
 
 const SYSTEM: &str = r#"set -e
+# Python packages byte-compile as they install, and older ones warn about their own docstrings.
+export PYTHONWARNINGS=ignore::SyntaxWarning
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   # A source the env doesn't allow (luoto-base lists cli.github.com) fails the update; apt
