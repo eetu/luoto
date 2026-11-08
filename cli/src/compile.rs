@@ -6,6 +6,9 @@ use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
+use luoto_shared::azure_identity::{
+    ARM_HOST, Audience, AzureIdentity, GRAPH_HOST, STORAGE_SERVICES, key_vault_host, storage_hosts,
+};
 use luoto_shared::creds::{
     BindingSpec, FORBIDDEN_GITHUB_PERMISSIONS, Injection, Placement, SSH_BINDING,
     default_github_api,
@@ -16,11 +19,11 @@ use luoto_shared::policy::{
 };
 use luoto_shared::{forges, presets, profiles};
 
-use crate::azure;
 use crate::config::{
-    AzureDevopsCred, CustomCred, EnvConfig, GitCred, GithubCred, ProviderValue, SshCred,
+    AzureCred, AzureDevopsCred, CustomCred, EnvConfig, GitCred, GithubCred, ProviderValue, SshCred,
     extend_unique,
 };
+use crate::{azure, azure_identity};
 
 pub struct Compiled {
     pub policy: Policy,
@@ -150,6 +153,12 @@ pub fn compile(
         aliases,
         over_ssh(azure::SSH_HOST),
     ));
+    let azure_identity = cfg
+        .credentials
+        .azure
+        .as_ref()
+        .map(|c| compile_azure_identity(&mut b, c))
+        .transpose()?;
     let (git, upstream_cas) = compile_git(&mut b, &cfg.credentials.git)?;
     for c in &cfg.credentials.git {
         let host = c.host.split(':').next().unwrap_or_default();
@@ -206,6 +215,7 @@ pub fn compile(
             })
             .into_iter()
             .collect(),
+        azure: azure_identity,
     };
     // A tunnel passes bytes unread: one you or a repository wrote can't cover a host whose
     // credentials, forge guards or denies the gate applies (`luoto allow` refuses it too).
@@ -1033,6 +1043,126 @@ fn compile_git(
         b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     }
     Ok((guards, cas))
+}
+
+/// `[credentials.azure]`: a binding per audience it grants (a token from `az` on the host, or
+/// minted by the vault for a service principal); Resource Manager's paths for its
+/// subscriptions, and the data plane hosts it names, allowed and given the audience's token.
+/// The identity the gate's IMDS answers for, and the variables tools in the env read.
+fn compile_azure_identity(b: &mut Builder, c: &AzureCred) -> Result<AzureIdentity> {
+    azure_identity::check(c)?;
+    let source = |aud: Audience| match (&c.client_id, &c.client_secret, &c.tenant) {
+        (Some(client_id), Some(secret), Some(tenant)) => BindingSpec::AzureServicePrincipal {
+            tenant: tenant.clone(),
+            client_id: client_id.clone(),
+            secret_ref: secret.clone(),
+            audience: aud.resource().into(),
+        },
+        _ => BindingSpec::Static {
+            secret_ref: azure_identity::azcli_ref(aud, c.tenant.as_deref()),
+        },
+    };
+    let mut identity = AzureIdentity::default();
+    let access = Access::Level(c.access);
+    // Resource Manager reads paths in any case.
+    let mut grant = |b: &mut Builder, aud: Audience, id: String, host: String, access, paths| {
+        let binding = aud.binding().to_string();
+        b.bindings.insert(binding.clone(), source(aud));
+        identity.audiences.insert(aud, binding.clone());
+        b.injections.push(Injection {
+            binding,
+            host: host.clone(),
+            paths: Vec::clone(&paths),
+            place: Placement::Header {
+                name: "authorization".into(),
+                format: "Bearer {secret}".into(),
+            },
+            ignore_case: aud == Audience::Arm,
+        });
+        b.rule(
+            id,
+            "azure",
+            Rule {
+                host,
+                access,
+                paths,
+                ignore_case: aud == Audience::Arm,
+                ..Default::default()
+            },
+        );
+    };
+    let subscriptions: Vec<String> = c
+        .subscriptions
+        .iter()
+        .map(|s| format!("/subscriptions/{s}/**"))
+        .collect();
+    grant(
+        b,
+        Audience::Arm,
+        "azure-arm".into(),
+        ARM_HOST.into(),
+        access.clone(),
+        subscriptions,
+    );
+    // What `az login` and the providers read beside the subscriptions: the subscriptions and
+    // tenants the identity sees, and resource provider metadata.
+    grant(
+        b,
+        Audience::Arm,
+        "azure-arm-read".into(),
+        ARM_HOST.into(),
+        Access::Level(AccessLevel::Read),
+        vec![
+            "/subscriptions".into(),
+            "/tenants".into(),
+            "/providers/**".into(),
+        ],
+    );
+    for name in &c.key_vaults {
+        let host = key_vault_host(name);
+        let id = format!("azure-keyvault-{}", name.to_ascii_lowercase());
+        grant(b, Audience::KeyVault, id, host, access.clone(), Vec::new());
+    }
+    for account in &c.storage_accounts {
+        for (host, service) in storage_hosts(account).into_iter().zip(STORAGE_SERVICES) {
+            let id = format!("azure-storage-{account}-{service}");
+            grant(b, Audience::Storage, id, host, access.clone(), Vec::new());
+        }
+    }
+    if c.graph {
+        let read = Access::Level(AccessLevel::Read);
+        grant(
+            b,
+            Audience::Graph,
+            "azure-graph".into(),
+            GRAPH_HOST.into(),
+            read,
+            Vec::new(),
+        );
+    }
+    if c.access == AccessLevel::Write && c.client_id.is_none() {
+        b.warnings.push(
+            "credentials.azure: access = \"write\" with your own az login lets code in the env \
+             change whatever your Azure roles allow; a service principal with a narrow role \
+             keeps it smaller"
+                .into(),
+        );
+    }
+    let first = &c.subscriptions[0];
+    for (k, v) in [
+        ("ARM_USE_MSI", "true"),
+        ("ARM_SUBSCRIPTION_ID", first),
+        ("AZURE_SUBSCRIPTION_ID", first),
+        // Its telemetry goes to a host no env reaches.
+        ("AZURE_CORE_COLLECT_TELEMETRY", "false"),
+    ] {
+        b.dev_env.insert(k.into(), v.into());
+    }
+    if let Some(t) = &c.tenant {
+        b.dev_env.insert("ARM_TENANT_ID".into(), t.clone());
+        b.dev_env.insert("AZURE_TENANT_ID".into(), t.clone());
+    }
+    Ok(identity)
 }
 
 /// Azure DevOps: the PAT added as basic auth on the repos' git paths, those paths allowed
@@ -2047,5 +2177,246 @@ methods = ["DELETE"]
         let muted = cfg("[[mute]]\nhost = \"telemetry.example\"\npaths = [\"/v1/**\"]");
         let c = compile("t", &muted, GATE, &[]).unwrap();
         assert!(c.policy.denies.is_empty());
+    }
+
+    const SUB: &str = "0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0";
+
+    #[test]
+    fn azure_reaches_its_subscriptions_with_the_arm_token_in_any_case() {
+        let text = format!("[credentials.azure]\nsubscriptions = [\"{SUB}\"]\n");
+        let c = compile("t", &cfg(&text), GATE, &[]).unwrap();
+        let p = &c.policy;
+        let allowed = |method: &str, path: &str| {
+            matches!(
+                decide(p, "management.azure.com", method, path),
+                Decision::Allow { .. }
+            )
+        };
+        let rg = format!("/subscriptions/{SUB}/resourceGroups/rg");
+        for (method, path) in [
+            ("GET", "/subscriptions".to_string()),
+            ("GET", "/tenants".into()),
+            ("GET", "/providers/Microsoft.Compute".into()),
+            ("GET", format!("/subscriptions/{SUB}")),
+            ("GET", rg.clone()),
+            ("GET", rg.to_uppercase()),
+            ("HEAD", rg.clone()),
+        ] {
+            assert!(allowed(method, &path), "{method} {path}");
+            let bound: Vec<&str> = p
+                .injections_for("management.azure.com", &path)
+                .iter()
+                .map(|i| i.binding.as_str())
+                .collect();
+            assert_eq!(bound, ["azure-arm"], "{path}");
+        }
+        // Read: no writes, and nothing outside the subscriptions.
+        for (method, path) in [
+            ("PUT", rg.clone()),
+            (
+                "POST",
+                format!("{rg}/providers/Microsoft.Storage/storageAccounts/a/listKeys"),
+            ),
+            ("DELETE", rg.clone()),
+            ("POST", "/subscriptions".into()),
+            (
+                "PUT",
+                "/providers/Microsoft.Management/managementGroups/x".into(),
+            ),
+            (
+                "GET",
+                "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups".into(),
+            ),
+        ] {
+            assert!(!allowed(method, &path), "{method} {path}");
+        }
+        assert!(
+            p.injections_for(
+                "management.azure.com",
+                "/subscriptions/11111111-2222-3333-4444-555555555555"
+            )
+            .is_empty()
+        );
+
+        let write = cfg(&format!("{text}access = \"write\"\n"));
+        let c = compile("t", &write, GATE, &[]).unwrap();
+        assert!(matches!(
+            decide(&c.policy, "management.azure.com", "PUT", &rg),
+            Decision::Allow { .. }
+        ));
+        assert!(!matches!(
+            decide(&c.policy, "management.azure.com", "PUT", "/subscriptions"),
+            Decision::Allow { .. }
+        ));
+        assert!(c.warnings.iter().any(|w| w.contains("your own az login")));
+    }
+
+    #[test]
+    fn azure_data_planes_are_exact_hosts_with_their_own_audience() {
+        let text = format!(
+            r#"
+[credentials.azure]
+subscriptions = ["{SUB}"]
+key_vaults = ["KV-Prod"]
+storage_accounts = ["acct"]
+graph = true
+"#
+        );
+        let c = compile("t", &cfg(&text), GATE, &[]).unwrap();
+        let p = &c.policy;
+        let binding = |host: &str| -> Vec<String> {
+            p.injections_for(host, "/x")
+                .iter()
+                .map(|i| i.binding.clone())
+                .collect()
+        };
+        assert_eq!(binding("kv-prod.vault.azure.net"), ["azure-keyvault"]);
+        for service in STORAGE_SERVICES {
+            assert_eq!(
+                binding(&format!("acct.{service}.core.windows.net")),
+                ["azure-storage"]
+            );
+        }
+        assert_eq!(binding("graph.microsoft.com"), ["azure-graph"]);
+        assert!(binding("other.vault.azure.net").is_empty());
+        for i in &p.injections {
+            assert!(!i.host.contains('*'), "{}", i.host);
+        }
+        for r in p.rules.iter().filter(|r| r.origin == "azure") {
+            assert!(!r.rule.host.contains('*'), "{}", r.rule.host);
+        }
+        // Graph stays read-only whatever `access` says.
+        let w = cfg(&format!("{text}access = \"write\"\n"));
+        let w = compile("t", &w, GATE, &[]).unwrap();
+        for (host, method, allowed) in [
+            ("kv-prod.vault.azure.net", "POST", true),
+            ("acct.blob.core.windows.net", "PUT", true),
+            ("graph.microsoft.com", "GET", true),
+            ("graph.microsoft.com", "POST", false),
+        ] {
+            let d = decide(&w.policy, host, method, "/x");
+            assert_eq!(
+                matches!(d, Decision::Allow { .. }),
+                allowed,
+                "{method} {host}"
+            );
+        }
+        assert!(matches!(
+            decide(p, "kv-prod.vault.azure.net", "POST", "/keys/k/decrypt"),
+            Decision::Deny(DenyReason::MethodNotAllowed { .. })
+        ));
+
+        let audiences = &p.azure.as_ref().unwrap().audiences;
+        assert_eq!(audiences.keys().copied().collect::<Vec<_>>(), Audience::ALL);
+        for (aud, binding) in audiences {
+            assert_eq!(
+                c.bindings[binding],
+                BindingSpec::Static {
+                    secret_ref: format!("azcli:{}", aud.resource())
+                }
+            );
+        }
+        assert_eq!(c.dev_env["ARM_USE_MSI"], "true");
+        assert_eq!(c.dev_env["AZURE_SUBSCRIPTION_ID"], SUB);
+        assert!(!c.dev_env.contains_key("AZURE_TENANT_ID"));
+
+        // Only the audiences it names.
+        let arm = compile(
+            "t",
+            &cfg(&format!(
+                "[credentials.azure]\nsubscriptions = [\"{SUB}\"]\n"
+            )),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        let audiences = &arm.policy.azure.as_ref().unwrap().audiences;
+        assert_eq!(
+            audiences.keys().copied().collect::<Vec<_>>(),
+            [Audience::Arm]
+        );
+        assert_eq!(arm.bindings.len(), 1);
+    }
+
+    #[test]
+    fn a_service_principal_is_minted_in_the_vault_from_its_secret() {
+        let text = format!(
+            r#"
+[credentials.azure]
+subscriptions = ["{SUB}"]
+tenant = "contoso.onmicrosoft.com"
+client_id = "11111111-2222-3333-4444-555555555555"
+client_secret = "op://Dev/sp/secret"
+key_vaults = ["kv1"]
+"#
+        );
+        let c = compile("t", &cfg(&text), GATE, &[]).unwrap();
+        for (binding, audience) in [
+            ("azure-arm", "https://management.azure.com/"),
+            ("azure-keyvault", "https://vault.azure.net"),
+        ] {
+            assert_eq!(
+                c.bindings[binding],
+                BindingSpec::AzureServicePrincipal {
+                    tenant: "contoso.onmicrosoft.com".into(),
+                    client_id: "11111111-2222-3333-4444-555555555555".into(),
+                    secret_ref: "op://Dev/sp/secret".into(),
+                    audience: audience.into(),
+                }
+            );
+        }
+        assert_eq!(
+            c.vault_refs().into_iter().collect::<Vec<_>>(),
+            ["op://Dev/sp/secret"]
+        );
+        assert_eq!(c.dev_env["ARM_TENANT_ID"], "contoso.onmicrosoft.com");
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+
+        // With your own login, the tenant goes to `az`.
+        let mine = format!(
+            "[credentials.azure]\nsubscriptions = [\"{SUB}\"]\ntenant = \"contoso.onmicrosoft.com\"\n"
+        );
+        let c = compile("t", &cfg(&mine), GATE, &[]).unwrap();
+        assert_eq!(
+            c.bindings["azure-arm"].secret_ref(),
+            "azcli:https://management.azure.com/?tenant=contoso.onmicrosoft.com"
+        );
+        for r in c.vault_refs() {
+            crate::secrets::check_ref(&r).unwrap();
+        }
+    }
+
+    #[test]
+    fn azure_names_cannot_reach_another_host() {
+        for extra in [
+            "key_vaults = [\"evil.example/x\"]",
+            "key_vaults = [\"*\"]",
+            "storage_accounts = [\"acct.blob.core.windows.net\"]",
+            "storage_accounts = [\"evil.example#\"]",
+        ] {
+            let text = format!("[credentials.azure]\nsubscriptions = [\"{SUB}\"]\n{extra}\n");
+            assert!(compile("t", &cfg(&text), GATE, &[]).is_err(), "{extra}");
+        }
+    }
+
+    #[test]
+    fn config_toml_gives_azure_to_envs_without_their_own() {
+        let global: crate::config::GlobalConfig = toml::from_str(&format!(
+            "[credentials.azure]\nsubscriptions = [\"{SUB}\"]\n"
+        ))
+        .unwrap();
+        let mut plain = EnvConfig::default();
+        global.layer_under(&mut plain);
+        assert_eq!(plain.credentials.azure, global.credentials.azure);
+        let mut own = cfg(
+            "[credentials.azure]\nsubscriptions = [\"11111111-2222-3333-4444-555555555555\"]\n",
+        );
+        let before = own.credentials.azure.clone();
+        global.layer_under(&mut own);
+        assert_eq!(own.credentials.azure, before);
+        assert!(
+            toml::from_str::<crate::config::GlobalConfig>("[credentials.github]\ntoken = \"x\"")
+                .is_err()
+        );
     }
 }

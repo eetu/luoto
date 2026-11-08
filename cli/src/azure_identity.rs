@@ -1,0 +1,354 @@
+//! `[credentials.azure]` on the host: what it may name, the `azcli:` secret refs that read a
+//! token from this machine's Azure CLI, and logging the env's own `az` in to the managed
+//! identity the gate answers for.
+
+use std::process::{Command, Stdio};
+
+use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use chrono::{DateTime, Utc};
+use luoto_shared::azure_identity::{
+    Audience, is_guid, key_vault_name_ok, storage_account_ok, tenant_ok,
+};
+use serde::Deserialize;
+
+use crate::config::AzureCred;
+use crate::env::{Ctx, UID};
+use crate::text::display;
+use crate::{connect, names};
+
+/// The secret ref scheme for a token from this machine's `az` login.
+pub const AZCLI: &str = "azcli:";
+
+/// Why `c` is refused, if it is.
+pub fn check(c: &AzureCred) -> Result<()> {
+    if c.subscriptions.is_empty() {
+        bail!(
+            "credentials.azure: list the subscriptions the env may reach \
+             (`subscriptions = [\"<subscription id>\"]`)"
+        );
+    }
+    if let Some(s) = c.subscriptions.iter().find(|s| !is_guid(s)) {
+        bail!(
+            "credentials.azure: `{}` is not a subscription ID",
+            display(s)
+        );
+    }
+    if let Some(t) = c.tenant.as_deref().filter(|t| !tenant_ok(t)) {
+        bail!(
+            "credentials.azure: tenant `{}` is not a tenant ID or domain",
+            display(t)
+        );
+    }
+    if let Some(n) = c.key_vaults.iter().find(|n| !key_vault_name_ok(n)) {
+        bail!(
+            "credentials.azure: `{}` is not a key vault name (3-24 letters, digits and single \
+             hyphens: the name, not its URL)",
+            display(n)
+        );
+    }
+    if let Some(n) = c.storage_accounts.iter().find(|n| !storage_account_ok(n)) {
+        bail!(
+            "credentials.azure: `{}` is not a storage account name (3-24 lower-case letters \
+             and digits: the name, not its URL)",
+            display(n)
+        );
+    }
+    match (&c.client_id, &c.client_secret) {
+        (Some(id), Some(_)) => {
+            if !is_guid(id) {
+                bail!(
+                    "credentials.azure: client_id `{}` is not an application ID",
+                    display(id)
+                );
+            }
+            if c.tenant.is_none() {
+                bail!("credentials.azure: a service principal (client_id) needs `tenant`");
+            }
+        }
+        (Some(_), None) => {
+            bail!("credentials.azure: client_id needs client_secret (a secret ref)")
+        }
+        (None, Some(_)) => bail!("credentials.azure: client_secret goes with client_id"),
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+/// The `azcli:` ref for a token for `aud`, in `tenant` or `az`'s current one.
+pub fn azcli_ref(aud: Audience, tenant: Option<&str>) -> String {
+    match tenant {
+        Some(t) => format!("{AZCLI}{}?tenant={t}", aud.resource()),
+        None => format!("{AZCLI}{}", aud.resource()),
+    }
+}
+
+/// The resource and tenant an `azcli:` ref asks `az` for.
+pub fn parse_ref(r: &str) -> Result<(&str, Option<&str>)> {
+    let rest = r.strip_prefix(AZCLI).unwrap_or(r);
+    let (resource, tenant) = match rest.split_once("?tenant=") {
+        Some((resource, t)) => (resource, Some(t)),
+        None => (rest, None),
+    };
+    let plain = |s: &str| !s.contains(|c: char| c.is_whitespace() || c.is_control() || c == '?');
+    if !resource.starts_with("https://") || !plain(resource) {
+        bail!("`azcli:` refs are azcli:<resource URL>, or azcli:<resource URL>?tenant=<tenant>");
+    }
+    if let Some(t) = tenant.filter(|t| !tenant_ok(t)) {
+        bail!("`{}` is not a tenant ID or domain", display(t));
+    }
+    Ok((resource, tenant))
+}
+
+/// A token for ref `r` from this machine's Azure CLI, and when it expires if that is known.
+pub fn read(r: &str) -> Result<(String, Option<DateTime<Utc>>)> {
+    let (resource, tenant) = parse_ref(r)?;
+    let mut cmd = Command::new(if cfg!(windows) { "az.cmd" } else { "az" });
+    cmd.args([
+        "account",
+        "get-access-token",
+        "--resource",
+        resource,
+        "--output",
+        "json",
+    ]);
+    if let Some(t) = tenant {
+        cmd.args(["--tenant", t]);
+    }
+    let out = match cmd.stdin(Stdio::null()).output() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
+            "the Azure CLI (`az`) is not installed on this machine: install it and run \
+             `az login`, or give [credentials.azure] a service principal (client_id, \
+             client_secret)"
+        ),
+        out => out.context("run the Azure CLI (`az`)")?,
+    };
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err: String = err.trim().chars().take(300).collect();
+        if err.contains("az login") {
+            bail!(
+                "the Azure CLI on this machine is not logged in{}: run `az login`{} ({err})",
+                tenant.map(|t| format!(" to {t}")).unwrap_or_default(),
+                tenant.map(|t| format!(" --tenant {t}")).unwrap_or_default()
+            );
+        }
+        bail!("az account get-access-token failed: {err}");
+    }
+    parse_output(&out.stdout)
+}
+
+/// The token in `az account get-access-token`'s JSON and when it expires: `expires_on`
+/// (seconds since the epoch, from az 2.54), else the token's own `exp`.
+pub fn parse_output(json: &[u8]) -> Result<(String, Option<DateTime<Utc>>)> {
+    #[derive(Deserialize)]
+    struct Out {
+        #[serde(rename = "accessToken")]
+        access_token: String,
+        #[serde(default)]
+        expires_on: Option<i64>,
+    }
+    // The output holds the token: an error never repeats it.
+    let out: Out = serde_json::from_slice(json)
+        .map_err(|_| anyhow!("az account get-access-token printed something unexpected"))?;
+    if out.access_token.is_empty() {
+        bail!("az account get-access-token gave no token");
+    }
+    let expires = out
+        .expires_on
+        .and_then(|s| DateTime::from_timestamp(s, 0))
+        .or_else(|| token_expiry(&out.access_token));
+    Ok((out.access_token, expires))
+}
+
+/// When JWT `token` expires, by its `exp` claim.
+pub fn token_expiry(token: &str) -> Option<DateTime<Utc>> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = B64URL.decode(payload.trim_end_matches('=')).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    DateTime::from_timestamp(claims.get("exp")?.as_i64()?, 0)
+}
+
+/// Log the env's Azure CLI in to the gate's managed identity as the dev user, with the first
+/// subscription as its default, when the image has `az`. Best effort: a failure is a note.
+pub fn login_in_env(ctx: &Ctx, env: &str, c: &AzureCred) {
+    // Checked to be an ID, so a plain shell word.
+    let Some(sub) = c.subscriptions.first().filter(|s| is_guid(s)) else {
+        return;
+    };
+    let script = format!(
+        "command -v az >/dev/null 2>&1 || exit 0\n\
+         az login --identity --output none --only-show-errors && \
+         az account set --subscription {sub} --only-show-errors"
+    );
+    let dev = names::dev(env);
+    let run = ctx.rt.run([
+        "exec",
+        "-u",
+        UID,
+        dev.as_str(),
+        "sh",
+        "-c",
+        connect::LOGIN,
+        &script,
+    ]);
+    if let Err(e) = run {
+        eprintln!(
+            "note: `az login --identity` failed in `{env}`, so az there is not logged in: {}\n      \
+             see docs/guides/azure.md; `luoto up -e {env}` tries again",
+            crate::text::lines(&format!("{e:#}"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SUB: &str = "0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0";
+    const APP: &str = "11111111-2222-3333-4444-555555555555";
+
+    fn cred() -> AzureCred {
+        toml::from_str(&format!("subscriptions = [\"{SUB}\"]")).unwrap()
+    }
+
+    #[test]
+    fn a_credential_names_ids_and_azure_names_only() {
+        let c = cred();
+        assert_eq!(c.access, luoto_shared::policy::AccessLevel::Read);
+        check(&c).unwrap();
+        let refused = |c: AzureCred, why: &str| {
+            let e = check(&c).unwrap_err().to_string();
+            assert!(e.contains(why), "{e}");
+        };
+        refused(
+            AzureCred {
+                subscriptions: vec![],
+                ..cred()
+            },
+            "list the subscriptions",
+        );
+        refused(
+            AzureCred {
+                subscriptions: vec!["prod".into()],
+                ..cred()
+            },
+            "not a subscription ID",
+        );
+        refused(
+            AzureCred {
+                key_vaults: vec!["kv.evil.example".into()],
+                ..cred()
+            },
+            "not a key vault name",
+        );
+        refused(
+            AzureCred {
+                key_vaults: vec!["*".into()],
+                ..cred()
+            },
+            "not a key vault name",
+        );
+        refused(
+            AzureCred {
+                storage_accounts: vec!["acct.blob.core.windows.net".into()],
+                ..cred()
+            },
+            "not a storage account name",
+        );
+        refused(
+            AzureCred {
+                tenant: Some("evil.example/x".into()),
+                ..cred()
+            },
+            "not a tenant",
+        );
+        refused(
+            AzureCred {
+                client_id: Some(APP.into()),
+                ..cred()
+            },
+            "client_id needs client_secret",
+        );
+        refused(
+            AzureCred {
+                client_secret: Some("op://v/i/f".into()),
+                ..cred()
+            },
+            "client_secret goes with client_id",
+        );
+        refused(
+            AzureCred {
+                client_id: Some(APP.into()),
+                client_secret: Some("op://v/i/f".into()),
+                ..cred()
+            },
+            "needs `tenant`",
+        );
+        check(&AzureCred {
+            client_id: Some(APP.into()),
+            client_secret: Some("op://v/i/f".into()),
+            tenant: Some("contoso.onmicrosoft.com".into()),
+            ..cred()
+        })
+        .unwrap();
+        assert!(toml::from_str::<AzureCred>("subscriptions = []\naccess = \"admin\"").is_err());
+        assert!(toml::from_str::<AzureCred>("subscriptions = []\nscope = \"x\"").is_err());
+    }
+
+    #[test]
+    fn azcli_refs_name_a_resource_and_maybe_a_tenant() {
+        let r = azcli_ref(Audience::Arm, None);
+        assert_eq!(r, "azcli:https://management.azure.com/");
+        assert_eq!(
+            parse_ref(&r).unwrap(),
+            ("https://management.azure.com/", None)
+        );
+        let r = azcli_ref(Audience::KeyVault, Some("contoso.onmicrosoft.com"));
+        assert_eq!(
+            parse_ref(&r).unwrap(),
+            ("https://vault.azure.net", Some("contoso.onmicrosoft.com"))
+        );
+        for bad in [
+            "azcli:management.azure.com",
+            "azcli:https://x y",
+            "azcli:https://x?resource=y",
+            "azcli:https://x?tenant=a/b",
+            "azcli:--help",
+        ] {
+            assert!(parse_ref(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_token_comes_from_azs_json_and_never_into_an_error() {
+        let claims = B64URL.encode(br#"{"exp":1900000000,"oid":"o"}"#);
+        let jwt = format!("eyJhbGciOiJSUzI1NiJ9.{claims}.sig");
+        let out = serde_json::json!({
+            "accessToken": jwt,
+            "expiresOn": "2030-03-17 18:46:40.000000",
+            "expires_on": 1_900_000_100,
+            "subscription": SUB,
+            "tenant": "t",
+            "tokenType": "Bearer",
+        });
+        let (token, exp) = parse_output(out.to_string().as_bytes()).unwrap();
+        assert_eq!(token, jwt);
+        assert_eq!(exp.unwrap().timestamp(), 1_900_000_100);
+
+        // Before az 2.54 there is no `expires_on`: the token's own `exp` says.
+        let old =
+            serde_json::json!({"accessToken": jwt, "expiresOn": "2030-03-17 18:46:40.000000"});
+        let (_, exp) = parse_output(old.to_string().as_bytes()).unwrap();
+        assert_eq!(exp.unwrap().timestamp(), 1_900_000_000);
+        assert_eq!(token_expiry(&jwt).unwrap().timestamp(), 1_900_000_000);
+        assert_eq!(token_expiry("opaque"), None);
+
+        let e = parse_output(format!("{{\"token\": \"{jwt}\"").as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(!e.contains(&jwt), "{e}");
+        assert!(parse_output(br#"{"accessToken": ""}"#).is_err());
+    }
+}

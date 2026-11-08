@@ -19,8 +19,8 @@ luoto gives each project a sandbox where that doesn't work:
 - **It reaches only what you allowed.** Every request leaves through a gate with per-host
   rules, read-only unless you say otherwise. Anything else is blocked and shown to you, with a
   one-click allow.
-- **Your secrets never enter it.** Agent, GitHub and Azure DevOps tokens stay in a vault
-  outside the sandbox; the gate adds them to the requests you allowed, and code inside sees
+- **Your secrets never enter it.** Agent, GitHub, Azure DevOps and Azure tokens stay in a
+  vault outside the sandbox; the gate adds them to the requests you allowed, and code inside sees
   placeholders. Git tokens work only for the repositories you named.
 
 You keep working as usual: your editor attaches over SSH, agents run with their prompts off
@@ -263,6 +263,16 @@ repos = ["myorg/Project/repo"]   # `org/project/repo`, or the clone URL
 # read_repos = ["myorg/Project/lib"]   # fetched only
 protected_branches = ["main"]
 
+[credentials.azure]           # Azure: az, terraform and the SDKs see a managed identity
+subscriptions = ["<subscription id>"]   # Resource Manager paths the env may reach
+access = "read"               # GET and HEAD; "write": every method, as your Azure role allows
+# tenant = "contoso.onmicrosoft.com"    # required with a service principal; else az's current
+# key_vaults = ["kv-prod"]    # data planes, by name: read or write as `access` says
+# storage_accounts = ["acct"] # its blob, queue, table, file and dfs hosts
+# graph = true                # Microsoft Graph, read-only
+# client_id = "<app id>"      # a service principal instead of your `az login` on this machine
+# client_secret = "op://Dev/azure-sp/secret"
+
 [[credentials.git]]           # git over HTTPS on any other host: GitLab, Forgejo, Gitea, …
 host = "gitlab.example.com"   # `host:port` for another port
 token = "op://Dev/gitlab/token"
@@ -304,7 +314,8 @@ hosts = ["dl.k8s.io"]         # extra hosts readable only while installs run
 
 `config.toml` takes `[tools]`, `[deps]`, `[[deny]]`, `[[mute]]`, `idle_stop` and
 `auto_forward` too, for every env, and `[agents.<name>]` options (`model`, `effort`) for every
-env that has that agent; an env's own, and its `luoto.toml`'s, come on top.
+env that has that agent; an env's own, and its `luoto.toml`'s, come on top. A
+`[credentials.azure]` there is every env's that has none of its own.
 `notifications = false` there turns desktop notifications off.
 
 A `[[deny]]` beats every allow: a preset's, a rule's, an approved request's. It applies to the
@@ -314,8 +325,9 @@ for telemetry you keep denied: its denials are still recorded, but stay out of `
 the UI and the offers to allow them; `luoto egress --all` shows them.
 
 Secret refs: `op://…` (1Password CLI, desktop or service account), `vault://mount/path#field`
-(OpenBao / HashiCorp Vault), `keyring:service/account` (OS keychain), `env:NAME`, `file:path`.
-Sources are configured in `~/.config/luoto/config.toml`.
+(OpenBao / HashiCorp Vault), `keyring:service/account` (OS keychain), `env:NAME`, `file:path`,
+`azcli:<resource>` (a token from your `az` login, which `[credentials.azure]` uses). Sources
+are configured in `~/.config/luoto/config.toml`.
 
 `[sandbox_secrets]` are resolved on your machine at `up` and written to a memory-only file in
 the dev container that every shell loads; they leave with the container. Anything that only
@@ -336,6 +348,15 @@ working as they are: SSH ones (`git@ssh.dev.azure.com:v3/…`, or a host alias f
 API by the repository's name (`…/_apis/git/repositories/<repo>/pullrequests`): opened,
 commented on, their title, description, draft state and target changed; completing them, and
 votes, stay with you. `az repos pr` addresses repos by ID, which the gate doesn't match.
+
+An Azure credential gives the env a managed identity: the gate answers the instance metadata
+service (`169.254.169.254`) itself, so `az` (logged in by `up`), terraform's azurerm
+(`ARM_USE_MSI`) and the SDKs' `DefaultAzureCredential` work unchanged. The token they get is a
+placeholder with the real one's claims; the gate puts the real token on Resource Manager
+requests for the listed subscriptions and on the key vaults, storage accounts and Graph you
+name. It comes from your `az login` on this machine, refreshed before it expires, or from a
+service principal whose secret the vault keeps and mints with
+([guide](docs/guides/azure.md)).
 
 A `[[credentials.git]]` works with any forge, as git speaks the same protocol to all: the gate
 adds the token to the listed repos' git requests only and guards pushes as on GitHub. It
@@ -361,7 +382,9 @@ java, go, rust, php, ruby, terraform, ….
 Terraform and OpenTofu are found by `.terraform-version`, `.opentofu-version`, `main.tf`,
 `versions.tf`, `terraform.tf` (or `main.tofu`, `versions.tofu`) and `.terraform.lock.hcl`,
 whose providers' registry tells the two apart; an exact `required_version` sets the version.
-Their presets (`terraform`, `opentofu`) open the provider and module registry. Cloud credentials for `plan` and `apply` aren't handled yet
+Their presets (`terraform`, `opentofu`) open the provider and module registry. Azure
+credentials for `plan` and `apply` come from `[credentials.azure]`
+([guide](docs/guides/azure.md)); AWS and Google Cloud ones aren't handled yet
 ([ROADMAP.md](ROADMAP.md)).
 
 - `luoto init` reads the folder first and shows what it found (toolchains with the file that

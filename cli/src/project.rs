@@ -474,6 +474,9 @@ pub fn suggest(env: &str, own: &EnvConfig, accepted: Option<&ProjectConfig>) -> 
     if c.azure_devops.is_some() {
         creds.push("azure_devops".into());
     }
+    if c.azure.is_some() {
+        creds.push("azure".into());
+    }
     if c.ssh.is_some() {
         creds.push("ssh".into());
     }
@@ -707,6 +710,14 @@ pub fn missing_needs(p: &ProjectConfig, cfg: &EnvConfig) -> Vec<String> {
                     "[credentials.custom.{name}]\nhost = \"<api host>\"\nsecret = \"op://<vault>/<item>/<field>\""
                 ));
             }
+        } else if c == "azure" {
+            if cfg.credentials.azure.is_none() {
+                out.push(
+                    "[credentials.azure]\nsubscriptions = [\"<subscription id>\"]   # your az \
+                     login's token; or client_id + client_secret + tenant"
+                        .into(),
+                );
+            }
         } else if !cfg.credentials.providers.contains_key(c) {
             let kind = profiles::provider(c)
                 .and_then(|p| p.auth.keys().next().cloned())
@@ -934,8 +945,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_project_needing_azure_gets_its_section_suggested() {
+        let p = parse("[needs]\ncredentials = [\"azure\"]").unwrap();
+        let needs = missing_needs(&p, &EnvConfig::default());
+        assert_eq!(needs.len(), 1);
+        assert!(
+            needs[0].starts_with("[credentials.azure]\nsubscriptions"),
+            "{needs:?}"
+        );
+    }
+
+    #[test]
     fn refuses_secrets_tools_and_risky_rules() {
         assert!(parse("[credentials.github]\ntoken = \"op://x\"").is_err());
+        assert!(parse("[credentials.azure]\nsubscriptions = [\"x\"]").is_err());
         assert!(parse("[sandbox_secrets]\nX = \"op://x\"").is_err());
         assert!(parse("[tools]\nnode = \"22\"").is_err());
         assert!(parse("[[allow]]\nhost = \"*\"").is_err());

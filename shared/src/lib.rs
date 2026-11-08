@@ -2,6 +2,7 @@
 //! helper all depend on this crate, so it stays dependency-light and fully unit-tested.
 
 pub mod api;
+pub mod azure_identity;
 pub mod creds;
 pub mod ctl;
 pub mod events;

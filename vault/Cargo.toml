@@ -11,7 +11,8 @@ name = "luoto-vault"
 path = "src/main.rs"
 
 [features]
-# Lets integration tests point GitHub API calls at a local test server over plain HTTP.
+# Lets integration tests point token mints (GitHub's API; Entra ID by LUOTO_TEST_AZURE_LOGIN) at a
+# local test server over plain HTTP.
 test-hooks = []
 
 [dependencies]

@@ -60,6 +60,12 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
 - The SSH key is a vault binding (`SshAgent`) that never leaves the vault, not even to the
   gate. The agent signs only logins to sessions a pinned host key bound
   (`shared/src/forges.rs`, plus `host_keys`; `vault/src/agent.rs`).
+- Azure (`[credentials.azure]`, not Azure DevOps' `azure.rs`): audiences, their hosts and
+  name rules in `shared/src/azure_identity.rs`; one binding per audience. The gate answers IMDS
+  itself (`gate/src/imds.rs`) with placeholders (real header and claims, unusable signature)
+  and never returns a real token; the vault mints service principal tokens
+  (`vault/src/entra.rs`, only `login.microsoftonline.com`); `azcli:` refs read the host's `az`
+  (`cli/src/azure_identity.rs`), and the watcher renews them before they expire.
 - `project.rs`: a repo's `luoto.toml` is untrusted. It layers in (`env::plan`) only as the
   exact text the user accepted (kept in the env's state); changes need a fresh accept. Never
   let it carry secret refs or skip `RuleOrigin::Sandbox` validation, and print its strings

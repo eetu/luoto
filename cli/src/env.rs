@@ -513,6 +513,10 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     if let Err(e) = crate::agents::ensure(ctx, env, &agents, opts.quiet) {
         eprintln!("warning: agents not installed: {e:#}\n         `luoto up -e {env}` retries");
     }
+    // After deps: the image or [deps] may be what brings `az`.
+    if let Some(c) = &p.cfg.credentials.azure {
+        crate::azure_identity::login_in_env(ctx, env, c);
+    }
 
     crate::watch::spawn(ctx);
 
@@ -652,8 +656,8 @@ fn start_gate(
     sync::apply_policy(ctx, env, &p.compiled)?;
     // Credentials failing to unlock must not block the env: credentialed hosts fail closed
     // ("credentials locked") until `luoto vault unlock` succeeds.
-    if let Err(e) =
-        bound.and_then(|()| sync::load_secrets(ctx, &p.compiled.vault_refs(), &format!("`{env}`")))
+    if let Err(e) = bound
+        .and_then(|()| sync::load_secrets(ctx, &p.compiled.vault_refs(), &format!("`{env}`"), true))
     {
         eprintln!(
             "warning: {e:#}\n         their hosts return 403 until the reference is fixed \

@@ -5,6 +5,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::azure_identity::AzureIdentity;
 use crate::creds::Injection;
 use crate::forges;
 use crate::glob;
@@ -423,6 +424,9 @@ pub struct Policy {
     pub git: Vec<GitGuard>,
     #[serde(default)]
     pub internal_names: Vec<InternalName>,
+    /// The managed identity the gate's IMDS answers for (`[credentials.azure]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure: Option<AzureIdentity>,
 }
 
 #[derive(Debug, Clone)]

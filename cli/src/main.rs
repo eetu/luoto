@@ -3,6 +3,7 @@
 
 mod agents;
 mod azure;
+mod azure_identity;
 mod ca;
 mod commands;
 mod compile;

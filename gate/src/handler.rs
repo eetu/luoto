@@ -25,6 +25,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::body::{Body, Capped, Metered, boxed, is_too_large, watched};
 use crate::creds::apply;
 use crate::guards;
+use crate::imds;
 use crate::limits::{self, Activity, HEAD_GRACE, Limits, Slot, Watched};
 use crate::respond;
 use crate::state::State;
@@ -199,7 +200,24 @@ pub async fn handle(
     req: Request<Incoming>,
     target: Target,
 ) -> Result<Response<Body>, Infallible> {
+    if imds::answers(&state.policy(), &target, req.uri().path()) {
+        return Ok(imds::answer(&state, &ctx, req, &target).await);
+    }
     Ok(handle_inner(state, ctx, req, target).await)
+}
+
+/// The destination is decided once, by the caller; the request may not disagree.
+pub fn host_agrees(headers: &HeaderMap, target: &Target) -> bool {
+    let mut hosts = headers.get_all(HOST).iter();
+    match (hosts.next(), hosts.next()) {
+        (None, _) => true,
+        (Some(h), None) => h
+            .to_str()
+            .ok()
+            .and_then(|s| split_authority(s).ok())
+            .is_some_and(|(hh, hp)| hh == target.host && hp.is_none_or(|p| p == target.port)),
+        (Some(_), Some(_)) => false,
+    }
 }
 
 fn denied(
@@ -262,18 +280,7 @@ async fn handle_inner(
         return deny(ev, reason);
     }
 
-    // The destination is decided once, by the caller; the request may not disagree.
-    let mut hosts = req.headers().get_all(HOST).iter();
-    let host_agrees = match (hosts.next(), hosts.next()) {
-        (None, _) => true,
-        (Some(h), None) => h
-            .to_str()
-            .ok()
-            .and_then(|s| split_authority(s).ok())
-            .is_some_and(|(hh, hp)| hh == target.host && hp.is_none_or(|p| p == target.port)),
-        (Some(_), Some(_)) => false,
-    };
-    if !host_agrees {
+    if !host_agrees(req.headers(), &target) {
         return deny(ev, DenyReason::InvalidHost);
     }
     if req.headers().contains_key(TRANSFER_ENCODING) && req.headers().contains_key(CONTENT_LENGTH) {

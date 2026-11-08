@@ -5,7 +5,10 @@
 //! the gate itself.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+#[cfg(target_os = "linux")]
+use std::net::Ipv4Addr;
+use std::net::{IpAddr, SocketAddr};
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,8 +24,10 @@ use crate::mitm::{self, Expect};
 use crate::respond;
 use crate::state::{State, lock};
 
+#[cfg(target_os = "linux")]
 const SO_ORIGINAL_DST: libc::c_int = 80;
 
+#[cfg(target_os = "linux")]
 fn original_dst(stream: &TcpStream) -> io::Result<SocketAddr> {
     let fd = stream.as_raw_fd();
     // SAFETY: getsockopt writes at most `len` bytes into `addr`, a properly sized and
@@ -52,14 +57,33 @@ fn looks_like_http(b: &[u8]) -> bool {
     METHODS.iter().any(|m| b.starts_with(m))
 }
 
+#[cfg(target_os = "linux")]
 pub async fn serve(state: Arc<State>, listener: TcpListener) {
+    serve_with(state, listener, original_dst).await;
+}
+
+/// Every connection to `listener` as if iptables had redirected it from `dst`: the
+/// integration tests' stand-in for the redirect.
+#[cfg(feature = "test-hooks")]
+pub async fn serve_as(state: Arc<State>, listener: TcpListener, dst: SocketAddr) {
+    serve_with(state, listener, move |_: &TcpStream| Ok(dst)).await;
+}
+
+/// Serve the connections on `listener`, each to the original destination `dst` finds for it.
+async fn serve_with<F>(state: Arc<State>, listener: TcpListener, dst: F)
+where
+    F: Fn(&TcpStream) -> io::Result<SocketAddr>,
+{
     loop {
         let (stream, _peer) = limits::accept(&listener).await;
         let Some(slot) = limits::admit(&state, Intake::Transparent) else {
             continue;
         };
+        let Ok(dst) = dst(&stream) else {
+            continue;
+        };
         let state = state.clone();
-        tokio::spawn(async move { conn(state, stream, slot).await });
+        tokio::spawn(async move { conn(state, stream, dst, slot).await });
     }
 }
 
@@ -74,10 +98,7 @@ fn direct(state: &State, host: &str, port: u16, message: String) {
     );
 }
 
-async fn conn(state: Arc<State>, stream: TcpStream, slot: Slot) {
-    let Ok(dst) = original_dst(&stream) else {
-        return;
-    };
+async fn conn(state: Arc<State>, stream: TcpStream, dst: SocketAddr, slot: Slot) {
     let IpAddr::V4(ip) = dst.ip() else {
         return;
     };

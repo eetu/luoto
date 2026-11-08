@@ -16,6 +16,12 @@ env's name and its current rules.
   (`GH_TOKEN`, `ANTHROPIC_*`, `OPENAI_API_KEY`, …) are placeholders; the gate swaps in the real
   credential only for the hosts the user granted. This is expected. Do not look for "real"
   tokens.
+- **Azure.** Where the user granted Azure, the env is a managed identity: `az` is logged in
+  through the gate, and terraform (`ARM_USE_MSI`) and the Azure SDKs find the identity on their
+  own. Never run `az login` here, interactively or with a secret. Access tokens you see are
+  placeholders that work nowhere; the gate adds the real one on the subscriptions, key vaults
+  and storage accounts the user named. A 403 from Azure itself (`AuthorizationFailed`) is the
+  identity's Azure role, which only the user can change.
 - **Writes.** Remote writes only work where the user granted them (for example pushing
   feature branches to one GitHub repository). Protected branches, tags, workflow files and
   GitHub Actions are off-limits.

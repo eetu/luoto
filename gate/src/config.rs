@@ -35,6 +35,10 @@ pub struct Config {
     pub limits: Limits,
     #[cfg(feature = "test-hooks")]
     pub test_resolve: Vec<(String, SocketAddr)>,
+    /// A listener whose connections the transparent intake takes as redirected from an
+    /// original destination: `(listen, destination)`.
+    #[cfg(feature = "test-hooks")]
+    pub test_transparent: Option<(SocketAddr, SocketAddr)>,
 }
 
 fn var(name: &str) -> Option<String> {
@@ -106,6 +110,11 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or_default(),
+            #[cfg(feature = "test-hooks")]
+            test_transparent: var("LUOTO_TEST_TRANSPARENT").and_then(|v| {
+                let (listen, dst) = v.split_once('=')?;
+                Some((listen.parse().ok()?, dst.parse().ok()?))
+            }),
         })
     }
 

@@ -7,6 +7,7 @@
 //! - `keyring:service/account` — macOS Keychain, Windows Credential Manager, Secret Service
 //! - `env:NAME` — an environment variable of the luoto process
 //! - `file:/path` or `file:~/path` — a file readable by the user
+//! - `azcli:<resource>[?tenant=<tenant>]` — a token from the Azure CLI's login on this machine
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Write};
@@ -14,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 
+use crate::azure_identity::{self, AZCLI};
 use crate::config::GlobalConfig;
 
 pub fn resolve_all(
@@ -30,7 +33,7 @@ pub fn resolve_all(
 }
 
 pub fn scheme_ok(r: &str) -> bool {
-    ["op://", "vault://", "keyring:", "env:", "file:"]
+    ["op://", "vault://", "keyring:", "env:", "file:", AZCLI]
         .iter()
         .any(|p| r.starts_with(p))
 }
@@ -39,16 +42,31 @@ pub fn scheme_ok(r: &str) -> bool {
 pub fn check_ref(r: &str) -> Result<()> {
     if !scheme_ok(r) {
         bail!(
-            "secret ref `{r}` has an unknown scheme (use op://, vault://, keyring:, env: or file:)"
+            "secret ref `{r}` has an unknown scheme (use op://, vault://, keyring:, env:, file: \
+             or azcli:)"
         );
     }
     if let Some(path) = r.strip_prefix("file:") {
         file_path(path)?;
     }
+    if r.starts_with(AZCLI) {
+        azure_identity::parse_ref(r)?;
+    }
     Ok(())
 }
 
+/// `r`'s value, and when it expires where its source says (an `azcli:` token).
+pub fn resolve_expiring(global: &GlobalConfig, r: &str) -> Result<(String, Option<DateTime<Utc>>)> {
+    if r.starts_with(AZCLI) {
+        return azure_identity::read(r);
+    }
+    Ok((resolve(global, r)?, None))
+}
+
 pub fn resolve(global: &GlobalConfig, r: &str) -> Result<String> {
+    if r.starts_with(AZCLI) {
+        return Ok(azure_identity::read(r)?.0);
+    }
     if r.starts_with("op://") {
         return op_read(global, r);
     }
@@ -75,7 +93,7 @@ pub fn resolve(global: &GlobalConfig, r: &str) -> Result<String> {
             .trim_end_matches(['\r', '\n'])
             .to_string());
     }
-    bail!("unknown secret ref scheme (use op://, vault://, keyring:, env: or file:)")
+    bail!("unknown secret ref scheme (use op://, vault://, keyring:, env:, file: or azcli:)")
 }
 
 /// Whether reading `r` needs no one at the machine: not the 1Password app, which asks for
@@ -85,7 +103,7 @@ pub fn unattended(global: &GlobalConfig, r: &str) -> bool {
     if r.starts_with("op://") {
         return global.sources.op.mode.as_deref() == Some("service-account");
     }
-    ["keyring:", "file:", "vault://"]
+    ["keyring:", "file:", "vault://", AZCLI]
         .iter()
         .any(|p| r.starts_with(p))
 }

@@ -15,7 +15,7 @@ use luoto_shared::events::{Event, Source};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use crate::{agent, github};
+use crate::{agent, entra, github};
 
 struct EnvEntry {
     token_sha256: [u8; 32],
@@ -57,7 +57,7 @@ pub struct Vault {
     sessions: Mutex<agent::Sessions>,
 }
 
-/// TLS towards GitHub's API, for minting App tokens.
+/// TLS towards where tokens are minted: GitHub's API and Microsoft Entra ID.
 pub fn client_tls() -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -129,7 +129,8 @@ impl Vault {
                     .get(spec.secret_ref())
                     .ok_or(CredentialError::Locked)?
                     .clone();
-                if let BindingSpec::GithubApp { .. } = spec
+                if let BindingSpec::GithubApp { .. } | BindingSpec::AzureServicePrincipal { .. } =
+                    spec
                     && let Some((tok, exp)) = inner.minted.get(&key)
                     && *exp - Utc::now() > chrono::TimeDelta::minutes(10)
                 {
@@ -140,31 +141,42 @@ impl Vault {
                 }
                 (spec.clone(), secret, entry.generation)
             };
-            let BindingSpec::GithubApp {
-                app_id,
-                installation_id,
-                repos,
-                permissions,
-                api_base,
-                ..
-            } = &spec
-            else {
-                return Ok(CredentialValue {
-                    value: secret,
-                    expires_at: None,
-                });
+            let minted = match &spec {
+                BindingSpec::GithubApp {
+                    app_id,
+                    installation_id,
+                    repos,
+                    permissions,
+                    api_base,
+                    ..
+                } => {
+                    github::installation_token(
+                        &self.tls,
+                        api_base,
+                        app_id,
+                        *installation_id,
+                        &secret,
+                        repos,
+                        permissions,
+                    )
+                    .await
+                }
+                BindingSpec::AzureServicePrincipal {
+                    tenant,
+                    client_id,
+                    audience,
+                    ..
+                } => {
+                    entra::client_credentials(&self.tls, tenant, client_id, &secret, audience).await
+                }
+                BindingSpec::Static { .. } | BindingSpec::SshAgent { .. } => {
+                    return Ok(CredentialValue {
+                        value: secret,
+                        expires_at: None,
+                    });
+                }
             };
-            let (token, exp) = github::installation_token(
-                &self.tls,
-                api_base,
-                app_id,
-                *installation_id,
-                &secret,
-                repos,
-                permissions,
-            )
-            .await
-            .map_err(|e| CredentialError::Failed(format!("{e:#}")))?;
+            let (token, exp) = minted.map_err(|e| CredentialError::Failed(format!("{e:#}")))?;
             let mut inner = self.lock();
             // Bound or wiped again during the mint: this token has the old scope.
             if inner.generation_of(env) != Some(generation) {

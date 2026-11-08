@@ -33,7 +33,7 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   store at unlock and wiped by `luoto vault lock` or a VM restart. `luoto vault reload` reads
   them again; one an upstream refuses (401) is read again on its own, at most every 10
   minutes, when its source needs no one (the keychain, a 1Password service account, `file:`,
-  Vault). Each gate authenticates to the
+  Vault, `az`). Each gate authenticates to the
   vault with its own token and receives only its env's bindings, as short-lived values
   (GitHub installation tokens restricted to the env's repositories and permissions). On a
   credentialed host the gate removes any credential the client sent before injecting its own,
@@ -61,6 +61,16 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   runs the forge's CI as any branch does: keep CI secrets in protected variables. `ca` is
   trusted for that host only. `private = true` lets the gate dial that host's private address,
   never loopback, cloud metadata or luoto's own networks.
+- **Azure** (`[credentials.azure]`). Tokens live in the vault: read from your `az` login on
+  the host (and read again before they expire), or minted there from a service principal's
+  secret, which never leaves it; the vault reaches only `login.microsoftonline.com` for them.
+  The gate answers the instance metadata service itself and never dials it. What it hands the
+  sandbox is a placeholder: the real token's header and claims (object and tenant IDs, expiry,
+  and for your own login your user name) with a signature that can't verify. The real token
+  goes, over TLS, only on Resource Manager paths of the listed subscriptions (plus reading the
+  subscription, tenant and provider lists), the key vaults and storage accounts named exactly,
+  and Graph, read-only; IMDS serves no other audience. Only your own config grants it: a
+  `luoto.toml` can't, and access requests from the sandbox add hosts, never tokens.
 - **Credentials coming back.** On a credentialed host the gate looks for the credential it
   placed in the response's headers and the start of its body (all of a JSON body, from which
   it removes the fields carrying it, as LFS servers echo it); a response that still carries it
@@ -118,6 +128,11 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   spent by anything in the sandbox. Anthropic's, OpenAI's and Gemini's file and batch
   endpoints are denied, and so are requests asking them to fetch a URL or call an MCP server
   (unless `server_tools = true`); the other providers' are not.
+- **Azure write access.** With `access = "write"`, code in the sandbox can do on the listed
+  subscriptions whatever the identity's roles allow: create resources that reach the internet,
+  assign roles, read keys that `listKeys` returns. Azure RBAC is the boundary, and with your
+  own `az` login it is your roles: prefer a service principal with a narrow role for write.
+  Whatever the identity reads reaches the sandbox, Key Vault secret values included.
 - **Exhausting the gate.** Code in the sandbox can hold the gate's 1024 connections and
   so stop the env's own traffic, which it could break anyway; other envs have their own gates.
   The event queue, cached certificates and the gate's log stay bounded.

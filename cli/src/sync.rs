@@ -4,11 +4,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use luoto_shared::ctl::{GateCtl, VaultCtl};
 use luoto_shared::policy::Rule;
 use sha2::{Digest, Sha256};
 
+use crate::azure_identity::AZCLI;
 use crate::compile::Compiled;
 use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx, Plan};
@@ -31,13 +32,14 @@ pub fn bind_vault(ctx: &Ctx, env: &str, state: &EnvState, compiled: &Compiled) -
 }
 
 /// Load those of `refs` the vault is missing, prompting the user's secret store only for
-/// them; `whose` names them for the user. Each loads on its own: one that doesn't resolve
-/// (a typo in its reference) leaves the others working, and the error names it.
-pub fn load_secrets(ctx: &Ctx, refs: &BTreeSet<String>, whose: &str) -> Result<()> {
+/// them, and with `renew` the `azcli:` tokens it holds too (one loaded in an earlier session may
+/// have expired); `whose` names them for the user. Each loads on its own: one that doesn't
+/// resolve (a typo in its reference) leaves the others working, and the error names it.
+pub fn load_secrets(ctx: &Ctx, refs: &BTreeSet<String>, whose: &str, renew: bool) -> Result<()> {
     let status = ctl::vault_status(&ctx.rt)?;
     let missing: BTreeSet<String> = refs
         .iter()
-        .filter(|r| !status.loaded_refs.contains(r))
+        .filter(|r| !status.loaded_refs.contains(r) || (renew && r.starts_with(AZCLI)))
         .cloned()
         .collect();
     if !missing.is_empty() {
@@ -97,7 +99,7 @@ pub fn reapply(ctx: &Ctx, env: &str) -> Result<Option<Plan>> {
     let bound = bind_vault(ctx, env, state, &p.compiled);
     apply_policy(ctx, env, &p.compiled)?;
     bound?;
-    load_secrets(ctx, &p.compiled.vault_refs(), &format!("`{env}`"))?;
+    load_secrets(ctx, &p.compiled.vault_refs(), &format!("`{env}`"), false)?;
     let applied = ctx
         .rt
         .run([
@@ -154,6 +156,8 @@ pub struct Reloaded {
     pub changed: usize,
     /// The references that couldn't be read, and the gates that weren't flushed.
     pub failed: Vec<String>,
+    /// When the values read expire, for those whose source says (`azcli:` tokens).
+    pub expires: BTreeMap<String, DateTime<Utc>>,
 }
 
 /// Read `refs` from the secret store again (a token rotated there) and give the vault those
@@ -162,10 +166,14 @@ pub struct Reloaded {
 pub fn reload(ctx: &Ctx, refs: &BTreeSet<String>) -> Result<Reloaded> {
     let mut values = BTreeMap::new();
     let mut failed = Vec::new();
+    let mut expires = BTreeMap::new();
     for r in refs {
-        match secrets::resolve(&ctx.global, r) {
-            Ok(v) => {
+        match secrets::resolve_expiring(&ctx.global, r) {
+            Ok((v, exp)) => {
                 values.insert(r.clone(), v);
+                if let Some(exp) = exp {
+                    expires.insert(r.clone(), exp);
+                }
             }
             Err(e) => failed.push(format!("{r}: {e:#}")),
         }
@@ -183,6 +191,7 @@ pub fn reload(ctx: &Ctx, refs: &BTreeSet<String>) -> Result<Reloaded> {
         read,
         changed,
         failed,
+        expires,
     })
 }
 
@@ -202,7 +211,7 @@ pub fn unlock_all(ctx: &Ctx) -> Result<usize> {
         refs.extend(p.compiled.vault_refs());
         n += 1;
     }
-    load_secrets(ctx, &refs, "your envs")?;
+    load_secrets(ctx, &refs, "your envs", true)?;
     Ok(n)
 }
 

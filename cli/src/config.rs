@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use luoto_shared::policy::{Deny, Mute, Rule};
+use luoto_shared::policy::{AccessLevel, Deny, Mute, Rule};
 use serde::{Deserialize, Serialize};
 use toml_edit::DocumentMut;
 
@@ -66,8 +66,25 @@ pub struct GlobalConfig {
     /// Mutes for every env, beside each env's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mute: Vec<Mute>,
+    /// Credentials for every env that has none of that kind of its own.
+    #[serde(default, skip_serializing_if = "GlobalCredentials::is_empty")]
+    pub credentials: GlobalCredentials,
     #[serde(default)]
     pub sources: Sources,
+}
+
+/// The credentials `config.toml` can give every env.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalCredentials {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure: Option<AzureCred>,
+}
+
+impl GlobalCredentials {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl GlobalConfig {
@@ -76,8 +93,12 @@ impl GlobalConfig {
         self.mute.iter().chain(&cfg.mute).cloned().collect()
     }
 
-    /// Put these denies and mutes under an env's, each deny noting where it came from.
+    /// Put these denies and mutes under an env's, each deny noting where it came from, and
+    /// these credentials where it has none of their kind.
     pub fn layer_under(&self, cfg: &mut EnvConfig) {
+        if cfg.credentials.azure.is_none() {
+            cfg.credentials.azure = self.credentials.azure.clone();
+        }
         let mut deny: Vec<Deny> = self
             .deny
             .iter()
@@ -257,6 +278,41 @@ pub struct AzureDevopsCred {
     pub allow_tags: bool,
 }
 
+/// Azure Resource Manager and the data planes listed, as a managed identity: the gate answers
+/// IMDS in the env with placeholder tokens and adds the real ones on these hosts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AzureCred {
+    /// Subscription IDs whose Resource Manager paths the env may reach.
+    pub subscriptions: Vec<String>,
+    /// `read` (GET, HEAD) or `write` (every method), on Resource Manager and the data planes.
+    #[serde(default = "read_access")]
+    pub access: AccessLevel,
+    /// Tenant ID or domain: required with a service principal; else `az`'s current tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    /// Key vault names whose data plane (`<name>.vault.azure.net`) the env may reach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_vaults: Vec<String>,
+    /// Storage account names whose blob, queue, table, file and dfs hosts the env may reach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub storage_accounts: Vec<String>,
+    /// Microsoft Graph, read-only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub graph: bool,
+    /// A service principal's application ID, as the token source in place of `az` on this
+    /// machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Ref to its client secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+}
+
+fn read_access() -> AccessLevel {
+    AccessLevel::Read
+}
+
 /// Git over HTTPS on any other host (GitLab, Forgejo, Gitea, Bitbucket, GitHub Enterprise
 /// Server): a token the gate adds to the listed repos' git requests as basic auth, and the
 /// push guard on them.
@@ -388,6 +444,8 @@ pub struct Credentials {
     pub github: GithubCreds,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure_devops: Option<AzureDevopsCred>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure: Option<AzureCred>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<SshCred>,
     /// `[[credentials.git]]`, one per host.
