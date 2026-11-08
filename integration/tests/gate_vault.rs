@@ -188,6 +188,11 @@ impl Env {
         Env::start_with(resolve, &[])
     }
 
+    /// With the gate's limits shrunk by `limits` (`conns=2,idle_ms=300,…`).
+    fn start_limited(resolve: &[(&str, SocketAddr)], limits: &str) -> Env {
+        Env::start_with(resolve, &[("LUOTO_TEST_LIMITS", limits)])
+    }
+
     /// With `gate_env` added to the gate's environment.
     fn start_with(resolve: &[(&str, SocketAddr)], gate_env: &[(&str, &str)]) -> Env {
         build();
@@ -909,6 +914,19 @@ async fn a_tunnel_closes_once_its_rule_is_revoked() {
         ..Default::default()
     });
 
+    let mut s = open_tunnel(&env);
+    env.apply(Policy::default());
+    let revoked = Instant::now();
+    assert!(closed(&mut s), "the tunnel stayed open");
+    assert!(
+        revoked.elapsed() < Duration::from_secs(7),
+        "closed after {:?}",
+        revoked.elapsed()
+    );
+}
+
+/// A tunnel to `tunnel.test:443` through the proxy, checked to echo.
+fn open_tunnel(env: &Env) -> TcpStream {
     let mut s = TcpStream::connect(("127.0.0.1", env.gate_port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     s.write_all(b"CONNECT tunnel.test:443 HTTP/1.1\r\nHost: tunnel.test:443\r\n\r\n")
@@ -919,19 +937,146 @@ async fn a_tunnel_closes_once_its_rule_is_revoked() {
     let mut echo = [0u8; 4];
     s.read_exact(&mut echo).unwrap();
     assert_eq!(&echo, b"ping");
+    s
+}
 
-    env.apply(Policy::default());
-    let revoked = Instant::now();
-    let closed = match s.read(&mut echo) {
+/// Whether the gate closed `s` (within its 10 s read timeout).
+fn closed(s: &mut TcpStream) -> bool {
+    let mut buf = [0u8; 16];
+    match s.read(&mut buf) {
         Ok(n) => n == 0,
         Err(e) => !matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut),
-    };
-    assert!(closed, "the tunnel stayed open");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn a_quiet_tunnel_is_closed() {
+    let env = Env::start_limited(&[("tunnel.test", echo_server())], "tunnel_idle_ms=500");
+    let mut tunnel_rule = read("tunnel", "tunnel.test");
+    tunnel_rule.rule.access = Access::Level(AccessLevel::Write);
+    tunnel_rule.rule.mode = Mode::Tunnel;
+    env.apply(Policy {
+        rules: vec![tunnel_rule],
+        ..Default::default()
+    });
+
+    let mut s = open_tunnel(&env);
+    let quiet = Instant::now();
+    assert!(closed(&mut s), "the tunnel stayed open");
+    let after = quiet.elapsed();
     assert!(
-        revoked.elapsed() < Duration::from_secs(7),
-        "closed after {:?}",
-        revoked.elapsed()
+        after >= Duration::from_millis(400),
+        "closed after {after:?}"
     );
+    assert!(after < Duration::from_secs(5), "closed after {after:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn connections_past_the_cap_are_refused_and_reported() {
+    let env = Env::start_limited(&[], "conns=2");
+    let held: Vec<TcpStream> = (0..2)
+        .map(|_| TcpStream::connect(("127.0.0.1", env.gate_port)).unwrap())
+        .collect();
+    // Accepted in order, so this one finds both places taken. It sends nothing: the gate
+    // answers without reading, and unread bytes would turn its close into a reset.
+    let mut third = TcpStream::connect(("127.0.0.1", env.gate_port)).unwrap();
+    third
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut reply = String::new();
+    third.read_to_string(&mut reply).unwrap();
+    assert!(reply.starts_with("HTTP/1.1 503"), "{reply}");
+    assert!(reply.contains("too many open connections"), "{reply}");
+
+    drop(held);
+    // Time for the gate to see them close, so the next request finds a place.
+    std::thread::sleep(Duration::from_millis(200));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let denial = loop {
+        let r = send(
+            env.gate_port,
+            b"GET /_sandbox/status HTTP/1.1\r\nHost: gate\r\nConnection: close\r\n\r\n",
+        );
+        let found = (r.status == 200)
+            .then(|| r.json()["recent_denials"].as_array().cloned())
+            .flatten()
+            .and_then(|ds| ds.into_iter().find(|d| d["reason"] == "conn_limit"));
+        if let Some(d) = found {
+            break d;
+        }
+        assert!(Instant::now() < deadline, "no refusal reported: {}", r.body);
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(denial["intake"], "proxy");
+    let message = denial["message"].as_str().unwrap();
+    assert!(message.contains("2 connections were open"), "{message}");
+}
+
+/// An HTTP server that answers by path: `/silent` never, `/stall` with a head and part of
+/// the body it announces, anything else ten bytes, one every 100 ms.
+fn timing_server() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 2 {
+                    line.clear();
+                }
+                let mut s = stream;
+                match first.split_whitespace().nth(1).unwrap_or("") {
+                    "/silent" => std::thread::sleep(Duration::from_secs(30)),
+                    "/stall" => {
+                        let _ =
+                            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial");
+                        std::thread::sleep(Duration::from_secs(30));
+                    }
+                    _ => {
+                        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n");
+                        for _ in 0..10 {
+                            std::thread::sleep(Duration::from_millis(100));
+                            let _ = s.write_all(b"x");
+                        }
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn a_stalled_exchange_is_cut_but_a_slow_one_is_not() {
+    let env = Env::start_limited(
+        &[("timing.test", timing_server())],
+        "response_head_ms=500,idle_ms=500",
+    );
+    env.apply(Policy {
+        rules: vec![read("timing", "timing.test")],
+        ..Default::default()
+    });
+
+    let started = Instant::now();
+    let r = env.get("http://timing.test/silent");
+    assert_eq!(r.status, 504, "{}", r.head);
+    assert!(r.body.contains("no response within 500 ms"), "{}", r.body);
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    let started = Instant::now();
+    let r = env.get("http://timing.test/stall");
+    assert_eq!((r.status, r.body.as_str()), (200, "partial"));
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    // Twice the idle limit in all, but never idle for it.
+    let r = env.get("http://timing.test/slow");
+    assert_eq!((r.status, r.body.as_str()), (200, "xxxxxxxxxx"));
 }
 
 fn provider() -> Arc<CryptoProvider> {

@@ -14,6 +14,7 @@ mod dns;
 mod events;
 mod guards;
 mod handler;
+mod limits;
 mod mitm;
 mod proxy;
 mod relay;
@@ -83,7 +84,8 @@ fn run() -> ExitCode {
 
 async fn serve() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let cfg = Config::from_env()?;
+    let mut cfg = Config::from_env()?;
+    cfg.limits = cfg.limits.fit(limits::raise_nofile());
     std::fs::create_dir_all(&cfg.state_dir)
         .with_context(|| format!("create {}", cfg.state_dir.display()))?;
 
@@ -166,7 +168,7 @@ async fn serve() -> Result<()> {
     state.events.emit(Event {
         kind: Some(EventKind::Lifecycle),
         message: Some(format!(
-            "gate {} started ({} rules, CA {}, vault {})",
+            "gate {} started ({} rules, CA {}, vault {}, {} connections at most)",
             luoto_shared::VERSION,
             state.policy().rules.len(),
             if state.ca().is_some() {
@@ -179,6 +181,7 @@ async fn serve() -> Result<()> {
             } else {
                 "not configured"
             },
+            state.conns.max(),
         )),
         ..Default::default()
     });

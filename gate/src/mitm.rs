@@ -3,16 +3,17 @@
 //! allowed, so a denied host sees no TCP, DNS or SNI from us.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use luoto_shared::events::{EventKind, Intake};
 use luoto_shared::host::normalize_host;
 use luoto_shared::policy::DenyReason;
 use rustls::AlertDescription;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::time::timeout;
 use tokio_rustls::LazyConfigAcceptor;
 
 use crate::handler::{ConnCtx, Target, handle, serve_http1};
+use crate::limits::{HANDSHAKE, Slot};
 use crate::state::State;
 
 /// Who decides the hostname for this TLS connection.
@@ -24,15 +25,21 @@ pub enum Expect {
     FromSni { fallback: String },
 }
 
-pub async fn serve<IO>(state: Arc<State>, io: IO, expect: Expect, port: u16, intake: Intake)
-where
+pub async fn serve<IO>(
+    state: Arc<State>,
+    io: IO,
+    expect: Expect,
+    port: u16,
+    intake: Intake,
+    slot: Slot,
+) where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let Some(ca) = state.ca() else {
         return;
     };
     let acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), io);
-    let start = match tokio::time::timeout(Duration::from_secs(15), acceptor).await {
+    let start = match timeout(HANDSHAKE, acceptor).await {
         Ok(Ok(s)) => s,
         _ => return,
     };
@@ -63,9 +70,10 @@ where
             return;
         }
     };
-    let tls = match start.into_stream(cfg).await {
-        Ok(t) => t,
-        Err(e) => {
+    let tls = match timeout(HANDSHAKE, start.into_stream(cfg)).await {
+        Ok(Ok(t)) => t,
+        Err(_) => return,
+        Ok(Err(e)) => {
             if is_certificate_rejection(&e) {
                 state.events.deny_conn(
                     EventKind::TlsReject,
@@ -84,13 +92,14 @@ where
             return;
         }
     };
-    let ctx = Arc::new(ConnCtx::new(intake));
+    let ctx = Arc::new(ConnCtx::new(intake, slot));
     let target = Target {
         host,
         port,
         tls: true,
     };
-    serve_http1(tls, move |req| {
+    let (activity, lim) = (ctx.activity.clone(), state.cfg.limits);
+    serve_http1(tls, activity, lim, move |req| {
         handle(state.clone(), ctx.clone(), req, target.clone())
     })
     .await;

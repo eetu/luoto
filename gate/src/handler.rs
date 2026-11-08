@@ -22,9 +22,10 @@ use luoto_shared::host::{canonical_path, split_authority};
 use luoto_shared::policy::{Decision, DenyReason, RequestInfo};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::body::{Body, Capped, Metered, boxed, is_too_large};
+use crate::body::{Body, Capped, Metered, boxed, is_too_large, watched};
 use crate::creds::apply;
 use crate::guards;
+use crate::limits::{self, Activity, HEAD_GRACE, Limits, Slot, Watched};
 use crate::respond;
 use crate::state::State;
 use crate::upstream::{DialError, dial, http1_sender, test_server};
@@ -63,18 +64,28 @@ impl Target {
 /// A kept-alive upstream connection and the destination it is for.
 type Upstream = (String, u16, bool, SendRequest<Body>);
 
-/// Per client connection: how it arrived and a reusable upstream connection.
+/// Per client connection: how it arrived, its place under the connection cap, its progress
+/// and a reusable upstream connection.
 pub struct ConnCtx {
     pub intake: Intake,
+    slot: Slot,
+    pub activity: Arc<Activity>,
     upstream: tokio::sync::Mutex<Option<Upstream>>,
 }
 
 impl ConnCtx {
-    pub fn new(intake: Intake) -> Self {
+    pub fn new(intake: Intake, slot: Slot) -> Self {
         ConnCtx {
             intake,
+            slot,
+            activity: Activity::new(),
             upstream: tokio::sync::Mutex::new(None),
         }
+    }
+
+    /// For a task that carries the connection on after an upgrade.
+    pub fn slot(&self) -> Slot {
+        self.slot.clone()
     }
 
     async fn sender(
@@ -102,20 +113,36 @@ impl ConnCtx {
 }
 
 /// Serve HTTP/1.1 from the sandbox on `io`: header names keep the case the client wrote them
-/// in, the head must arrive within a minute, and upgrades pass through.
-pub async fn serve_http1<IO, F, Fut>(io: IO, handle: F)
+/// in, the head must arrive within a minute, and upgrades pass through. The connection closes
+/// once no byte has moved for `limits.idle`; while a request is handled the handler's own
+/// limits apply first, with the response-head limit as the backstop.
+pub async fn serve_http1<IO, F, Fut>(io: IO, activity: Arc<Activity>, limits: Limits, handle: F)
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     F: Fn(Request<Incoming>) -> Fut,
     Fut: Future<Output = Result<Response<Body>, Infallible>>,
 {
-    let _ = http1::Builder::new()
+    let watched = Watched::new(io, activity.clone());
+    let handling = activity.clone();
+    let service = service_fn(move |req| {
+        let busy = handling.busy();
+        let resp = handle(req);
+        async move {
+            let resp = resp.await;
+            drop(busy);
+            resp
+        }
+    });
+    let conn = http1::Builder::new()
         .preserve_header_case(true)
         .timer(TokioTimer::new())
         .header_read_timeout(Duration::from_secs(60))
-        .serve_connection(TokioIo::new(io), service_fn(handle))
-        .with_upgrades()
-        .await;
+        .serve_connection(TokioIo::new(watched), service)
+        .with_upgrades();
+    tokio::select! {
+        _ = conn => {}
+        () = activity.stalled(limits.idle, limits.response_head + HEAD_GRACE) => {}
+    }
 }
 
 const HOP_BY_HOP: &[&str] = &[
@@ -401,13 +428,25 @@ async fn handle_inner(
     let up_bytes = Arc::new(AtomicU64::new(0));
     let counter = up_bytes.clone();
     body = Metered::new(body, move |n| counter.store(n, Ordering::Relaxed)).boxed();
+    // A long upload is progress, so the response-head limit counts from its last byte.
+    body = watched(body, ctx.activity.clone());
 
     let mut sender = match ctx.sender(&state, &target, allow_private).await {
         Ok(s) => s,
         Err(DialError::Denied(reason)) => return deny(ev, reason),
         Err(DialError::Failed(msg)) => return failed(&state, ev, StatusCode::BAD_GATEWAY, msg),
     };
-    let mut resp = match sender.send_request(Request::from_parts(parts, body)).await {
+    let lim = state.cfg.limits;
+    let head = lim.response_head;
+    let sent = tokio::select! {
+        r = sender.send_request(Request::from_parts(parts, body)) => r,
+        () = ctx.activity.stalled(head, head) => {
+            let msg = format!("{} sent no response within {}", target.host, limits::spell(head));
+            return failed(&state, ev, StatusCode::GATEWAY_TIMEOUT, msg);
+        }
+    };
+    ctx.activity.touch();
+    let mut resp = match sent {
         Ok(r) => r,
         Err(e) => {
             let msg = if is_too_large(&e) {
@@ -422,11 +461,13 @@ async fn handle_inner(
     if status == StatusCode::SWITCHING_PROTOCOLS {
         if let Some(client_upgrade) = client_upgrade {
             let server_upgrade = hyper::upgrade::on(&mut resp);
+            let slot = ctx.slot();
             tokio::spawn(async move {
+                let _slot = slot;
                 if let (Ok(c), Ok(s)) = (client_upgrade.await, server_upgrade.await) {
-                    let mut c = TokioIo::new(c);
                     let mut s = TokioIo::new(s);
-                    let _ = tokio::io::copy_bidirectional(&mut c, &mut s).await;
+                    let idle = lim.tunnel_idle;
+                    limits::pipe(TokioIo::new(c), &mut s, idle, std::future::pending()).await;
                 }
             });
         }
@@ -434,11 +475,21 @@ async fn handle_inner(
         ctx.put_back(&target, sender).await;
     }
 
-    let (mut rparts, mut rbody) = boxed_parts(resp);
+    let (mut rparts, rbody) = boxed_parts(resp);
+    // A response that streams on is progress for the connection's idle limit.
+    let mut rbody = watched(rbody, ctx.activity.clone());
     if status != StatusCode::SWITCHING_PROTOCOLS {
         strip_hop_by_hop(&mut rparts.headers, false);
         if !placed.is_empty() {
-            rbody = match screen(&mut rparts.headers, rbody, &placed).await {
+            let idle = lim.idle;
+            let screened = tokio::select! {
+                r = screen(&mut rparts.headers, rbody, &placed) => r,
+                () = ctx.activity.stalled(idle, idle) => {
+                    let msg = format!("{} stopped sending for {}", target.host, limits::spell(idle));
+                    return failed(&state, ev, StatusCode::GATEWAY_TIMEOUT, msg);
+                }
+            };
+            rbody = match screened {
                 Ok(b) => b,
                 Err(reason) => return failed(&state, ev, StatusCode::BAD_GATEWAY, reason),
             };

@@ -15,8 +15,13 @@ const MAX_REQUEST: u64 = 16 << 20;
 
 pub async fn serve(state: Arc<State>, listener: UnixListener) {
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            continue;
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            // Out of descriptors: wait for some to close rather than spin.
+            Err(_) => {
+                tokio::time::sleep(crate::limits::ACCEPT_BACKOFF).await;
+                continue;
+            }
         };
         let state = state.clone();
         tokio::spawn(async move {

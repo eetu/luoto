@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::creds::VaultClient;
 use crate::dns::FakeIps;
 use crate::events::Emitter;
+use crate::limits::Conns;
 use crate::requests::Requests;
 
 /// The gate's locks ignore poisoning: a panic in one connection's task must not stop the gate
@@ -39,6 +40,7 @@ pub struct VaultSettings {
 pub struct State {
     pub cfg: Config,
     pub events: Emitter,
+    pub conns: Conns,
     policy: RwLock<Arc<Policy>>,
     ca: RwLock<Option<Arc<Ca>>>,
     vault: RwLock<Option<Arc<VaultClient>>>,
@@ -79,6 +81,7 @@ impl State {
             .collect::<Result<_>>()?;
         Ok(Arc::new(State {
             events: Emitter::new(cfg.env.clone()),
+            conns: Conns::new(cfg.limits.conns),
             policy: RwLock::new(Arc::new(policy)),
             ca: RwLock::new(ca),
             vault: RwLock::new(vault),

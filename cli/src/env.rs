@@ -546,6 +546,10 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     Ok(())
 }
 
+/// The gate's log is the env's event history: over 100 000 events, and a flood of them can't
+/// fill the disk.
+const GATE_LOG_MB: u32 = 50;
+
 fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
     let cfg = &p.cfg;
     let mut spec = RunSpec {
@@ -596,6 +600,7 @@ fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
         sysctls: vec!["net.ipv4.ip_forward=0".into()],
         restart: Some("on-failure".into()),
         labels: labels(env, "gate"),
+        log_mb: Some(GATE_LOG_MB),
         ..Default::default()
     };
     // Read at start: a changed CA changes the spec, which recreates the gate.

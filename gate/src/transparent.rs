@@ -16,6 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::dns::FakeIps;
 use crate::handler::{ConnCtx, Target, handle, serve_http1};
+use crate::limits::{self, Slot};
 use crate::mitm::{self, Expect};
 use crate::respond;
 use crate::state::{State, lock};
@@ -53,11 +54,12 @@ fn looks_like_http(b: &[u8]) -> bool {
 
 pub async fn serve(state: Arc<State>, listener: TcpListener) {
     loop {
-        let Ok((stream, _peer)) = listener.accept().await else {
+        let (stream, _peer) = limits::accept(&listener).await;
+        let Some(slot) = limits::admit(&state, Intake::Transparent) else {
             continue;
         };
         let state = state.clone();
-        tokio::spawn(async move { conn(state, stream).await });
+        tokio::spawn(async move { conn(state, stream, slot).await });
     }
 }
 
@@ -72,7 +74,7 @@ fn direct(state: &State, host: &str, port: u16, message: String) {
     );
 }
 
-async fn conn(state: Arc<State>, stream: TcpStream) {
+async fn conn(state: Arc<State>, stream: TcpStream, slot: Slot) {
     let Ok(dst) = original_dst(&stream) else {
         return;
     };
@@ -116,7 +118,7 @@ async fn conn(state: Arc<State>, stream: TcpStream) {
                 fallback: ip.to_string(),
             },
         };
-        mitm::serve(state, stream, expect, dst.port(), Intake::Transparent).await;
+        mitm::serve(state, stream, expect, dst.port(), Intake::Transparent, slot).await;
         return;
     }
     // Git over SSH, to hosts `[credentials.ssh]` names (as tunnel rules on their port),
@@ -173,40 +175,46 @@ async fn conn(state: Arc<State>, stream: TcpStream) {
         return;
     }
 
-    let ctx = Arc::new(ConnCtx::new(Intake::Transparent));
+    let ctx = Arc::new(ConnCtx::new(Intake::Transparent, slot));
     let port = dst.port();
-    serve_http1(stream, move |req: http::Request<hyper::body::Incoming>| {
-        let state = state.clone();
-        let ctx = ctx.clone();
-        let name = name.clone();
-        async move {
-            let host = match name {
-                Some(n) => Some(n),
-                None => req
-                    .headers()
-                    .get(http::header::HOST)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| split_authority(v).ok())
-                    .map(|(h, _)| h),
-            };
-            let Some(host) = host else {
-                return Ok(respond::plain(
-                    http::StatusCode::BAD_REQUEST,
-                    "luoto gate: request without a Host header\n",
-                ));
-            };
-            handle(
-                state,
-                ctx,
-                req,
-                Target {
-                    host,
-                    port,
-                    tls: false,
-                },
-            )
-            .await
-        }
-    })
+    let (activity, lim) = (ctx.activity.clone(), state.cfg.limits);
+    serve_http1(
+        stream,
+        activity,
+        lim,
+        move |req: http::Request<hyper::body::Incoming>| {
+            let state = state.clone();
+            let ctx = ctx.clone();
+            let name = name.clone();
+            async move {
+                let host = match name {
+                    Some(n) => Some(n),
+                    None => req
+                        .headers()
+                        .get(http::header::HOST)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| split_authority(v).ok())
+                        .map(|(h, _)| h),
+                };
+                let Some(host) = host else {
+                    return Ok(respond::plain(
+                        http::StatusCode::BAD_REQUEST,
+                        "luoto gate: request without a Host header\n",
+                    ));
+                };
+                handle(
+                    state,
+                    ctx,
+                    req,
+                    Target {
+                        host,
+                        port,
+                        tls: false,
+                    },
+                )
+                .await
+            }
+        },
+    )
     .await;
 }

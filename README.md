@@ -612,6 +612,9 @@ you use luoto: `luoto up` asks before switching.
   `[credentials.ssh]` hosts leave an env. Run databases inside the dev container.
 - No Docker-in-docker inside envs.
 - The gate speaks HTTP/1.1 to the sandbox, so gRPC needs a tunnel rule.
+- The gate holds up to 1024 connections per env. It closes a request whose response hasn't
+  started 10 minutes after it was sent, a response that sends nothing for 5 minutes, and a
+  tunnel or websocket after an hour without traffic.
 
 ## Install details
 

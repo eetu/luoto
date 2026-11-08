@@ -20,9 +20,7 @@ pub async fn serve(state: Arc<State>, listener: TcpListener, port: u16) {
         .as_deref()
         .and_then(|s| s.parse().ok());
     loop {
-        let Ok((mut inbound, peer)) = listener.accept().await else {
-            continue;
-        };
+        let (mut inbound, peer) = crate::limits::accept(&listener).await;
         // Only podman's forwarder: not the env's own network, nor the vault network that
         // the vault and other envs' gates share (10.212.0.0/16).
         let vault_net = match peer.ip() {

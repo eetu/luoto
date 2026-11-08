@@ -1,13 +1,16 @@
-//! Body plumbing: one boxed body type, size limits, and a metered body that reports bytes
-//! and duration when the response finishes.
+//! Body plumbing: one boxed body type, size limits, a metered body that reports bytes and
+//! duration when the response finishes, and a watched one that records progress.
 
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::{Body as HttpBody, Frame, SizeHint};
+
+use crate::limits::Activity;
 
 /// Concrete body error. (A bare `Box<dyn Error>` as the body error trips a higher-ranked
 /// lifetime inference bug in hyper's server bounds inside spawned tasks.)
@@ -229,5 +232,39 @@ impl HttpBody for Metered {
 impl Drop for Metered {
     fn drop(&mut self) {
         self.finish();
+    }
+}
+
+/// `inner`, recording each frame's arrival in `activity`.
+pub fn watched(inner: Body, activity: Arc<Activity>) -> Body {
+    Watched { inner, activity }.boxed()
+}
+
+struct Watched {
+    inner: Body,
+    activity: Arc<Activity>,
+}
+
+impl HttpBody for Watched {
+    type Data = Bytes;
+    type Error = BodyError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BodyError>>> {
+        let polled = Pin::new(&mut self.inner).poll_frame(cx);
+        if let Poll::Ready(Some(Ok(_))) = &polled {
+            self.activity.touch();
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
     }
 }
