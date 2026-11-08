@@ -44,7 +44,8 @@ pub struct AllowOpts {
     /// Expire after a duration: 30m, 1h, 2d.
     #[arg(long)]
     pub ttl: Option<String>,
-    /// Opaque tunnel (no inspection) for certificate-pinning clients.
+    /// Opaque tunnel (no inspection) for any client and protocol: certificate-pinning
+    /// clients, gRPC, a database with --port.
     #[arg(long)]
     pub tunnel: bool,
     /// Allow websocket upgrades.
@@ -57,6 +58,7 @@ pub struct AllowOpts {
     /// Allow private/host addresses (e.g. a service on your machine).
     #[arg(long)]
     pub private: bool,
+    /// The one port it covers (default: 80 and 443).
     #[arg(long)]
     pub port: Option<u16>,
     #[arg(long)]

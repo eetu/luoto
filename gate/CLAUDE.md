@@ -19,12 +19,14 @@ sockets, then drops to uid 65534 (`system.rs`).
   deletes), GitHub GraphQL mutations, matched without case like the rules, and model API
   bodies asking for server tools (`body_denies`, read whole up to 32 MiB) → credential
   strip/inject over TLS only (`creds.rs`, vault client) → `upstream.rs` (resolve, vet every
-  address, dial) → metered response + event. `body.rs` holds the body types (capped, metered, replayed prefix).
+  address, dial) → metered response + event. `body.rs` holds the body types (capped,
+  metered, replayed prefix).
 - `limits.rs` what the sandbox can't exhaust: one cap on open client connections over every
   intake (beyond it refused, reported as `conn_limit` events), sized to the open-file limit it
   raises at start, and idle-based timeouts carried by each connection's `Activity` (response
-  head, idle response, tunnel and websocket idle), which the allowing rule's `idle` replaces. `events.rs` queues at most 4096 lines for
-  stdout and reports what it drops; `ca.rs` mints a cached leaf again after a day.
+  head, idle response, tunnel and websocket idle), which the allowing rule's `idle` replaces.
+  `events.rs` queues at most 4096 lines for stdout and reports what it drops; `ca.rs` mints a
+  cached leaf again after a day.
 - `ctl.rs` unix socket; `state.rs` persists policy/CA/vault settings in the state volume so a
   restarted gate serves at once; secrets are never persisted.
 - `test-hooks` feature (integration tests only): `LUOTO_TEST_RESOLVE` maps names to local

@@ -244,6 +244,7 @@ dir = "/Users/me/dev/web"     # the project folder, copied in on the first `up`
 host = "docs.rs"
 paths = ["/serde/**"]         # /serde and below; `*` stays within one path segment
 expires = "2026-12-01T00:00:00Z"
+# idle = "2h"                 # how long it may sit silent before the gate closes it (see Limits)
 
 [[deny]]                      # refused whatever allows it, a preset included
 host = "registry.npmjs.org"
@@ -442,8 +443,8 @@ only proposes:
 - `luoto init` shows its settings and asks about them separately (default: no); accepting
   records that exact text. `--yes` accepts it, `--no-project` leaves it out.
 - A changed file (from a `git pull` in the env, or the sandbox itself) applies only after you
-  accept the difference: `up` lists it and asks; without a terminal it waits for
-  `luoto project apply`. `luoto project ignore` stops applying it.
+  accept the difference: `up` lists it and asks; where it can't ask (no terminal, the UI,
+  `up --all`) it waits for `luoto project apply`. `luoto project ignore` stops applying it.
 - It can't hold credentials, secret refs or `[[mute]]` (which would hide denials from you),
   and its rules pass the checks the sandbox's own access requests get (no `*`, no multi-tenant
   wildcards, no private addresses). Write access and uninspected tunnels are spelled out in
@@ -649,10 +650,11 @@ the vault, luoto's images and keychain entries, its config and data folders, and
 unless a source build uses it or anything else is in it. The binary stays:
 `brew uninstall luoto`, `scoop uninstall luoto`, or delete `~/.local/bin/luoto`.
 
-`luoto doctor --report` writes a file for a bug report: versions, doctor's checks, each env's
-config and state, the watcher's log and the gates' recent lifecycle and error events, with
-secret references, tokens, your home folder, user names and email addresses taken out. Host
-and repository names stay, so read it before you share it.
+`luoto doctor --report` writes a file only you can read, for a bug report: versions, the
+runtime and VM, doctor's checks, `config.toml`, each env's config and state, the watcher's
+log and the gates' and vault's recent lifecycle and error events, with secret references,
+tokens, your home folder, user names and email addresses taken out. Host and repository names
+stay, so read it before you share it.
 
 A source build runs as `luoto-dev`, beside a release in the same VM: its config is in
 `~/.config/luoto-dev`, its envs' containers are `luoto-dev-<env>`, it has a vault of its own,

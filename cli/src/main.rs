@@ -137,7 +137,7 @@ enum Cmd {
     /// List envs.
     #[command(visible_alias = "list")]
     Ls,
-    /// Show the env's state, workspace, credentials and rules.
+    /// Show the env's state, workspace, forwarded ports, credentials, rules, denies and mutes.
     Status {
         /// The compiled policy as JSON.
         #[arg(long)]
@@ -145,7 +145,8 @@ enum Cmd {
     },
     /// Open the env's config in $EDITOR, validate and apply it.
     Edit,
-    /// Show the project's luoto.toml (team settings in the repository), or apply or ignore it.
+    /// Show the project's luoto.toml (team settings in the repository), apply or ignore it, or
+    /// draft one from the env (`suggest`).
     Project {
         #[command(subcommand)]
         action: Option<ProjectCmd>,

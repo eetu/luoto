@@ -39,6 +39,8 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
 - Policy order in the gate: parse destination once → policy → (only if allowed) resolve, vet
   every address, dial that address. Denied requests cause no upstream DNS/TCP/SNI.
 - Events are serde-serialized JSON lines with `seq` + `run`; never hand-format event output.
+  A `[[mute]]` only hides: every view of denials (egress, UI, notifications, run summary)
+  filters through `events::Mutes`.
 - Every env has a folder (`[workspace] dir`), copied into its workspace volume on the first
   `up`; `luoto init` creates a missing one. `workspace.rs` owns env-from-cwd resolution and
   push/pull (tar over exec, so no VM file sharing needed). Anything that brings
@@ -62,8 +64,8 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   (`shared/src/forges.rs`, plus `host_keys`; `vault/src/agent.rs`).
 - `project.rs`: a repo's `luoto.toml` is untrusted. It layers in (`env::plan`) only as the
   exact text the user accepted (kept in the env's state); changes need a fresh accept. Never
-  let it carry secret refs or skip `RuleOrigin::Sandbox` validation, and print its strings
-  through `text::display`.
+  let it carry secret refs or mutes or skip `RuleOrigin::Sandbox` validation, and print its
+  strings through `text::display`.
 - Config files carry their format (`version`, 1 when missing); `format.rs` upgrades every
   file in memory before it is parsed, and saving an env file writes the current format,
   keeping the old file beside it. A config change that would break an existing file is a
@@ -80,7 +82,11 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   not its flags). The remote podman client can't choose a runtime, so gVisor containers are
   created by podman inside the VM (`podman machine ssh`); every later call uses the connection.
 - `watch.rs` is the one background process per config dir; port forwarding (`ports.rs`) goes
-  through `exec … sandbox relay`, never a network path.
+  through `exec … sandbox relay`, never a network path. Its desktop notifications
+  (`notify.rs`) pass sandbox text to the OS notifier cleaned, capped and as arguments, never
+  inside a script.
+- `report.rs` (`doctor --report`) writes nothing that hasn't passed its `Redactor`;
+  `uninstall.rs` removes only what this instance (`names::instance`) made.
 - Control of gate/vault is only via the ctl unix socket reached through the runtime's exec.
 - The UI API requires the per-run token; keep Host/Origin checks on any new route.
 - `ui/api.rs` holds no policy logic: its routes call the core the CLI uses (`rules.rs`,

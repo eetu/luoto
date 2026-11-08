@@ -140,7 +140,8 @@ use prompts to improve its products, until its Google Cloud project has billing.
   configuration (`aicode.googleapis.com` `/v1alpha:fetchConfig`).
 - Runs with `AGY_CLI_DISABLE_AUTO_UPDATE=1`. MCP servers live in
   `~/.gemini/config/mcp_config.json`, the briefing in `~/.gemini/GEMINI.md`.
-- Denied on purpose, and it works without them:
+- Denied on purpose, and it works without them (a `[[mute]]` keeps their denials out of
+  `luoto egress`, the UI and notifications):
 
   | host | what it is | why it stays closed |
   | --- | --- | --- |

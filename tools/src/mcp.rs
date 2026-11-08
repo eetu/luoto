@@ -48,7 +48,7 @@ fn tools() -> Value {
         },
         {
             "name": "sandbox_request_access",
-            "description": "Ask the user to allow egress to a host, or to add one of luoto's presets (a registry's hosts, e.g. npm). Only the user can approve, on the host. Use the narrowest access: read unless writes are required; one exact host. For a protocol other than HTTP(S), such as a database, give its port: approved, that host and port get an uninspected tunnel through the gate's proxy (CONNECT to gate:3128).",
+            "description": "Ask the user to allow egress to a host, or to add one of luoto's presets (a registry's hosts, e.g. npm). Only the user can approve, on the host. Use the narrowest access: read unless writes are required; one exact host. For a protocol other than HTTP(S), such as a database, give its port: approved, that host and port get an uninspected tunnel, and clients connect to them as they are.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

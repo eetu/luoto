@@ -31,8 +31,9 @@ can't be written. The env keeps running unless `--down` is given.
 | 130         | Ctrl-C stopped it                                                                |
 | 1           | luoto itself failed, the reason on stderr: the env didn't come up, no credential |
 
-After the run, stderr lists what the gate denied while the agent ran: each host, how often,
-the requests (or ports) it refused and why. stdout and `--output` keep only the answer.
+After the run, stderr lists what the gate denied while the agent ran, without what a
+`[[mute]]` hides: each host, how often, the requests (or ports) it refused and why. stdout and
+`--output` keep only the answer.
 
 ```text
 the gate denied 4 attempts to reach 2 hosts during the run:

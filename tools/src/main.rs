@@ -47,7 +47,8 @@ enum Cmd {
     /// toolchain in the env for good. Only the user can approve.
     Request {
         /// Host (`docs.rs`) or URL (`https://docs.rs/serde`); `host:port` for a protocol other
-        /// than HTTP(S) (`db.example.com:5432`), which the gate can only tunnel uninspected.
+        /// than HTTP(S) (`db.example.com:5432`, not 80 or 443), which the gate can only tunnel
+        /// uninspected.
         #[arg(required_unless_present_any = ["package", "tool", "preset"])]
         target: Option<String>,
         /// A system package (apt, apk or dnf) the env should have; approved, it is installed
