@@ -137,7 +137,10 @@ hour if you like:
 
 An agent that needs a host asks with `sandbox request`; only you can approve it, on your
 machine (`luoto approve`, which asks you to accept the rule's risks like `luoto allow` does;
-`--force` accepts them without asking). It asks the same way for a system package or a
+`--force` accepts them without asking). You can grant less than it asked, never more:
+`--read` for a write request, `--method`, `--path` within its paths. A protocol other than
+HTTP(S) is a host and port (`sandbox request db.example.com:5432`), which approved becomes an
+uninspected tunnel, a risk you confirm. It asks the same way for a system package or a
 toolchain the env should keep (`sandbox request --package postgresql-client`,
 `--tool node@24`): approving installs it and writes it into the env's `[deps] system` or
 `[tools]`, so a recreated container has it too.
@@ -163,7 +166,7 @@ Commands act on the env of the current folder; `-e NAME` picks another (`luoto s
 | to see what the sandbox tried to reach                                                               | `luoto egress --since 10m`<br>`luoto egress --denied`<br>`luoto egress --follow`                                                   |
 | to allow a host (read-only unless `--write`)                                                         | `luoto allow docs.rs --ttl 1h`<br>`luoto allow api.example.com --write --path '/v1/**'`<br>`luoto allow grpc.example.com --tunnel` |
 | to see or remove rules                                                                               | `luoto status`<br>`luoto revoke <id-or-host>`                                                                                      |
-| to answer access requests from inside                                                                | `luoto requests` (`--watch` waits)<br>`luoto approve 3 --ttl 1h`<br>`luoto reject 3`                                               |
+| to answer access requests from inside                                                                | `luoto requests` (`--watch` waits)<br>`luoto approve 3 --ttl 1h`<br>`luoto approve 3 --read --path '/v1/**'`<br>`luoto reject 3`   |
 | an agent (installed on first run)                                                                    | `luoto agent run claude --yolo`<br>`luoto agent list`                                                                              |
 | a dev server in your browser                                                                         | run it: its port is forwarded to localhost here (`luoto status` lists it)<br>`luoto forward 8080:5173` (to another local port)     |
 | your work out: push from the env (with a GitHub, Azure DevOps or SSH credential), or copy files back | `git push`<br>`luoto pull`                                                                                                         |
@@ -173,14 +176,16 @@ Commands act on the env of the current folder; `-e NAME` picks another (`luoto s
 | the env back after a reboot or an idle stop (unlocks the vault if needed)                            | `luoto up` (`--all`: every env)<br>`luoto vault unlock`                                                                            |
 | a secret you rotated in your secret store, in use                                                    | `luoto vault reload` (`-e <env>` for one env's)                                                                                    |
 | the gate's log, the background watcher's, or what the env's installs printed                         | `luoto logs`<br>`luoto logs watcher`<br>`luoto logs installs -f`                                                                   |
-| to check isolation                                                                                   | `luoto doctor`                                                                                                                     |
+| to check isolation, or a bug report with secrets and what identifies you taken out                   | `luoto doctor`<br>`luoto doctor --report`                                                                                          |
+| to remove luoto: envs, vault, images, keychain entries, config and data (the binary stays)           | `luoto uninstall`                                                                                                                  |
 
 Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host> --reason …`
-asks you for access (`--preset npm` for a registry's hosts at once; `--package <name>` or
-`--tool <tool>@<version>` for software to keep); only you can approve, on the host. A new
-request gets a desktop notification, as does the first denial at each host (macOS, where
-they come from Script Editor, and Linux with `notify-send`). Without them (turned off, or on
-Windows), the bell in `luoto ui` gives browser notifications for requests.
+asks you for access (`<host>:<port>` for a tunnel; `--preset npm` for a registry's hosts at
+once; `--package <name>` or `--tool <tool>@<version>` for software to keep); only you can
+approve, on the host. A new request gets a desktop notification, as does the first denial at
+each host (macOS, where they come from Script Editor, and Linux with `notify-send`). Without
+them (turned off, or on Windows), the bell in `luoto ui` gives browser notifications for
+requests.
 
 ## Agents
 
@@ -239,6 +244,7 @@ dir = "/Users/me/dev/web"     # the project folder, copied in on the first `up`
 host = "docs.rs"
 paths = ["/serde/**"]         # /serde and below; `*` stays within one path segment
 expires = "2026-12-01T00:00:00Z"
+# idle = "2h"                 # how long it may sit silent before the gate closes it (see Limits)
 
 [[deny]]                      # refused whatever allows it, a preset included
 host = "registry.npmjs.org"
@@ -460,8 +466,8 @@ only proposes:
 - `luoto init` shows its settings and asks about them separately (default: no); accepting
   records that exact text. `--yes` accepts it, `--no-project` leaves it out.
 - A changed file (from a `git pull` in the env, or the sandbox itself) applies only after you
-  accept the difference: `up` lists it and asks; without a terminal it waits for
-  `luoto project apply`. `luoto project ignore` stops applying it.
+  accept the difference: `up` lists it and asks; where it can't ask (no terminal, the UI,
+  `up --all`) it waits for `luoto project apply`. `luoto project ignore` stops applying it.
 - It can't hold credentials, secret refs or `[[mute]]` (which would hide denials from you),
   and its rules pass the checks the sandbox's own access requests get (no `*`, no multi-tenant
   wildcards, no private addresses). Write access and uninspected tunnels are spelled out in
@@ -662,10 +668,22 @@ next `luoto up` pulls the release's images, showing progress, and moves the env'
 the vault onto them; `luoto up --recreate` moves its dev container too, keeping its volumes.
 What each release changed is in [CHANGELOG.md](CHANGELOG.md).
 
+`luoto uninstall` lists what it removes and asks once: every env's containers and volumes,
+the vault, luoto's images and keychain entries, its config and data folders, and luoto's VM
+unless a source build uses it or anything else is in it. The binary stays:
+`brew uninstall luoto`, `scoop uninstall luoto`, or delete `~/.local/bin/luoto`.
+
+`luoto doctor --report` writes a file only you can read, for a bug report: versions, the
+runtime and VM, doctor's checks, `config.toml`, each env's config and state, the watcher's
+log and the gates' and vault's recent lifecycle and error events, with secret references,
+tokens, your home folder, user names and email addresses taken out. Host and repository names
+stay, so read it before you share it.
+
 A source build runs as `luoto-dev`, beside a release in the same VM: its config is in
 `~/.config/luoto-dev`, its envs' containers are `luoto-dev-<env>`, it has a vault of its own,
-keeps new keychain entries under `luoto-dev`, and serves `luoto ui` on port 47879. Its tab
-completion calls `luoto-dev`; `just link-dev` links that name to the checkout's debug build.
+keeps new keychain entries under `luoto-dev`, and serves `luoto ui` on port 47879;
+`luoto-dev uninstall` removes only what it made. Its tab completion calls `luoto-dev`;
+`just link-dev` links that name to the checkout's debug build.
 
 Tab completion covers commands, flags, env names, agents, editors and presets. Homebrew
 installs it; otherwise add one line to your shell's startup file:

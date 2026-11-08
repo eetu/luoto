@@ -55,6 +55,7 @@ fn dispatch(state: &State, op: GateCtl) -> CtlResponse {
         GateCtl::Status => CtlResponse::ok(GateStatus {
             rules: state.policy().rules.len(),
             ca_installed: state.ca().is_some(),
+            ca_pem_sha256: state.ca().map(|ca| ca.pem_sha256.clone()),
             vault_configured: state.vault().is_some(),
             pending_requests: state.requests().pending(),
         }),
@@ -96,6 +97,7 @@ fn dispatch(state: &State, op: GateCtl) -> CtlResponse {
                     state.events.emit(Event {
                         kind: Some(EventKind::Resolve),
                         host: Some(r.host.clone()),
+                        port: r.port,
                         request_id: Some(id),
                         message: Some(if approved { "approved" } else { "rejected" }.into()),
                         ..Default::default()

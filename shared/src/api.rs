@@ -2,11 +2,14 @@
 //! helper (and through it, MCP-capable agents). Read-mostly; the writes are filing an access
 //! request, which only the host can resolve, and passing ssh-agent messages to the vault.
 
+use std::net::IpAddr;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::events::Event;
-use crate::policy::{AccessLevel, Mode};
+use crate::host::{is_never_dialed, is_private, normalize_host};
+use crate::policy::{Access, AccessLevel, Mode, Rule, RuleOrigin, rule_error};
 
 pub const API_PREFIX: &str = "/_sandbox";
 
@@ -31,6 +34,9 @@ pub struct RuleSummary {
     pub id: String,
     pub origin: String,
     pub host: String,
+    /// `None`: HTTP(S)'s 80 and 443.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     pub access: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
@@ -75,6 +81,9 @@ pub struct CheckResult {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct NewAccessRequest {
     pub host: String,
+    /// A port HTTP(S) doesn't use: the request is for an uninspected tunnel to `host:port`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     pub access: AccessLevel,
     #[serde(default)]
     pub paths: Vec<String>,
@@ -156,6 +165,9 @@ pub struct AccessRequest {
     pub id: u64,
     /// Empty for an install request.
     pub host: String,
+    /// Set for a tunnel request: `access` is then write, since a tunnel's bytes go unread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     pub access: AccessLevel,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
@@ -175,3 +187,288 @@ pub struct AccessRequest {
 /// Limits on what the sandbox can file, so requests can't be used for approval fatigue.
 pub const MAX_PENDING_REQUESTS: usize = 5;
 pub const MAX_REASON_LEN: usize = 500;
+
+/// The rule a request for `host` asks for, or why the sandbox may not ask for it: a host or a
+/// wildcard the sandbox may name, never an address range or a private address; with `port`, an
+/// uninspected tunnel to that one host and port, which HTTP(S)'s 80 and 443 never get.
+pub fn requested_rule(
+    host: &str,
+    port: Option<u16>,
+    access: AccessLevel,
+    paths: &[String],
+) -> Result<Rule, String> {
+    let host = host.trim();
+    let host = match host.strip_prefix("*.") {
+        Some(rest) => normalize_host(rest).map(|d| format!("*.{d}")),
+        None => normalize_host(host),
+    }
+    .map_err(|e| e.to_string())?;
+    if let Ok(ip) = host.trim_start_matches("*.").parse::<IpAddr>() {
+        if host.starts_with("*.") {
+            return Err(format!("`{host}` is not a host pattern"));
+        }
+        if is_private(ip) || is_never_dialed(ip) {
+            return Err(format!(
+                "{ip} is a private address, which the sandbox may not ask for"
+            ));
+        }
+    }
+    let rule = match port {
+        None => Rule {
+            host,
+            access: Access::Level(access),
+            paths: paths.to_vec(),
+            ..Default::default()
+        },
+        Some(80 | 443) => {
+            return Err("ports 80 and 443 are HTTP(S): ask for the host without a port".into());
+        }
+        Some(0) => return Err("port 0 is not a port".into()),
+        Some(_) if host.starts_with("*.") => {
+            return Err("a tunnel goes to one host: name it exactly".into());
+        }
+        Some(_) if !paths.is_empty() => {
+            return Err("a tunnel can't be limited to paths: the gate doesn't read it".into());
+        }
+        Some(port) => Rule {
+            host,
+            port: Some(port),
+            access: Access::Level(AccessLevel::Write),
+            mode: Mode::Tunnel,
+            ..Default::default()
+        },
+    };
+    match rule_error(&rule, RuleOrigin::Sandbox) {
+        Some(e) => Err(e.message),
+        None => Ok(rule),
+    }
+}
+
+/// Less than a request asked for, granted by the host: read for write, some methods, some of
+/// its paths. Never more: [`AccessRequest::grant`] refuses a narrowing that would widen.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Narrowing {
+    /// Read-only (GET, HEAD, OPTIONS).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+impl Narrowing {
+    pub fn is_empty(&self) -> bool {
+        !self.read && self.methods.is_empty() && self.paths.is_empty()
+    }
+}
+
+impl AccessRequest {
+    /// The rule the request asks for, checked as the gate checked it when it was filed.
+    pub fn rule(&self) -> Result<Rule, String> {
+        if self.install.is_some() {
+            return Err(format!(
+                "request #{} asks for an install, not access",
+                self.id
+            ));
+        }
+        requested_rule(&self.host, self.port, self.access, &self.paths)
+    }
+
+    /// The rule granting the request, narrowed by `n`; refused if `n` would grant anything
+    /// the request did not ask for.
+    pub fn grant(&self, n: &Narrowing) -> Result<Rule, String> {
+        let mut rule = self.rule()?;
+        if n.is_empty() {
+            return Ok(rule);
+        }
+        let id = self.id;
+        if rule.mode == Mode::Tunnel {
+            return Err(format!(
+                "request #{id} asks for a tunnel, which can't be limited to methods or paths: \
+                 approve it as asked or reject it"
+            ));
+        }
+        if n.read && !n.methods.is_empty() {
+            return Err("give read or methods, not both".into());
+        }
+        if n.read {
+            rule.access = Access::Level(AccessLevel::Read);
+        }
+        if !n.methods.is_empty() {
+            let mut methods: Vec<String> =
+                n.methods.iter().map(|m| m.to_ascii_uppercase()).collect();
+            methods.sort();
+            methods.dedup();
+            if let Some(m) = methods
+                .iter()
+                .find(|m| m.is_empty() || !m.bytes().all(|b| b.is_ascii_alphabetic()))
+            {
+                return Err(format!("`{m}` is not an HTTP method"));
+            }
+            if let Some(m) = methods.iter().find(|m| !rule.access.allows(m)) {
+                return Err(format!(
+                    "{m} is more than request #{id} asked for ({})",
+                    rule.access.describe()
+                ));
+            }
+            rule.access = Access::Methods(methods);
+        }
+        if !n.paths.is_empty() {
+            let asked = &rule.paths;
+            if let Some(p) = n
+                .paths
+                .iter()
+                .find(|p| !asked.is_empty() && !asked.iter().any(|a| crate::glob::covers(a, p)))
+            {
+                return Err(format!(
+                    "path `{p}` reaches beyond the paths request #{id} asked for ({})",
+                    asked.join(", ")
+                ));
+            }
+            rule.paths = n.paths.clone();
+        }
+        match rule_error(&rule, RuleOrigin::Sandbox) {
+            Some(e) => Err(e.message),
+            None => Ok(rule),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn asked(host: &str, port: Option<u16>, access: AccessLevel, paths: &[&str]) -> AccessRequest {
+        AccessRequest {
+            id: 3,
+            host: host.into(),
+            port,
+            access,
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+            reason: "r".into(),
+            status: RequestStatus::Pending,
+            created: Utc::now(),
+            resolved: None,
+            note: None,
+            install: None,
+        }
+    }
+
+    #[test]
+    fn a_port_request_is_a_tunnel_to_one_public_host() {
+        let r = requested_rule("DB.Example.com", Some(5432), AccessLevel::Read, &[]).unwrap();
+        assert_eq!(
+            (r.host.as_str(), r.port, r.mode, r.access),
+            (
+                "db.example.com",
+                Some(5432),
+                Mode::Tunnel,
+                Access::Level(AccessLevel::Write)
+            )
+        );
+        for (host, port, paths) in [
+            ("db.example.com", 443, &[][..]),
+            ("db.example.com", 80, &[][..]),
+            ("db.example.com", 0, &[][..]),
+            ("*.example.com", 5432, &[][..]),
+            ("db.example.com", 5432, &["/x/**".to_string()][..]),
+            ("10.0.0.0/8", 5432, &[][..]),
+            ("10.1.2.3", 5432, &[][..]),
+            ("127.0.0.1", 5432, &[][..]),
+            ("[::1]", 5432, &[][..]),
+            ("169.254.169.254", 5432, &[][..]),
+            ("*", 5432, &[][..]),
+            ("user@db.example.com", 5432, &[][..]),
+        ] {
+            assert!(
+                requested_rule(host, Some(port), AccessLevel::Write, paths).is_err(),
+                "{host}:{port} {paths:?}"
+            );
+        }
+        assert!(requested_rule("203.0.113.9", Some(5432), AccessLevel::Write, &[]).is_err());
+        assert!(requested_rule("8.8.8.8", Some(5432), AccessLevel::Write, &[]).is_ok());
+    }
+
+    #[test]
+    fn host_requests_keep_their_checks() {
+        assert!(requested_rule("docs.rs", None, AccessLevel::Read, &[]).is_ok());
+        assert!(requested_rule("*.mycompany.dev", None, AccessLevel::Read, &[]).is_ok());
+        for host in [
+            "*",
+            "*.github.io",
+            "*.amazonaws.com",
+            "*.10.0.0.1",
+            "192.168.1.1",
+        ] {
+            assert!(
+                requested_rule(host, None, AccessLevel::Read, &[]).is_err(),
+                "{host}"
+            );
+        }
+        let bad_path = ["v1/**".to_string()];
+        assert!(requested_rule("docs.rs", None, AccessLevel::Read, &bad_path).is_err());
+    }
+
+    #[test]
+    fn a_grant_narrows_and_never_widens() {
+        let write = asked("api.example.com", None, AccessLevel::Write, &[]);
+        let read = Narrowing {
+            read: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            write.grant(&read).unwrap().access,
+            Access::Level(AccessLevel::Read)
+        );
+        let methods = |ms: &[&str]| Narrowing {
+            methods: ms.iter().map(|m| m.to_string()).collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            write.grant(&methods(&["post", "GET"])).unwrap().access,
+            Access::Methods(vec!["GET".into(), "POST".into()])
+        );
+        let paths = |ps: &[&str]| Narrowing {
+            paths: ps.iter().map(|p| p.to_string()).collect(),
+            ..Default::default()
+        };
+        assert_eq!(write.grant(&paths(&["/v1/**"])).unwrap().paths, ["/v1/**"]);
+        assert!(write.grant(&paths(&["v1"])).is_err());
+        assert!(write.grant(&methods(&["GET POST"])).is_err());
+        assert!(
+            write
+                .grant(&Narrowing {
+                    read: true,
+                    methods: vec!["GET".into()],
+                    ..Default::default()
+                })
+                .is_err()
+        );
+
+        let read_some = asked("docs.rs", None, AccessLevel::Read, &["/serde/**"]);
+        assert_eq!(
+            read_some.grant(&Narrowing::default()).unwrap(),
+            read_some.rule().unwrap()
+        );
+        assert!(read_some.grant(&read).is_ok());
+        assert!(read_some.grant(&methods(&["HEAD"])).is_ok());
+        assert!(read_some.grant(&methods(&["POST"])).is_err());
+        assert!(read_some.grant(&paths(&["/serde/latest/**"])).is_ok());
+        assert!(read_some.grant(&paths(&["/serde"])).is_ok());
+        assert!(read_some.grant(&paths(&["/tokio/**"])).is_err());
+        assert!(read_some.grant(&paths(&["/**"])).is_err());
+
+        let tunnel = asked("db.example.com", Some(5432), AccessLevel::Write, &[]);
+        assert_eq!(
+            tunnel.grant(&Narrowing::default()).unwrap().mode,
+            Mode::Tunnel
+        );
+        assert!(tunnel.grant(&read).is_err());
+        assert!(tunnel.grant(&paths(&["/x"])).is_err());
+
+        let mut install = asked("", None, AccessLevel::Read, &[]);
+        install.install = Some(Install::Package { name: "jq".into() });
+        assert!(install.grant(&Narrowing::default()).is_err());
+    }
+}

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::env::{Ctx, UID};
+use crate::paths::Paths;
 use crate::state::EnvState;
 use crate::{config, names};
 
@@ -16,7 +17,11 @@ pub fn dir(ctx: &Ctx) -> PathBuf {
 
 /// The generated config file users include from `~/.ssh/config`.
 pub fn config_path(ctx: &Ctx) -> PathBuf {
-    ctx.paths.config.join("ssh_config")
+    generated(&ctx.paths)
+}
+
+fn generated(paths: &Paths) -> PathBuf {
+    paths.config.join("ssh_config")
 }
 
 fn user_ssh_config() -> Option<PathBuf> {
@@ -38,8 +43,8 @@ pub fn tilde(p: &Path) -> String {
     }
 }
 
-pub fn include_line(ctx: &Ctx) -> String {
-    let p = tilde(&config_path(ctx));
+pub fn include_line(paths: &Paths) -> String {
+    let p = tilde(&generated(paths));
     if p.contains(' ') {
         format!("Include \"{p}\"")
     } else {
@@ -64,10 +69,10 @@ pub fn includes(user_config: &str, generated: &Path) -> bool {
     })
 }
 
-pub fn include_present(ctx: &Ctx) -> bool {
+pub fn include_present(paths: &Paths) -> bool {
     user_ssh_config()
         .and_then(|p| std::fs::read_to_string(p).ok())
-        .is_some_and(|c| includes(&c, &config_path(ctx)))
+        .is_some_and(|c| includes(&c, &generated(paths)))
 }
 
 fn ensure_key(ctx: &Ctx) -> Result<PathBuf> {
@@ -207,7 +212,7 @@ pub fn write_config(ctx: &Ctx) -> Result<PathBuf> {
 pub fn include_hint(ctx: &Ctx) -> String {
     format!(
         "Add this line at the top of ~/.ssh/config (once; luoto never edits that file):\n  {}",
-        include_line(ctx)
+        include_line(&ctx.paths)
     )
 }
 

@@ -151,6 +151,91 @@ test("approving a request whose rule has risks shows them and resends with force
   await expect.poll(() => forced).toEqual([false, true]);
 });
 
+test("a port request reads as an uninspected tunnel and needs its risk confirmed", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const request = {
+    id: 8,
+    host: "db.example.com",
+    port: 5432,
+    access: "write",
+    reason: "run the migrations",
+    status: "pending",
+    created: new Date().toISOString(),
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [request] }),
+  );
+  const risks = [
+    "a tunnel to db.example.com:5432 is not inspected: code in the sandbox gets full access to it, any protocol and any data",
+  ];
+  const bodies: { force: boolean; narrow?: unknown }[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/8/approve",
+    (route, req) => {
+      const body = req.postDataJSON() as { force: boolean; narrow?: unknown };
+      bodies.push(body);
+      return body.force
+        ? route.fulfill({ json: { host: request.host, port: 5432, mode: "tunnel" } })
+        : route.fulfill({ status: 409, json: { error: "confirm risks", risks } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: /tunnel to db\.example\.com:5432/ }).click();
+
+  await expect(page.getByRole("heading", { name: "db.example.com:5432" })).toBeVisible();
+  await expect(page.getByRole("group", { name: "grant" })).toHaveCount(0);
+  await page.getByRole("button", { name: "approve", exact: true }).click();
+  await expect(page.getByText(risks[0])).toBeVisible();
+  await page.getByRole("button", { name: "approve anyway" }).click();
+
+  await expect.poll(() => bodies.map((b) => b.force)).toEqual([false, true]);
+  expect(bodies.every((b) => b.narrow === undefined)).toBe(true);
+});
+
+test("a write request can be approved as read-only on some of its paths", async ({ page }) => {
+  await mockApi(page);
+  const request = {
+    id: 9,
+    host: "api.example.com",
+    access: "write",
+    reason: "post the results",
+    status: "pending",
+    created: new Date().toISOString(),
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [request] }),
+  );
+  const sent: unknown[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/9/approve",
+    (route, req) => {
+      sent.push(req.postDataJSON());
+      return route.fulfill({ json: { host: request.host, access: "read", paths: ["/v1/**"] } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: /access to api\.example\.com/ }).click();
+  await page
+    .getByRole("group", { name: "grant" })
+    .getByRole("button", { name: "read-only" })
+    .click();
+  await expect(page.getByText(/Write access lets anything/)).toHaveCount(0);
+  await page.getByRole("textbox", { name: "paths" }).fill("/v1/**");
+  await page.getByRole("button", { name: "approve", exact: true }).click();
+
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toMatchObject({
+    created: request.created,
+    narrow: { read: true, paths: ["/v1/**"] },
+  });
+});
+
 test("selected requests are approved together, each as it was shown", async ({ page }) => {
   await mockApi(page);
   const created = new Date().toISOString();
@@ -254,7 +339,8 @@ test("with desktop notifications on, the page shows none of its own", async ({ p
   await mockApi(page);
   await page.route(
     (url) => url.pathname === "/api/overview",
-    (route) => route.fulfill({ json: { ...(fixture("overview") as object), desktop_notifications: true } }),
+    (route) =>
+      route.fulfill({ json: { ...(fixture("overview") as object), desktop_notifications: true } }),
   );
   await open(page);
   const bell = page.getByRole("button", { name: "browser notifications" });

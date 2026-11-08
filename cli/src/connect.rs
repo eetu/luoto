@@ -138,7 +138,7 @@ pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
         );
     }
     let config = ssh::write_config(&ctx)?;
-    if !ssh::include_present(&ctx) {
+    if !ssh::include_present(&ctx.paths) {
         println!(
             "Editors find envs through ~/.ssh/config. {}",
             ssh::include_hint(&ctx)

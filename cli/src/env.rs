@@ -162,6 +162,7 @@ fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
         ulimits: vec!["core=0".into()],
         restart: Some("on-failure".into()),
         labels: labels("", "vault"),
+        log_mb: Some(VAULT_LOG_MB),
         ..Default::default()
     };
     start_or_create(ctx, &spec, image_id, true)?;
@@ -411,7 +412,14 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     }
     let rt = &ctx.rt;
     let a = names::addrs(state.octet);
-    let env_ca = ca::ensure(&ctx.paths.env_state(env), env)?;
+    let (env_ca, made) = ca::ensure(&ctx.paths.env_state(env), env)?;
+    if let ca::Made::Renewed(old) = made {
+        eprintln!("{}", ca::renewal_note(old, &env_ca));
+    }
+    let ca_sha = env_ca.pem_sha256();
+    // A renewal counts on its own: `dev_ca` is unset until a start records it.
+    let stale_ca = matches!(made, ca::Made::Renewed(_))
+        || state.dev_ca.as_deref().is_some_and(|h| h != ca_sha);
 
     start_vault(ctx, &ids.vault)?;
 
@@ -432,7 +440,17 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     populate_tools(ctx, env, &state, &ids.tools, &env_ca.cert_pem)?;
 
     let gate = start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)?;
-    let dev = start_dev(ctx, env, &p, &state, &ids, gate != Launch::AlreadyRunning)?;
+    let restart = if gate != Launch::AlreadyRunning {
+        Restart::Gate
+    } else if stale_ca {
+        Restart::Ca
+    } else {
+        Restart::No
+    };
+    let dev = start_dev(ctx, env, &p, &state, &ids, restart)?;
+    if state.dev_ca.as_deref() != Some(ca_sha.as_str()) {
+        EnvState::update(&ctx.paths, env, |s| s.dev_ca = Some(ca_sha))?;
+    }
     // Containers that were already running passed the self-test when they started.
     let restarted = gate != Launch::AlreadyRunning || dev != Launch::AlreadyRunning;
     after_start(
@@ -466,7 +484,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         let image = p.image.clone();
         p = plan(ctx, env)?;
         if start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)? != Launch::AlreadyRunning {
-            start_dev(ctx, env, &p, &state, &ids, true)?;
+            start_dev(ctx, env, &p, &state, &ids, Restart::Gate)?;
             after_start(ctx, env, &p, &state, !opts.no_selftest, opts.quiet)?;
         } else {
             sync::write_runtime_env(ctx, env, &p.compiled)?;
@@ -553,6 +571,11 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
 /// The gate's log is the env's event history: over 100 000 events, and a flood of them can't
 /// fill the disk.
 const GATE_LOG_MB: u32 = 50;
+/// The vault logs only an error that stops it: 1 MB holds thousands, and bounds a crash loop.
+const VAULT_LOG_MB: u32 = 1;
+/// The dev container logs init.sh's few lines a start, and whatever the sandbox (root in its
+/// container) writes to the main process's output, which this bounds.
+const DEV_LOG_MB: u32 = 10;
 
 fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
     let cfg = &p.cfg;
@@ -632,7 +655,7 @@ fn start_gate(
     let launch = start_or_create(ctx, &gate_spec(ctx, env, p, &a), image_id, true)?;
     let gs = wait_until(Duration::from_secs(20), || ctl::gate_status(rt, env).ok())
         .with_context(|| format!("gate for `{env}` did not come up (see `luoto logs -e {env}`)"))?;
-    if !gs.ca_installed {
+    if gs.ca_pem_sha256 != Some(env_ca.pem_sha256()) {
         ctl::gate::<bool>(
             rt,
             env,
@@ -718,26 +741,44 @@ fn dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &str) ->
             vec![("luoto.tools".into(), tools_id.into())],
         ]
         .concat(),
+        log_mb: Some(DEV_LOG_MB),
         ..Default::default()
     })
 }
 
-/// Start the dev container and wait for its init.sh. After a gate (re)start, a running dev
-/// container restarts too: until it does, its network stack keeps reaching for the gate it
-/// started with, at the same address, and gets nothing.
+/// Why `start_dev` restarts a dev container that is running.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Restart {
+    No,
+    /// The gate (re)started: until the dev container restarts, its network stack keeps
+    /// reaching for the gate it started with, at the same address, and gets nothing.
+    Gate,
+    /// It started with an older env CA: init.sh puts the tools volume's in its trust stores
+    /// at start.
+    Ca,
+}
+
+/// Start the dev container and wait for its init.sh.
 fn start_dev(
     ctx: &Ctx,
     env: &str,
     p: &Plan,
     state: &EnvState,
     ids: &ImageIds,
-    gate_started: bool,
+    restart: Restart,
 ) -> Result<Launch> {
     let rt = &ctx.rt;
     let spec = dev_spec(ctx, env, p, state, &ids.tools)?;
     let mut launch = start_or_create(ctx, &spec, &ids.dev, false)?;
-    if launch == Launch::AlreadyRunning && gate_started {
-        eprintln!("the gate restarted, so the dev container restarts too (what runs in it stops)");
+    if launch == Launch::AlreadyRunning && restart != Restart::No {
+        eprintln!(
+            "{} (what runs in it stops)",
+            if restart == Restart::Gate {
+                "the gate restarted, so the dev container restarts too"
+            } else {
+                "the dev container restarts to trust the new CA"
+            }
+        );
         // Not `restart`: podman gives up on it when the network teardown errs, as it does for
         // a gVisor container whose addresses runsc already took over.
         rt.stop(&names::dev(env))?;

@@ -33,6 +33,8 @@ const AZCLI_RENEW: TimeDelta = TimeDelta::minutes(5);
 /// (`az` logged out), waits this long.
 const AZCLI_AGAIN: Duration = Duration::from_secs(60);
 const AZCLI_FAILED_AGAIN: Duration = Duration::from_secs(300);
+/// How long `stop` waits: past a tick and the slowest round of work in it.
+const STOP_WAIT: Duration = Duration::from_secs(20);
 
 /// Start the watcher in the background; a second one exits at once (it holds a lock).
 pub fn spawn(ctx: &Ctx) {
@@ -94,6 +96,31 @@ fn take_lock(path: &Path) -> Result<Option<File>> {
     Ok(None)
 }
 
+/// Stop the watcher of this config dir, if one runs, and wait until it has: a watcher leaves
+/// once its lock file is gone. Whether one ran.
+pub fn stop(paths: &Paths) -> Result<bool> {
+    let path = lock_path(paths);
+    let Ok(lock) = File::open(&path) else {
+        return Ok(false);
+    };
+    if lock.try_lock_shared().is_ok() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path)?;
+    let deadline = Instant::now() + STOP_WAIT;
+    while Instant::now() < deadline {
+        // Ours once the watcher has exited: the lock goes with the process.
+        if lock.try_lock_shared().is_ok() {
+            return Ok(true);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    anyhow::bail!(
+        "the background watcher did not stop within {} s",
+        STOP_WAIT.as_secs()
+    )
+}
+
 fn exe_stamp() -> Option<SystemTime> {
     std::env::current_exe()
         .ok()
@@ -104,7 +131,8 @@ fn exe_stamp() -> Option<SystemTime> {
 /// The watcher itself (`luoto watch`, started by `spawn`).
 pub fn watch() -> Result<ExitCode> {
     let ctx = Ctx::load()?;
-    let Some(_lock) = take_lock(&lock_path(&ctx.paths))? else {
+    let lock_file = lock_path(&ctx.paths);
+    let Some(_lock) = take_lock(&lock_file)? else {
         return Ok(ExitCode::SUCCESS);
     };
     let stamp = exe_stamp();
@@ -121,6 +149,10 @@ pub fn watch() -> Result<ExitCode> {
     let mut azcli = Azcli::default();
     loop {
         std::thread::sleep(TICK);
+        // `stop` (luoto uninstall) removed it, and waits for this process to leave.
+        if !lock_file.exists() {
+            return Ok(ExitCode::SUCCESS);
+        }
         // A new luoto takes over once nothing is forwarded: leaving now would cut the
         // connections of a running dev server.
         if exe_stamp() != stamp && forwards.is_empty() {

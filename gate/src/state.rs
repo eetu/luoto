@@ -121,6 +121,8 @@ impl State {
         Ok(())
     }
 
+    /// Install the env's CA, a renewed one too: the leaves cached under the CA it replaces go
+    /// with that CA, so none of them is served again.
     pub fn set_ca(&self, cert_pem: &str, key_pem: &str) -> Result<()> {
         let ca = Ca::from_pem(cert_pem, key_pem)?;
         write_private(&self.cfg.state_dir.join("ca.crt"), cert_pem.as_bytes())?;

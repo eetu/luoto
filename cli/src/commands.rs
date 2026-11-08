@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use luoto_shared::api::{AccessRequest, RequestStatus};
+use luoto_shared::api::{AccessRequest, Narrowing, RequestStatus};
 use luoto_shared::events::Verdict;
 use luoto_shared::policy::Mode;
 
@@ -450,6 +450,10 @@ pub fn status(name: &str, json: bool) -> Result<ExitCode> {
         "  folder: {} (copied in; `luoto pull` brings changes back)",
         f.cfg.workspace.dir.as_deref().unwrap_or("none")
     );
+    let ca_dir = ctx.paths.env_state(name);
+    if let Some(n) = crate::ca::notice(&ca_dir, name) {
+        println!("  CA:     {n}");
+    }
     let plan = env::plan(&ctx, name);
     if dev == "running" {
         let published = plan.as_ref().map_or(&f.cfg.ports, |p| &p.cfg.ports);
@@ -460,10 +464,17 @@ pub fn status(name: &str, json: bool) -> Result<ExitCode> {
     }
     if gate == "running" {
         let s = ctl::gate_status(&ctx.rt, name)?;
+        let current = crate::ca::load(&ca_dir).ok().flatten();
+        let ca = match (&s.ca_pem_sha256, current) {
+            _ if !s.ca_installed => "missing",
+            (Some(gate), Some(c)) if *gate != c.pem_sha256() => {
+                "outdated (`luoto up` installs the current one)"
+            }
+            _ => "ok",
+        };
         println!(
-            "  policy: {} rules, CA {}, vault {}, {} pending request(s)",
+            "  policy: {} rules, CA {ca}, vault {}, {} pending request(s)",
             s.rules,
-            if s.ca_installed { "ok" } else { "missing" },
             if s.vault_configured {
                 "configured"
             } else {
@@ -520,6 +531,7 @@ fn print_rules(p: &env::Plan) {
         }
         let extra = [
             (!r.rule.paths.is_empty()).then(|| format!("paths {}", r.rule.paths.join(","))),
+            r.rule.idle.as_ref().map(|i| format!("idle {i}")),
             r.rule
                 .expires
                 .map(|e| format!("until {}", e.format("%m-%d %H:%M"))),
@@ -528,9 +540,13 @@ fn print_rules(p: &env::Plan) {
         .flatten()
         .collect::<Vec<_>>()
         .join(" ");
+        let host = match r.rule.port {
+            Some(port) => format!("{}:{port}", r.rule.host),
+            None => r.rule.host.clone(),
+        };
         println!(
             "{:<22} {:<38} {:<28} {} {extra}",
-            r.id, r.rule.host, access, r.origin
+            r.id, host, access, r.origin
         );
     }
     if !p.compiled.policy.injections.is_empty() {
@@ -608,16 +624,22 @@ fn fmt_request(r: &AccessRequest) -> String {
             "install {}, kept in the env's config",
             crate::text::display(&i.describe())
         ),
-        None => format!(
-            "{} {:?}{}",
-            crate::text::display(&r.host),
-            r.access,
-            if r.paths.is_empty() {
-                String::new()
-            } else {
-                format!(" paths {}", crate::text::display(&r.paths.join(",")))
-            }
-        ),
+        None => match r.port {
+            Some(port) => format!(
+                "a tunnel to {}:{port}, uninspected: any protocol and any data",
+                crate::text::display(&r.host)
+            ),
+            None => format!(
+                "{} {:?}{}",
+                crate::text::display(&r.host),
+                r.access,
+                if r.paths.is_empty() {
+                    String::new()
+                } else {
+                    format!(" paths {}", crate::text::display(&r.paths.join(",")))
+                }
+            ),
+        },
     };
     format!(
         "{what}\n   reason (written by the sandbox, untrusted): {:?}",
@@ -680,19 +702,31 @@ pub fn requests(name: Option<&str>, watch: bool) -> Result<ExitCode> {
     }
 }
 
-pub fn approve(name: &str, id: u64, ttl: Option<&str>, yes: bool, force: bool) -> Result<ExitCode> {
+pub fn approve(
+    name: &str,
+    id: u64,
+    ttl: Option<&str>,
+    narrow: &Narrowing,
+    yes: bool,
+    force: bool,
+) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let req = rules::request(&ctx, name, id)?;
     println!("request #{id}: {}", fmt_request(&req));
+    if !narrow.is_empty() {
+        // Before asking: a narrowing that would widen the request is refused here.
+        let rule = rules::grant(&req, narrow)?;
+        println!("grants less: {}", rules::describe(&rule));
+    }
     if !yes && !confirm("Approve?") {
         bail!("not approved (use --yes to skip the prompt)");
     }
-    if req.install.is_some() {
-        println!("{}", rules::approve_install(&ctx, name, &req)?);
-        return Ok(ExitCode::SUCCESS);
+    match rules::accepting_risks(force, |force| {
+        rules::approve(&ctx, name, &req, ttl, narrow, force)
+    })? {
+        rules::Approved::Installed { installed } => println!("{installed}"),
+        rules::Approved::Rule(rule) => println!("approved: {}", rules::describe(&rule)),
     }
-    let rule = rules::accepting_risks(force, |force| rules::approve(&ctx, name, &req, ttl, force))?;
-    println!("approved: {} {}", rule.host, rule.access.describe());
     Ok(ExitCode::SUCCESS)
 }
 

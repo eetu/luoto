@@ -11,7 +11,8 @@ SvelteKit (runes) SPA, adapter-static to `dist/`, embedded into `luoto` by rust-
 - Live updates: fetch-based SSE (`followEvents`) so the token can travel in a header.
 - One context menu (`menu.svelte.ts` + `ContextMenu.svelte`), one `Modal`.
 - Text written by the sandbox (request reasons) is rendered as plain text in an
-  "untrusted" block — never as HTML, never pre-filled into commands.
+  "untrusted" block — never as HTML, never pre-filled into commands, never in a browser
+  notification (`notify.svelte.ts`).
 - `yarn validate` = typecheck + lint + format. Vendored yarn: `node .yarn/releases/yarn-*.cjs`.
 - Glyph: the islet outline is the accent (orange stroke over currentColor waves) instead of the
   family's warm dot, which read as a figure above the islet. Still exactly one accent element.

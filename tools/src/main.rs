@@ -46,7 +46,9 @@ enum Cmd {
     /// Ask the user (on the host) to allow a host, or to install a system package or a
     /// toolchain in the env for good. Only the user can approve.
     Request {
-        /// Host (`docs.rs`) or URL (`https://docs.rs/serde`).
+        /// Host (`docs.rs`) or URL (`https://docs.rs/serde`); `host:port` for a protocol other
+        /// than HTTP(S) (`db.example.com:5432`, not 80 or 443), which the gate can only tunnel
+        /// uninspected.
         #[arg(required_unless_present_any = ["package", "tool", "preset"])]
         target: Option<String>,
         /// A system package (apt, apk or dnf) the env should have; approved, it is installed
@@ -181,9 +183,17 @@ pub fn render_status(s: &SandboxStatus) -> String {
             .expires
             .map(|e| format!(" (expires {})", e.format("%Y-%m-%d %H:%M UTC")))
             .unwrap_or_default();
+        let to = match r.port {
+            Some(port) => format!("{}:{port}", r.host),
+            None => r.host.clone(),
+        };
+        let access = match r.mode {
+            luoto_shared::policy::Mode::Tunnel => "uninspected tunnel",
+            luoto_shared::policy::Mode::Inspect => r.access.as_str(),
+        };
         out.push_str(&format!(
             "  {:<40} {}{}{}  [{}]\n",
-            r.host, r.access, paths, exp, r.origin
+            to, access, paths, exp, r.origin
         ));
     }
     if !s.credentialed_hosts.is_empty() {
@@ -222,6 +232,7 @@ pub fn render_status(s: &SandboxStatus) -> String {
     }
     out.push_str(&format!(
         "\nNeed more access? sandbox request <host> [--write] --reason \"…\" --wait\n\
+         Not HTTP(S) (a database)? sandbox request <host>:<port> --reason \"…\" --wait\n\
          The user can also grant it on the host: luoto allow -e {} <host> [--write] [--ttl 1h]\n\
          A system package or toolchain to keep: sandbox request --package <name> | --tool node@24 \
          --reason \"…\" --wait\n",
@@ -268,10 +279,11 @@ fn approve_hint(env: &str, id: u64) -> String {
 
 /// What a request asks for, for people.
 fn what(r: &AccessRequest) -> String {
-    match &r.install {
-        Some(i @ Install::Preset { .. }) => i.describe(),
-        Some(i) => format!("install {}", i.describe()),
-        None => format!(
+    match (&r.install, r.port) {
+        (Some(i @ Install::Preset { .. }), _) => i.describe(),
+        (Some(i), _) => format!("install {}", i.describe()),
+        (None, Some(port)) => format!("a tunnel to {}:{port}", r.host),
+        (None, None) => format!(
             "{} access to {}",
             match r.access {
                 AccessLevel::Write => "write",
@@ -288,10 +300,40 @@ pub struct Outcome {
     pub waited: Option<Duration>,
 }
 
-/// File a request for access to a host for the user to decide on the host; with `wait`, poll
-/// for the decision.
+/// The host a request names and, for `host:port` (not a URL), the port of a tunnel.
+pub fn parse_target(target: &str) -> Result<(String, Option<u16>)> {
+    let t = target.trim();
+    if t.contains("://") {
+        return Ok((luoto_shared::host::host_of(t).to_string(), None));
+    }
+    let authority = t.split(['/', '?', '#']).next().unwrap_or(t);
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(rest) => match rest.split_once("]:") {
+            Some((v6, port)) => (v6, Some(port)),
+            None => (authority, None),
+        },
+        // Several colons: an IPv6 address without brackets, so no port.
+        None => match authority.rsplit_once(':') {
+            Some((host, port)) if !host.contains(':') => (host, Some(port)),
+            _ => (authority, None),
+        },
+    };
+    let port = port
+        .map(|p| {
+            p.parse::<u16>()
+                .ok()
+                .filter(|n| *n != 0)
+                .with_context(|| format!("`{p}` is not a port (1-65535)"))
+        })
+        .transpose()?;
+    Ok((host.to_string(), port))
+}
+
+/// File a request for access to a host, or with `port` for a tunnel to it, for the user to
+/// decide on the host; with `wait`, poll for the decision.
 pub fn request_access(
-    target: &str,
+    host: &str,
+    port: Option<u16>,
     write: bool,
     paths: Vec<String>,
     reason: &str,
@@ -299,7 +341,8 @@ pub fn request_access(
 ) -> Result<Outcome> {
     file(
         NewAccessRequest {
-            host: luoto_shared::host::host_of(target).to_string(),
+            host: host.to_string(),
+            port,
             access: if write {
                 AccessLevel::Write
             } else {
@@ -318,6 +361,7 @@ pub fn request_install(install: Install, reason: &str, wait: Option<Duration>) -
     file(
         NewAccessRequest {
             host: String::new(),
+            port: None,
             access: AccessLevel::Read,
             paths: Vec::new(),
             reason: reason.to_string(),
@@ -384,7 +428,19 @@ pub fn describe(o: &Outcome) -> String {
                     .map(|n| format!(" — {n}"))
                     .unwrap_or_else(|| " is in the env now.".into())
             ),
-            None => format!("Request #{} approved: {} is reachable now.", r.id, r.host),
+            None => {
+                let to = match r.port {
+                    Some(port) => format!(
+                        "a tunnel to {}:{port} is open now: connect to it as it is",
+                        r.host
+                    ),
+                    None => format!("{} is reachable now", r.host),
+                };
+                match &r.note {
+                    Some(n) => format!("Request #{} approved: {to}; {n}.", r.id),
+                    None => format!("Request #{} approved: {to}.", r.id),
+                }
+            }
         },
         (RequestStatus::Rejected, _) => format!(
             "Request #{} was rejected by the user{}.",
@@ -420,7 +476,10 @@ fn request(
         (_, Some(name), _, _) => request_install(Install::Package { name }, reason, wait)?,
         (_, _, Some(t), _) => request_install(parse_tool(t), reason, wait)?,
         (_, _, _, Some(name)) => request_install(Install::Preset { name }, reason, wait)?,
-        (Some(t), None, None, None) => request_access(t, write, paths, reason, wait)?,
+        (Some(t), None, None, None) => {
+            let (host, port) = parse_target(t)?;
+            request_access(&host, port, write, paths, reason, wait)?
+        }
         (None, None, None, None) => anyhow::bail!("name a host, --preset, --package or --tool"),
     };
     println!("{}", describe(&o));
@@ -469,4 +528,52 @@ fn relay(port: u16) -> Result<ExitCode> {
     let _ = from_stdin.shutdown(std::net::Shutdown::Write);
     let _ = t.join();
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_target_with_a_port_asks_for_a_tunnel() {
+        let t = |s: &str| parse_target(s).unwrap();
+        assert_eq!(
+            t("db.example.com:5432"),
+            ("db.example.com".into(), Some(5432))
+        );
+        assert_eq!(t("[2001:db8::1]:5432"), ("2001:db8::1".into(), Some(5432)));
+        assert_eq!(t("docs.rs"), ("docs.rs".into(), None));
+        assert_eq!(t("https://docs.rs:8443/serde"), ("docs.rs".into(), None));
+        assert_eq!(t("2001:db8::1"), ("2001:db8::1".into(), None));
+        for bad in [
+            "db.example.com:0",
+            "db.example.com:70000",
+            "db.example.com:x",
+        ] {
+            assert!(parse_target(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_approved_tunnel_says_how_to_reach_it() {
+        let r = AccessRequest {
+            id: 3,
+            host: "db.example.com".into(),
+            port: Some(5432),
+            access: AccessLevel::Write,
+            paths: vec![],
+            reason: "migrations".into(),
+            status: RequestStatus::Approved,
+            created: Default::default(),
+            resolved: None,
+            note: None,
+            install: None,
+        };
+        assert_eq!(what(&r), "a tunnel to db.example.com:5432");
+        let said = describe(&Outcome {
+            request: r,
+            waited: None,
+        });
+        assert!(said.contains("db.example.com:5432 is open now"), "{said}");
+    }
 }

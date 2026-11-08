@@ -29,7 +29,7 @@ pub enum Source {
     /// The gate's container log: its diagnostics, and each connection as a JSON line.
     Gate,
     /// The background watcher's, one for every env: port forwards, idle stops, credentials
-    /// read again.
+    /// read again, notifications shown.
     Watcher,
     /// What the env's installs printed (system packages, toolchains, agents): the newest MiB.
     Installs,

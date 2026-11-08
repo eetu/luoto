@@ -128,7 +128,7 @@ fn set_shell(ctx: &Ctx, env: &str, shell: &str) -> Result<Option<String>> {
     }
 }
 
-fn host_git(key: &str) -> Option<String> {
+pub fn host_git(key: &str) -> Option<String> {
     let out = std::process::Command::new("git")
         .args(["config", "--global", "--includes", "--get", key])
         .output()

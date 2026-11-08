@@ -1322,6 +1322,44 @@ async fn intercepted_tls_shows_a_leaf_for_the_destination_signed_by_the_env_ca()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "spawns binaries; run with `just it`"]
+async fn a_renewed_env_ca_signs_every_leaf_from_its_install_on() {
+    // A renewal keeps the CA's name and changes its key, as `luoto up` does.
+    let old = TestCa::new("luoto sandbox CA (it)");
+    let new = TestCa::new("luoto sandbox CA (it)");
+    let forge_ca = TestCa::new("forge CA");
+    let forge = Https::start(&forge_ca, "forge.test");
+    let cas = upstream_cas(&[("forge.test", &forge_ca)]);
+    let env = Env::start_with(
+        &[("forge.test", forge.addr)],
+        &[("LUOTO_UPSTREAM_CAS", &cas)],
+    );
+    let reported = |env: &Env| env.gate(&GateCtl::Status)["data"]["ca_pem_sha256"].clone();
+    let sha = |ca: &TestCa| hex::encode(Sha256::digest(ca.cert_pem.as_bytes()));
+    assert_eq!(reported(&env), serde_json::Value::Null);
+    old.install(&env);
+    env.apply(Policy {
+        rules: vec![read("read", "forge.test")],
+        ..Default::default()
+    });
+    assert_eq!(env.https(&old, "forge.test", "/ok", &[]).status, 200);
+    assert_eq!(reported(&env), sha(&old));
+
+    // The leaf cached for the host a moment ago went with the old CA.
+    new.install(&env);
+    assert_eq!(reported(&env), sha(&new));
+    let r = env.https(&new, "forge.test", "/ok", &[]);
+    assert_eq!(r.status, 200, "{}", r.head);
+    let Err(e) = connect_tls(env.gate_port, "forge.test:443", "forge.test", &old) else {
+        panic!("a client trusting only the old CA verified the gate's certificate");
+    };
+    assert!(certificate_error(&e).is_some(), "{e}");
+    // Kept for a restarted gate.
+    let kept = std::fs::read_to_string(env._dir.path().join("gate/ca.crt")).unwrap();
+    assert_eq!(kept, new.cert_pem);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
 async fn sni_and_host_must_name_the_connect_destination() {
     let env_ca = TestCa::new("luoto sandbox CA (it)");
     let api_ca = TestCa::new("api CA");

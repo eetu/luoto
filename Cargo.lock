@@ -1874,6 +1874,7 @@ dependencies = [
  "hex",
  "inquire",
  "keyring",
+ "keyring-core",
  "luoto-shared",
  "mime_guess",
  "open",
@@ -1893,6 +1894,7 @@ dependencies = [
  "toml_edit",
  "tower",
  "tower-http",
+ "x509-parser",
 ]
 
 [[package]]
@@ -1920,6 +1922,7 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "time",
  "tokio",
  "tokio-rustls",

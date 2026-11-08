@@ -28,6 +28,7 @@ mod ports;
 mod project;
 mod prompt;
 mod release;
+mod report;
 mod repos;
 mod rules;
 mod runtime;
@@ -38,6 +39,7 @@ mod state;
 mod sync;
 mod text;
 mod ui;
+mod uninstall;
 mod upgrade;
 mod watch;
 mod wizard;
@@ -73,9 +75,21 @@ enum Cmd {
     /// Detect the host, recommend/install a container runtime, prepare images.
     Setup(setup::SetupOpts),
     /// Check the runtime, images, vault and every env's isolation.
-    Doctor,
+    Doctor {
+        /// Also write what a bug report needs to FILE (default: luoto-report-<time>.txt here),
+        /// with secrets and what identifies you taken out.
+        #[arg(long, value_name = "FILE", num_args = 0..=1)]
+        report: Option<Option<String>>,
+    },
     /// Update luoto to the latest release.
     Upgrade,
+    /// Remove luoto's envs, vault, images, keychain entries, config and data (and its VM when
+    /// nothing else uses it), after listing them; the binary stays.
+    Uninstall {
+        /// Don't ask first.
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// Start the local web UI.
     Ui {
         /// Outside the ports envs forward to this machine (1024–32767), so no env can serve
@@ -124,7 +138,7 @@ enum Cmd {
     /// List envs.
     #[command(visible_alias = "list")]
     Ls,
-    /// Show the env's state, workspace, credentials and rules.
+    /// Show the env's state, workspace, forwarded ports, credentials, rules, denies and mutes.
     Status {
         /// The compiled policy as JSON.
         #[arg(long)]
@@ -132,7 +146,8 @@ enum Cmd {
     },
     /// Open the env's config in $EDITOR, validate and apply it.
     Edit,
-    /// Show the project's luoto.toml (team settings in the repository), or apply or ignore it.
+    /// Show the project's luoto.toml (team settings in the repository), apply or ignore it, or
+    /// draft one from the env (`suggest`).
     Project {
         #[command(subcommand)]
         action: Option<ProjectCmd>,
@@ -217,11 +232,20 @@ enum Cmd {
         #[arg(long)]
         watch: bool,
     },
-    /// Approve an access request (adds a rule).
+    /// Approve an access request (adds a rule), as asked or narrowed.
     Approve {
         id: u64,
         #[arg(long)]
         ttl: Option<String>,
+        /// Grant read-only access (GET, HEAD, OPTIONS) to a write request.
+        #[arg(long, conflicts_with = "methods")]
+        read: bool,
+        /// Grant only these methods (repeatable), among those the request asked for.
+        #[arg(long = "method")]
+        methods: Vec<String>,
+        /// Grant only these path globs (repeatable), within the request's paths.
+        #[arg(long = "path")]
+        paths: Vec<String>,
         #[arg(long, short)]
         yes: bool,
         /// Accept the rule's risks without asking.
@@ -389,8 +413,12 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
     let env = || workspace::resolve(&paths, env_arg.as_deref());
     match cmd {
         Cmd::Setup(o) => setup::setup(o),
-        Cmd::Doctor => setup::doctor(),
+        Cmd::Doctor { report } => setup::doctor(report),
         Cmd::Upgrade => upgrade::upgrade(),
+        Cmd::Uninstall { .. } if env_arg.is_some() => {
+            anyhow::bail!("uninstall removes every env: leave out -e")
+        }
+        Cmd::Uninstall { yes } => uninstall::uninstall(yes),
         Cmd::Ui { port, no_open } => ui::serve(port, !no_open),
         Cmd::Init(o) => {
             if env_arg.is_some() {
@@ -507,9 +535,19 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Approve {
             id,
             ttl,
+            read,
+            methods,
+            paths,
             yes,
             force,
-        } => c::approve(&env()?, id, ttl.as_deref(), yes, force),
+        } => {
+            let narrow = luoto_shared::api::Narrowing {
+                read,
+                methods,
+                paths,
+            };
+            c::approve(&env()?, id, ttl.as_deref(), &narrow, yes, force)
+        }
         Cmd::Reject { id, note } => c::reject(&env()?, id, note),
         Cmd::Egress {
             denied,
@@ -551,6 +589,30 @@ mod tests {
     }
 
     #[test]
+    fn approve_takes_what_narrows_a_request() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat());
+        let Ok(Cli {
+            cmd:
+                Cmd::Approve {
+                    id: 3,
+                    read: true,
+                    methods,
+                    paths,
+                    ..
+                },
+            ..
+        }) = parse(&[
+            "approve", "3", "--read", "--path", "/v1/**", "--path", "/v2",
+        ])
+        else {
+            panic!("approve didn't parse");
+        };
+        assert!(methods.is_empty());
+        assert_eq!(paths, ["/v1/**", "/v2"]);
+        assert!(parse(&["approve", "3", "--read", "--method", "GET"]).is_err());
+    }
+
+    #[test]
     fn all_is_every_env_not_one() {
         let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat());
         for args in [["up", "--all", "-e", "web"], ["-e", "web", "down", "--all"]] {
@@ -581,5 +643,23 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_report_file_is_optional_and_uninstall_takes_no_env() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat()).unwrap();
+        let report = |args: &[&str]| match parse(args).cmd {
+            Cmd::Doctor { report } => report,
+            _ => panic!("not doctor"),
+        };
+        assert_eq!(report(&["doctor"]), None);
+        assert_eq!(report(&["doctor", "--report"]), Some(None));
+        assert_eq!(
+            report(&["doctor", "--report", "bug.txt"]),
+            Some(Some("bug.txt".into()))
+        );
+        let cli = parse(&["uninstall", "-e", "web"]);
+        let e = run(cli.env, cli.cmd).unwrap_err().to_string();
+        assert!(e.contains("leave out -e"), "{e}");
     }
 }
