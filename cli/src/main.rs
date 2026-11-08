@@ -20,6 +20,7 @@ mod init;
 mod logs;
 mod machine;
 mod names;
+mod notify;
 mod paths;
 mod personal;
 mod ports;

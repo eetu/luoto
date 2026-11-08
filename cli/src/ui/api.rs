@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use super::Ui;
 use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx, UpOptions};
-use crate::{commands, ctl, events, init, names, project, rules, setup, sync, workspace};
+use crate::{commands, ctl, events, init, names, ports, project, rules, setup, sync, workspace};
 
 pub struct ApiError(StatusCode, Value);
 
@@ -413,6 +413,7 @@ struct EnvDetail {
     credentials: Vec<String>,
     missing_secrets: Vec<String>,
     sandbox_secrets: Vec<String>,
+    ports: ports::EnvPorts,
 }
 
 async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
@@ -437,7 +438,13 @@ async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
             })
             .collect();
         injections.dedup_by(|a, b| a.host == b.host && a.binding == b.binding);
+        let ports = if dev == "running" {
+            ports::of_env(&ctx.paths, &name, &p.cfg.ports, gate == "running")
+        } else {
+            ports::EnvPorts::default()
+        };
         Ok(EnvDetail {
+            ports,
             path: p.path.display().to_string(),
             rules: p.compiled.policy.rules.clone(),
             denies: p.compiled.policy.denies.len(),

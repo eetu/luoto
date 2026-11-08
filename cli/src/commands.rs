@@ -13,7 +13,7 @@ use crate::env::{self, Ctx, UpOptions};
 use crate::prompt::confirm;
 use crate::rules::{self, AllowOpts};
 use crate::state::EnvState;
-use crate::{ctl, events, machine, names, project, sync, workspace};
+use crate::{ctl, events, machine, names, ports, project, sync, workspace};
 
 /// Show, accept or drop the project's luoto.toml settings for an env.
 pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<ExitCode> {
@@ -400,6 +400,14 @@ pub fn status(name: &str, json: bool) -> Result<ExitCode> {
         "  folder: {} (copied in; `luoto pull` brings changes back)",
         f.cfg.workspace.dir.as_deref().unwrap_or("none")
     );
+    let plan = env::plan(&ctx, name);
+    if dev == "running" {
+        let published = plan.as_ref().map_or(&f.cfg.ports, |p| &p.cfg.ports);
+        print_ports(
+            name,
+            &ports::of_env(&ctx.paths, name, published, gate == "running"),
+        );
+    }
     if gate == "running" {
         let s = ctl::gate_status(&ctx.rt, name)?;
         println!(
@@ -432,8 +440,25 @@ pub fn status(name: &str, json: bool) -> Result<ExitCode> {
             }
         }
     }
-    print_rules(&env::plan(&ctx, name)?);
+    print_rules(&plan?);
     Ok(ExitCode::SUCCESS)
+}
+
+fn print_ports(name: &str, p: &ports::EnvPorts) {
+    let open: Vec<String> = p.open().into_iter().map(ports::url).collect();
+    println!(
+        "  ports:  {}",
+        if open.is_empty() {
+            "none forwarded".to_string()
+        } else {
+            open.join("  ")
+        }
+    );
+    for port in &p.taken {
+        println!(
+            "          {port} is taken on this machine: `luoto forward -e {name} <port>:{port}`"
+        );
+    }
 }
 
 fn print_rules(p: &env::Plan) {

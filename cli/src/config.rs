@@ -31,6 +31,10 @@ pub struct GlobalConfig {
     /// Forward each port an env listens on to localhost here (default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_forward: Option<bool>,
+    /// Desktop notifications for access requests and the first denial at each host (default
+    /// true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<bool>,
     /// gVisor's `runsc` inside the runtime, which dev containers run on; set by `luoto setup`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gvisor: Option<String>,

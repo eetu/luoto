@@ -188,3 +188,64 @@ test("selected requests are approved together, each as it was shown", async ({ p
   expect(sent[1]).toMatchObject({ id: "4", body: { created } });
   expect((sent[1].body as { ttl?: string }).ttl).toBeUndefined();
 });
+
+test("the env panel links the ports forwarded from the env", async ({ page }) => {
+  await mockApi(page);
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  await expect(page.getByRole("link", { name: "http://localhost:5173" })).toHaveAttribute(
+    "href",
+    "http://localhost:5173",
+  );
+  await expect(page.getByText("3000 is taken on this machine")).toBeVisible();
+  await expect(page.getByText("luoto forward -e web <port>:3000")).toBeVisible();
+});
+
+test("a new access request notifies once the user turned notifications on", async ({ page }) => {
+  // A stand-in for the browser's notifications, and a tab out of sight.
+  await page.addInitScript(() => {
+    const w = window as unknown as { shown: string[]; asked: number };
+    w.shown = [];
+    w.asked = 0;
+    class Stub {
+      static permission = "default";
+      static requestPermission = () => {
+        w.asked += 1;
+        Stub.permission = "granted";
+        return Promise.resolve("granted");
+      };
+      onclick: (() => void) | null = null;
+      constructor(title: string) {
+        w.shown.push(title);
+      }
+      close() {}
+    }
+    Object.defineProperty(window, "Notification", { value: Stub });
+    document.hasFocus = () => false;
+  });
+  await mockApi(page);
+  let pending = 0;
+  const overview = fixture("overview") as { envs: { pending: number }[] };
+  await page.route(
+    (url) => url.pathname === "/api/overview",
+    (route) =>
+      route.fulfill({
+        json: { ...overview, envs: overview.envs.map((e) => ({ ...e, pending })) },
+      }),
+  );
+  await open(page);
+  const bell = page.getByRole("button", { name: "browser notifications" });
+  await expect(bell).toHaveAttribute("aria-pressed", "false");
+  expect(await page.evaluate(() => (window as unknown as { asked: number }).asked)).toBe(0);
+
+  await bell.click();
+  await expect(bell).toHaveAttribute("aria-pressed", "true");
+  pending = 1;
+
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { shown: string[] }).shown), {
+      timeout: 10_000,
+    })
+    .toEqual(["luoto: web asks for access"]);
+});

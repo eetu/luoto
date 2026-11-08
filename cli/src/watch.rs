@@ -1,12 +1,13 @@
 //! The background watcher: one per config dir, started by `up`, `down` and commands that work
-//! in an env. Every 2 s it forwards the ports running envs listen on (see `ports`); every
-//! 30 s it reads again the credentials upstreams refused, from sources that need no one; every
-//! minute it stops envs that have been idle for `idle_stop` (see `idle`), and luoto's VM once
-//! no env has run for that long. It exits when nothing is left to watch, or when the luoto
-//! binary changes, so a new version starts its own.
+//! in an env. Every 2 s it forwards the ports running envs listen on (see `ports`) and posts
+//! desktop notifications (see `notify`); every 30 s it reads again the credentials upstreams
+//! refused, from sources that need no one; every minute it stops envs that have been idle for
+//! `idle_stop` (see `idle`), and luoto's VM once no env has run for that long. It exits when
+//! nothing is left to watch, or when the luoto binary changes, so a new version starts its own.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs::{File, OpenOptions};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs::{File, OpenOptions, TryLockError};
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -15,7 +16,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx};
-use crate::{events, idle, machine, names, ports, secrets, sync};
+use crate::paths::Paths;
+use crate::{events, idle, machine, names, notify, ports, secrets, sync};
 
 const TICK: Duration = Duration::from_secs(2);
 const IDLE_EVERY: Duration = Duration::from_secs(60);
@@ -61,6 +63,29 @@ pub fn spawn(ctx: &Ctx) {
     }
 }
 
+fn lock_path(paths: &Paths) -> PathBuf {
+    paths.data.join("watch.lock")
+}
+
+/// A watcher runs for this config dir: it holds its lock, so a shared one is refused.
+pub fn running(paths: &Paths) -> bool {
+    File::open(lock_path(paths))
+        .is_ok_and(|f| matches!(f.try_lock_shared(), Err(TryLockError::WouldBlock)))
+}
+
+/// Take the watcher's lock. `running` holds it shared for an instant, so a watcher starting
+/// then tries again before leaving it to the one that runs.
+fn take_lock(path: &Path) -> Result<Option<File>> {
+    let lock = File::create(path)?;
+    for _ in 0..3 {
+        if lock.try_lock().is_ok() {
+            return Ok(Some(lock));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(None)
+}
+
 fn exe_stamp() -> Option<SystemTime> {
     std::env::current_exe()
         .ok()
@@ -71,13 +96,14 @@ fn exe_stamp() -> Option<SystemTime> {
 /// The watcher itself (`luoto watch`, started by `spawn`).
 pub fn watch() -> Result<ExitCode> {
     let ctx = Ctx::load()?;
-    let lock = File::create(ctx.paths.data.join("watch.lock"))?;
-    if lock.try_lock().is_err() {
+    let Some(_lock) = take_lock(&lock_path(&ctx.paths))? else {
         return Ok(ExitCode::SUCCESS);
-    }
+    };
     let stamp = exe_stamp();
     let mut forwards: HashMap<(String, u16), ports::Forward> = HashMap::new();
     let mut refused: HashSet<(String, u16)> = HashSet::new();
+    let mut recorded: Option<BTreeMap<String, ports::Watched>> = None;
+    let notices = notify::Notices::default();
     let mut idle_since: HashMap<String, Instant> = HashMap::new();
     let mut idle_checked = Instant::now();
     let mut no_env_since: Option<Instant> = None;
@@ -102,6 +128,8 @@ pub fn watch() -> Result<ExitCode> {
             .collect();
         if running.is_empty() {
             forwards.clear();
+            refused.clear();
+            record(&ctx.paths, &forwards, &refused, &mut recorded);
             // Without a VM of luoto's own there is nothing left to stop.
             if !machine::is_luoto(ctx.rt.connection.as_deref()) {
                 return Ok(ExitCode::SUCCESS);
@@ -121,6 +149,14 @@ pub fn watch() -> Result<ExitCode> {
         }
         no_env_since = None;
 
+        let notifying = ctx.global.notifications.unwrap_or(true);
+        if notifying {
+            for name in running.iter().filter(|e| states.running(&names::gate(e))) {
+                notices.follow(&ctx.rt, name);
+            }
+        }
+        notices.flush(notifying);
+
         // Forwards follow what each env listens on.
         let mut wanted: HashSet<(String, u16)> = HashSet::new();
         for name in &running {
@@ -134,9 +170,10 @@ pub fn watch() -> Result<ExitCode> {
             }
             let dev = names::dev(name);
             let Some(open) = ports::listening(&ctx.rt, &dev) else {
-                // A failed look (the runtime busy) keeps what is forwarded: dropping it would
-                // refuse the next connections.
-                wanted.extend(forwards.keys().filter(|(e, _)| e == name).cloned());
+                // A failed look (the runtime busy) keeps what is forwarded, and what is taken:
+                // dropping a forward would refuse the next connections.
+                let kept = forwards.keys().chain(refused.iter());
+                wanted.extend(kept.filter(|(e, _)| e == name).cloned());
                 continue;
             };
             for port in open.into_iter().filter(|p| ports::AUTO.contains(p)) {
@@ -159,6 +196,7 @@ pub fn watch() -> Result<ExitCode> {
         }
         forwards.retain(|k, _| wanted.contains(k));
         refused.retain(|k| wanted.contains(k));
+        record(&ctx.paths, &forwards, &refused, &mut recorded);
 
         if creds_checked.elapsed() >= CREDS_EVERY {
             creds_checked = Instant::now();
@@ -188,6 +226,29 @@ pub fn watch() -> Result<ExitCode> {
                 Err(e) => println!("{} could not stop `{name}`: {e:#}", Utc::now()),
             }
         }
+    }
+}
+
+/// Write what is forwarded for `status` and the UI, when it changed.
+fn record(
+    paths: &Paths,
+    forwards: &HashMap<(String, u16), ports::Forward>,
+    refused: &HashSet<(String, u16)>,
+    recorded: &mut Option<BTreeMap<String, ports::Watched>>,
+) {
+    let mut now: BTreeMap<String, ports::Watched> = BTreeMap::new();
+    for (env, port) in forwards.keys() {
+        now.entry(env.clone()).or_default().forwarded.insert(*port);
+    }
+    for (env, port) in refused {
+        now.entry(env.clone()).or_default().taken.insert(*port);
+    }
+    if recorded.as_ref() == Some(&now) {
+        return;
+    }
+    match ports::save_watched(paths, &now) {
+        Ok(()) => *recorded = Some(now),
+        Err(e) => println!("{} forwards not recorded: {e:#}", Utc::now()),
     }
 }
 

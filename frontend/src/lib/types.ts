@@ -143,6 +143,16 @@ export type GateStatus = {
   rules: number;
 };
 
+/** Where an env's servers answer on this machine, at `http://localhost:<port>`. */
+export type EnvPorts = {
+  /** Published by the gate (`ports` in the env's config). */
+  published: number[];
+  /** Forwarded by luoto's watcher as the env listens on them. */
+  forwarded: number[];
+  /** Listened on in the env, not forwarded: something on this machine has the port. */
+  taken: number[];
+};
+
 export type EnvDetail = {
   name: string;
   path: string;
@@ -155,6 +165,8 @@ export type EnvDetail = {
   credentials: string[];
   missing_secrets: string[];
   sandbox_secrets: string[];
+  /** Empty while the dev container is stopped. */
+  ports: EnvPorts;
 };
 
 export type Meta = {

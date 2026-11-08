@@ -125,6 +125,7 @@ Start the project as usual in the env's terminal: `yarn dev` prints
 on, 1024–32767, to the same port on your machine for as long as it listens. It goes through
 the runtime rather than a network path, so servers bound to the env's own localhost work too;
 a port already taken here is skipped (`luoto forward LOCAL:ENV` maps it elsewhere).
+`luoto status` and the env's panel in `luoto ui` list the forwarded ports as links.
 
 ### 5. See what it reached
 
@@ -164,7 +165,7 @@ Commands act on the env of the current folder; `-e NAME` picks another (`luoto s
 | to see or remove rules                                                                               | `luoto status`<br>`luoto revoke <id-or-host>`                                                                                      |
 | to answer access requests from inside                                                                | `luoto requests` (`--watch` waits)<br>`luoto approve 3 --ttl 1h`<br>`luoto reject 3`                                               |
 | an agent (installed on first run)                                                                    | `luoto agent run claude --yolo`<br>`luoto agent list`                                                                              |
-| a dev server in your browser                                                                         | run it: its port is forwarded to localhost here<br>`luoto forward 8080:5173` (to another local port)                               |
+| a dev server in your browser                                                                         | run it: its port is forwarded to localhost here (`luoto status` lists it)<br>`luoto forward 8080:5173` (to another local port)     |
 | your work out: push from the env (with a GitHub, Azure DevOps or SSH credential), or copy files back | `git push`<br>`luoto pull`                                                                                                         |
 | image or config changes applied (volumes are kept)                                                   | `luoto up --recreate`                                                                                                              |
 | a fresh home: dotfiles, shell history, agents' logins and state, toolchains (the workspace stays)    | `luoto reset-home`                                                                                                                 |
@@ -176,7 +177,10 @@ Commands act on the env of the current folder; `-e NAME` picks another (`luoto s
 
 Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host> --reason …`
 asks you for access (`--preset npm` for a registry's hosts at once; `--package <name>` or
-`--tool <tool>@<version>` for software to keep); only you can approve, on the host.
+`--tool <tool>@<version>` for software to keep); only you can approve, on the host. A new
+request gets a desktop notification, as does the first denial at each host (macOS, where
+they come from Script Editor, and Linux with `notify-send`); the bell in `luoto ui` adds
+browser notifications for requests.
 
 ## Agents
 
@@ -292,7 +296,8 @@ hosts = ["dl.k8s.io"]         # extra hosts readable only while installs run
 
 `config.toml` takes `[tools]`, `[deps]`, `idle_stop` and `auto_forward` too, for every env, and
 `[agents.<name>]` options (`model`, `effort`) for every env that has that agent; an env's own,
-and its `luoto.toml`'s, come on top.
+and its `luoto.toml`'s, come on top. `notifications = false` there turns desktop notifications
+off.
 
 Secret refs: `op://…` (1Password CLI, desktop or service account), `vault://mount/path#field`
 (OpenBao / HashiCorp Vault), `keyring:service/account` (OS keychain), `env:NAME`, `file:path`.

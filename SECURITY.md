@@ -129,6 +129,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   sandbox. Ports already taken on the host are never taken over: a port anything on this
   machine answers on at localhost is skipped. `luoto ui` defaults to a port outside the range,
   so no env can serve a page on its origin. `auto_forward = false` turns this off.
+- **Notifications.** A desktop notification shows the host and reason of a request, and a
+  denied host, as the sandbox wrote them: control and format characters become spaces, the
+  text is capped, and it reaches the notifier as an argument, never as script. Denials notify
+  at most twice a minute per env. The UI's browser notifications carry no sandbox text.
 - **IDE attachment.** VS Code's host-side client talks to the server in the container; UI
   extensions run on the host. Keep host-side extensions minimal.
 - **SSH logins relayed out.** The vault checks that a session is bound to a pinned host key,

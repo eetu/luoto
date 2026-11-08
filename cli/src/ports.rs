@@ -1,24 +1,98 @@
 //! Reaching servers in an env from this machine. A forward listens on localhost here and pipes
 //! each connection into the env through `sandbox relay`, which connects from inside, so a
 //! server bound to the env's own localhost (Vite, Next, …) works without flags. The watcher
-//! forwards every port an env starts listening on; `luoto forward` does one by hand.
+//! forwards every port an env starts listening on and records them in `<data>/forwards.json`
+//! for `status` and the UI; `luoto forward` does one by hand.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::env::UID;
+use crate::paths::{Paths, write_private};
 use crate::runtime::Runtime;
 
 /// Ports the watcher forwards on its own: above the privileged ones, below Linux's ephemeral
 /// range (where servers asking for any free port land, editors' remote servers among them).
 pub const AUTO: std::ops::RangeInclusive<u16> = 1024..=32767;
+
+/// One env's ports as the watcher handles them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Watched {
+    /// Forwarded to the same port here.
+    pub forwarded: BTreeSet<u16>,
+    /// Listened on in the env, but something on this machine has the port.
+    pub taken: BTreeSet<u16>,
+}
+
+fn watched_path(paths: &Paths) -> PathBuf {
+    paths.data.join("forwards.json")
+}
+
+/// Record what the watcher forwards, by env.
+pub fn save_watched(paths: &Paths, by_env: &BTreeMap<String, Watched>) -> Result<()> {
+    write_private(&watched_path(paths), &serde_json::to_vec(by_env)?)
+}
+
+/// What the running watcher forwards for `env`; nothing when no watcher runs, as the file
+/// outlives one that was killed.
+fn watched(paths: &Paths, env: &str) -> Watched {
+    if !crate::watch::running(paths) {
+        return Watched::default();
+    }
+    std::fs::read(watched_path(paths))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<BTreeMap<String, Watched>>(&b).ok())
+        .and_then(|mut m| m.remove(env))
+        .unwrap_or_default()
+}
+
+/// Where an env's servers answer on this machine.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct EnvPorts {
+    /// Published by the gate (`ports` in the env's config).
+    pub published: BTreeSet<u16>,
+    /// Forwarded by the watcher.
+    pub forwarded: BTreeSet<u16>,
+    /// Listened on in the env and not forwarded: the port is taken on this machine.
+    pub taken: BTreeSet<u16>,
+}
+
+impl EnvPorts {
+    /// Every port that answers here, in order.
+    pub fn open(&self) -> BTreeSet<u16> {
+        self.published.union(&self.forwarded).copied().collect()
+    }
+}
+
+/// `env`'s ports: the gate's published ones while it runs, and the watcher's forwards.
+pub fn of_env(paths: &Paths, env: &str, config_ports: &[u16], gate_running: bool) -> EnvPorts {
+    let w = watched(paths, env);
+    let published: BTreeSet<u16> = if gate_running {
+        config_ports.iter().copied().collect()
+    } else {
+        BTreeSet::new()
+    };
+    EnvPorts {
+        // The gate's own publishing is what the watcher finds taken there.
+        taken: w.taken.difference(&published).copied().collect(),
+        forwarded: w.forwarded,
+        published,
+    }
+}
+
+/// The address a browser opens for `port`.
+pub fn url(port: u16) -> String {
+    format!("http://localhost:{port}")
+}
 
 /// TCP ports something listens on in the env's dev container; None if that can't be asked.
 pub fn listening(rt: &Runtime, dev: &str) -> Option<BTreeSet<u16>> {
@@ -180,6 +254,32 @@ mod tests {
              1: 0100007F:A3D2 0100007F:1F90 01 0\n\
              0: 00000000000000000000000001000000:1435 00000000000000000000000000000000:0000 0A 0\n";
         assert_eq!(parse_listening(table), BTreeSet::from([8080, 5173]));
+    }
+
+    #[test]
+    fn forwards_are_listed_only_while_the_watcher_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config: dir.path().join("config"),
+            data: dir.path().join("data"),
+        };
+        let web = Watched {
+            forwarded: BTreeSet::from([5173]),
+            taken: BTreeSet::from([3000]),
+        };
+        save_watched(&paths, &BTreeMap::from([("web".to_string(), web)])).unwrap();
+        let stopped = of_env(&paths, "web", &[8080], false);
+        assert_eq!(stopped, EnvPorts::default());
+
+        let lock = std::fs::File::create(paths.data.join("watch.lock")).unwrap();
+        lock.try_lock().unwrap();
+        let p = of_env(&paths, "web", &[8080], true);
+        assert_eq!(p.open(), BTreeSet::from([5173, 8080]));
+        assert_eq!(p.taken, BTreeSet::from([3000]));
+        let published = of_env(&paths, "web", &[3000], true);
+        assert_eq!(published.open(), BTreeSet::from([3000, 5173]));
+        assert!(published.taken.is_empty());
+        assert_eq!(of_env(&paths, "api", &[], true), EnvPorts::default());
     }
 
     #[test]

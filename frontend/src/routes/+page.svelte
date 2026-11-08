@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Bell from "@lucide/svelte/icons/bell";
+  import BellOff from "@lucide/svelte/icons/bell-off";
   import { onMount } from "svelte";
 
   import { bootToken } from "$lib/api";
@@ -11,6 +13,7 @@
   import SetupView from "$lib/components/SetupView.svelte";
   import VaultPanel from "$lib/components/VaultPanel.svelte";
   import Wordmark from "$lib/components/Wordmark.svelte";
+  import { noticeRequests, notifications, toggleNotifications } from "$lib/notify.svelte";
   import { app, startSync } from "$lib/stores/app.svelte";
 
   let showNew = $state(false);
@@ -18,6 +21,10 @@
 
   $effect(() => {
     document.title = app.overview?.instance ?? "luoto";
+  });
+
+  $effect(() => {
+    if (app.overview) noticeRequests(app.overview.envs, app.overview.instance);
   });
 
   onMount(() => {
@@ -47,6 +54,18 @@
     <Wordmark name={app.overview?.instance} />
     <span class="spacer"></span>
     {#if app.busy}<span class="busy">{app.busy}</span>{/if}
+    <button
+      class="icon"
+      class:active={notifications.on}
+      aria-label="browser notifications"
+      aria-pressed={notifications.on}
+      title={notifications.on
+        ? "browser notifications for access requests: on"
+        : "browser notifications for access requests: off"}
+      onclick={() => void toggleNotifications()}
+    >
+      {#if notifications.on}<Bell size={16} />{:else}<BellOff size={16} />{/if}
+    </button>
   </header>
 
   <div class="shell">
@@ -100,6 +119,24 @@
   .busy {
     color: var(--halo-accent);
     font-size: 12px;
+  }
+
+  .icon {
+    display: inline-flex;
+    padding: 4px;
+    border: 1px solid transparent;
+    border-radius: var(--halo-radius);
+    background: none;
+    color: var(--halo-text-muted);
+  }
+
+  .icon:hover {
+    color: var(--halo-text-main);
+  }
+
+  .icon.active {
+    background: var(--halo-accent-soft);
+    color: var(--halo-accent);
   }
 
   .shell {
