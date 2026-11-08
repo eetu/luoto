@@ -20,14 +20,11 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
 - **The process behind a request,** named from outside by gVisor's runtime monitoring.
 - **Malicious and brand-new package versions** refused at registry hosts (OSV `MAL-*`, a
   minimum release age).
-- **Cloud credentials outside the sandbox** for terraform and the cloud CLIs: the gate re-signs
-  AWS requests (SigV4); the vault mints Azure and GCP tokens. Today they are
-  `sandbox_secret`s, readable inside.
+- **AWS and GCP credentials outside the sandbox,** as Azure's are: the gate re-signs AWS
+  requests (SigV4); the vault mints GCP tokens.
 
 ## Workflow
 
-- **Start from a remote:** `luoto init <url|owner/repo>` clones into a new env with nothing on
-  the host.
 - **Services that come back:** a command on every start (a database after `up` or an idle
   stop), then sidecars.
 - **Corporate networks:** a CA for every upstream (Zscaler, Netskope) and egress through a
