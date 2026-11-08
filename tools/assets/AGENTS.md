@@ -70,9 +70,7 @@ completing it stays with the user:
    request for all its hosts: `sandbox request --preset npm --reason "<why>" --wait`.
    A protocol other than HTTP(S), such as a database, is a host and port:
    `sandbox request db.example.com:5432 --reason "<why>" --wait`. Approved, it is an
-   uninspected tunnel through the proxy (`CONNECT` to `gate:3128`): clients that honour
-   `HTTPS_PROXY` use it as they are, others connect through it, e.g.
-   `nc -X connect -x gate:3128 db.example.com 5432`.
+   uninspected tunnel: clients connect to the host and port as they are.
 
 3. Tell the user what you requested and why. They approve it on the host with
    `luoto approve -e <env> <id>` or in `luoto ui`, possibly for less than you asked (read

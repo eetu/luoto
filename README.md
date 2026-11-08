@@ -622,8 +622,6 @@ you use luoto: `luoto up` asks before switching.
 
 - Outside HTTP(S), only tunnel rules (`luoto allow --tunnel`) and git over SSH to
   `[credentials.ssh]` hosts leave an env. Run databases inside the dev container.
-- A tunnel is reached through the gate's proxy (`CONNECT` to `gate:3128`), as clients that
-  honour `HTTPS_PROXY` do; a client that dials the host itself, such as `psql`, is refused.
 - No Docker-in-docker inside envs.
 - The gate speaks HTTP/1.1 to the sandbox, so gRPC needs a tunnel rule.
 - The gate holds up to 1024 connections per env. It closes a request whose response hasn't

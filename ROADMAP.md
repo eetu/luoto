@@ -38,9 +38,7 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   host tools act on (`.git/config`, hooks, `.envrc`, editor and pre-commit configs).
 - **`luoto run` jobs:** a clean-checkout start, a CI recipe.
 - **Detached agents:** `agent run --detach`, `agent ps`, `agent attach`.
-- **Requests:** `sandbox request` for ports; `approve` that narrows a request.
 - **More commands:** `push` (a reviewed copy-in), `doctor --report`, `uninstall`.
-- **`luoto project suggest`:** an env's working rules as a `luoto.toml` for the team.
 - **The UI does what the CLI does:** editing an env's presets, tools, agents, ports,
   credentials and repos, removing it, and the questions `init` and installs ask (prompts and
   progress the UI streams).
@@ -81,5 +79,4 @@ Each change is a format migration (`cli/src/format.rs`); the first one also brin
 
 - Windows verified end to end, or documented as WSL2-only.
 - `sandbox provision`: one call into the env instead of the 26 an unchanged `up` makes.
-- An env CA renewed before its 730 days end; log caps on the vault and dev containers.
 - Generated frontend types.

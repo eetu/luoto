@@ -32,6 +32,23 @@ Your own deny and mute rules, notifications for requests, and commands for every
   as in luoto's VM, and Docker keep their own settings.
 - **System packages:** `[deps] system` installs in an env without the `github` preset, whose
   missing grant for the base image's GitHub CLI source failed the package-list update.
+- **Port requests:** `sandbox request db.example.com:5432` asks for an uninspected tunnel to
+  that host and port (never 80 or 443, no private addresses); approving it, in the CLI or the
+  UI, asks you to confirm the risk.
+- **Narrower approvals:** `luoto approve --read`, `--method` and `--path` grant less than a
+  request asked, never more; the UI's request panel offers read-only and paths. The sandbox
+  is told what it got.
+- **Tunnels for every client:** a tunnel rule also passes connections that skip the proxy
+  (`psql`, protocols whose server speaks first, TLS a client pins), where only clients using
+  `HTTPS_PROXY` got through.
+- **`luoto project suggest`:** prints a `luoto.toml` from an env's presets, agents, ports,
+  `[deps]`, remote repos, rules and denies, and names what it leaves out (credentials,
+  secrets, mutes, folders, expiring grants, rules a sandbox couldn't ask for); `--write` puts
+  it in the env's folder, replacing one only with `--force`.
+- **CA renewal:** `up` replaces an env CA with less than 60 days of its two years left, or
+  already expired; the gate signs with the new one at once and a running dev container
+  restarts to trust it. `luoto status` and `doctor` show the expiry when it is that close.
+  The vault's and dev container's logs are capped (1 MB, 10 MB; podman).
 - **luoto.toml review:** an `up` that can't ask (the UI, `up --all`) leaves a changed
   `luoto.toml` unapplied without recording a decline.
 

@@ -98,6 +98,38 @@ async fn conn(state: Arc<State>, stream: TcpStream, slot: Slot) {
     };
     let label = name.clone().unwrap_or_else(|| ip.to_string());
 
+    // A tunnel rule for the name and port passes the connection through before a byte is
+    // read: any protocol, including ones whose server speaks first, and TLS a client pins.
+    let port = dst.port();
+    let rule = name.as_deref().and_then(|h| {
+        state
+            .policy()
+            .tunnel_rule(h, port, chrono::Utc::now())
+            .map(|r| (h.to_string(), r.id.clone(), r.rule.allow_private))
+    });
+    if let Some((host, rule_id, allow_private)) = rule {
+        match crate::upstream::dial_tcp(&state, &host, port, allow_private).await {
+            Ok(upstream) => {
+                let _slot = slot;
+                crate::proxy::splice(
+                    state,
+                    stream,
+                    upstream,
+                    host,
+                    port,
+                    rule_id,
+                    Intake::Transparent,
+                )
+                .await;
+            }
+            Err(crate::upstream::DialError::Denied(reason)) => {
+                direct(&state, &label, port, reason.message(&host));
+            }
+            Err(crate::upstream::DialError::Failed(msg)) => direct(&state, &label, port, msg),
+        }
+        return;
+    }
+
     let mut peek = [0u8; 8];
     let n = match tokio::time::timeout(Duration::from_secs(10), stream.peek(&mut peek)).await {
         Ok(Ok(n)) if n > 0 => n,
@@ -121,45 +153,16 @@ async fn conn(state: Arc<State>, stream: TcpStream, slot: Slot) {
         mitm::serve(state, stream, expect, dst.port(), Intake::Transparent, slot).await;
         return;
     }
-    // Git over SSH, to hosts `[credentials.ssh]` names (as tunnel rules on their port),
-    // passed through as it is: the vault's agent signs the login, for pinned host keys only.
+    // Git over SSH passes only on the tunnel rules `[credentials.ssh]` compiles (above).
     if peek[..n].starts_with(b"SSH-") {
-        let port = dst.port();
-        let rule = name.as_deref().and_then(|h| {
-            state
-                .policy()
-                .tunnel_rule(h, port, chrono::Utc::now())
-                .map(|r| (h.to_string(), r.id.clone(), r.rule.allow_private))
-        });
-        let Some((host, rule_id, allow_private)) = rule else {
-            direct(
-                &state,
-                &label,
-                port,
-                format!(
-                    "SSH to {label}:{port} was refused; `[credentials.ssh] hosts` lists where git over SSH may go"
-                ),
-            );
-            return;
-        };
-        match crate::upstream::dial_tcp(&state, &host, port, allow_private).await {
-            Ok(upstream) => {
-                crate::proxy::splice(
-                    state,
-                    stream,
-                    upstream,
-                    host,
-                    port,
-                    rule_id,
-                    Intake::Transparent,
-                )
-                .await;
-            }
-            Err(crate::upstream::DialError::Denied(reason)) => {
-                direct(&state, &label, port, reason.message(&host));
-            }
-            Err(crate::upstream::DialError::Failed(msg)) => direct(&state, &label, port, msg),
-        }
+        direct(
+            &state,
+            &label,
+            port,
+            format!(
+                "SSH to {label}:{port} was refused; `[credentials.ssh] hosts` lists where git over SSH may go"
+            ),
+        );
         return;
     }
     if !looks_like_http(&peek[..n]) {
@@ -176,7 +179,6 @@ async fn conn(state: Arc<State>, stream: TcpStream, slot: Slot) {
     }
 
     let ctx = Arc::new(ConnCtx::new(Intake::Transparent, slot));
-    let port = dst.port();
     let (activity, lim) = (ctx.activity.clone(), state.cfg.limits);
     serve_http1(
         stream,

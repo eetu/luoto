@@ -7,9 +7,10 @@ sockets, then drops to uid 65534 (`system.rs`).
 - `proxy.rs` explicit proxy on gate:3128 (CONNECT → `mitm.rs` or an opaque tunnel for
   tunnel-mode rules; absolute-form HTTP; origin-form → `api.rs`, the in-sandbox API).
 - `transparent.rs` catch-all on :15001 for TCP that bypassed the proxy; destination name from
-  the fake-IP map (`dns.rs`) or SNI/Host. Never dials the client's chosen IP. `SSH-`
-  connections pass through unread, only on a tunnel rule for their host and port (what
-  `[credentials.ssh]` compiles); the vault signs the login.
+  the fake-IP map (`dns.rs`) or SNI/Host. Never dials the client's chosen IP. A connection
+  whose name and port have a tunnel rule passes through unread before any byte is sniffed
+  (any protocol, server-first ones and pinned TLS too; SSH under `[credentials.ssh]`, whose
+  login the vault signs).
 - `handler.rs` per-request pipeline shared by every intake: one canonical path
   (`host::canonical_path`: dot and empty segments and backslashes refused, unreserved escapes
   decoded), matched and forwarded alike; upper-case methods only (`canonical_request`, which
