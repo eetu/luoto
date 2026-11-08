@@ -305,14 +305,20 @@ async fn handle_inner(
         },
         Utc::now(),
     );
-    let (rule, max_body, allow_private) = match decision {
+    let (rule, max_body, allow_private, rule_idle) = match decision {
         Decision::Allow {
             rule,
             max_body,
             allow_private,
-        } => (rule, max_body, allow_private),
-        Decision::Deny(reason) => return deny(ev, reason),
+            idle,
+        } => (rule, max_body, allow_private, idle),
+        Decision::Deny(reason) => {
+            ctx.activity.set_rule_idle(None);
+            return deny(ev, reason);
+        }
     };
+    // Every wait on this connection follows the rule until the next request is decided.
+    ctx.activity.set_rule_idle(rule_idle);
     let mut ev = ev;
     ev.rule = Some(rule);
 
@@ -441,7 +447,8 @@ async fn handle_inner(
     let sent = tokio::select! {
         r = sender.send_request(Request::from_parts(parts, body)) => r,
         () = ctx.activity.stalled(head, head) => {
-            let msg = format!("{} sent no response within {}", target.host, limits::spell(head));
+            let waited = head.max(ctx.activity.idle_or(Duration::ZERO));
+            let msg = format!("{} sent no response within {}", target.host, limits::spell(waited));
             return failed(&state, ev, StatusCode::GATEWAY_TIMEOUT, msg);
         }
     };
@@ -466,7 +473,7 @@ async fn handle_inner(
                 let _slot = slot;
                 if let (Ok(c), Ok(s)) = (client_upgrade.await, server_upgrade.await) {
                     let mut s = TokioIo::new(s);
-                    let idle = lim.tunnel_idle;
+                    let idle = rule_idle.unwrap_or(lim.tunnel_idle);
                     limits::pipe(TokioIo::new(c), &mut s, idle, std::future::pending()).await;
                 }
             });
@@ -481,7 +488,7 @@ async fn handle_inner(
     if status != StatusCode::SWITCHING_PROTOCOLS {
         strip_hop_by_hop(&mut rparts.headers, false);
         if !placed.is_empty() {
-            let idle = lim.idle;
+            let idle = ctx.activity.idle_or(lim.idle);
             let screened = tokio::select! {
                 r = screen(&mut rparts.headers, rbody, &placed) => r,
                 () = ctx.activity.stalled(idle, idle) => {

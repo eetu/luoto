@@ -1032,6 +1032,15 @@ fn timing_server() -> SocketAddr {
                 let mut s = stream;
                 match first.split_whitespace().nth(1).unwrap_or("") {
                     "/silent" => std::thread::sleep(Duration::from_secs(30)),
+                    "/late" => {
+                        std::thread::sleep(Duration::from_millis(1500));
+                        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nlate");
+                    }
+                    "/pause" => {
+                        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na");
+                        std::thread::sleep(Duration::from_millis(1500));
+                        let _ = s.write_all(b"b");
+                    }
                     "/stall" => {
                         let _ =
                             s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial");
@@ -1077,6 +1086,32 @@ async fn a_stalled_exchange_is_cut_but_a_slow_one_is_not() {
     // Twice the idle limit in all, but never idle for it.
     let r = env.get("http://timing.test/slow");
     assert_eq!((r.status, r.body.as_str()), (200, "xxxxxxxxxx"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn a_rules_idle_lets_its_host_stay_silent_longer() {
+    let env = Env::start_limited(
+        &[("timing.test", timing_server())],
+        "response_head_ms=500,idle_ms=500",
+    );
+    env.apply(Policy {
+        rules: vec![read("timing", "timing.test")],
+        ..Default::default()
+    });
+    assert_eq!(env.get("http://timing.test/late").status, 504);
+    assert_eq!(env.get("http://timing.test/pause").body, "a");
+
+    let mut patient = read("patient", "timing.test");
+    patient.rule.idle = Some("3s".into());
+    env.apply(Policy {
+        rules: vec![patient],
+        ..Default::default()
+    });
+    let r = env.get("http://timing.test/late");
+    assert_eq!((r.status, r.body.as_str()), (200, "late"), "{}", r.head);
+    let r = env.get("http://timing.test/pause");
+    assert_eq!((r.status, r.body.as_str()), (200, "ab"));
 }
 
 fn provider() -> Arc<CryptoProvider> {

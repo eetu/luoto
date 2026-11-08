@@ -249,3 +249,15 @@ test("a new access request notifies once the user turned notifications on", asyn
     })
     .toEqual(["luoto: web asks for access"]);
 });
+
+test("with desktop notifications on, the page shows none of its own", async ({ page }) => {
+  await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/overview",
+    (route) => route.fulfill({ json: { ...(fixture("overview") as object), desktop_notifications: true } }),
+  );
+  await open(page);
+  const bell = page.getByRole("button", { name: "browser notifications" });
+  await expect(bell).toBeDisabled();
+  await expect(bell).toHaveAttribute("title", /notifications = false/);
+});

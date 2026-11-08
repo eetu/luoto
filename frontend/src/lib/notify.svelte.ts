@@ -62,11 +62,12 @@ export const toggleNotifications = async (): Promise<void> => {
 // Requests pending per env at the last look; the first look only records them.
 let lastPending: Record<string, number> | null = null;
 
-/** Notify of each env with more requests pending than at the last look. */
-export const noticeRequests = (envs: EnvRow[], instance: string): void => {
+/** Notify of each env with more requests pending than at the last look, unless the desktop
+ * already does. */
+export const noticeRequests = (envs: EnvRow[], instance: string, desktop: boolean): void => {
   const before = lastPending;
   lastPending = Object.fromEntries(envs.map((e) => [e.name, e.pending]));
-  if (!before || !notifications.on) return;
+  if (!before || !notifications.on || desktop) return;
   // In sight, the request shows on the page.
   if (document.visibilityState === "visible" && document.hasFocus()) return;
   for (const env of envs) {

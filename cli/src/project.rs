@@ -357,6 +357,9 @@ fn rule_line(r: &Rule) -> String {
     if let Some(m) = r.max_body {
         parts.push(format!("bodies up to {m} bytes"));
     }
+    if let Some(i) = &r.idle {
+        parts.push(format!("silent up to {}", display(i)));
+    }
     if let Some(e) = r.expires {
         parts.push(format!("until {}", e.to_rfc3339()));
     }

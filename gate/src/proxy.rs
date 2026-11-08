@@ -193,7 +193,11 @@ pub async fn splice<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
             }
         }
     };
-    let idle = state.cfg.limits.tunnel_idle;
+    let idle = state
+        .policy()
+        .tunnel_rule(&host, port, Utc::now())
+        .and_then(|r| r.rule.idle_limit())
+        .unwrap_or(state.cfg.limits.tunnel_idle);
     let piped = limits::pipe(client, &mut upstream, idle, watchdog).await;
     let message = match piped.end {
         End::Closed => None,

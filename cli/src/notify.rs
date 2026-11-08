@@ -319,6 +319,18 @@ fn post(n: &Note) -> std::io::Result<bool> {
 
 /// The OS's notifier with the note as its arguments, never as script source, so no text can
 /// run. Linux notification servers read the body as markup, so it is escaped.
+/// Whether the watcher shows desktop notifications: on in `config.toml` and a notifier here.
+pub fn desktop(on: Option<bool>) -> bool {
+    on != Some(false)
+        && match std::env::consts::OS {
+            "macos" => true,
+            "linux" => std::env::var_os("PATH").is_some_and(|path| {
+                std::env::split_paths(&path).any(|d| d.join("notify-send").is_file())
+            }),
+            _ => false,
+        }
+}
+
 fn notifier(os: &str, n: &Note) -> Option<Command> {
     match os {
         "macos" => {

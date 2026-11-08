@@ -49,6 +49,10 @@ pub struct AllowOpts {
     /// Allow websocket upgrades.
     #[arg(long)]
     pub ws: bool,
+    /// How long the host may stay silent before the gate closes the connection (30m, 2h; at
+    /// most 24h), for long polls such as `kubectl logs -f`.
+    #[arg(long, value_name = "DURATION")]
+    pub idle: Option<String>,
     /// Allow private/host addresses (e.g. a service on your machine).
     #[arg(long)]
     pub private: bool,
@@ -68,6 +72,9 @@ pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
     } else {
         luoto_shared::host::normalize_host(luoto_shared::host::host_of(host))?
     };
+    if let Some(idle) = &o.idle {
+        luoto_shared::policy::parse_idle(idle).map_err(anyhow::Error::msg)?;
+    }
     let access = if !o.methods.is_empty() {
         Access::Methods(o.methods.iter().map(|m| m.to_ascii_uppercase()).collect())
     } else if o.write || o.tunnel {
@@ -97,6 +104,7 @@ pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
         allow_private: o.private,
         note: o.note.clone(),
         ignore_case: false,
+        idle: o.idle.clone(),
     })
 }
 

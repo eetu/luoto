@@ -13,10 +13,6 @@ use serde_json::Value;
 use crate::config::GlobalConfig;
 use crate::names;
 
-/// Files Docker's `local` log driver rotates over (its own default): the oldest goes as a
-/// new one starts, so the log never empties at once.
-const DOCKER_LOG_FILES: u32 = 5;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flavor {
     Podman,
@@ -64,7 +60,8 @@ pub struct RunSpec {
     pub id_map: Option<u32>,
     pub restart: Option<String>,
     pub security_opts: Vec<String>,
-    /// The most of the container's log the runtime keeps, in MB.
+    /// The most of the container's log podman keeps, in MB. Docker keeps the daemon's own
+    /// log driver and its settings.
     pub log_mb: Option<u32>,
 }
 
@@ -624,20 +621,11 @@ impl Runtime {
                 }
             }
         }
-        if let Some(mb) = spec.log_mb {
-            match self.flavor {
-                // Podman takes `max-size` with every log driver (journald keeps its own bounds).
-                Flavor::Podman => a.extend(["--log-opt".into(), format!("max-size={mb}m")]),
-                // Docker refuses `max-size` for drivers without it; `local` rotates over files.
-                Flavor::Docker => a.extend([
-                    "--log-driver".into(),
-                    "local".into(),
-                    "--log-opt".into(),
-                    format!("max-size={}m", mb.div_ceil(DOCKER_LOG_FILES)),
-                    "--log-opt".into(),
-                    format!("max-file={DOCKER_LOG_FILES}"),
-                ]),
-            }
+        // Podman takes `max-size` with every log driver (journald keeps its own bounds).
+        if let Some(mb) = spec.log_mb
+            && self.flavor == Flavor::Podman
+        {
+            a.extend(["--log-opt".into(), format!("max-size={mb}m")]);
         }
         if let Some(r) = &spec.restart {
             a.extend(["--restart".into(), r.clone()]);
@@ -808,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn a_log_cap_takes_each_runtime_form() {
+    fn a_log_cap_goes_to_podman_and_docker_keeps_its_drivers() {
         let s = RunSpec {
             log_mb: Some(50),
             ..spec()
@@ -816,11 +804,9 @@ mod tests {
         let podman = rt(Flavor::Podman).run_args(&s, false).join(" ");
         assert!(podman.contains("--log-opt max-size=50m"));
         assert!(!podman.contains("--log-driver"));
-        let docker = rt(Flavor::Docker).run_args(&s, true).join(" ");
-        assert!(docker.contains("--log-driver local --log-opt max-size=10m --log-opt max-file=5"));
         assert!(
             !rt(Flavor::Docker)
-                .run_args(&spec(), true)
+                .run_args(&s, true)
                 .join(" ")
                 .contains("--log")
         );

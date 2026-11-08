@@ -101,9 +101,42 @@ pub struct Rule {
     /// (Azure DevOps organizations, projects and repositories).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ignore_case: bool,
+    /// How long the host may stay silent (`30m`, `2h`) before the gate closes the connection,
+    /// in place of its default: for long polls such as `kubectl logs -f`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle: Option<String>,
+}
+
+/// The longest `idle` a rule may set.
+pub const MAX_IDLE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// A rule's `idle`: a whole number of seconds, minutes or hours (`90s`, `30m`, `2h`), above
+/// zero and at most [`MAX_IDLE`].
+pub fn parse_idle(s: &str) -> Result<std::time::Duration, String> {
+    let s = s.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num, unit) = s.split_at(split);
+    let n: u64 = num
+        .parse()
+        .map_err(|_| format!("idle `{s}`: give a duration such as 30m or 2h"))?;
+    let secs = match unit {
+        "s" => Some(n),
+        "m" => n.checked_mul(60),
+        "h" => n.checked_mul(3600),
+        _ => return Err(format!("idle `{s}`: use s, m or h")),
+    };
+    match secs.map(std::time::Duration::from_secs) {
+        Some(d) if !d.is_zero() && d <= MAX_IDLE => Ok(d),
+        _ => Err(format!("idle `{s}`: above zero and at most 24h")),
+    }
 }
 
 impl Rule {
+    /// The rule's valid `idle`, if it sets one.
+    pub fn idle_limit(&self) -> Option<std::time::Duration> {
+        self.idle.as_deref().and_then(|s| parse_idle(s).ok())
+    }
+
     pub fn read(host: &str) -> Self {
         Rule {
             host: host.into(),
@@ -473,6 +506,8 @@ pub enum Decision {
         rule: String,
         max_body: Option<u64>,
         allow_private: bool,
+        /// The rule's `idle`, in place of the gate's.
+        idle: Option<std::time::Duration>,
     },
     Deny(DenyReason),
 }
@@ -542,6 +577,7 @@ impl Policy {
                 rule: r.id.clone(),
                 max_body: r.rule.max_body,
                 allow_private: r.rule.allow_private,
+                idle: r.rule.idle_limit(),
             };
         }
 
@@ -726,6 +762,9 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
             "tunnel mode cannot enforce methods or paths; it grants full access to the host".into(),
         ));
     }
+    if let Some(Err(e)) = rule.idle.as_deref().map(parse_idle) {
+        issues.push(err(e));
+    }
     if rule.allow_private {
         issues.push(host_risk(
             "allows dialing private/host addresses (e.g. services on your machine)".into(),
@@ -743,6 +782,45 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rules_idle_is_a_duration_up_to_a_day() {
+        assert_eq!(parse_idle("90s"), Ok(std::time::Duration::from_secs(90)));
+        assert_eq!(parse_idle("30m"), Ok(std::time::Duration::from_secs(1800)));
+        assert_eq!(parse_idle("24h"), Ok(MAX_IDLE));
+        for bad in [
+            "0m",
+            "25h",
+            "1d",
+            "soon",
+            "",
+            "-5m",
+            "99999999999999999999h",
+        ] {
+            assert!(parse_idle(bad).is_err(), "{bad}");
+        }
+        let mut r = Rule::read("k8s.example");
+        r.idle = Some("2d".into());
+        assert!(
+            validate_rule(&r, RuleOrigin::Host)
+                .iter()
+                .any(|i| i.severity == Severity::Error)
+        );
+        r.idle = Some("2h".into());
+        assert!(validate_rule(&r, RuleOrigin::Host).is_empty());
+        let p = Policy {
+            rules: vec![CompiledRule {
+                id: "k".into(),
+                origin: "test".into(),
+                rule: r,
+            }],
+            ..Default::default()
+        };
+        assert!(matches!(
+            p.decide(&req("k8s.example", "GET", "/logs"), Utc::now()),
+            Decision::Allow { idle: Some(d), .. } if d == std::time::Duration::from_secs(7200)
+        ));
+    }
     use chrono::Duration;
 
     fn rule(id: &str, r: Rule) -> CompiledRule {

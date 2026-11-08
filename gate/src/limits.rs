@@ -256,6 +256,8 @@ pub struct Activity {
     read: AtomicU64,
     written: AtomicU64,
     busy: AtomicUsize,
+    /// The allowing rule's `idle` in milliseconds, 0 for the gate's own limits.
+    rule_idle: AtomicU64,
     changed: Notify,
 }
 
@@ -267,6 +269,7 @@ impl Activity {
             read: AtomicU64::new(0),
             written: AtomicU64::new(0),
             busy: AtomicUsize::new(0),
+            rule_idle: AtomicU64::new(0),
             changed: Notify::new(),
         })
     }
@@ -295,14 +298,32 @@ impl Activity {
         Busy(self.clone())
     }
 
+    /// The idle limit of the rule that allowed the request being served (`None`: the gate's).
+    pub fn set_rule_idle(&self, idle: Option<Duration>) {
+        let ms = idle.map_or(0, |d| d.as_millis().max(1) as u64);
+        self.rule_idle.store(ms, Ordering::SeqCst);
+        self.changed.notify_waiters();
+    }
+
+    /// `idle`, or the allowing rule's in its place.
+    pub fn idle_or(&self, idle: Duration) -> Duration {
+        match self.rule_idle.load(Ordering::SeqCst) {
+            0 => idle,
+            ms => Duration::from_millis(ms),
+        }
+    }
+
     /// Resolves once nothing has moved for `idle`, or for `busy` while a request is handled.
+    /// A rule's `idle` replaces `idle` and lengthens `busy` to it.
     pub async fn stalled(&self, idle: Duration, busy: Duration) {
         loop {
             let changed = self.changed.notified();
-            let limit = if self.busy.load(Ordering::SeqCst) > 0 {
-                busy
-            } else {
-                idle
+            let rule = self.idle_or(Duration::ZERO);
+            let limit = match (self.busy.load(Ordering::SeqCst) > 0, rule.is_zero()) {
+                (true, true) => busy,
+                (true, false) => busy.max(rule + HEAD_GRACE),
+                (false, true) => idle,
+                (false, false) => rule,
             };
             let still = self.still();
             if still >= limit {

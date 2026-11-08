@@ -134,6 +134,8 @@ export type VaultStatus = {
 export type Overview = {
   /** `luoto`, or `luoto-dev` for a source build. */
   instance: string;
+  /** The watcher shows desktop notifications, so this page shows none. */
+  desktop_notifications: boolean;
   runtime: string;
   envs: EnvRow[];
   vault: VaultStatus | null;

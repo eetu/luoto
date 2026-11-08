@@ -11,6 +11,7 @@
       "repos": []
     }
   ],
+  "desktop_notifications": false,
   "instance": "luoto",
   "runtime": "podman version 6.1.4",
   "vault": {

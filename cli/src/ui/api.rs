@@ -102,6 +102,8 @@ struct EnvRow {
 #[derive(Serialize)]
 struct Overview {
     instance: &'static str,
+    /// The watcher shows desktop notifications, so the UI shows none of its own.
+    desktop_notifications: bool,
     runtime: String,
     envs: Vec<EnvRow>,
     vault: Option<VaultStatus>,
@@ -151,6 +153,7 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
             .flatten();
         Ok(Overview {
             instance: names::instance(),
+            desktop_notifications: crate::notify::desktop(ctx.global.notifications),
             runtime: ctx
                 .rt
                 .version()

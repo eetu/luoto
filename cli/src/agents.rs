@@ -3,6 +3,8 @@
 
 use std::io::{self, IsTerminal};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -516,6 +518,38 @@ pub fn add(env_name: &str, agent: &str, credential: Option<&str>) -> Result<Exit
 /// What `luoto run` exits with when the agent ran out of `--timeout`, as `timeout(1)` does.
 pub const TIMED_OUT: u8 = 124;
 
+/// What `luoto run` exits with after Ctrl-C, as a shell reports SIGINT.
+const INTERRUPTED: u8 = 130;
+
+/// Why `luoto run` stopped the agent before it ended.
+#[derive(Clone, Copy)]
+enum Stop {
+    Timeout,
+    Interrupt,
+    /// Its answer could be written nowhere.
+    Output,
+}
+
+/// From now on Ctrl-C only counts, for `luoto run` to stop the agent in the env.
+fn count_interrupts() -> Arc<AtomicUsize> {
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        rt.block_on(async {
+            while tokio::signal::ctrl_c().await.is_ok() {
+                seen.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+    });
+    count
+}
+
 /// The variable that marks the processes of one `luoto run` in the env, whatever group or
 /// session they moved to.
 const RUN_MARK: &str = "LUOTO_RUN";
@@ -631,6 +665,11 @@ pub fn headless(
     } else {
         Stdio::inherit()
     });
+    // Ctrl-C is for luoto, which stops the agent inside the env: the runtime's client would
+    // only drop its end and leave the agent running.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let interrupts = count_interrupts();
     let mut child = cmd.spawn()?;
     let started = Instant::now();
     let errs = child
@@ -638,9 +677,10 @@ pub fn headless(
         .take()
         .map(|e| std::thread::spawn(move || relay(e, &mut std::io::stderr(), true)));
     let out = child.stdout.take().context("the agent's output")?;
-    let (status, relayed, timed_out) = std::thread::scope(|s| -> Result<_> {
+    let (status, relayed, stopped) = std::thread::scope(|s| -> Result<_> {
         let mut relayer = Some(s.spawn(|| answer(out, output, &out_file, err_tty)));
         let mut relayed = Ok(());
+        let mut stop: Option<(Instant, Stop)> = None;
         let mut steps = 0;
         let status = loop {
             if let Some(r) = relayer.take_if(|r| r.is_finished()) {
@@ -648,39 +688,62 @@ pub fn headless(
                     .join()
                     .unwrap_or_else(|_| Err(io::Error::other("relay failed")));
                 if relayed.is_err() {
-                    let _ = child.kill();
+                    stop.get_or_insert((Instant::now(), Stop::Output));
                 }
             }
             if let Some(status) = child.try_wait()? {
                 break status;
             }
-            let over = limit.and_then(|l| started.elapsed().checked_sub(l));
-            while let Some(over) = over
-                && STOP_STEPS.get(steps).is_some_and(|at| over >= *at)
-            {
-                match steps {
-                    0 => {
-                        eprintln!(
-                            "the agent ran past --timeout {}; stopping it",
-                            timeout.unwrap_or_default().trim()
-                        );
-                        signal_run(&ctx, &dev, &mark, "TERM");
-                    }
-                    1 => signal_run(&ctx, &dev, &mark, "KILL"),
-                    _ => {
-                        let _ = child.kill();
-                    }
+            if stop.is_none() {
+                if limit.is_some_and(|l| started.elapsed() >= l) {
+                    eprintln!(
+                        "the agent ran past --timeout {}; stopping it",
+                        timeout.unwrap_or_default().trim()
+                    );
+                    stop = Some((Instant::now(), Stop::Timeout));
+                } else if interrupts.load(Ordering::SeqCst) > 0 {
+                    eprintln!("stopping the agent in the env (Ctrl-C again: without waiting)");
+                    stop = Some((Instant::now(), Stop::Interrupt));
                 }
-                steps += 1;
+            }
+            if let Some((from, _)) = stop {
+                let over = if interrupts.load(Ordering::SeqCst) > 1 {
+                    Duration::MAX
+                } else {
+                    from.elapsed()
+                };
+                while STOP_STEPS.get(steps).is_some_and(|at| over >= *at) {
+                    match steps {
+                        0 => signal_run(&ctx, &dev, &mark, "TERM"),
+                        1 => signal_run(&ctx, &dev, &mark, "KILL"),
+                        _ => {
+                            let _ = child.kill();
+                        }
+                    }
+                    steps += 1;
+                }
             }
             std::thread::sleep(Duration::from_millis(50));
         };
+        // The agent may end before its stragglers, or the client before the agent (Ctrl-C
+        // reaches it on Windows).
+        let stop = stop
+            .map(|(_, why)| why)
+            .or_else(|| (interrupts.load(Ordering::SeqCst) > 0).then_some(Stop::Interrupt));
+        if stop.is_some() {
+            if steps == 0 {
+                signal_run(&ctx, &dev, &mark, "TERM");
+            }
+            if steps < 2 {
+                signal_run(&ctx, &dev, &mark, "KILL");
+            }
+        }
         if let Some(r) = relayer {
             relayed = r
                 .join()
                 .unwrap_or_else(|_| Err(io::Error::other("relay failed")));
         }
-        Ok((status, relayed, steps > 0))
+        Ok((status, relayed, stop))
     })?;
     if let Some(t) = errs {
         let _ = t.join();
@@ -704,8 +767,10 @@ pub fn headless(
             Err(e) => eprintln!("warning: env `{env_name}` not stopped ({e:#})"),
         }
     }
-    if timed_out {
-        return Ok(ExitCode::from(TIMED_OUT));
+    match stopped {
+        Some(Stop::Timeout) => return Ok(ExitCode::from(TIMED_OUT)),
+        Some(Stop::Interrupt) => return Ok(ExitCode::from(INTERRUPTED)),
+        Some(Stop::Output) | None => {}
     }
     Ok(ExitCode::from(
         status.code().unwrap_or(1).clamp(0, 255) as u8

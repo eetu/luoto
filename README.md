@@ -179,8 +179,8 @@ Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host
 asks you for access (`--preset npm` for a registry's hosts at once; `--package <name>` or
 `--tool <tool>@<version>` for software to keep); only you can approve, on the host. A new
 request gets a desktop notification, as does the first denial at each host (macOS, where
-they come from Script Editor, and Linux with `notify-send`); the bell in `luoto ui` adds
-browser notifications for requests.
+they come from Script Editor, and Linux with `notify-send`). Without them (turned off, or on
+Windows), the bell in `luoto ui` gives browser notifications for requests.
 
 ## Agents
 
@@ -614,7 +614,9 @@ you use luoto: `luoto up` asks before switching.
 - The gate speaks HTTP/1.1 to the sandbox, so gRPC needs a tunnel rule.
 - The gate holds up to 1024 connections per env. It closes a request whose response hasn't
   started 10 minutes after it was sent, a response that sends nothing for 5 minutes, and a
-  tunnel or websocket after an hour without traffic.
+  tunnel or websocket after an hour without traffic. A rule's `idle` (`luoto allow
+  k8s.example.com --idle 2h`, at most 24h) gives its host that long instead, for long polls
+  such as `kubectl logs -f`.
 
 ## Install details
 

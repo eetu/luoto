@@ -21,12 +21,14 @@ how it is started (`headless` in `shared/agents/<agent>.toml`).
 `--timeout 30m` (or `90s`, `2h`) counts from the agent's start, so bringing the env up and
 installing the agent don't use it. When it passes, luoto stops the agent and everything it
 started in the env, even processes in a group of their own: SIGTERM, then SIGKILL 10 seconds
-later. The env keeps running unless `--down` is given.
+later. Ctrl-C stops it the same way (a second one doesn't wait), and so does an answer that
+can't be written. The env keeps running unless `--down` is given.
 
 | exit code   | when                                                                             |
 | ----------- | -------------------------------------------------------------------------------- |
 | the agent's | the agent finished                                                               |
 | 124         | the agent ran past `--timeout` and was stopped (as `timeout(1)` exits)           |
+| 130         | Ctrl-C stopped it                                                                |
 | 1           | luoto itself failed, the reason on stderr: the env didn't come up, no credential |
 
 After the run, stderr lists what the gate denied while the agent ran: each host, how often,

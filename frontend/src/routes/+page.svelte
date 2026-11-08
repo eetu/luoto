@@ -24,7 +24,10 @@
   });
 
   $effect(() => {
-    if (app.overview) noticeRequests(app.overview.envs, app.overview.instance);
+    if (app.overview) {
+      const { envs, instance, desktop_notifications } = app.overview;
+      noticeRequests(envs, instance, desktop_notifications);
+    }
   });
 
   onMount(() => {
@@ -54,18 +57,29 @@
     <Wordmark name={app.overview?.instance} />
     <span class="spacer"></span>
     {#if app.busy}<span class="busy">{app.busy}</span>{/if}
-    <button
-      class="icon"
-      class:active={notifications.on}
-      aria-label="browser notifications"
-      aria-pressed={notifications.on}
-      title={notifications.on
-        ? "browser notifications for access requests: on"
-        : "browser notifications for access requests: off"}
-      onclick={() => void toggleNotifications()}
-    >
-      {#if notifications.on}<Bell size={16} />{:else}<BellOff size={16} />{/if}
-    </button>
+    {#if app.overview?.desktop_notifications}
+      <button
+        class="icon"
+        aria-label="browser notifications"
+        title="desktop notifications show access requests; `notifications = false` in config.toml hands them to this browser"
+        disabled
+      >
+        <Bell size={16} />
+      </button>
+    {:else}
+      <button
+        class="icon"
+        class:active={notifications.on}
+        aria-label="browser notifications"
+        aria-pressed={notifications.on}
+        title={notifications.on
+          ? "browser notifications for access requests: on"
+          : "browser notifications for access requests: off"}
+        onclick={() => void toggleNotifications()}
+      >
+        {#if notifications.on}<Bell size={16} />{:else}<BellOff size={16} />{/if}
+      </button>
+    {/if}
   </header>
 
   <div class="shell">
@@ -132,6 +146,11 @@
 
   .icon:hover {
     color: var(--halo-text-main);
+  }
+
+  .icon:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 
   .icon.active {
