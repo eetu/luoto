@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use crate::config::{EnvFile, ProviderValue};
 use crate::connect::exec_login;
 use crate::env::{self, Ctx, UID};
+use crate::logs::InstallLog;
 use crate::text::sh_quote;
 use crate::{events, names, secrets, sync};
 
@@ -67,11 +68,14 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
     let a = profile(agent)?;
     let dev = names::dev(env_name);
     if !installed(ctx, &dev, &a) && !a.install.is_empty() {
-        println!(
-            "installing {} in `{env_name}` (temporary access: {})…",
+        let what = format!(
+            "installing {} in `{env_name}` (temporary access: {})",
             a.description,
             a.install_hosts.join(", ")
         );
+        println!("{what}…");
+        let log = InstallLog::new(&ctx.paths, env_name);
+        log.note(&what);
         let rules: Vec<Rule> = a.install_hosts.iter().map(|h| Rule::read(h)).collect();
         let script = a.install.join(" && ");
         let status = sync::with_grants(
@@ -81,19 +85,27 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
             TimeDelta::minutes(15),
             &format!("installing {agent} (auto-revoked)"),
             || {
-                ctx.rt.interactive([
-                    "exec",
-                    "-u",
-                    UID,
-                    "-w",
-                    "/workspace",
-                    &dev,
-                    "sh",
-                    "-lc",
-                    &script,
-                ])
+                log.run(
+                    &ctx.rt,
+                    [
+                        "exec",
+                        "-u",
+                        UID,
+                        "-w",
+                        "/workspace",
+                        &dev,
+                        "sh",
+                        "-lc",
+                        &script,
+                    ],
+                )
             },
         )??;
+        log.note(&if status.success() {
+            format!("installed {agent}")
+        } else {
+            format!("installing {agent} failed ({status})")
+        });
         if status.success() && !installed(ctx, &dev, &a) {
             bail!(
                 "{agent} installed, but `{}` is not on the login PATH (~/.local/bin, mise shims)",

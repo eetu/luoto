@@ -353,6 +353,19 @@ pub fn remove_dev(ctx: &Ctx, env: &str) -> Result<()> {
     ctx.rt.remove_container(&names::dev(env))
 }
 
+/// Discard the env's home volume, and the dev container that mounts it (a volume in use can't
+/// go); the next `up` makes both anew. Whether there was a home to discard.
+pub fn reset_home(ctx: &Ctx, env: &str) -> Result<bool> {
+    ensure_vm(ctx)?;
+    let vol = names::volume(env, "home");
+    if !ctx.rt.volume_exists(&vol) {
+        return Ok(false);
+    }
+    ctx.rt.remove_container(&names::dev(env))?;
+    ctx.rt.run(["volume", "rm", &vol])?;
+    Ok(true)
+}
+
 /// On macOS and Windows, podman envs run only in luoto's own VM, started here if needed.
 pub fn ensure_vm(ctx: &Ctx) -> Result<()> {
     if ctx.rt.flavor != Flavor::Podman || !machine::supported() {
@@ -599,15 +612,8 @@ fn start_gate(
     let rt = &ctx.rt;
     let a = names::addrs(state.octet);
     let launch = start_or_create(ctx, &gate_spec(ctx, env, p, &a), image_id, true)?;
-    let gs = wait_until(Duration::from_secs(20), || ctl::gate_status(rt, env).ok()).with_context(
-        || {
-            format!(
-                "gate for `{env}` did not come up (see `{} logs {}`)",
-                rt.name(),
-                names::gate(env)
-            )
-        },
-    )?;
+    let gs = wait_until(Duration::from_secs(20), || ctl::gate_status(rt, env).ok())
+        .with_context(|| format!("gate for `{env}` did not come up (see `luoto logs -e {env}`)"))?;
     if !gs.ca_installed {
         ctl::gate::<bool>(
             rt,

@@ -289,6 +289,62 @@ impl Runtime {
         Ok(self.command().args(args).status()?)
     }
 
+    /// Run with stdout and stderr read as they come: `each` gets every chunk and whether it
+    /// came from stderr. When `each` returns false the command is killed.
+    pub fn stream<I, S>(
+        &self,
+        args: I,
+        each: &(dyn Fn(bool, &[u8]) -> bool + Sync),
+    ) -> Result<ExitStatus>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let args: Vec<std::ffi::OsString> =
+            args.into_iter().map(|a| a.as_ref().to_owned()).collect();
+        traced(&args, || -> Result<ExitStatus> {
+            let mut child = self
+                .command()
+                .args(&args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .with_context(|| format!("run {}", self.bin))?;
+            let out = child.stdout.take().context("stdout")?;
+            let err = child.stderr.take().context("stderr")?;
+            let child = std::sync::Mutex::new(child);
+            fn pump(
+                mut r: impl std::io::Read,
+                is_err: bool,
+                each: &(dyn Fn(bool, &[u8]) -> bool + Sync),
+                child: &std::sync::Mutex<std::process::Child>,
+            ) {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match r.read(&mut buf) {
+                        Ok(0) => return,
+                        Ok(n) if !each(is_err, &buf[..n]) => {
+                            let _ = child.lock().map(|mut c| c.kill());
+                            return;
+                        }
+                        Ok(_) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => return,
+                    }
+                }
+            }
+            std::thread::scope(|s| {
+                s.spawn(|| pump(err, true, each, &child));
+                pump(out, false, each, &child);
+            });
+            let mut child = child
+                .into_inner()
+                .map_err(|_| anyhow::anyhow!("child lock"))?;
+            Ok(child.wait()?)
+        })
+    }
+
     /// Pull `image` with the runtime's own progress on the terminal: a first pull can take
     /// minutes on a slow network, and a silent one looks hung.
     pub fn pull(&self, image: &str) -> Result<()> {

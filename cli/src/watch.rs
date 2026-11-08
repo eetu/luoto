@@ -33,7 +33,7 @@ pub fn spawn(ctx: &Ctx) {
     let Ok(log) = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(ctx.paths.data.join("watch.log"))
+        .open(ctx.paths.watch_log())
     else {
         return;
     };

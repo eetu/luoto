@@ -23,6 +23,7 @@ use crate::config::{Deps, EnvConfig, EnvFile, extend_unique};
 use crate::connect::LOGIN;
 use crate::detect::{self, DEPTH, Detected, IDIOMATIC_TOOLS, SKIP_DIRS};
 use crate::env::{Ctx, UID};
+use crate::logs::InstallLog;
 use crate::prompt::confirm;
 use crate::workspace::{self, Oversize};
 use crate::{events, names, sync};
@@ -227,6 +228,7 @@ struct Env<'a> {
     home: &'a str,
     /// `HOME=<home>`, for exec.
     home_env: String,
+    log: InstallLog,
 }
 
 impl<'a> Env<'a> {
@@ -236,6 +238,7 @@ impl<'a> Env<'a> {
             dev: names::dev(env),
             home_env: format!("HOME={home}"),
             home,
+            log: InstallLog::new(&ctx.paths, env),
         }
     }
 
@@ -257,7 +260,9 @@ impl<'a> Env<'a> {
     }
 
     fn step(&self, args: &[&str], what: &str) -> Result<()> {
-        if !self.ctx.rt.interactive(args)?.success() {
+        let status = self.log.run(&self.ctx.rt, args)?;
+        if !status.success() {
+            self.log.note(&format!("{what} failed ({status})"));
             bail!("{what} failed");
         }
         Ok(())
@@ -498,8 +503,8 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
             .chain(hosts.iter())
             .map(String::as_str)
             .collect();
-        println!(
-            "installing in `{env}`: {}{}…",
+        let what = format!(
+            "installing in `{env}`: {}{}",
             job.describe(),
             if access.is_empty() {
                 String::new()
@@ -507,6 +512,8 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
                 format!(" (temporary access: {})", access.join(", "))
             }
         );
+        println!("{what}…");
+        e.log.note(&what);
         let since = Utc::now();
         let res = sync::with_grants(
             ctx,
@@ -524,7 +531,9 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
         if denied.is_empty() {
             return Err(err);
         }
-        println!("the install was denied: {}", denied.join(", "));
+        let note = format!("the install was denied: {}", denied.join(", "));
+        println!("{note}");
+        e.log.note(&note);
         if asked
             || !confirm(&format!(
                 "Allow them for installs in `{env}` (saved to [deps] hosts) and retry?"
@@ -554,6 +563,7 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
         ])?;
     }
     println!("installed");
+    e.log.note("installed");
     Ok(())
 }
 

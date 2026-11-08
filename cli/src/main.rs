@@ -17,6 +17,7 @@ mod events;
 mod format;
 mod idle;
 mod init;
+mod logs;
 mod machine;
 mod names;
 mod paths;
@@ -86,6 +87,10 @@ enum Cmd {
     Init(init::InitOpts),
     /// Create or update the env's containers from its config and start it.
     Up {
+        /// Every env, asking nothing (what an env needs from you is printed); one that fails
+        /// leaves the rest to start.
+        #[arg(long)]
+        all: bool,
         #[arg(long)]
         no_selftest: bool,
         /// Recreate the dev container (the workspace and home volumes are kept).
@@ -96,9 +101,20 @@ enum Cmd {
         quiet: bool,
     },
     /// Stop the env (volumes and config are kept).
-    Down,
+    Down {
+        /// Every env that runs (the vault keeps running).
+        #[arg(long)]
+        all: bool,
+    },
     /// Delete the env: containers, workspace and home volumes, config (your folder stays).
     Rm {
+        /// Don't ask first.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Discard the env's home (dotfiles, shell history, agents' logins and state, toolchains)
+    /// and recreate its dev container with an empty one; the workspace stays.
+    ResetHome {
         /// Don't ask first.
         #[arg(long, short)]
         yes: bool,
@@ -232,6 +248,17 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// The env's gate log, the background watcher's, or what its installs printed.
+    Logs {
+        #[arg(value_enum, default_value_t = logs::Source::Gate)]
+        source: logs::Source,
+        /// Keep printing what is added.
+        #[arg(short, long)]
+        follow: bool,
+        /// Only the last N lines.
+        #[arg(short = 'n', long, value_name = "N")]
+        lines: Option<usize>,
+    },
     /// The vault that holds secrets for every env: status, unlock, lock.
     Vault {
         #[command(subcommand)]
@@ -356,7 +383,17 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             }
             init::init(o)
         }
+        Cmd::Up { all: true, .. } | Cmd::Down { all: true } if env_arg.is_some() => {
+            anyhow::bail!("--all acts on every env: leave out -e")
+        }
         Cmd::Up {
+            all: true,
+            no_selftest,
+            recreate,
+            quiet,
+        } => c::up_all(!no_selftest, recreate, quiet),
+        Cmd::Up {
+            all: false,
             no_selftest,
             recreate,
             quiet,
@@ -369,8 +406,10 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             }
             Err(e) => Err(e),
         },
-        Cmd::Down => c::down(&env()?),
+        Cmd::Down { all: true } => c::down_all(),
+        Cmd::Down { all: false } => c::down(&env()?),
         Cmd::Rm { yes } => c::rm(&env()?, yes),
+        Cmd::ResetHome { yes } => c::reset_home(&env()?, yes),
         Cmd::Ls => c::ls(),
         Cmd::Status { json } => c::status(&env()?, json),
         Cmd::Edit => c::edit(&env()?),
@@ -469,6 +508,11 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
                 c::egress(&env()?, denied, since.as_deref(), json)
             }
         }
+        Cmd::Logs {
+            source,
+            follow,
+            lines,
+        } => logs::show(source, env, follow, lines),
         Cmd::Vault { action } => match action.unwrap_or(VaultCmd::Status) {
             VaultCmd::Status => c::vault_status(),
             VaultCmd::Unlock => c::unlock(),
@@ -477,5 +521,48 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         },
         Cmd::SshProxy { env: e } => connect::ssh_proxy(&e),
         Cmd::Watch => watch::watch(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cli_is_well_formed() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn all_is_every_env_not_one() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat());
+        for args in [["up", "--all", "-e", "web"], ["-e", "web", "down", "--all"]] {
+            let cli = parse(&args).unwrap();
+            let e = run(cli.env, cli.cmd).unwrap_err().to_string();
+            assert!(e.contains("leave out -e"), "{e}");
+        }
+        let Ok(Cli {
+            cmd:
+                Cmd::Logs {
+                    source,
+                    follow,
+                    lines,
+                },
+            ..
+        }) = parse(&["logs", "installs", "-fn", "20"])
+        else {
+            panic!("logs didn't parse");
+        };
+        assert!(source == logs::Source::Installs && follow && lines == Some(20));
+        assert!(matches!(
+            parse(&["logs"]),
+            Ok(Cli {
+                cmd: Cmd::Logs {
+                    source: logs::Source::Gate,
+                    ..
+                },
+                ..
+            })
+        ));
     }
 }

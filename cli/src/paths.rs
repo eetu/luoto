@@ -72,6 +72,16 @@ impl Paths {
     pub fn events_db(&self) -> PathBuf {
         self.data.join("events.db")
     }
+
+    /// The background watcher's log (`watch.rs`), one for every env.
+    pub fn watch_log(&self) -> PathBuf {
+        self.data.join("watch.log")
+    }
+
+    /// What the env's installs printed (`logs::InstallLog`).
+    pub fn install_log(&self, env: &str) -> PathBuf {
+        self.env_state(env).join("install.log")
+    }
 }
 
 /// Write a file readable only by the current user.

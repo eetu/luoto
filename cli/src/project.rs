@@ -663,7 +663,7 @@ pub fn review(ctx: &Ctx, env: &str) -> Result<bool> {
                 println!("applied");
                 return Ok(true);
             }
-            if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            if crate::prompt::interactive() {
                 set_declined(ctx, env, Some(sha(text)))?;
                 println!(
                     "kept the previous settings (`luoto project apply -e {env}` applies it later)"

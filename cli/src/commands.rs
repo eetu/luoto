@@ -180,19 +180,92 @@ pub fn pull(
 }
 
 pub fn up(name: &str, selftest: bool, recreate: bool, quiet: bool) -> Result<ExitCode> {
-    let ctx = Ctx::load()?;
+    up_env(&Ctx::load()?, name, selftest, recreate, quiet)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn up_env(ctx: &Ctx, name: &str, selftest: bool, recreate: bool, quiet: bool) -> Result<()> {
     if recreate {
-        env::remove_dev(&ctx, name)?;
+        env::remove_dev(ctx, name)?;
     }
     env::up(
-        &ctx,
+        ctx,
         name,
         &UpOptions {
             no_selftest: !selftest,
             quiet,
         },
-    )?;
-    Ok(ExitCode::SUCCESS)
+    )
+}
+
+/// `f` on each of `envs`, its error printed as it fails; one that fails leaves the rest to go.
+/// The ones that failed.
+fn each_env(envs: &[String], mut f: impl FnMut(&str) -> Result<()>) -> Vec<String> {
+    let mut failed = Vec::new();
+    for name in envs {
+        if let Err(e) = f(name) {
+            eprintln!("luoto: `{name}`: {}", crate::text::lines(&format!("{e:#}")));
+            failed.push(name.clone());
+        }
+    }
+    failed
+}
+
+/// The end of a command on several envs: which failed, and a failing exit code if any did.
+fn each_env_result(verb: &str, total: usize, failed: &[String]) -> ExitCode {
+    if failed.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+    eprintln!(
+        "\nluoto: {verb} failed for {} of {total} env(s): {}",
+        failed.len(),
+        failed.join(", ")
+    );
+    ExitCode::FAILURE
+}
+
+/// Every env up, asking nothing: what an env needs from you is printed instead, for
+/// `luoto up -e <env>` to ask.
+pub fn up_all(selftest: bool, recreate: bool, quiet: bool) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    let envs = config::list_envs(&ctx.paths)?;
+    if envs.is_empty() {
+        println!("no envs yet: `luoto init` in a project folder, or `luoto init <new-folder>`");
+        return Ok(ExitCode::SUCCESS);
+    }
+    crate::prompt::never_ask();
+    let mut first = true;
+    let failed = each_env(&envs, |name| {
+        println!("{}== {name} ==", if first { "" } else { "\n" });
+        first = false;
+        up_env(&ctx, name, selftest, recreate, quiet)
+    });
+    Ok(each_env_result("up", envs.len(), &failed))
+}
+
+/// Stop every env that runs; the vault keeps running.
+pub fn down_all() -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    if machine::stopped(&ctx.rt) {
+        println!("no env is running (luoto's VM is stopped)");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let states = ctx.rt.states()?;
+    let running: Vec<String> = config::list_envs(&ctx.paths)?
+        .into_iter()
+        .filter(|e| states.running(&names::dev(e)) || states.running(&names::gate(e)))
+        .collect();
+    if running.is_empty() {
+        println!("no env is running");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let failed = each_env(&running, |name| {
+        env::down(&ctx, name)?;
+        println!("env `{name}` stopped");
+        Ok(())
+    });
+    crate::watch::spawn(&ctx);
+    Ok(each_env_result("down", running.len(), &failed))
 }
 
 pub fn down(name: &str) -> Result<ExitCode> {
@@ -230,6 +303,35 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
     std::fs::remove_file(&cfg)?;
     crate::ssh::write_config(&ctx)?;
     println!("env `{name}` removed");
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn reset_home(name: &str, yes: bool) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    config::validate_name(name)?;
+    if !ctx.paths.env_config(name).exists() {
+        bail!("no env `{name}` (`luoto ls` lists them)");
+    }
+    if !yes
+        && !confirm(&format!(
+            "Discard the home of `{name}`: dotfiles, shell history, agents' logins and state, \
+             toolchains? The workspace stays"
+        ))
+    {
+        bail!("aborted (`luoto reset-home -e {name} --yes` skips the question)");
+    }
+    let running = ctx.rt.is_running(&names::dev(name));
+    if !env::reset_home(&ctx, name)? {
+        println!("`{name}` has no home yet: nothing to discard");
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!("discarded the home of `{name}`");
+    if running {
+        // Back as it was, with its agents and toolchains installed anew.
+        env::up(&ctx, name, &UpOptions::default())?;
+    } else {
+        println!("`luoto up -e {name}` starts it with a fresh home");
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -717,4 +819,26 @@ pub fn lock() -> Result<ExitCode> {
          `luoto down`)"
     );
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_env_failing_leaves_the_rest_to_go() {
+        let envs: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        let mut tried = Vec::new();
+        let failed = each_env(&envs, |n| {
+            tried.push(n.to_string());
+            if n == "b" {
+                bail!("no");
+            }
+            Ok(())
+        });
+        assert_eq!(tried, envs);
+        assert_eq!(failed, ["b"]);
+        assert_eq!(each_env_result("up", 3, &failed), ExitCode::FAILURE);
+        assert_eq!(each_env_result("up", 3, &[]), ExitCode::SUCCESS);
+    }
 }
