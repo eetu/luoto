@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+- **Agent credentials:** before you choose one, each kind of credential says where to get it;
+  the Claude subscription token links Anthropic's guide (`claude setup-token`, a Pro, Max,
+  Team or Enterprise plan) and the API key the Claude Console.
+
 ## 0.4.0 (2026-11-09)
 
 Cloud credentials that stay outside the sandbox (Azure, Hetzner, UpCloud, DigitalOcean,

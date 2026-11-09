@@ -57,7 +57,7 @@ MCP servers on their own side, through the gate. `server_tools = true` under
 
 | provider | hosts the credential goes to | kinds | where to get one | kept out of reach |
 | --- | --- | --- | --- | --- |
-| `anthropic` | `api.anthropic.com` | `oauth_token`, `api_key`, login inside | `claude setup-token` on your machine (Claude plan); console.anthropic.com (API billing) | files, message batches, organization admin, skills; server tools: web fetch, the MCP connector |
+| `anthropic` | `api.anthropic.com` | `oauth_token`, `api_key`, login inside | `claude setup-token` on your machine (Claude plan); platform.claude.com (API billing) | files, message batches, organization admin, skills; server tools: web fetch, the MCP connector |
 | `openai` | `api.openai.com` (over WebSocket only with server tools) | `api_key`, login inside | platform.openai.com/api-keys; a ChatGPT plan only through login inside | files, uploads, batches, organization, fine-tuning, vector stores; server tools: remote MCP servers |
 | `openrouter` | `openrouter.ai` `/api/**` | `api_key` | openrouter.ai/keys | |
 | `gemini` | `generativelanguage.googleapis.com` | `api_key` | aistudio.google.com/apikey | uploads, files, cached contents, batches; server tools: URL context, remote MCP servers |

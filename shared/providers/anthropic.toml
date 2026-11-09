@@ -10,14 +10,14 @@ reason = "file storage, batches and admin endpoints of the Anthropic API are not
 
 [auth.api_key]
 label = "Anthropic API key (billed per use)"
-how = "console.anthropic.com > API keys > Create key. It can have its own spend limit."
+how = "In the Claude Console (https://platform.claude.com): API keys > Create key. It can have its own spend limit."
 header = "x-api-key"
 format = "{secret}"
 env = { ANTHROPIC_API_KEY = "sk-ant-api03-luoto-placeholder-0000000000000000000000000000000000000000000000000000000000000000-AAAAAAA" }
 
 [auth.oauth_token]
 label = "Claude subscription token"
-how = "Run `claude setup-token` on your machine (not in the env) and copy the token it prints. It uses your Claude plan."
+how = "Run `claude setup-token` on your machine (not in the env): it opens your browser and, once you approve, prints a token valid for a year. Needs Claude Code here and a Pro, Max, Team or Enterprise plan; see https://code.claude.com/docs/en/authentication#generate-a-long-lived-token"
 header = "authorization"
 format = "Bearer {secret}"
 env = { CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-luoto-placeholder-000000000000000000000000000000000000000000000000000000000000000000-AAAAAAA" }

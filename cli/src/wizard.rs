@@ -325,9 +325,15 @@ pub fn credential(
     } else {
         "later: log in inside the sandbox until then"
     };
-    let auth = if options.len() == 1 {
+    let menu = options.len() > 1;
+    let auth = if !menu {
         options.remove(0).value
     } else {
+        // Where each comes from, before the choice rather than after it.
+        for k in &kinds {
+            let a = &p.auth[k];
+            println!("  {}: {}", a.label, a.how);
+        }
         if p.login_hosts.is_empty() {
             options.push(choice(Auth::Later, "later", later));
         }
@@ -351,7 +357,9 @@ pub fn credential(
         Auth::Kind(k) => k,
     };
     let how = &p.auth[&kind];
-    println!("  {}", how.how);
+    if !menu {
+        println!("  {}", how.how);
+    }
     let title = format!("luoto {provider_name} {kind}");
     let acct = format!("{provider_name}.{kind}");
     let Some(reference) = secret(&how.label, &acct, &title, later, &[], global)? else {
