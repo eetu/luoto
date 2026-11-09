@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0
+## 0.4.0 (2026-11-09)
 
 Azure credentials that stay outside the sandbox, and envs started from a remote with nothing
 on your machine.
