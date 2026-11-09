@@ -2,8 +2,8 @@
 
 ## 0.4.0 (2026-11-09)
 
-Azure credentials that stay outside the sandbox, and envs started from a remote with nothing
-on your machine.
+Cloud credentials that stay outside the sandbox (Azure, Hetzner, UpCloud, DigitalOcean,
+Cloudflare), envs started from a remote or moved between machines, and disk use in sight.
 
 - **Azure credentials:** `[credentials.azure]` in an env's config gives it a managed identity:
   the gate answers the instance metadata service (169.254.169.254) with placeholder tokens,
