@@ -1,4 +1,4 @@
-description = "GitHub release downloads (read-only): opened while any install runs; selected, they stay open"
+description = "GitHub release downloads (read-only), on by default; without it, open only while an install runs"
 tools = ["*"]
 
 [[rule]]

@@ -311,6 +311,8 @@ const BUILD_DIRS: &[&str] = &[
 ];
 /// Folders smaller than this go unnamed in a hint.
 const BUILD_DIR_MIN: u64 = 500_000_000;
+/// How much of a folder's path a hint shows: the sandbox names folders.
+const BUILD_DIR_SHOWN: usize = 120;
 /// How long measuring them may take, in the env and from here.
 const BUILD_DIRS_SECS: u64 = 12;
 
@@ -334,7 +336,12 @@ fn parse_build_dirs(out: &str) -> Vec<(u64, String)> {
         .filter_map(|l| {
             let (kib, path) = l.split_once('\t')?;
             let bytes = kib.trim().parse::<u64>().ok()?.checked_mul(1024)?;
-            Some((bytes, path.strip_prefix("./").unwrap_or(path).to_string()))
+            let path = path.strip_prefix("./").unwrap_or(path);
+            let path = match path.char_indices().nth(BUILD_DIR_SHOWN) {
+                Some((i, _)) => format!("{}…", &path[..i]),
+                None => path.to_string(),
+            };
+            Some((bytes, path))
         })
         .filter(|(b, _)| *b >= BUILD_DIR_MIN)
         .collect();
@@ -1418,6 +1425,10 @@ CACHE ID   CACHE TYPE   SIZE      CREATED   LAST USED   USAGE     SHARED
         assert_eq!(paths, ["api/target", "web/node_modules", "tools/.venv"]);
         assert_eq!(dirs[0].0, 8_500_000 * 1024);
         assert!(parse_build_dirs("").is_empty());
+        let long = format!("9000000\t./{}/target\n", "x".repeat(5000));
+        let shown = &parse_build_dirs(&long)[0].1;
+        assert_eq!(shown.chars().count(), BUILD_DIR_SHOWN + 1);
+        assert!(shown.ends_with('…'));
         let script = build_dirs_script();
         assert!(script.contains("-name 'target' -o -name 'node_modules'"));
         assert!(script.contains("-prune"));

@@ -648,19 +648,17 @@ mod tests {
     }
 
     #[test]
-    fn installs_open_github_release_files_the_defaults_leave_shut() {
+    fn installs_open_github_release_files_an_env_without_them_leaves_shut() {
+        let without: Vec<String> = ["debian", "github", "toolchains"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(install_presets(["python"], &without), ["github-releases"]);
+        assert_eq!(install_presets(["go"], &without), ["go", "github-releases"]);
         let defaults: Vec<String> = crate::init::DEFAULT_PRESETS
             .iter()
             .map(|p| p.to_string())
             .collect();
-        assert_eq!(install_presets(["python"], &defaults), ["github-releases"]);
-        assert_eq!(
-            install_presets(["go"], &defaults),
-            ["go", "github-releases"]
-        );
-        let mut kept = defaults.clone();
-        kept.push("github-releases".into());
-        assert!(install_presets(["python"], &kept).is_empty());
+        assert!(install_presets(["python"], &defaults).is_empty());
     }
 
     #[test]

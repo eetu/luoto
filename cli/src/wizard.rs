@@ -133,7 +133,7 @@ fn toolchains(p: &mut Proposal) -> Result<()> {
         .found
         .tools
         .iter()
-        .map(|t| format!("{} {} ({})", t.tool, t.version, t.source))
+        .map(|t| crate::text::display(&format!("{} {} ({})", t.tool, t.version, t.source)))
         .collect();
     if !found.is_empty() {
         println!(

@@ -11,7 +11,7 @@
   let dir = $state("");
   let name = $state("");
   let ports = $state("");
-  let presets = $state<string[]>(["debian", "github", "toolchains"]);
+  let presets = $state<string[]>(["debian", "github", "github-releases", "toolchains"]);
   let presetsTouched = $state(false);
   let agents = $state<string[]>([]);
 

@@ -762,13 +762,22 @@ pub struct Unpushed {
     pub path: String,
     /// Files changed and not committed.
     pub changed: usize,
-    /// Commits on a local branch and on no remote-tracking one.
+    /// Commits on a local branch or HEAD and on no remote-tracking one.
     pub commits: usize,
     pub stashes: usize,
+    /// A repo git couldn't read: what it holds is unknown.
+    pub unread: bool,
 }
 
 impl fmt::Display for Unpushed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.unread {
+            return write!(
+                f,
+                "{}: git couldn't read it; look before removing",
+                self.path
+            );
+        }
         let n = |k: usize, one: &str, many: &str| match k {
             0 => None,
             1 => Some(format!("1 {one}")),
@@ -786,11 +795,17 @@ impl fmt::Display for Unpushed {
     }
 }
 
-/// Counts per repo, one line each: a git work tree whose top is the folder given.
+/// Counts per repo, one line each: a git work tree whose top is the folder given. Commits count
+/// from HEAD too (a detached one, after checking out a tag); a folder with a `.git` that git
+/// can't read is a line of `?`.
 const UNPUSHED_SCRIPT: &str = r#"for d; do
-  [ "$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" = "$d" ] || continue
+  if [ "$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" != "$d" ]; then
+    { [ -e "$d/.git" ] || [ -L "$d/.git" ]; } && printf '%s\t?\n' "$d"
+    continue
+  fi
+  h=; git -C "$d" rev-parse -q --verify HEAD >/dev/null 2>&1 && h=HEAD
   c=$(git -c core.fsmonitor=false -C "$d" status --porcelain 2>/dev/null | wc -l)
-  u=$(git -C "$d" rev-list --count --branches --not --remotes 2>/dev/null || echo 0)
+  u=$(git -C "$d" rev-list --count $h --branches --not --remotes 2>/dev/null) || u='?'
   s=$(git -C "$d" stash list 2>/dev/null | wc -l)
   printf '%s\t%s\t%s\t%s\n' "$d" "$c" "$u" "$s"
 done; true"#;
@@ -824,21 +839,34 @@ const STATUS_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// A line per repo.
 const STATUS_CAP: usize = 64 << 10;
 
+/// The script's lines for `dirs`, the first for each; one whose counts aren't all numbers is a
+/// repo git couldn't read.
 fn parse_unpushed(out: &str, dirs: &[String]) -> Vec<Unpushed> {
-    out.lines()
-        .filter_map(|l| {
-            let f: Vec<&str> = l.split('\t').collect();
-            let [path, c, u, s] = f[..] else { return None };
-            let n = |x: &str| x.trim().parse::<usize>().ok();
-            Some(Unpushed {
-                path: dirs.iter().find(|d| *d == path)?.clone(),
-                changed: n(c)?,
-                commits: n(u)?,
-                stashes: n(s)?,
-            })
-        })
-        .filter(|w| w.changed + w.commits + w.stashes > 0)
-        .collect()
+    let mut found: Vec<Unpushed> = Vec::new();
+    for l in out.lines() {
+        let f: Vec<&str> = l.split('\t').collect();
+        let Some(path) = dirs.iter().find(|d| **d == f[0]) else {
+            continue;
+        };
+        if found.iter().any(|w| w.path == *path) {
+            continue;
+        }
+        let n = |i: usize| f.get(i).and_then(|x| x.trim().parse::<usize>().ok());
+        let counts = match (f.len(), n(1), n(2), n(3)) {
+            (4, Some(c), Some(u), Some(s)) => Some((c, u, s)),
+            _ => None,
+        };
+        let (changed, commits, stashes) = counts.unwrap_or_default();
+        found.push(Unpushed {
+            path: path.clone(),
+            changed,
+            commits,
+            stashes,
+            unread: counts.is_none(),
+        });
+    }
+    found.retain(|w| w.unread || w.changed + w.commits + w.stashes > 0);
+    found
 }
 
 /// Forget that `url` was answered as public, so the next `up` asks for its access again:
@@ -1980,31 +2008,41 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
 
     #[test]
     fn only_repos_with_work_no_remote_has_are_named() {
-        let dirs = ["/workspace".to_string(), "/workspace/api".to_string()];
+        let dirs = [
+            "/workspace".to_string(),
+            "/workspace/api".to_string(),
+            "/workspace/web".to_string(),
+        ];
         let out = "/workspace\t2\t0\t0\n\
                    /workspace/api\t      0\t0\t0\n\
                    /etc\t1\t1\t1\n\
                    /workspace/api\x1b[2K\t1\t1\t1\n\
-                   /workspace/api\tx\t1\t1\n";
+                   /workspace/api\t1\t1\t1\n\
+                   /workspace/web\t?\n";
         let found = parse_unpushed(out, &dirs);
+        let shown: Vec<String> = found.iter().map(ToString::to_string).collect();
         assert_eq!(
-            found,
-            [Unpushed {
-                path: "/workspace".into(),
-                changed: 2,
-                commits: 0,
-                stashes: 0,
-            }]
+            shown,
+            [
+                "/workspace: 2 files changed",
+                "/workspace/web: git couldn't read it; look before removing",
+            ],
+            "the first line for a folder counts; a clean repo goes unnamed"
         );
         let all = Unpushed {
             path: "/workspace/api".into(),
             changed: 1,
             commits: 3,
             stashes: 1,
+            unread: false,
         };
         assert_eq!(
             all.to_string(),
             "/workspace/api: 1 file changed, 3 commits not pushed, 1 stash"
+        );
+        assert_eq!(
+            parse_unpushed("/workspace\t0\t?\t0\n", &dirs)[0].to_string(),
+            "/workspace: git couldn't read it; look before removing"
         );
     }
 

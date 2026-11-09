@@ -59,11 +59,13 @@ completing it stays with the user:
   `mise use node@24 python@3.13 java@temurin-21` in `/workspace` writes `mise.toml` and
   installs. Use the versions the user asked for, otherwise the current LTS or stable release,
   and keep the version file in the repository.
-- Runtime downloads are allowed when the env has the `toolchains` preset; package registries
-  (npm, PyPI, crates, Maven, …) need their own presets. A blocked download is a host to
-  request (below), never a reason to switch to an unofficial mirror or binary.
-- Files from GitHub releases (Python, Java, Bun, pnpm, many CLI tools) come through only while
-  luoto installs. For a toolchain from there, keep the pin and ask for the install:
+- Runtime downloads from vendors' servers are allowed when the env has the `toolchains`
+  preset; package registries (npm, PyPI, crates, Maven, …) need their own presets. A blocked
+  download is a host to request (below), never a reason to switch to an unofficial mirror or
+  binary.
+- Files from GitHub releases (Python, Java, Bun, pnpm, many CLI tools) need the
+  `github-releases` preset; without it they come through only while luoto installs. For a
+  toolchain from there, keep the pin and ask for the install:
   `sandbox request --tool python@3.13 --reason "<why>" --wait`.
 - Go modules come through the proxy only from GitHub, GitLab, Bitbucket and well-known module
   domains (golang.org, google.golang.org, k8s.io, go.uber.org, gopkg.in, …). A module on

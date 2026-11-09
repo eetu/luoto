@@ -12,7 +12,7 @@ $ luoto init acme/web
 env `web` from acme/web
   workspace  a remote: acme/web cloned in the env through the gate; nothing on this machine
   isolation  gVisor: its own user-space kernel (builds about 1.6× slower)
-  presets    debian, github, toolchains
+  presets    debian, github, github-releases, toolchains
   toolchains and luoto.toml: read from the clone, shown before anything applies
 
 Create it? [Y/n/c = customize]

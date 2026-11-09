@@ -143,7 +143,7 @@ pub fn compile(
     // Only HTTP(S) leaves the env, so SSH remotes go to HTTPS unless the vault's key logs in
     // to their host.
     if !over_ssh(forges::GITHUB) {
-        for from in ["git@github.com:", "ssh://git@github.com/"] {
+        for from in GITHUB_SSH_REMOTES {
             b.rewrites
                 .push(("https://github.com/".to_string(), from.to_string()));
         }
@@ -533,6 +533,13 @@ fn git_config(pairs: &[(String, String)]) -> String {
     out
 }
 
+/// The prefixes of a GitHub SSH remote, as `insteadOf` matches them (case-sensitively).
+const GITHUB_SSH_REMOTES: [&str; 3] = [
+    "git@github.com:",
+    "ssh://git@github.com/",
+    "ssh://git@github.com:22/",
+];
+
 /// Git over SSH: the key as a vault binding the env's agent signs with, a tunnel rule on
 /// port 22 for each host (GitHub's on `ssh.github.com:443` with `github_port = 443`, its
 /// remotes rewritten there), and the hosts' pinned keys. The hosts, and their `known_hosts`.
@@ -623,7 +630,7 @@ fn compile_ssh(b: &mut Builder, c: Option<&SshCred>) -> Result<(Vec<String>, Str
     }
     if github_443 {
         let base = format!("ssh://git@{}:443/", forges::GITHUB_SSH_443);
-        for from in ["git@github.com:", "ssh://git@github.com/"] {
+        for from in GITHUB_SSH_REMOTES {
             b.rewrites.push((base.clone(), from.to_string()));
         }
     }
@@ -1776,7 +1783,7 @@ github_port = 443
         };
         assert_eq!(host_keys.len(), 4);
         assert!(c.git_config.contains(
-            "[url \"ssh://git@ssh.github.com:443/\"]\n\tinsteadOf = \"git@github.com:\"\n\tinsteadOf = \"ssh://git@github.com/\"\n"
+            "[url \"ssh://git@ssh.github.com:443/\"]\n\tinsteadOf = \"git@github.com:\"\n\tinsteadOf = \"ssh://git@github.com/\"\n\tinsteadOf = \"ssh://git@github.com:22/\"\n"
         ));
         assert!(!c.git_config.contains("https://github.com/"));
 

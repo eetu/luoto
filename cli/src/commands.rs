@@ -981,9 +981,10 @@ pub fn egress(
                 .and_then(luoto_shared::host::path_glob)
                 .unwrap_or_else(|| "<path glob>".into());
             format!(
-                "{} → luoto allow -e {name} {} --path '{glob}'",
+                "{} → luoto allow -e {name} {} --path '{glob}'{}",
                 s.last_message.clone().unwrap_or_default(),
                 s.host,
+                if s.wants_write { " --write" } else { "" },
             )
         } else if s.denied > 0 {
             let private = s.host.ends_with(".internal")

@@ -2,7 +2,7 @@
 //! user can allow it — the text is read by humans and by agents in the sandbox alike.
 
 use http::{HeaderValue, Response, StatusCode, header};
-use luoto_shared::policy::DenyReason;
+use luoto_shared::policy::{DenyReason, READ_METHODS};
 use serde::Serialize;
 
 use crate::body::{Body, empty, full};
@@ -17,7 +17,7 @@ pub fn deny(
     reason: &DenyReason,
 ) -> Response<Body> {
     let message = reason.message(host);
-    let fix = fix(env, host, path, reason);
+    let fix = fix(env, method, host, path, reason);
     let body = format!(
         "luoto: egress blocked by the sandbox policy of env \"{env}\"\n\
          request: {method} {url}\n\
@@ -57,18 +57,24 @@ pub fn deny(
 }
 
 /// How the user can allow what `reason` denied.
-fn fix(env: &str, host: &str, path: &str, reason: &DenyReason) -> String {
+fn fix(env: &str, method: &str, host: &str, path: &str, reason: &DenyReason) -> String {
     let write = if reason.wants_write() { " --write" } else { "" };
     match reason {
         // The host is open on other paths (a relay such as the Go module proxy may be open only
-        // for some): allowing all of it would undo that, so the fix names a path.
+        // for some): allowing all of it would undo that, so the fix names a path, and the
+        // method too, or the next denial would offer writes to the whole host.
         DenyReason::PathNotAllowed => {
             let glob = luoto_shared::host::path_glob(path).unwrap_or_else(|| "<path glob>".into());
+            let write = if READ_METHODS.contains(&method) {
+                ""
+            } else {
+                " --write"
+            };
             format!(
                 "To allow this path, the user can run on the host:\n  \
-                 luoto allow -e {env} {host} --path '{glob}'\n\
+                 luoto allow -e {env} {host} --path '{glob}'{write}\n\
                  or approve it in `luoto ui`. From inside the sandbox, request it with:\n  \
-                 sandbox request {host} --path '{glob}' --reason \"<why this is needed>\""
+                 sandbox request {host} --path '{glob}'{write} --reason \"<why this is needed>\""
             )
         }
         DenyReason::Locked => {
@@ -117,21 +123,34 @@ mod tests {
     fn a_path_denial_offers_that_path_not_the_host() {
         let f = fix(
             "web",
+            "GET",
             "proxy.golang.org",
             "/filippo.io/edwards25519/@v/list",
             &DenyReason::PathNotAllowed,
         );
         assert!(
             f.contains(
-                "luoto allow -e web proxy.golang.org --path '/filippo.io/edwards25519/@v/**'"
+                "luoto allow -e web proxy.golang.org --path '/filippo.io/edwards25519/@v/**'\n"
             ),
             "{f}"
         );
         assert!(
             f.contains("sandbox request proxy.golang.org --path '/filippo.io/edwards25519/@v/**'")
         );
+        let post = fix(
+            "web",
+            "POST",
+            "api.example",
+            "/v1/items/x",
+            &DenyReason::PathNotAllowed,
+        );
+        assert!(
+            post.contains("luoto allow -e web api.example --path '/v1/items/**' --write\n"),
+            "{post}"
+        );
         let hostile = fix(
             "web",
+            "GET",
             "h.example",
             "/a/b'; rm -rf ~; '",
             &DenyReason::PathNotAllowed,
@@ -140,7 +159,7 @@ mod tests {
             hostile.contains("--path '<path glob>'") && !hostile.contains("rm -rf"),
             "{hostile}"
         );
-        let host = fix("web", "docs.rs", "/x", &DenyReason::NoRule);
+        let host = fix("web", "GET", "docs.rs", "/x", &DenyReason::NoRule);
         assert!(host.contains("luoto allow -e web docs.rs\n"), "{host}");
     }
 }

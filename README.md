@@ -66,7 +66,7 @@ $ luoto init
 env `my-app` from ~/dev/my-app
   workspace  copy: the env works on its own copy; changes leave by git push or `luoto pull`
   isolation  gVisor: its own user-space kernel (builds about 1.6× slower)
-  presets    debian, github, toolchains, npm (package.json)
+  presets    debian, github, github-releases, toolchains, npm (package.json)
   toolchains node 24 (.nvmrc)
              installed by mise in the env; the project's files keep deciding versions
 
@@ -232,7 +232,7 @@ a config file is its format (1 when missing): luoto reads older formats and refu
 from a newer luoto.
 
 ```toml
-presets = ["debian", "github", "toolchains", "npm"]   # see shared/presets/
+presets = ["debian", "github", "github-releases", "toolchains", "npm"]   # see shared/presets/
 agents = ["claude"]           # with options: [agents.claude] tables (docs/guides/agent-settings.md)
 ports = [5173]                # published by the gate itself (servers listening on all interfaces)
 # isolation = "container"     # default gVisor; this shares the VM's kernel, builds ~1.6× faster
@@ -437,9 +437,10 @@ Google Cloud ones aren't handled yet ([ROADMAP.md](ROADMAP.md)).
 - Inside the env, you or an agent add a language with `mise use go@1.23` (it writes
   `mise.toml`). The `toolchains` preset, on by default, lets runtime downloads through: mise
   metadata and the vendors' download servers, read-only. Without it, `up` grants it only while
-  installing. Files from GitHub releases (Python, Java, Bun, pnpm, aqua tools) come through
-  only while luoto installs: pin the version and run `up`, or `sandbox request --tool
-  python@3.13` from the env. The `github-releases` preset keeps them open.
+  installing. Files from GitHub releases (Python, Java, Bun, pnpm, aqua tools, npm packages'
+  prebuilt binaries) come through the `github-releases` preset, also on by default; without
+  it, only while luoto installs: pin the version and run `up`, or `sandbox request --tool
+  python@3.13` from the env.
 - The `go` preset opens the module proxy and checksum database, which fetch from whatever host
   a module path names, only for modules on code hosts and well-known module domains
   ([the list](shared/presets/go.toml)). Another host's modules are denied by path; allowing

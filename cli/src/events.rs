@@ -223,7 +223,13 @@ pub fn summarize(events: &[Event], mutes: &Mutes) -> Vec<HostSummary> {
                 s.last_reason = e.reason.clone();
                 s.last_message = e.message.clone();
                 s.last_denied_path = e.path.clone();
-                if e.reason.as_deref() == Some("method_not_allowed") {
+                let write = e
+                    .method
+                    .as_deref()
+                    .is_some_and(|m| !luoto_shared::policy::READ_METHODS.contains(&m));
+                if e.reason.as_deref() == Some("method_not_allowed")
+                    || (e.reason.as_deref() == Some("path_not_allowed") && write)
+                {
                     s.wants_write = true;
                 }
             }

@@ -15,10 +15,10 @@
   go.opentelemetry.io, go.uber.org and gopkg.in. Another host's are denied by path; allowing
   one takes `luoto allow proxy.golang.org --path '/<host>/**'` and
   `luoto allow sum.golang.org --path '/lookup/<host>/**'`.
-- **GitHub release downloads** open only while luoto installs, no longer with the `github` and
-  `toolchains` presets: a runtime mise fetches from GitHub (Python, Java, Bun, pnpm) installs
-  at `up` or through `sandbox request --tool`. `terraform` and `opentofu` keep them for
-  `init`; the new `github-releases` preset keeps them open.
+- **GitHub release downloads** have their own preset, `github-releases`, on by default; the
+  `github` and `toolchains` presets no longer open them. Without it, they open only while luoto
+  installs (`terraform` and `opentofu` keep them for `init`). An env made before 0.4.1 lists
+  its presets: add `github-releases` (`luoto edit`) to keep release downloads open in it.
 - **Path denials** suggest allowing that path (`--path`), not the whole host.
 - **Git over SSH where port 22 is blocked:** `github_port = 443` in `[credentials.ssh]` sends
   GitHub SSH remotes to `ssh.github.com:443`, its host keys pinned there too.

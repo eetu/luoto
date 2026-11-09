@@ -124,16 +124,14 @@ mod tests {
                 "/golang.org/toolchain/@v/v0.0.1-go1.23.0.linux-amd64.zip",
             ),
             ("proxy.golang.org", "/gopkg.in/yaml.v3/@latest"),
+            // A 403 here would stop the go command; the proxy's 404 sends it to sum.golang.org.
             ("proxy.golang.org", "/sumdb/sum.golang.org/supported"),
-            (
-                "proxy.golang.org",
-                "/sumdb/sum.golang.org/tile/8/0/x123/456",
-            ),
             (
                 "proxy.golang.org",
                 "/sumdb/sum.golang.org/lookup/go.uber.org/zap@v1.27.0",
             ),
             ("sum.golang.org", "/lookup/k8s.io/client-go@v0.31.0"),
+            ("sum.golang.org", "/tile/8/0/x123/456"),
             ("sum.golang.org", "/latest"),
         ] {
             assert!(
