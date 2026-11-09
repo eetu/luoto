@@ -292,15 +292,19 @@ impl Notices {
             .flat_map(|(env, news)| news.due(env, now))
             .collect();
         if show {
-            // To the watcher's log, so `luoto logs watcher` says what was shown.
             for n in &due {
-                match post(n) {
-                    Ok(true) => println!("{} notified: {}", Utc::now(), n.title),
-                    Ok(false) => {}
-                    Err(e) => println!("{} not notified ({e}): {}", Utc::now(), n.title),
-                }
+                show_logged(n);
             }
         }
+    }
+}
+
+/// Post `n`, and say so in the watcher's log, so `luoto logs watcher` lists what was shown.
+pub fn show_logged(n: &Note) {
+    match post(n) {
+        Ok(true) => println!("{} notified: {}", Utc::now(), n.title),
+        Ok(false) => {}
+        Err(e) => println!("{} not notified ({e}): {}", Utc::now(), n.title),
     }
 }
 

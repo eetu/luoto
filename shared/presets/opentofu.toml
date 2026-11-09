@@ -1,5 +1,19 @@
-description = "OpenTofu provider and module registry (read-only); providers download from GitHub releases, which toolchains opens"
+description = "OpenTofu provider and module registry, and GitHub release downloads for providers (read-only)"
 tools = ["opentofu"]
 
 [[rule]]
 host = "registry.opentofu.org"
+
+# `tofu init` downloads providers from their GitHub releases, outside any install.
+[[rule]]
+host = "github.com"
+paths = ["/*/*/releases/download/**"]
+note = "provider downloads (tofu init); redirects to release-assets.githubusercontent.com"
+
+[[rule]]
+host = "release-assets.githubusercontent.com"
+note = "provider downloads (tofu init)"
+
+[[rule]]
+host = "objects.githubusercontent.com"
+note = "provider downloads (tofu init, older links)"

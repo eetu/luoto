@@ -381,6 +381,8 @@ pub fn down(name: &str) -> Result<ExitCode> {
         println!("env `{name}` is not running (luoto's VM is stopped)");
         return Ok(ExitCode::SUCCESS);
     }
+    // While its dev container still runs, to name its build folders.
+    disk::hint_growth(&ctx, name);
     env::down(&ctx, name)?;
     println!("env `{name}` stopped");
     // The VM stays up for a quick `up`; the watcher stops it after `idle_stop` without envs.
@@ -396,29 +398,43 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
         bail!("no env `{name}` (`luoto ls` lists them)");
     }
     // An env cloned from a remote has no folder: what isn't pushed exists only in the env.
-    if let Ok(f) = EnvFile::load(&ctx.paths, name)
-        && let (None, Some(url)) = (&f.cfg.workspace.dir, &f.cfg.workspace.url)
-    {
+    let url = EnvFile::load(&ctx.paths, name).ok().and_then(|f| {
+        f.cfg
+            .workspace
+            .url
+            .filter(|_| f.cfg.workspace.dir.is_none())
+    });
+    if let Some(url) = &url {
         println!(
             "`{name}` is cloned from {}: its work exists only in the env, unless pushed",
             crate::text::display(url)
         );
-        if ctx.rt.is_running(&names::dev(name)) {
-            match crate::repos::workspace_status(&ctx, name) {
-                Ok((branch, changed)) => {
-                    println!("  branch {branch}");
-                    println!("  {changed} file(s) changed and not committed");
+    }
+    // A state that won't load must not keep an env from being removed.
+    let repos = EnvState::load(&ctx.paths, name)
+        .ok()
+        .flatten()
+        .map(|s| s.repos)
+        .unwrap_or_default();
+    if ctx.rt.is_running(&names::dev(name)) {
+        match crate::repos::unpushed(&ctx, name, &repos) {
+            Ok(found) if found.is_empty() => {}
+            Ok(found) => {
+                println!("Work in `{name}` that no remote has:");
+                for w in found {
+                    println!("  {w}");
                 }
-                Err(e) => println!(
-                    "  git status failed in the env: {}",
-                    crate::text::lines(&format!("{e:#}"))
-                ),
             }
-        } else {
-            println!(
-                "  it is stopped: `luoto up -e {name}`, then `git status` in it, shows what isn't pushed"
-            );
+            Err(e) => println!(
+                "  git status failed in the env: {}",
+                crate::text::lines(&format!("{e:#}"))
+            ),
         }
+    } else if url.is_some() || !repos.is_empty() {
+        println!(
+            "`{name}` is stopped: after `luoto up -e {name}`, `luoto rm` names the repos with work \
+             no remote has"
+        );
     }
     if !yes
         && !confirm(&format!(
@@ -956,6 +972,19 @@ pub fn egress(
             // No rule opens these (the metadata service, the gate's own ranges): the message
             // says what does, if anything.
             s.last_message.clone().unwrap_or_default()
+        } else if s.denied > 0 && s.last_reason.as_deref() == Some("path_not_allowed") {
+            // Other paths of the host are open (a relay may be open only for some): allowing
+            // all of it would undo that.
+            let glob = s
+                .last_denied_path
+                .as_deref()
+                .and_then(luoto_shared::host::path_glob)
+                .unwrap_or_else(|| "<path glob>".into());
+            format!(
+                "{} → luoto allow -e {name} {} --path '{glob}'",
+                s.last_message.clone().unwrap_or_default(),
+                s.host,
+            )
         } else if s.denied > 0 {
             let private = s.host.ends_with(".internal")
                 || s.host

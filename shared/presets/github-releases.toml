@@ -1,0 +1,15 @@
+description = "GitHub release downloads (read-only): opened while any install runs; selected, they stay open"
+tools = ["*"]
+
+[[rule]]
+host = "github.com"
+paths = ["/*/*/releases/download/**"]
+note = "redirects to the file on release-assets.githubusercontent.com"
+
+[[rule]]
+host = "release-assets.githubusercontent.com"
+note = "release files of any repository"
+
+[[rule]]
+host = "objects.githubusercontent.com"
+note = "release files of any repository (older links)"

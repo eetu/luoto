@@ -24,7 +24,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   every allow. Non-HTTP TCP goes nowhere except through tunnel rules
   you grant (`luoto allow --tunnel`, a host and port, or an approved port request, after you
   confirm it goes uninspected) and SSH to the hosts an SSH credential
-  names, on port 22; both pass through uninspected. UDP goes nowhere. DNS is answered locally
+  names, on port 22 (GitHub's on `ssh.github.com:443` with `github_port = 443`); both pass
+  through uninspected. UDP goes nowhere. DNS is answered locally
   with fake addresses and never forwarded. Destinations are resolved by the gate only after a
   request is allowed, every resolved address is checked against private, loopback,
   link-local, CGNAT and host-gateway ranges (including IPv4 inside IPv6), and the gate
@@ -241,7 +242,13 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   toolchains `luoto up` installs, and so which presets it grants for the install (only from
   luoto's own preset data; other hosts need your yes). While a grant is open, any code in the
   env can use it. The default `toolchains` preset keeps vendor download servers readable
-  permanently; downloading more code is not a new risk inside the sandbox.
+  permanently; downloading more code is not a new risk inside the sandbox. GitHub release
+  files, which anyone can publish, are readable only in install windows unless the env has
+  `github-releases`, `terraform` or `opentofu`.
+- **Relays.** The Go module proxy and checksum database fetch from whatever host a module path
+  names, so a path the sandbox writes is a request to a domain it chooses. The `go` preset
+  opens them only for modules on code hosts and on domains the Go project, Google, the CNCF
+  and Uber run, and gopkg.in; allowing another host's paths opens a request to that host.
 - **`sandbox_secrets`** and `login_inside` provider logins put credentials inside the sandbox
   by design. An agent added without a credential logs in inside where its provider allows it,
   so its session is in the sandbox until you configure a credential instead.

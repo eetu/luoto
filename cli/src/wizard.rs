@@ -469,9 +469,11 @@ pub fn secret(
             r
         }
         Source::Reference => {
+            println!("  {OP_FIELDS}");
             // Resolved once here (the value is dropped), so a typo shows now rather than as a
             // locked credential at `up`.
             let global = global.clone();
+            let label = label.to_string();
             let Some(r) = Text::new(&format!("Reference to the {label}:"))
                 .with_placeholder("op://<vault>/<item>/<field>")
                 .with_help_message("checked against your secret store; Esc for later")
@@ -479,7 +481,10 @@ pub fn secret(
                     let s = s.trim();
                     Ok(
                         match secrets::check_ref(s).and_then(|()| secrets::resolve(&global, s)) {
-                            Ok(_) => Validation::Valid,
+                            Ok(v) => match not_alone(&v, &label) {
+                                Some(why) => Validation::Invalid(why.into()),
+                                None => Validation::Valid,
+                            },
                             Err(e) => Validation::Invalid(format!("{e:#}").into()),
                         },
                     )
@@ -491,6 +496,25 @@ pub fn secret(
             r.trim().to_string()
         }
     }))
+}
+
+/// The field a token is in, by 1Password item type.
+const OP_FIELDS: &str = "In 1Password: an API Credential item's field is `credential`, a \
+                         Password's `password`, a Secure Note's text `notesPlain` (the token \
+                         alone in it)";
+
+/// Why `value`, read from a reference to a token (`label`), isn't the token alone: tokens
+/// carry no spaces or line breaks, a note or a field with more text in it does.
+fn not_alone(value: &str, label: &str) -> Option<String> {
+    if value.is_empty() {
+        return Some(format!("it is empty; the {label} isn't there"));
+    }
+    value.contains(char::is_whitespace).then(|| {
+        format!(
+            "it holds more than the {label}: spaces or line breaks; keep the {label} alone in \
+             that field"
+        )
+    })
 }
 
 /// A hidden paste, trimmed; `None` when skipped.
@@ -545,6 +569,18 @@ fn free_account(base: &str, taken: impl Fn(&str) -> Result<bool>) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_referenced_token_is_alone_in_its_field() {
+        assert_eq!(not_alone("sk-ant-oat01-abc", "token"), None);
+        for v in [
+            "",
+            "sk-ant-oat01-abc\nexpires 2027",
+            "Claude token: sk-ant-oat01-abc",
+        ] {
+            assert!(not_alone(v, "token").is_some(), "{v:?}");
+        }
+    }
 
     #[test]
     fn a_paste_takes_the_first_free_account() {

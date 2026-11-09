@@ -62,6 +62,14 @@ completing it stays with the user:
 - Runtime downloads are allowed when the env has the `toolchains` preset; package registries
   (npm, PyPI, crates, Maven, …) need their own presets. A blocked download is a host to
   request (below), never a reason to switch to an unofficial mirror or binary.
+- Files from GitHub releases (Python, Java, Bun, pnpm, many CLI tools) come through only while
+  luoto installs. For a toolchain from there, keep the pin and ask for the install:
+  `sandbox request --tool python@3.13 --reason "<why>" --wait`.
+- Go modules come through the proxy only from GitHub, GitLab, Bitbucket and well-known module
+  domains (golang.org, google.golang.org, k8s.io, go.uber.org, gopkg.in, …). A module on
+  another host takes two requests, its modules and its checksums:
+  `sandbox request proxy.golang.org --path '/<host>/**' --reason "<why>" --wait`, then
+  `sandbox request sum.golang.org --path '/lookup/<host>/**' --reason "<why>" --wait`.
 - CLI tools installed for the user (`npm i -g`, `pipx install`) land in `~/.local/bin` and
   persist. A system package of your own (`sudo apt-get install …`) vanishes when the container
   is recreated. For one the project needs, or a toolchain it doesn't pin, ask the user to keep

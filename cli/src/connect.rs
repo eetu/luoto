@@ -62,6 +62,10 @@ pub fn exec_login(ctx: &Ctx, name: &str, inner: &str) -> Result<ExitCode> {
         inner.into(),
     ]);
     let status = ctx.rt.interactive(&args)?;
+    // A session (a shell, an agent) is where builds fill the disk.
+    if tty {
+        crate::disk::hint_growth(ctx, name);
+    }
     Ok(ExitCode::from(
         status.code().unwrap_or(1).clamp(0, 255) as u8
     ))

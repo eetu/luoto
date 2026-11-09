@@ -147,6 +147,9 @@ pub struct HostSummary {
     pub top_paths: Vec<(String, u64)>,
     pub last_reason: Option<String>,
     pub last_message: Option<String>,
+    /// The path of the last denial, for a hint that allows that path, not the host.
+    #[serde(skip)]
+    pub last_denied_path: Option<String>,
     pub last_rule: Option<String>,
     pub bytes_up: u64,
     pub bytes_down: u64,
@@ -219,6 +222,7 @@ pub fn summarize(events: &[Event], mutes: &Mutes) -> Vec<HostSummary> {
                 s.muted += u64::from(mutes.hides(e));
                 s.last_reason = e.reason.clone();
                 s.last_message = e.message.clone();
+                s.last_denied_path = e.path.clone();
                 if e.reason.as_deref() == Some("method_not_allowed") {
                     s.wants_write = true;
                 }
@@ -431,6 +435,9 @@ mod tests {
                 .unwrap()
                 .dns_only
         );
+        let docs = s.iter().find(|h| h.host == "docs.rs").unwrap();
+        assert_eq!(docs.last_denied_path.as_deref(), Some("/serde"));
+        assert_eq!(npm.last_denied_path.as_deref(), Some("/react"));
     }
 
     #[test]

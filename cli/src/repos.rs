@@ -5,6 +5,7 @@
 //! through the gate and with the env's credentials.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::io::IsTerminal;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
@@ -754,49 +755,90 @@ fn relayed(ctx: &Ctx, args: &[&str]) -> Result<std::process::ExitStatus> {
     Ok(status)
 }
 
-/// The clone in the env as `git status --porcelain --branch` sees it, run as the dev user: its
-/// branch line (with how far it is ahead of its upstream), and how many files changed. The
-/// sandbox can write any of it, so the line is cleaned for the terminal, and it decides how
-/// long git takes and how much it says (a clean filter it configured runs), so both are
-/// bounded.
-pub fn workspace_status(ctx: &Ctx, env: &str) -> Result<(String, usize)> {
-    let dev = names::dev(env);
-    let out = ctx.rt.run_limited(
-        [
-            "exec",
-            "-u",
-            UID,
-            dev.as_str(),
-            "git",
-            "-c",
-            "core.fsmonitor=false",
-            "-C",
-            "/workspace",
-            "status",
-            "--porcelain",
-            "--branch",
-        ],
-        STATUS_LIMIT,
-        STATUS_CAP,
-    )?;
-    Ok(porcelain_summary(&out))
+/// What a repo in the env holds that no remote has.
+#[derive(Debug, PartialEq)]
+pub struct Unpushed {
+    /// `/workspace` or `/workspace/<name>`.
+    pub path: String,
+    /// Files changed and not committed.
+    pub changed: usize,
+    /// Commits on a local branch and on no remote-tracking one.
+    pub commits: usize,
+    pub stashes: usize,
 }
 
-/// How long `git status` in the env may take before `rm` goes on without it.
-const STATUS_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
-/// How much of its output is read: a line per changed file, so far more than anyone reads.
-const STATUS_CAP: usize = 8 << 20;
+impl fmt::Display for Unpushed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let n = |k: usize, one: &str, many: &str| match k {
+            0 => None,
+            1 => Some(format!("1 {one}")),
+            k => Some(format!("{k} {many}")),
+        };
+        let parts: Vec<String> = [
+            n(self.changed, "file changed", "files changed"),
+            n(self.commits, "commit not pushed", "commits not pushed"),
+            n(self.stashes, "stash", "stashes"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        write!(f, "{}: {}", self.path, parts.join(", "))
+    }
+}
 
-fn porcelain_summary(out: &str) -> (String, usize) {
-    let lines = out.lines().filter(|l| !l.is_empty());
-    let branch = lines
-        .clone()
-        .next()
-        .and_then(|l| l.strip_prefix("## "))
-        .map(display)
-        .unwrap_or_default();
-    let changed = lines.filter(|l| !l.starts_with("## ")).count();
-    (branch, changed)
+/// Counts per repo, one line each: a git work tree whose top is the folder given.
+const UNPUSHED_SCRIPT: &str = r#"for d; do
+  [ "$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" = "$d" ] || continue
+  c=$(git -c core.fsmonitor=false -C "$d" status --porcelain 2>/dev/null | wc -l)
+  u=$(git -C "$d" rev-list --count --branches --not --remotes 2>/dev/null || echo 0)
+  s=$(git -C "$d" stash list 2>/dev/null | wc -l)
+  printf '%s\t%s\t%s\t%s\n' "$d" "$c" "$u" "$s"
+done; true"#;
+
+/// The repos in the env (`/workspace` and its seeded `repos`) holding work no remote has, run
+/// as the dev user in one call. The sandbox decides how long git takes (a clean filter it
+/// configured runs) and what the script prints, so both are bounded and only lines naming a
+/// folder asked about are read.
+pub fn unpushed(ctx: &Ctx, env: &str, repos: &BTreeSet<String>) -> Result<Vec<Unpushed>> {
+    let dev = names::dev(env);
+    let dirs: Vec<String> = std::iter::once("/workspace".to_string())
+        .chain(repos.iter().map(|r| format!("/workspace/{r}")))
+        .collect();
+    let mut args = vec![
+        "exec",
+        "-u",
+        UID,
+        dev.as_str(),
+        "sh",
+        "-c",
+        UNPUSHED_SCRIPT,
+        "sh",
+    ];
+    args.extend(dirs.iter().map(String::as_str));
+    let out = ctx.rt.run_limited(&args, STATUS_LIMIT, STATUS_CAP)?;
+    Ok(parse_unpushed(&out, &dirs))
+}
+
+/// How long the repos' `git status` in the env may take before `rm` goes on without it.
+const STATUS_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// A line per repo.
+const STATUS_CAP: usize = 64 << 10;
+
+fn parse_unpushed(out: &str, dirs: &[String]) -> Vec<Unpushed> {
+    out.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            let [path, c, u, s] = f[..] else { return None };
+            let n = |x: &str| x.trim().parse::<usize>().ok();
+            Some(Unpushed {
+                path: dirs.iter().find(|d| *d == path)?.clone(),
+                changed: n(c)?,
+                commits: n(u)?,
+                stashes: n(s)?,
+            })
+        })
+        .filter(|w| w.changed + w.commits + w.stashes > 0)
+        .collect()
 }
 
 /// Forget that `url` was answered as public, so the next `up` asks for its access again:
@@ -1937,12 +1979,33 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
     }
 
     #[test]
-    fn git_status_counts_what_is_not_committed() {
-        let (branch, changed) =
-            porcelain_summary("## main...origin/main [ahead 2]\n M src/a.rs\n?? new\x1b[2K\n");
-        assert_eq!(branch, "main...origin/main [ahead 2]");
-        assert_eq!(changed, 2);
-        assert_eq!(porcelain_summary("## x\u{202e}y\n").0, "x\\u{202e}y");
+    fn only_repos_with_work_no_remote_has_are_named() {
+        let dirs = ["/workspace".to_string(), "/workspace/api".to_string()];
+        let out = "/workspace\t2\t0\t0\n\
+                   /workspace/api\t      0\t0\t0\n\
+                   /etc\t1\t1\t1\n\
+                   /workspace/api\x1b[2K\t1\t1\t1\n\
+                   /workspace/api\tx\t1\t1\n";
+        let found = parse_unpushed(out, &dirs);
+        assert_eq!(
+            found,
+            [Unpushed {
+                path: "/workspace".into(),
+                changed: 2,
+                commits: 0,
+                stashes: 0,
+            }]
+        );
+        let all = Unpushed {
+            path: "/workspace/api".into(),
+            changed: 1,
+            commits: 3,
+            stashes: 1,
+        };
+        assert_eq!(
+            all.to_string(),
+            "/workspace/api: 1 file changed, 3 commits not pushed, 1 stash"
+        );
     }
 
     #[test]

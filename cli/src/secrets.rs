@@ -198,9 +198,13 @@ fn op_output(mut cmd: Command, what: &str, input: Option<&[u8]>) -> Result<Vec<u
     Ok(out.stdout)
 }
 
+/// Trimmed as a `file:` is: text typed into 1Password (a Secure Note's) often ends in a line
+/// break, which no header value can carry.
 fn op_read(global: &GlobalConfig, r: &str) -> Result<String> {
     let out = op_output(op(global, &["read", "--no-newline", r])?, "op read", None)?;
-    Ok(String::from_utf8_lossy(&out).into_owned())
+    Ok(String::from_utf8_lossy(&out)
+        .trim_end_matches(['\r', '\n'])
+        .to_string())
 }
 
 /// The 1Password CLI is installed.

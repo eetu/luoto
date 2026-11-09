@@ -7,8 +7,6 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
 - **GitHub: App only, pushes to a fork.** A pushed branch runs the repo's workflows with its
   secrets; push to a secrets-free fork and open pull requests across. Drops personal access
   tokens, whose reach luoto can't check. Needs a guided App setup (the manifest flow) first.
-- **Narrower relay hosts:** the Go module proxy fetches from any domain (allow it only during
-  installs, or for the project's modules); GitHub release downloads only during installs.
 - **Install windows bound to the installer:** a per-run proxy credential, so other processes
   can't use the window.
 - **Container hardening:** dropped capabilities, `nosuid,nodev` mounts, user namespaces on
@@ -29,8 +27,8 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   stop), then sidecars.
 - **Corporate networks:** a CA for every upstream (Zscaler, Netskope) and egress through a
   company proxy.
-- **Moving work:** `rm` names repos with unpushed work first; `fork` of an env; seed from a
-  git bundle and `luoto fetch` into `refs/remotes/luoto/<env>`.
+- **Moving work:** `fork` of an env; seed from a git bundle and `luoto fetch` into
+  `refs/remotes/luoto/<env>`.
 - **A folder shared live** (Linux, or a VM that shares folders), with an audit of the files
   host tools act on (`.git/config`, hooks, `.envrc`, editor and pre-commit configs).
 - **`luoto run` jobs:** a clean-checkout start, a CI recipe.
@@ -45,7 +43,6 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
 ## Git over SSH
 
 - **A key per env,** derived by the vault from a root secret, added as a deploy key.
-- **`ssh.github.com:443`** for networks that block port 22.
 - **Commit signing** by the vault (`gpg.format = ssh`).
 - **An SSH proxy in the gate,** if repo scoping and the push guard prove necessary over SSH.
 
@@ -58,7 +55,6 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
 - **`devcontainer.json` read at `init`:** image, features, `postCreateCommand`, `forwardPorts`.
 - **Model gateways:** Bedrock, Vertex, Azure OpenAI, a base URL (LiteLLM), a local Ollama.
 - **Your MCP servers** with their tokens in the vault (`[mcp.<name>]`).
-- **Runtimes a dependency needs,** suggested at `init` (pyspark → Java).
 - **Agents verified end to end:** GitHub Copilot CLI (hosts, paths, briefing file), Antigravity
   with a Gemini API key the gate holds.
 

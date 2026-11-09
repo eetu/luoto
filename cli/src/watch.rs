@@ -23,6 +23,8 @@ use crate::{azure_identity, events, idle, machine, names, notify, ports, secrets
 const TICK: Duration = Duration::from_secs(2);
 const IDLE_EVERY: Duration = Duration::from_secs(60);
 const CREDS_EVERY: Duration = Duration::from_secs(30);
+/// How often free space is read (one call to the runtime), for `disk::free_note`.
+const DISK_EVERY: Duration = Duration::from_secs(300);
 /// How soon a refused credential is read again: code in the sandbox can make an upstream
 /// refuse one at will.
 const REREAD_AFTER: Duration = Duration::from_secs(600);
@@ -147,6 +149,7 @@ pub fn watch() -> Result<ExitCode> {
     let mut creds_since: HashMap<String, DateTime<Utc>> = HashMap::new();
     let mut reread: HashMap<String, Instant> = HashMap::new();
     let mut azcli = Azcli::default();
+    let mut disk_checked: Option<Instant> = None;
     loop {
         std::thread::sleep(TICK);
         // `stop` (luoto uninstall) removed it, and waits for this process to leave.
@@ -197,6 +200,16 @@ pub fn watch() -> Result<ExitCode> {
             }
         }
         notices.flush(notifying);
+        if disk_checked.is_none_or(|t| t.elapsed() >= DISK_EVERY) {
+            disk_checked = Some(Instant::now());
+            if let Some(n) = crate::disk::free_note(&ctx) {
+                if notifying {
+                    notify::show_logged(&n);
+                } else {
+                    println!("{} {}", Utc::now(), n.title);
+                }
+            }
+        }
 
         // Forwards follow what each env listens on.
         let mut wanted: HashSet<(String, u16)> = HashSet::new();

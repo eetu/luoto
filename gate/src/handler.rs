@@ -226,12 +226,13 @@ fn denied(
     method: &str,
     url: &str,
     host: &str,
+    path: &str,
     reason: DenyReason,
 ) -> Response<Body> {
     ev.verdict = Some(Verdict::Deny);
     ev.reason = Some(reason.code().to_string());
     ev.message = Some(reason.message(host));
-    let resp = respond::deny(&state.cfg.env, method, url, host, &reason);
+    let resp = respond::deny(&state.cfg.env, method, url, host, path, &reason);
     ev.status = Some(resp.status().as_u16());
     state.events.emit(ev);
     resp
@@ -274,8 +275,9 @@ async fn handle_inner(
         path: Some(clip_path(&path)),
         ..Default::default()
     };
-    let deny =
-        |ev: Event, reason: DenyReason| denied(&state, ev, &method, &url, &target.host, reason);
+    let deny = |ev: Event, reason: DenyReason| {
+        denied(&state, ev, &method, &url, &target.host, &path, reason)
+    };
     if let Some(reason) = refused {
         return deny(ev, reason);
     }

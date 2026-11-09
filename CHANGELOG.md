@@ -5,6 +5,33 @@
 - **Agent credentials:** before you choose one, each kind of credential says where to get it;
   the Claude subscription token links Anthropic's guide (`claude setup-token`, a Pro, Max,
   Team or Enterprise plan) and the API key the Claude Console.
+- **1Password refs:** a token in a Secure Note works (`op://<vault>/<item>/notesPlain`): an
+  `op://` value loses a trailing line break, as a `file:` one does. When you give a reference,
+  the wizard names the field each item type keeps a token in, and refuses one whose value
+  holds more than the token.
+- **Go modules:** the `go` preset reaches the module proxy and checksum database, which fetch
+  from whatever host a module path names, only for modules on GitHub, GitLab, Bitbucket,
+  golang.org, google.golang.org, cloud.google.com, k8s.io, sigs.k8s.io, go.etcd.io,
+  go.opentelemetry.io, go.uber.org and gopkg.in. Another host's are denied by path; allowing
+  one takes `luoto allow proxy.golang.org --path '/<host>/**'` and
+  `luoto allow sum.golang.org --path '/lookup/<host>/**'`.
+- **GitHub release downloads** open only while luoto installs, no longer with the `github` and
+  `toolchains` presets: a runtime mise fetches from GitHub (Python, Java, Bun, pnpm) installs
+  at `up` or through `sandbox request --tool`. `terraform` and `opentofu` keep them for
+  `init`; the new `github-releases` preset keeps them open.
+- **Path denials** suggest allowing that path (`--path`), not the whole host.
+- **Git over SSH where port 22 is blocked:** `github_port = 443` in `[credentials.ssh]` sends
+  GitHub SSH remotes to `ssh.github.com:443`, its host keys pinned there too.
+- **`luoto rm`:** before asking, names each repo in the env (the workspace and its `repos`)
+  with files not committed, commits on no remote or stashes, for envs from a folder too.
+- **Runtimes a dependency needs:** `init` gives the env Java (Temurin 17) for pyspark,
+  apache-flink, JPype1 or tabula-py named in `requirements.txt`, `pyproject.toml`, `Pipfile`,
+  `uv.lock` or `poetry.lock`, unless a version file pins one.
+- **Disk growth:** once luoto's VM disk has grown 10 GB (or a tenth of it) since the last
+  hint, `up`, `down`, `luoto run` and the end of a shell or agent session say by how much,
+  name the env's biggest build folders (`target/`, `node_modules/`, …) and point to
+  `status --size` and `prune`. The watcher notifies when free space falls under 10 GB, and
+  again under 3 GB.
 
 ## 0.4.0 (2026-11-09)
 

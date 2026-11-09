@@ -77,10 +77,10 @@ terraform {
 provider "hcloud" {}   # HCLOUD_TOKEN; likewise upcloud {}, digitalocean {}, cloudflare {}
 ```
 
-`terraform init` needs the `terraform` (or `opentofu`) preset and `toolchains`: both
-registries point each of these four providers at its GitHub release
+`terraform init` needs the `terraform` (or `opentofu`) preset: both registries point each of
+these four providers at its GitHub release
 (`github.com/<owner>/<repo>/releases/download/…`, then `release-assets.githubusercontent.com`),
-which `toolchains` opens.
+which the preset opens.
 
 S3-compatible storage (DigitalOcean Spaces, Cloudflare R2, UpCloud Managed Object Storage,
 Hetzner Object Storage) signs every request with its keys, which the gate can't add: a

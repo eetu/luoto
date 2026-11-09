@@ -645,6 +645,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         if ids.pulled {
             crate::disk::note_superseded(ctx);
         }
+        crate::disk::hint_growth(ctx, env);
     }
     Ok(())
 }

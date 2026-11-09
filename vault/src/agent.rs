@@ -530,6 +530,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_host_on_another_port_binds_under_its_known_hosts_name() {
+        let key = Key::from_openssh(USER_ED25519).unwrap();
+        let host = PrivateKey::from_openssh(HOST_ED25519).unwrap();
+        let hosts = host_keys(&[format!(
+            "[ssh.github.com]:443 {}",
+            host.public_key().to_openssh().unwrap()
+        )]);
+        let mut bound = Vec::new();
+        let (r, note) = handle(&key, &hosts, &mut bound, &bind_msg(&host, b"s", false));
+        let name = "[ssh.github.com]:443".to_string();
+        assert_eq!((r, note), (vec![SUCCESS], Note::Bound(name.clone())));
+        let data = login(b"s", &key, "ssh-ed25519");
+        let (r, note) = handle(&key, &hosts, &mut bound, &sign_msg(&key, &data, 0));
+        assert_eq!((r[0], note), (SIGN_RESPONSE, Note::Signed(name)));
+    }
+
     fn session(id: &[u8]) -> Session {
         Session {
             id: id.to_vec(),

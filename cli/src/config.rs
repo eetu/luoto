@@ -261,6 +261,9 @@ pub struct SshCred {
     /// Host keys for other hosts, as `known_hosts` lines (`host algorithm base64`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_keys: Vec<String>,
+    /// 443: GitHub's SSH goes to `ssh.github.com:443`, for networks that block port 22.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_port: Option<u16>,
 }
 
 /// Azure DevOps git repositories over HTTPS, with a PAT the gate adds.

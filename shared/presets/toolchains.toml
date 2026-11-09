@@ -1,4 +1,4 @@
-description = "Language runtimes and tools that mise installs: its metadata and the vendors' download servers (read-only)"
+description = "Language runtimes and tools that mise installs: its metadata and the vendors' download servers (read-only); GitHub release files only while installing (github-releases)"
 tools = ["*"]
 
 [[rule]]
@@ -16,7 +16,7 @@ host = "mise.run"
 [[rule]]
 host = "github.com"
 paths = ["/*/*/releases", "/*/*/releases/**", "/*/*/info/refs", "/*/*.git/info/refs"]
-note = "release downloads (Python, Bun, pnpm, JDKs, aqua/ubi tools) and plugin clones"
+note = "releases (Python, Bun, pnpm, JDKs, aqua/ubi tools; their files come from github-releases) and plugin clones"
 
 [[rule]]
 host = "github.com"
@@ -28,12 +28,6 @@ note = "cloning a tool plugin negotiates with a POST"
 [[rule]]
 host = "api.github.com"
 paths = ["/repos/*/*/releases", "/repos/*/*/releases/**", "/repos/*/*/tags"]
-
-[[rule]]
-host = "objects.githubusercontent.com"
-
-[[rule]]
-host = "release-assets.githubusercontent.com"
 
 [[rule]]
 host = "nodejs.org"

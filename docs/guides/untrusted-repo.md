@@ -94,8 +94,8 @@ your own tools act on (`.envrc`, `.vscode`, build wrappers, hooks) are held back
 - `luoto init acme/web` again finds the env (any spelling of the same repository), starts it
   if needed, and offers what the clone suggests now. `--name web2` makes a second env.
 - A new VM (or a removed workspace volume) starts empty: the next `up` clones again.
-- `luoto rm -e web` first says what exists only in the env: the branch line of `git status`
-  (how far it is ahead) and how many files aren't committed.
+- `luoto rm -e web` first names each repo in the env with what no remote has: files not
+  committed, commits not pushed, stashes.
 
 A large repository fills the disk of luoto's VM, which your other envs share: that costs space,
 not isolation.
