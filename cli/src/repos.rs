@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
@@ -63,9 +63,28 @@ fn shorthand(url: &str) -> Option<(&str, &str)> {
         .then_some((owner, repo))
 }
 
+/// The user name of an `https://` URL, which a token can stand in: its host and path too.
+fn https_userinfo(url: &str) -> Option<(&str, &str, &str)> {
+    let rest = url.strip_prefix("https://")?;
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let (user, host) = authority.rsplit_once('@')?;
+    Some((user, host, path))
+}
+
+/// Azure DevOps' own clone URL, `https://<org>@dev.azure.com/<org>/…`: its user name is the
+/// organization the path names, not a secret.
+fn azure_org_user(user: &str, host: &str, path: &str) -> bool {
+    host.eq_ignore_ascii_case(crate::azure::HOST)
+        && path
+            .split('/')
+            .next()
+            .is_some_and(|org| org.eq_ignore_ascii_case(user))
+}
+
 /// The host a remote names, if it is one luoto clones: GitHub's `owner/repo`, an `https://` or
 /// `ssh://` URL, or scp-like `user@host:path`. No local paths, `file://` or git's command
-/// transports (`ext::`), and no password in the URL.
+/// transports (`ext::`), and no password in the URL ([`check_url`] also refuses an
+/// `https://` user name for what is typed or a `luoto.toml` names).
 fn remote_host(url: &str) -> Option<&str> {
     if let Some(rest) = url
         .strip_prefix("https://")
@@ -96,7 +115,31 @@ fn remote_host(url: &str) -> Option<&str> {
     shorthand(url).map(|_| "github.com")
 }
 
+/// A remote an env's own config names: what [`check_url`] allows, and an `https://` user name,
+/// which env files written before 0.4.0 may hold (Bitbucket's copied URLs carry one).
+fn check_config_url(url: &str) -> Result<()> {
+    match https_userinfo(url) {
+        Some((user, host, path)) if !azure_org_user(user, host, path) => {
+            if !plain(user, b"._-") {
+                bail!("`https://…@{}/…`: no password in the URL", display(host));
+            }
+            check_url(&format!("https://{host}/{path}"))
+        }
+        _ => check_url(url),
+    }
+}
+
 pub fn check_url(url: &str) -> Result<()> {
+    if let Some((user, host, path)) = https_userinfo(url)
+        && !azure_org_user(user, host, path)
+    {
+        bail!(
+            "`https://…@{}/…`: give the remote's URL without a user name or token, which would \
+             be kept in the env's config, its export and the env's git config; `luoto up` asks \
+             for a credential, which the gate adds",
+            display(host)
+        );
+    }
     let Some(host) = remote_host(url) else {
         bail!(
             "`{}` is not a remote luoto clones: `owner/repo` (GitHub), an https:// or ssh:// \
@@ -201,6 +244,21 @@ pub fn github_repo(url: &str) -> Option<String> {
 /// with a `branch`), not both; and its repos have valid names that stay distinct on a
 /// case-insensitive host, each a folder or a remote in the same way.
 pub fn check(ws: &Workspace) -> Result<()> {
+    let folders =
+        ws.dir
+            .iter()
+            .map(|d| ("[workspace]".to_string(), d))
+            .chain(ws.repos.iter().filter_map(|(n, r)| {
+                Some((format!("[workspace.repos.{}]", display(n)), r.dir.as_ref()?))
+            }));
+    for (at, d) in folders {
+        if workspace::network_path(d) {
+            bail!(
+                "{at}: `{}` is on another machine; `dir` is a folder on this one",
+                display(d)
+            );
+        }
+    }
     match (&ws.dir, &ws.url) {
         (Some(_), Some(_)) => {
             bail!("[workspace]: a host folder (`dir`) or a remote (`url`), not both")
@@ -240,7 +298,7 @@ pub fn check(ws: &Workspace) -> Result<()> {
                 }
             }
             (None, Some(u)) => {
-                check_url(u).with_context(|| format!("[workspace.repos.{name}]"))?;
+                check_config_url(u).with_context(|| format!("[workspace.repos.{name}]"))?;
             }
         }
         if let Some(b) = &r.branch {
@@ -318,6 +376,74 @@ pub fn check_folder(root: Option<&str>, dir: &Path) -> Result<()> {
             "{} holds your home folder, which never goes into an env",
             dir.display()
         );
+    }
+    Ok(())
+}
+
+/// `p`'s names, to compare as text: `~` expanded, past any drive or root, each folded as
+/// macOS and Windows compare names. `..` only the filesystem resolves.
+fn text_names(p: &str) -> Result<Vec<String>> {
+    let path = match directories::BaseDirs::new() {
+        Some(b) if p == "~" => b.home_dir().to_path_buf(),
+        _ => workspace::expand(p),
+    };
+    let mut out = Vec::new();
+    for c in path.components() {
+        match c {
+            Component::Normal(n) => out.push(workspace::fold(&n.to_string_lossy())),
+            Component::ParentDir => bail!("`{}` names `..`", display(p)),
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// [`check_folder`]'s rule for the folders of a config from elsewhere, on their text alone: a
+/// lookup can reach another machine (an automounter, a share) before anyone said yes. None is
+/// your home folder or holds it (as written, or as its links resolve), and no repo's is in or
+/// around the env's.
+pub fn check_folders_text(ws: &Workspace) -> Result<()> {
+    let homes: Vec<Vec<String>> = directories::BaseDirs::new()
+        .map(|b| {
+            [
+                Some(b.home_dir().to_path_buf()),
+                b.home_dir().canonicalize().ok(),
+            ]
+        })
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|h| text_names(&h.to_string_lossy()).ok())
+        .collect();
+    let root = ws.dir.as_deref().map(text_names).transpose()?;
+    let folders = ws.dir.iter().map(|d| (None, d)).chain(
+        ws.repos
+            .iter()
+            .filter_map(|(n, r)| Some((Some(n), r.dir.as_ref()?))),
+    );
+    for (repo, d) in folders {
+        let at = match repo {
+            Some(n) => format!("[workspace.repos.{}]", display(n)),
+            None => "[workspace]".to_string(),
+        };
+        let names = text_names(d).with_context(|| at.clone())?;
+        if names.is_empty() {
+            bail!("{at}: `{}` names no folder of its own", display(d));
+        }
+        if homes.iter().any(|h| h.starts_with(&names)) {
+            bail!(
+                "{at}: {} is your home folder or holds it, which never goes into an env",
+                display(d)
+            );
+        }
+        if let (Some(_), Some(root)) = (repo, &root) {
+            if names.starts_with(root) {
+                bail!("{at}: {} is inside the env's folder", display(d));
+            }
+            if root.starts_with(&names) {
+                bail!("{at}: {} holds the env's folder", display(d));
+            }
+        }
     }
     Ok(())
 }
@@ -501,29 +627,33 @@ fn own_entries(ctx: &Ctx, env: &str, ws: &Workspace) -> BTreeSet<String> {
         .collect()
 }
 
-/// Where the env's own remote is cloned before its entries move into `/workspace`.
-const WORKSPACE_CLONE: &str = ".luoto-clone";
+/// The start of the folder the env's own remote is cloned into before its entries move into
+/// `/workspace`; a random suffix ends it, so no entry of the repository has its name.
+const WORKSPACE_CLONE: &str = ".luoto-clone-";
 
 /// What [`clone_workspace`] runs as the dev user: the env's remote cloned into a hidden folder
 /// of `/workspace`, its entries moved up only once the clone is whole, so a clone cut short
 /// leaves nothing an `up` would take as the workspace. No prompts, no submodules, and LFS
 /// files stay pointers (no filter runs). Exits 3, touching nothing, when `/workspace` holds
-/// anything else.
+/// anything but such folders.
 pub fn workspace_clone_script(url: &str, branch: Option<&str>, progress: bool) -> String {
     format!(
         r#"export GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes' GIT_LFS_SKIP_SMUDGE=1
 cd /workspace || exit 1
 for f in * .[!.]* ..?*; do
-  {{ [ -e "$f" ] || [ -L "$f" ]; }} && [ "$f" != {tmp} ] && exit 3
+  {{ [ -e "$f" ] || [ -L "$f" ]; }} || continue
+  case "$f" in {tmp}*) ;; *) exit 3 ;; esac
 done
-t=/workspace/{tmp}
-rm -rf "$t" && git clone --no-recurse-submodules{progress}{branch} -- {url} "$t" || {{ rm -rf "$t"; exit 1; }}
+rm -rf -- {tmp}*
+t=/workspace/{tmp}{suffix}
+mkdir -- "$t" && git clone --no-recurse-submodules{progress}{branch} -- {url} "$t" || {{ rm -rf -- "$t"; exit 1; }}
 for f in "$t"/* "$t"/.[!.]* "$t"/..?*; do
   {{ [ -e "$f" ] || [ -L "$f" ]; }} || continue
   mv -- "$f" /workspace/ || exit 1
 done
-rmdir "$t""#,
+rmdir -- "$t""#,
         tmp = WORKSPACE_CLONE,
+        suffix = hex::encode(rand::random::<[u8; 8]>()),
         progress = if progress { " --progress" } else { "" },
         branch = branch
             .map(|b| format!(" --branch {}", sh_quote(b)))
@@ -550,18 +680,21 @@ pub fn clone_workspace(
     );
     let script = workspace_clone_script(url, branch, std::io::stderr().is_terminal());
     let dev = names::dev(env);
-    let status = ctx.rt.interactive([
-        "exec",
-        "-u",
-        UID,
-        "-w",
-        "/",
-        dev.as_str(),
-        "sh",
-        "-c",
-        connect::LOGIN,
-        &script,
-    ])?;
+    let status = relayed(
+        ctx,
+        &[
+            "exec",
+            "-u",
+            UID,
+            "-w",
+            "/",
+            dev.as_str(),
+            "sh",
+            "-c",
+            connect::LOGIN,
+            &script,
+        ],
+    )?;
     if status.code() == Some(3) {
         bail!(
             "/workspace in the env has files, but no clone into it finished (an `up` cut short, \
@@ -586,27 +719,73 @@ pub fn clone_workspace(
     Ok(())
 }
 
+/// Run `args` with what they write escaped on its way out ([`crate::text::Relay`]): git's
+/// output in the env carries the remote's messages and the sandbox's own text, and a review
+/// is asked right after it.
+fn relayed(ctx: &Ctx, args: &[&str]) -> Result<std::process::ExitStatus> {
+    use std::io::Write;
+    use std::sync::Mutex;
+    let relays = [
+        Mutex::new(crate::text::Relay::new(std::io::stdout().is_terminal())),
+        Mutex::new(crate::text::Relay::new(std::io::stderr().is_terminal())),
+    ];
+    let write = |to_err: bool, text: &str| {
+        if to_err {
+            eprint!("{text}");
+        } else {
+            print!("{text}");
+            let _ = std::io::stdout().flush();
+        }
+    };
+    let status = ctx.rt.stream(args, &|to_err, chunk| {
+        if let Ok(mut r) = relays[usize::from(to_err)].lock() {
+            write(to_err, &r.feed(chunk));
+        }
+        true
+    })?;
+    for (to_err, r) in [(false, &relays[0]), (true, &relays[1])] {
+        if let Ok(mut r) = r.lock() {
+            let rest = r.finish();
+            if !rest.is_empty() {
+                write(to_err, &format!("{rest}\n"));
+            }
+        }
+    }
+    Ok(status)
+}
+
 /// The clone in the env as `git status --porcelain --branch` sees it, run as the dev user: its
 /// branch line (with how far it is ahead of its upstream), and how many files changed. The
-/// sandbox can write any of it, so the line is cleaned for the terminal.
+/// sandbox can write any of it, so the line is cleaned for the terminal, and it decides how
+/// long git takes and how much it says (a clean filter it configured runs), so both are
+/// bounded.
 pub fn workspace_status(ctx: &Ctx, env: &str) -> Result<(String, usize)> {
     let dev = names::dev(env);
-    let out = ctx.rt.run([
-        "exec",
-        "-u",
-        UID,
-        dev.as_str(),
-        "git",
-        "-c",
-        "core.fsmonitor=false",
-        "-C",
-        "/workspace",
-        "status",
-        "--porcelain",
-        "--branch",
-    ])?;
+    let out = ctx.rt.run_limited(
+        [
+            "exec",
+            "-u",
+            UID,
+            dev.as_str(),
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "-C",
+            "/workspace",
+            "status",
+            "--porcelain",
+            "--branch",
+        ],
+        STATUS_LIMIT,
+        STATUS_CAP,
+    )?;
     Ok(porcelain_summary(&out))
 }
+
+/// How long `git status` in the env may take before `rm` goes on without it.
+const STATUS_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
+/// How much of its output is read: a line per changed file, so far more than anyone reads.
+const STATUS_CAP: usize = 8 << 20;
 
 fn porcelain_summary(out: &str) -> (String, usize) {
     let lines = out.lines().filter(|l| !l.is_empty());
@@ -675,18 +854,21 @@ fn clone(
         sh_quote(&format!("/workspace/{name}")),
     );
     let dev = names::dev(env);
-    let status = ctx.rt.interactive([
-        "exec",
-        "-u",
-        UID,
-        "-w",
-        "/workspace",
-        dev.as_str(),
-        "sh",
-        "-c",
-        connect::LOGIN,
-        &script,
-    ])?;
+    let status = relayed(
+        ctx,
+        &[
+            "exec",
+            "-u",
+            UID,
+            "-w",
+            "/workspace",
+            dev.as_str(),
+            "sh",
+            "-c",
+            connect::LOGIN,
+            &script,
+        ],
+    )?;
     if !status.success() && locked {
         bail!(
             "git clone failed: some of the env's credentials are locked (see the warning about \
@@ -1403,6 +1585,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_env_file_from_before_keeps_its_https_user_name() {
+        let url = "https://alice@bitbucket.org/acme/api.git";
+        assert!(check_url(url).is_err());
+        check_config_url(url).unwrap();
+        assert!(check_config_url("https://alice:pw@bitbucket.org/acme/api.git").is_err());
+        assert!(check_config_url("file:///etc").is_err());
+    }
+
+    #[test]
     fn remotes_luoto_clones() {
         for u in [
             "acme/api",
@@ -1436,6 +1627,90 @@ mod tests {
         ] {
             assert!(check_url(u).is_err(), "{u}");
         }
+        for u in [
+            "https://ghp_secret@github.com/acme/api",
+            "https://glpat-secret@gitlab.com/group/api.git",
+            "https://other@dev.azure.com/org/Data%20Platform/_git/api",
+            "https://x@forge.example",
+        ] {
+            assert!(check_url(u).is_err(), "{u}");
+        }
+        // A token in the URL would be kept wherever the URL is: the error doesn't repeat it.
+        let e = check_url("https://ghp_secret@github.com/acme/api").unwrap_err();
+        assert!(!e.to_string().contains("ghp_secret"), "{e}");
+        assert!(e.to_string().contains("github.com"), "{e}");
+    }
+
+    #[test]
+    fn folders_on_other_machines_are_refused() {
+        let ws = |dir: &str, repo: &str| Workspace {
+            dir: Some(dir.into()),
+            repos: BTreeMap::from([(
+                "api".to_string(),
+                Repo {
+                    dir: Some(repo.into()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        assert!(check(&ws("/p", "/q")).is_ok());
+        for bad in [
+            r"\\attacker\share",
+            "//attacker/share",
+            r"\\?\UNC\attacker\s",
+            "/net/h/x",
+        ] {
+            let e = check(&ws(bad, "/q")).unwrap_err();
+            assert!(format!("{e:#}").contains("another machine"), "{e:#}");
+            let e = check(&ws("/p", bad)).unwrap_err();
+            assert!(format!("{e:#}").contains("[workspace.repos.api]"), "{e:#}");
+        }
+    }
+
+    #[test]
+    fn an_imported_configs_folders_are_judged_as_text() {
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
+        let h = home.display().to_string();
+        let ws = |dir: &str, repo: Option<&str>| Workspace {
+            dir: Some(dir.into()),
+            repos: repo
+                .map(|r| {
+                    (
+                        "api".to_string(),
+                        Repo {
+                            dir: Some(r.into()),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let parent = home.parent().unwrap().display().to_string();
+        for bad in [
+            ws(&h, None),
+            ws("~", None),
+            ws(&format!("{h}/"), None),
+            ws(&h.to_uppercase(), None),
+            ws(&parent, None),
+            ws("/", None),
+            ws(".", None),
+            ws(&format!("{h}/proj/.."), None),
+            ws("/nonexistent/luoto-p", Some(&parent)),
+            ws("/nonexistent/luoto-p", Some("~")),
+            ws("/nonexistent/luoto-p", Some("/nonexistent/luoto-p/api")),
+            ws("/nonexistent/luoto-p/web", Some("/nonexistent/luoto-p")),
+        ] {
+            assert!(check_folders_text(&bad).is_err(), "{bad:?}");
+        }
+        assert!(check_folders_text(&ws("/nonexistent/luoto-p", Some("/nonexistent/x"))).is_ok());
+        // A folder in your home is a folder like any: the import lists it.
+        assert!(check_folders_text(&ws("~/dev/proj", Some("~/.ssh"))).is_ok());
     }
 
     #[test]
@@ -1614,7 +1889,7 @@ mod tests {
 [ "$GIT_LFS_SKIP_SMUDGE" = 1 ] || exit 9
 for last; do :; done
 [ -n "$FAIL" ] && { mkdir -p "$last"; echo half > "$last/a"; exit 128; }
-mkdir -p "$last/.git" "$last/src" && echo x > "$last/src/main.rs" && echo y > "$last/.envrc"
+mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/main.rs" && echo y > "$last/.envrc"
 "#;
         std::fs::write(bin.join("git"), fake).unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -1641,10 +1916,18 @@ mkdir -p "$last/.git" "$last/src" && echo x > "$last/src/main.rs" && echo y > "$
         };
         assert_eq!(run(true), Some(1));
         assert!(names().is_empty(), "a failed clone leaves nothing");
+        // What a clone cut short by more than an error left is cleared.
+        std::fs::create_dir_all(ws.join(".luoto-clone-0123456789abcdef/.git")).unwrap();
+        // The repository's own `.luoto-clone` moves in like any entry.
         assert_eq!(run(false), Some(0));
-        assert_eq!(names(), [".envrc", ".git", "src"]);
+        assert_eq!(names(), [".envrc", ".git", ".luoto-clone", "src"]);
         assert_eq!(run(false), Some(3), "a workspace with files is left alone");
-        assert_eq!(names(), [".envrc", ".git", "src"]);
+        assert_eq!(names(), [".envrc", ".git", ".luoto-clone", "src"]);
+        assert_ne!(
+            workspace_clone_script("x/y", None, false),
+            workspace_clone_script("x/y", None, false),
+            "each clone's folder is its own"
+        );
     }
 
     #[test]

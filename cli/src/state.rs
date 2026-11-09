@@ -26,6 +26,10 @@ pub struct EnvState {
     /// Repositories copied or cloned into the workspace volume, or found there (`repos.rs`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub repos: BTreeSet<String>,
+    /// The env's own remote is cloned and nobody has said yes to installing what it pins:
+    /// until someone does, `up` asks, or installs nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub installs_pending: bool,
     /// Login user in the dev container (uid 1000).
     #[serde(default)]
     pub user: Option<String>,
@@ -87,7 +91,20 @@ pub fn ensure(ctx: &Ctx, env: &str, image: &str) -> Result<EnvState> {
     if let Some(s) = EnvState::load(&ctx.paths, env)? {
         return Ok(s);
     }
-    let s = EnvState::fresh(allocate_octet(ctx)?, detect_home(ctx, image));
+    let home = detect_home(ctx, image);
+    reserve(ctx, env, |octet| EnvState::fresh(octet, home))
+}
+
+/// Save `env`'s first state, `make` given a free octet: under a lock, and with the state
+/// written before the lock goes, so an `up` or import running beside it picks another.
+pub fn reserve(ctx: &Ctx, env: &str, make: impl FnOnce(u8) -> EnvState) -> Result<EnvState> {
+    std::fs::create_dir_all(&ctx.paths.data)?;
+    let lock = std::fs::File::create(ctx.paths.data.join("octets.lock"))?;
+    lock.lock().context("lock the subnets")?;
+    let used = ctx.rt.used_subnets()?;
+    let octet = free_octet(&taken(&ctx.paths)?, &used)
+        .context("no free 10.213.x.0/24 subnet left for a new env")?;
+    let s = make(octet);
     s.save(&ctx.paths, env)?;
     Ok(s)
 }
@@ -101,6 +118,7 @@ impl EnvState {
             vault_token: hex::encode(rand::random::<[u8; 32]>()),
             seeded: false,
             repos: BTreeSet::new(),
+            installs_pending: false,
             user: None,
             tools: None,
             dev_ca: None,
@@ -108,17 +126,25 @@ impl EnvState {
     }
 }
 
-/// Pick a free 10.213.x.0/24 for a new env: the octet also picks its dev container's ID range
+/// The octets of every env with state here, one whose config isn't written yet (an import
+/// under way) included. The octet also picks the env's dev container's ID range
 /// (`env::dev_id_map`).
-pub fn allocate_octet(ctx: &Ctx) -> Result<u8> {
-    let used = ctx.rt.used_subnets()?;
-    let mut taken: BTreeSet<u8> = BTreeSet::new();
-    for env in config::list_envs(&ctx.paths)? {
-        if let Some(s) = EnvState::load(&ctx.paths, &env)? {
+fn taken(paths: &Paths) -> Result<BTreeSet<u8>> {
+    let mut names: BTreeSet<String> = config::list_envs(paths)?.into_iter().collect();
+    if let Ok(dirs) = std::fs::read_dir(paths.data.join("envs")) {
+        names.extend(
+            dirs.flatten()
+                .filter_map(|d| d.file_name().into_string().ok())
+                .filter(|n| config::validate_name(n).is_ok()),
+        );
+    }
+    let mut taken = BTreeSet::new();
+    for env in names {
+        if let Some(s) = EnvState::load(paths, &env)? {
             taken.insert(s.octet);
         }
     }
-    free_octet(&taken, &used).context("no free 10.213.x.0/24 subnet left for a new env")
+    Ok(taken)
 }
 
 /// The first octet no env here has (`taken`) and no network's subnet (`used`) holds.
@@ -158,5 +184,20 @@ mod tests {
         let all: BTreeSet<u8> = (1..=253).collect();
         assert_eq!(free_octet(&all, &[]), Some(254));
         assert_eq!(free_octet(&all, &["10.213.254.0/24".to_string()]), None);
+    }
+
+    #[test]
+    fn an_env_with_state_but_no_config_yet_holds_its_octet() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config: dir.path().join("config"),
+            data: dir.path().join("data"),
+        };
+        std::fs::create_dir_all(paths.envs_dir()).unwrap();
+        std::fs::write(paths.env_config("web"), "").unwrap();
+        EnvState::fresh(3, None).save(&paths, "web").unwrap();
+        // An import under way: its state first, its config once its volumes are written.
+        EnvState::fresh(4, None).save(&paths, "moving").unwrap();
+        assert_eq!(taken(&paths).unwrap(), BTreeSet::from([3, 4]));
     }
 }

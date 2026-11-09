@@ -296,6 +296,89 @@ impl Runtime {
         Ok(self.command().args(args).status()?)
     }
 
+    /// [`run`](Self::run) for a command whose output and time the sandbox decides: given up on
+    /// (and killed) after `limit`, or once its stdout passes `cap` bytes.
+    pub fn run_limited<I, S>(
+        &self,
+        args: I,
+        limit: std::time::Duration,
+        cap: usize,
+    ) -> Result<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        use std::io::Read;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let args: Vec<std::ffi::OsString> =
+            args.into_iter().map(|a| a.as_ref().to_owned()).collect();
+        traced(&args, || -> Result<String> {
+            let mut child = self
+                .command()
+                .args(&args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .with_context(|| format!("run {}", self.bin))?;
+            let over = Arc::new(AtomicBool::new(false));
+            let read = |pipe: Option<Box<dyn Read + Send>>, over: Option<Arc<AtomicBool>>| {
+                std::thread::spawn(move || {
+                    let mut v = Vec::new();
+                    if let Some(p) = pipe {
+                        let _ = p.take(cap as u64 + 1).read_to_end(&mut v);
+                    }
+                    if v.len() > cap
+                        && let Some(o) = over
+                    {
+                        o.store(true, Ordering::Relaxed);
+                    }
+                    v
+                })
+            };
+            let out = read(
+                child.stdout.take().map(|p| Box::new(p) as _),
+                Some(over.clone()),
+            );
+            let err = read(child.stderr.take().map(|p| Box::new(p) as _), None);
+            let deadline = std::time::Instant::now() + limit;
+            let status = loop {
+                if let Some(s) = child.try_wait()? {
+                    break s;
+                }
+                let late = std::time::Instant::now() >= deadline;
+                if late || over.load(Ordering::Relaxed) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // Something it started may hold the pipes: their threads end with it.
+                    if late {
+                        bail!(
+                            "{} gave no answer within {} s",
+                            self.name(),
+                            limit.as_secs()
+                        );
+                    }
+                    bail!("{} wrote more than {cap} bytes", self.name());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            };
+            let out = out.join().unwrap_or_default();
+            let err = err.join().unwrap_or_default();
+            if out.len() > cap {
+                bail!("{} wrote more than {cap} bytes", self.name());
+            }
+            if !status.success() {
+                bail!(
+                    "{} failed: {}",
+                    self.name(),
+                    String::from_utf8_lossy(&err[..err.len().min(cap)]).trim()
+                );
+            }
+            Ok(String::from_utf8_lossy(&out).into_owned())
+        })
+    }
+
     /// Run with stdout and stderr read as they come: `each` gets every chunk and whether it
     /// came from stderr. When `each` returns false the command is killed.
     pub fn stream<I, S>(
@@ -757,6 +840,30 @@ mod tests {
             connection: None,
             api: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_the_sandbox_answers_is_bounded_in_time_and_output() {
+        use std::time::{Duration, Instant};
+        let sh = Runtime {
+            bin: "sh".into(),
+            ..rt(Flavor::Podman)
+        };
+        let limit = Duration::from_secs(5);
+        assert_eq!(
+            sh.run_limited(["-c", "echo hi"], limit, 100).unwrap(),
+            "hi\n"
+        );
+        let started = Instant::now();
+        let e = sh
+            .run_limited(["-c", "exec sleep 30"], Duration::from_millis(300), 100)
+            .unwrap_err();
+        assert!(e.to_string().contains("no answer"), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let e = sh.run_limited(["-c", "exec yes"], limit, 4096).unwrap_err();
+        assert!(e.to_string().contains("more than 4096 bytes"), "{e}");
+        assert!(sh.run_limited(["-c", "exit 2"], limit, 100).is_err());
     }
 
     fn spec() -> RunSpec {

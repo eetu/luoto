@@ -46,6 +46,28 @@ pub fn canonical(p: &str) -> Result<PathBuf> {
         .with_context(|| format!("{} does not exist", path.display()))
 }
 
+/// Whether `p` names a place on another machine, which merely looking it up reaches: a UNC
+/// path (`\\server\share`, `//server/share`, `\\?\UNC\…`), to which Windows sends the user's
+/// credentials, or `/net/<host>`, which macOS's automounter mounts. `\\?\C:\…` is a local
+/// drive in Windows' long form.
+pub fn network_path(p: &str) -> bool {
+    let sep = |c: u8| c == b'/' || c == b'\\';
+    let b = p.as_bytes();
+    if b.len() >= 2 && sep(b[0]) && sep(b[1]) {
+        let local_drive = b.len() >= 6
+            && (b[2] == b'?' || b[2] == b'.')
+            && sep(b[3])
+            && b[4].is_ascii_alphabetic()
+            && b[5] == b':';
+        return !local_drive;
+    }
+    sep(b.first().copied().unwrap_or_default())
+        && p[1..]
+            .split(['/', '\\'])
+            .next()
+            .is_some_and(|first| first.eq_ignore_ascii_case("net"))
+}
+
 /// A valid env name from a directory or repo name: `My_Project` → `my-project`.
 pub fn name_from(s: &str) -> String {
     let base = s
@@ -152,7 +174,7 @@ pub fn check_pull_dest(dest: &Path) -> Result<()> {
 /// the invisible characters HFS+ ignores removed and the trailing dots and spaces NTFS drops.
 /// `.GIT`, `.g\u{200c}it` and `.git.` all name `.git` there. Folding goes through upper case
 /// first, as the filesystems' tables do: `ſ` (long s) names `s`, `ı` names `i`.
-fn fold(component: &str) -> String {
+pub(crate) fn fold(component: &str) -> String {
     let s: String = component
         .chars()
         .filter(|c| !crate::text::is_format(*c))
@@ -651,12 +673,17 @@ pub fn pull_targets(
     repo: Option<&str>,
     present: &BTreeSet<String>,
 ) -> Result<Vec<PullTarget>> {
-    let root =
-        || -> Result<PathBuf> {
-            canonical(ws.dir.as_deref().context(
-                "the env has no folder to pull into (`luoto pull --to <dir>` picks one)",
-            )?)
-        };
+    // Every folder a pull writes: a config from elsewhere (`luoto import`) names them too.
+    let checked = |d: PathBuf| -> Result<PathBuf> {
+        check_pull_dest(&d)?;
+        Ok(d)
+    };
+    let to = to.map(checked).transpose()?;
+    let root = || -> Result<PathBuf> {
+        checked(canonical(ws.dir.as_deref().context(
+            "the env has no folder to pull into (`luoto pull --to <dir>` picks one)",
+        )?)?)
+    };
     if let Some(name) = repo {
         let r = ws.repos.get(name).with_context(|| {
             format!(
@@ -666,7 +693,7 @@ pub fn pull_targets(
         })?;
         let dest = match (to, &r.dir) {
             (Some(t), _) => t,
-            (None, Some(d)) => canonical(d)?,
+            (None, Some(d)) => checked(canonical(d)?)?,
             (None, None) => {
                 let d = root()?.join(name);
                 std::fs::create_dir_all(&d)?;
@@ -705,7 +732,7 @@ pub fn pull_targets(
                 d
             }
             None => match canonical(dir) {
-                Ok(d) => d,
+                Ok(d) => checked(d)?,
                 Err(e) => {
                     eprintln!("warning: repo {name} left out: {e:#}");
                     continue;
@@ -1331,6 +1358,61 @@ mod tests {
         assert!(check_pull_dest(home.parent().unwrap()).is_err());
         assert!(check_pull_dest(home.ancestors().last().unwrap()).is_err());
         assert!(check_pull_dest(&to.path().canonicalize().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn network_paths_are_told_from_local_ones() {
+        for p in [
+            r"\\server\share\proj",
+            "//server/share/proj",
+            r"\\?\UNC\server\share",
+            r"\\.\UNC\server\share",
+            r"/\server\share",
+            "/net/host/export",
+            "/NET/host",
+            "/net",
+        ] {
+            assert!(network_path(p), "{p}");
+        }
+        for p in [
+            "/Users/me/proj",
+            r"C:\Users\me\proj",
+            r"\\?\C:\Users\me\proj",
+            "~/proj",
+            "/network/x",
+            "/home/me/net/x",
+            "",
+        ] {
+            assert!(!network_path(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn no_folder_a_config_names_pulls_into_home() {
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
+        let other = tempfile::tempdir().unwrap();
+        let folder = |d: &Path| config::Repo {
+            dir: Some(d.display().to_string()),
+            ..Default::default()
+        };
+        let present = BTreeSet::from(["api".to_string()]);
+        let at_home = Workspace {
+            dir: Some(home.display().to_string()),
+            ..Default::default()
+        };
+        assert!(pull_targets(&at_home, None, None, &present).is_err());
+        let repo_above_home = Workspace {
+            dir: Some(other.path().display().to_string()),
+            repos: BTreeMap::from([("api".to_string(), folder(home.parent().unwrap()))]),
+            ..Default::default()
+        };
+        let e = pull_targets(&repo_above_home, None, None, &present).unwrap_err();
+        assert!(format!("{e:#}").contains("home folder"), "{e:#}");
+        assert!(pull_targets(&repo_above_home, None, Some("api"), &present).is_err());
+        assert!(pull_targets(&at_home, Some(home.clone()), None, &present).is_err());
     }
 
     #[test]

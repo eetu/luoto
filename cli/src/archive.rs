@@ -13,8 +13,9 @@
 //!
 //! Volume contents were written by the sandbox, and an archive may come from another machine:
 //! both are untrusted. Every entry is decoded here (names capped, GNU long names only), checked
-//! (a plain relative path, nothing under a symbolic link the stream made, hard links within the
-//! volume, only files, folders, links and FIFOs) and written anew, never unpacked on the host:
+//! (a plain relative path, nothing under a symbolic link the stream made or a hard link to one,
+//! hard links within the volume, only files, folders, links and FIFOs) and written anew, never
+//! unpacked on the host:
 //! the tar that a container unpacks into a volume is the one written here.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -456,6 +457,11 @@ impl Volume {
                     bail!("{}: a hard link to the volume's root", show(name));
                 }
                 self.through_link(&target, false)?;
+                // tar links the symbolic link itself (link(2) doesn't follow it), so the hard
+                // link is one too, and nothing may be written through it either.
+                if self.symlinks.contains(&target) {
+                    self.symlinks.insert(rel.clone());
+                }
                 Some(target)
             }
             (Kind::Symlink | Kind::Hardlink, _) => bail!("{}: a link to nothing", show(name)),
@@ -1089,6 +1095,20 @@ mod tests {
                 "symbolic link",
             ),
             (
+                "through a hard link to a link",
+                volume(&[
+                    link,
+                    (b'1', b"./h", b"./a", b""),
+                    (b'0', b"./h/passwd", b"", b""),
+                ]),
+                "symbolic link",
+            ),
+            (
+                "over a hard link to a link",
+                volume(&[link, (b'1', b"./h", b"./a", b""), (b'5', b"./h/", b"", b"")]),
+                "symbolic link",
+            ),
+            (
                 "link to nothing",
                 volume(&[(b'2', b"./a", b"", b"")]),
                 "a link to nothing",
@@ -1169,6 +1189,16 @@ mod tests {
                     raw(b, b'0', b"volumes/work/../../x", b"", b"");
                 }),
                 "not a plain path",
+            ),
+            (
+                "through a hard link to a link",
+                crafted(|b| {
+                    raw(b, b'5', b"volumes/work/", b"", b"");
+                    raw(b, b'2', b"volumes/work/a", b"/etc", b"");
+                    raw(b, b'1', b"volumes/work/h", b"volumes/work/a", b"");
+                    raw(b, b'0', b"volumes/work/h/cron.d/x", b"", b"");
+                }),
+                "symbolic link",
             ),
             (
                 "hard link to another part",

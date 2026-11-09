@@ -122,8 +122,11 @@ pub fn unattended(global: &GlobalConfig, r: &str) -> bool {
 }
 
 /// A `file:` ref's path. Only absolute and `~/` paths: a relative one would resolve against
-/// whichever folder luoto happens to run in.
+/// whichever folder luoto happens to run in. Only this machine's (`workspace::network_path`).
 fn file_path(p: &str) -> Result<PathBuf> {
+    if crate::workspace::network_path(p) {
+        bail!("`file:{p}` is on another machine; keep the secret in a file on this one");
+    }
     if let Some(rest) = p.strip_prefix("~/") {
         let dirs = directories::BaseDirs::new().context("no home directory to expand `~/` in")?;
         return Ok(dirs.home_dir().join(rest));
@@ -332,6 +335,13 @@ mod tests {
             assert!(check_ref(&format!("file:{rel}")).is_err());
         }
         assert!(check_ref("file:~/k").is_ok());
+        for remote in [
+            r"file:\\server\share\k",
+            "file://server/share/k",
+            "file:/net/h/k",
+        ] {
+            assert!(check_ref(remote).is_err(), "{remote}");
+        }
         assert!(check_ref("op://v/i/f").is_ok());
         assert!(check_ref("http://x").is_err());
         let azcli = "azcli:https://management.azure.com/";

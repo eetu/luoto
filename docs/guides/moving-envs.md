@@ -30,10 +30,14 @@ It holds the env's workspace and home, agents' logins included: keep it as you w
 $ luoto import infra.luoto.tar
 infra.luoto.tar: env `infra`, exported by luoto-dev 0.4.0 at 2026-11-08T10:12:03Z
   holds      config, luoto.toml, state, workspace, home
-  folder     /Users/you/dev/infra
+  folder     /Users/you/dev/infra: `luoto pull` writes the workspace's files here
   secrets    read on this machine at `up`, from:
-    credentials.anthropic.oauth_token = keyring:luoto-dev/anthropic
-    credentials.azure: your `az` login here
+             credentials.anthropic.oauth_token = keyring:luoto-dev/anthropic
+             credentials.azure: your `az` login here
+  sent to    each credential, by the gate, on:
+             anthropic  api.anthropic.com
+             …
+  luoto.toml accepted where it was exported, not here: `up` reviews the workspace's as a new one
   becomes    env `infra` of luoto, with a CA and vault token of its own
 Import it as `infra`? [y/N] y
 importing: 4.6 GB of 4.6 GB
@@ -66,8 +70,9 @@ What only the old machine has stays there:
   work wherever you are signed in, `env:` and `file:` need the variable or file there,
   `keyring:` needs the secret stored again, and `[credentials.azure]` needs `az login` there.
   `luoto import` lists every ref before it asks; `luoto up` warns about any it can't read.
-- **Folders.** An env made from a folder keeps `[workspace] dir`. Where that folder doesn't
-  exist, the env still works (its workspace came in the file), but `luoto pull` needs `--to`
+- **Folders.** An env made from a folder keeps `[workspace] dir`, and its repos' folders. Its
+  workspace came in the file, so nothing is copied in from them: they are where `luoto pull`
+  writes. Where that folder doesn't exist, the env still works, but `luoto pull` needs `--to`
   until `luoto edit` points `dir` at a folder there. An env cloned from a remote has none.
 
 ## What moves
@@ -75,7 +80,7 @@ What only the old machine has stays there:
 | in the file | not in it |
 | --- | --- |
 | the env's config file as you wrote it, refs as refs | secret values |
-| the accepted luoto.toml, the repos in the workspace, the repos you called public, a luoto.toml you declined | the CA, its key and the vault token: import makes new ones |
+| the accepted luoto.toml (the first `up` after import reviews it again), the repos in the workspace, the repos you called public, a luoto.toml you declined | the CA, its key and the vault token: import makes new ones |
 | the workspace, with owners, modes and links as they were | its subnet: import takes a free one |
 | the home, unless `--no-home` | luoto's tools and the gate's state, which `up` rebuilds, and the egress history |
 
@@ -91,6 +96,6 @@ It holds the env's whole workspace and home: work not pushed, files the sandbox 
 writes it readable only by you; delete it once the env is imported.
 
 An archive from someone else is their env: its config decides which of your secrets `up`
-reads and which hosts get them. Read the refs `luoto import` lists before you say yes. The
+reads and which hosts get them. Read what `luoto import` lists before you say yes. The
 rest of the file is handled as untrusted: nothing in it is unpacked on your machine, and the
 volumes are written by a container that sees only the new env's volume.

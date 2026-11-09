@@ -1072,6 +1072,13 @@ fn compile_git(
             });
         }
         if let Some(ca) = &c.ca {
+            if crate::workspace::network_path(ca) {
+                bail!(
+                    "credentials.git ({host}): its CA `{}` is on another machine; give a file on \
+                     this one",
+                    crate::text::display(ca)
+                );
+            }
             let path = crate::workspace::expand(ca);
             let text = std::fs::read_to_string(&path).with_context(|| {
                 format!("credentials.git ({host}): read its CA {}", path.display())
@@ -1954,6 +1961,11 @@ ca = '{}'
             ca.display()
         );
         let c = compile("t", &cfg(&text), GATE, &[]).unwrap();
+        let remote_ca = text.replace(&ca.display().to_string(), r"\\server\share\ca.pem");
+        let Err(e) = compile("t", &cfg(&remote_ca), GATE, &[]) else {
+            panic!("a CA on another machine is read");
+        };
+        assert!(e.to_string().contains("another machine"), "{e}");
         let p = &c.policy;
         let allowed = |method, path| {
             matches!(

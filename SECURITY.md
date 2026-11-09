@@ -111,17 +111,27 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   Nothing in it runs, installs or is granted before your yes, at two steps of the first `up`:
   its `luoto.toml` (Enter answers no; `--yes` leaves it pending), then what installing would
   do, where mise reads its version files and `mise.toml` (which can run commands in the env).
-  Until then the env has its default presets and the access you gave the remote. A shell or
-  editor you open in it starts mise there.
+  Both questions stay open until answered: an `up` cut short or without a terminal (the UI,
+  `up --all`) installs nothing. Until then the env has its default presets and the access you
+  gave the remote. A shell or editor you open in it starts mise there. git's output on the
+  way, the remote's messages included, is shown escaped.
 - **Moving an env** (`luoto export`, `luoto import`). An archive holds no secret value, CA
   key or vault token: the config's refs stay refs, read where the env is imported, and import
   makes a new CA, vault token and subnet. The archive is untrusted input (the sandbox wrote
   its volumes, and it may come from elsewhere): each entry is decoded with capped names,
-  checked (a plain relative path, nothing under a symbolic link the archive made, hard links
-  within their volume, only files, folders, links and FIFOs) and written anew to a container
-  that mounts only the new volume, with no network, in the new env's user namespace. Nothing
-  of a volume is unpacked on the host. Before it asks, import lists the secret refs the config
-  reads on this machine.
+  checked (a plain relative path, nothing under a symbolic link the archive made or a hard
+  link to one, hard links within their volume, only files, folders, links and FIFOs) and
+  written anew to a container that mounts only the new volume, with no network, in the new
+  env's user namespace. Nothing of a volume is unpacked on the host. Before it asks, import
+  lists what the config opens: the secret refs it reads on this machine, the hosts each
+  credential goes to, secrets put in the sandbox, `isolation`, `image`, `ports`, `[[allow]]`
+  rules, `[deps] run` and private git hosts. Until your yes, the folders it names are only
+  text, never looked up; it refuses your home folder or one that holds it, and nothing is
+  copied in from them afterwards (the workspace came in the archive): they are where `pull`
+  writes, which the list says. The `luoto.toml` accepted where it was exported is not
+  accepted here: the next `up` reviews it as a new one. Folders, CA files and `file:` refs on
+  another machine (`\\server\share`, `/net/<host>`) are refused in any config, since looking
+  one up sends your Windows credentials there or mounts it.
 - **Isolation.** With podman, dev containers run on gVisor (in luoto's VM on macOS and
   Windows; on Linux once `runsc` is installed): the sandbox's system calls reach gVisor's
   user-space kernel, not the VM's or the host's. In luoto's VM each env's dev container has its
@@ -177,7 +187,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Cloud API write access.** With `write = true` under a Hetzner, UpCloud, DigitalOcean or
   Cloudflare credential, code in the sandbox can do whatever the token allows, such as create
   a server or Worker that reaches the internet with data from the env. The token's own
-  permissions are the limit; UpCloud tokens can't be read-only.
+  permissions are the limit; UpCloud tokens can't be read-only. A read-only token, for these
+  or for Azure, still gives the sandbox whatever it reads: a database's password, a cluster's
+  kubeconfig, secret values in Key Vault, each usable from anywhere.
 - **Large clones.** A repository cloned in an env can fill the disk of luoto's VM, which the
   other envs and the vault share: their availability, not their isolation.
 - **Exhausting the gate.** Code in the sandbox can hold the gate's 1024 connections and
@@ -222,7 +234,7 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   pushed, files the sandbox wrote, shell history and agents' logins, which work from it. It is
   written readable only by you; keep it as a secret and delete it once imported. Importing
   someone else's adopts their config, which decides which of your secrets `up` reads and which
-  hosts get them: read the refs import lists.
+  hosts get them, and their home and workspace, which run in the env: read what import lists.
 - **Images.** Release images are pinned by digest in the binary; images from
   `luoto setup --build` are as trustworthy as your source tree.
 - **Install windows.** The project's version files, which the sandbox controls, decide which

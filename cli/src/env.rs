@@ -522,8 +522,11 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
                  (`luoto edit -e {env}`)"
             ),
         }
-        EnvState::update(&ctx.paths, env, |s| s.seeded = true)?;
+        // The install question outlives this `up`: one cut short, or unable to ask, leaves it
+        // for the next.
+        EnvState::update(&ctx.paths, env, |s| filled(s, cloned_workspace))?;
     }
+    let installs_pending = cloned_workspace || state.installs_pending;
     // A new volume holds none of the repos, whatever the host remembers.
     let seeded_repos = if fresh_work {
         Default::default()
@@ -563,10 +566,10 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     // New clones bring files of their own: the presets and toolchains they suggest, offered
     // as `luoto init` offers a folder's.
     let mut install = true;
-    if cloned || cloned_workspace {
+    if cloned || installs_pending {
         match deps::detect_in_env(ctx, env) {
             Ok(found) => {
-                let heading = if cloned_workspace {
+                let heading = if installs_pending {
                     format!("the repository cloned into `{env}` suggests:")
                 } else {
                     format!("the repos cloned into `{env}` suggest:")
@@ -575,16 +578,19 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
                     sync::reapply(ctx, env)?;
                     p = plan(ctx, env)?;
                 }
-                if cloned_workspace {
+                if installs_pending {
                     install = ask_installs(ctx, env, &p.cfg, &found, opts.accept_installs);
+                    if install {
+                        EnvState::update(&ctx.paths, env, |s| s.installs_pending = false)?;
+                    }
                 }
             }
             Err(e) => {
                 eprintln!("warning: the cloned repos weren't read ({e:#})");
                 // What the clone pins is unknown: nothing installs without a look at it.
-                if cloned_workspace {
+                if installs_pending {
                     install = false;
-                    println!("nothing installed yet: `luoto up -e {env}` installs it");
+                    println!("nothing installed yet: `luoto up -e {env}` asks again");
                 }
             }
         }
@@ -701,16 +707,25 @@ fn ask_installs(
     if accept {
         return true;
     }
-    let later = format!("nothing installed yet: `luoto up -e {env}` installs them");
     if !crate::prompt::interactive() {
-        println!("{later}");
+        println!(
+            "nothing installed: installing waits for a yes, which `luoto up -e {env}` asks for \
+             on a terminal"
+        );
         return false;
     }
     if crate::prompt::ask("Install them now? [Y/n]", 'y') == 'n' {
-        println!("{later}");
+        println!("nothing installed yet: `luoto up -e {env}` asks again");
         return false;
     }
     true
+}
+
+/// The state once the workspace is filled: a clone of the env's own remote also opens the
+/// install question, which only a yes closes.
+fn filled(s: &mut EnvState, cloned: bool) {
+    s.seeded = true;
+    s.installs_pending |= cloned;
 }
 
 /// The gate's log is the env's event history: over 100 000 events, and a flood of them can't
@@ -1139,4 +1154,30 @@ pub fn remove(ctx: &Ctx, env: &str) -> Result<()> {
         std::fs::remove_dir_all(&state)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_install_question_outlives_an_up_that_didnt_answer_it() {
+        let mut s = EnvState::fresh(1, None);
+        filled(&mut s, true);
+        assert!(s.seeded && s.installs_pending);
+        // An `up` cut short after the clone: the next one finds the state saved so.
+        let saved = serde_json::to_vec(&s).unwrap();
+        let mut next: EnvState = serde_json::from_slice(&saved).unwrap();
+        assert!(next.installs_pending);
+        // A workspace volume filled again doesn't answer it.
+        filled(&mut next, false);
+        assert!(next.installs_pending);
+        let mut copied = EnvState::fresh(2, None);
+        filled(&mut copied, false);
+        assert!(!copied.installs_pending);
+        let old: EnvState =
+            serde_json::from_str(r#"{"octet":3,"home":null,"vault_token":"t","seeded":true}"#)
+                .unwrap();
+        assert!(!old.installs_pending);
+    }
 }

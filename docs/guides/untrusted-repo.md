@@ -56,7 +56,8 @@ it took.
    Install them now? [Y/n]
    ```
 
-   No leaves the env without them for now; the next `luoto up -e web` installs them.
+   No leaves the env without them; each `luoto up -e web` asks again until a yes, and one
+   that can't ask (the UI, `up --all`) installs nothing.
 
 `luoto init acme/web --yes` asks nothing: the remote is public, the installs run, and its
 `luoto.toml` waits for `luoto project apply`. With `--no-up`, `luoto up -e web` does all of the

@@ -540,7 +540,7 @@ pub fn suggest(env: &str, own: &EnvConfig, accepted: Option<&ProjectConfig>) -> 
 }
 
 /// Every setting of a rule, so no change to it can pass the review unseen.
-fn rule_line(r: &Rule) -> String {
+pub fn rule_line(r: &Rule) -> String {
     let mut parts = vec![match &r.access {
         Access::Level(AccessLevel::Read) => "read".to_string(),
         Access::Level(AccessLevel::Write) => "WRITE".to_string(),
