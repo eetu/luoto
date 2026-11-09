@@ -94,7 +94,8 @@ pub fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    let tmp = path.with_extension("tmp");
+    // This process's own: the watcher and a command can write the same file at once.
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     {
         use std::io::Write;
         let mut opts = std::fs::OpenOptions::new();

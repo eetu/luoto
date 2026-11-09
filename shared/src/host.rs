@@ -333,6 +333,24 @@ pub fn canonical_path(raw: &str) -> Result<String, &'static str> {
     Ok(out)
 }
 
+/// A glob for a denied `path` and its neighbours (`/a/b/c` → `/a/b/**`), offered in a command
+/// people paste. The sandbox wrote the path, so it decides how wide a glob would be: one is
+/// offered only under two segments at least (`/lookup/x` stays itself, never `/lookup/**`), and
+/// `None` unless every character is plain (no quote, space or `*` reaches the suggestion).
+pub fn path_glob(path: &str) -> Option<String> {
+    let plain = path.starts_with('/')
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-~!@+=:,%".contains(&b));
+    if !plain {
+        return None;
+    }
+    Some(match path.rfind('/') {
+        Some(i) if path[..i].matches('/').count() >= 2 => format!("{}/**", &path[..i]),
+        _ => path.to_string(),
+    })
+}
+
 /// The host in what a user typed for one: a bare name, `host:port`, or a URL.
 pub fn host_of(target: &str) -> &str {
     let t = target.trim();
@@ -346,6 +364,37 @@ pub fn host_of(target: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_path_glob_is_offered_only_for_a_plain_path() {
+        use super::path_glob;
+        assert_eq!(path_glob("/serde").as_deref(), Some("/serde"));
+        // Too shallow to widen: `/lookup/**` would open every module host.
+        assert_eq!(path_glob("/lookup/x").as_deref(), Some("/lookup/x"));
+        assert_eq!(
+            path_glob("/lookup/filippo.io/edwards25519@v1.1.0").as_deref(),
+            Some("/lookup/filippo.io/**")
+        );
+        assert_eq!(
+            path_glob("/filippo.io/edwards25519/@v/list").as_deref(),
+            Some("/filippo.io/edwards25519/@v/**")
+        );
+        assert_eq!(
+            path_glob("/sumdb/sum.golang.org/lookup/filippo.io/edwards25519@v1.1.0").as_deref(),
+            Some("/sumdb/sum.golang.org/lookup/filippo.io/**")
+        );
+        // The sandbox wrote the path: nothing that could break out of the quotes or widen the glob.
+        for hostile in [
+            "/a/b'; rm -rf ~; '",
+            "/a/b c",
+            "/a/*/c",
+            "/a/\"b\"",
+            "/a/$(id)",
+            "a/b",
+        ] {
+            assert_eq!(path_glob(hostile), None, "{hostile}");
+        }
+    }
+
     #[test]
     fn request_paths_are_canonical_or_refused() {
         use super::canonical_path as c;

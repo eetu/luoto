@@ -1,4 +1,4 @@
-description = "GitHub reads: clone/fetch public repos, API reads, raw files, release assets"
+description = "GitHub reads: clone/fetch public repos, API reads, raw files (release downloads: github-releases)"
 
 [[rule]]
 host = "github.com"
@@ -18,12 +18,6 @@ host = "codeload.github.com"
 
 [[rule]]
 host = "raw.githubusercontent.com"
-
-[[rule]]
-host = "objects.githubusercontent.com"
-
-[[rule]]
-host = "release-assets.githubusercontent.com"
 
 [[rule]]
 host = "cli.github.com"

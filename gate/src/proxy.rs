@@ -129,7 +129,7 @@ async fn connect(state: Arc<State>, slot: Slot, req: Request<Incoming>) -> Respo
                     reason.message(&host),
                 );
                 let url = format!("{host}:{port}");
-                return respond::deny(&state.cfg.env, "CONNECT", &url, &host, &reason);
+                return respond::deny(&state.cfg.env, "CONNECT", &url, &host, "", &reason);
             }
             Err(DialError::Failed(msg)) => {
                 return respond::plain(StatusCode::BAD_GATEWAY, format!("{msg}\n"));

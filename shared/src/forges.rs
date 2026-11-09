@@ -9,6 +9,9 @@
 
 /// GitHub's git host (smart HTTP, and SSH on port 22).
 pub const GITHUB: &str = "github.com";
+/// GitHub's SSH on the HTTPS port, for networks that block 22; it serves github.com's host
+/// keys.
+pub const GITHUB_SSH_443: &str = "ssh.github.com";
 /// GitHub's REST and GraphQL API.
 pub const GITHUB_API: &str = "api.github.com";
 /// Azure DevOps Services, where its git repositories are served over HTTPS.

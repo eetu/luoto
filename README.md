@@ -66,7 +66,7 @@ $ luoto init
 env `my-app` from ~/dev/my-app
   workspace  copy: the env works on its own copy; changes leave by git push or `luoto pull`
   isolation  gVisor: its own user-space kernel (builds about 1.6× slower)
-  presets    debian, github, toolchains, npm (package.json)
+  presets    debian, github, github-releases, toolchains, npm (package.json)
   toolchains node 24 (.nvmrc)
              installed by mise in the env; the project's files keep deciding versions
 
@@ -232,7 +232,7 @@ a config file is its format (1 when missing): luoto reads older formats and refu
 from a newer luoto.
 
 ```toml
-presets = ["debian", "github", "toolchains", "npm"]   # see shared/presets/
+presets = ["debian", "github", "github-releases", "toolchains", "npm"]   # see shared/presets/
 agents = ["claude"]           # with options: [agents.claude] tables (docs/guides/agent-settings.md)
 ports = [5173]                # published by the gate itself (servers listening on all interfaces)
 # isolation = "container"     # default gVisor; this shares the VM's kernel, builds ~1.6× faster
@@ -302,6 +302,7 @@ repos = ["group/api"]         # pushes, under the same guard; `read_repos` to fe
 key = "op://Private/github-ssh/private key?ssh-format=openssh"
 hosts = ["github.com"]        # GitHub's and Azure DevOps' host keys are pinned
 # host_keys = ["git.example.com ssh-ed25519 AAAA…"]   # known_hosts lines for other hosts
+# github_port = 443           # GitHub over ssh.github.com:443, where port 22 is blocked
 
 [credentials.anthropic]       # or openai, openrouter, gemini, mistral, groq, copilot
 oauth_token = "op://Private/claude-code/token"
@@ -346,8 +347,9 @@ the UI and the offers to allow them; `luoto egress --all` shows them.
 
 Secret refs: `op://…` (1Password CLI, desktop or service account), `vault://mount/path#field`
 (OpenBao / HashiCorp Vault), `keyring:service/account` (OS keychain), `env:NAME`, `file:path`.
-Sources are configured in `~/.config/luoto/config.toml`. `[credentials.azure]` reads your `az`
-login itself, with no ref.
+In 1Password, a token is an API Credential's `credential` field, a Password's `password`, or a
+Secure Note's `notesPlain` holding the token alone. Sources are configured in
+`~/.config/luoto/config.toml`. `[credentials.azure]` reads your `az` login itself, with no ref.
 
 `[sandbox_secrets]` are resolved on your machine at `up` and written to a memory-only file in
 the dev container that every shell loads; they leave with the container. Anything that only
@@ -387,9 +389,10 @@ adds the token to the listed repos' git requests only and guards pushes as on Gi
 covers git, not the forge's API (merge requests), which a `[credentials.custom]` can reach.
 Without a token it lists public repos to fetch. Its host's SSH remotes go over HTTPS with it.
 
-An SSH credential lets git use SSH remotes as they are, to `hosts` on port 22 only. GitHub SSH
-remotes go to HTTPS when github.com isn't in `hosts`, as do Azure DevOps ones with an Azure
-DevOps credential; other forges' SSH remotes work only through `hosts`. SSH sessions are
+An SSH credential lets git use SSH remotes as they are, to `hosts` on port 22 only;
+`github_port = 443` sends GitHub's to `ssh.github.com:443` instead, for networks that block 22.
+GitHub SSH remotes go to HTTPS when github.com isn't in `hosts`, as do Azure DevOps ones with
+an Azure DevOps credential; other forges' SSH remotes work only through `hosts`. SSH sessions are
 unscoped by repository, so use a deploy key where that matters
 ([SECURITY.md](SECURITY.md#what-holds-the-line)). From 1Password, the key's ref is
 `op://<vault>/<item>/private key?ssh-format=openssh`.
@@ -406,17 +409,18 @@ java, go, rust, php, ruby, terraform, ….
 Terraform and OpenTofu are found by `.terraform-version`, `.opentofu-version`, `main.tf`,
 `versions.tf`, `terraform.tf` (or `main.tofu`, `versions.tofu`) and `.terraform.lock.hcl`,
 whose providers' registry tells the two apart; an exact `required_version` sets the version.
-Their presets (`terraform`, `opentofu`) open the provider and module registry. Azure
-credentials for `plan` and `apply` come from `[credentials.azure]`
-([guide](docs/guides/azure.md)); Hetzner, UpCloud, DigitalOcean and Cloudflare ones from
-`[credentials.<cloud>]` ([guide](docs/guides/cloud-apis.md)); AWS and Google Cloud ones
-aren't handled yet ([ROADMAP.md](ROADMAP.md)).
+Their presets (`terraform`, `opentofu`) open the provider and module registry and the
+providers' GitHub release downloads. Azure credentials for `plan` and `apply` come from
+`[credentials.azure]` ([guide](docs/guides/azure.md)); Hetzner, UpCloud, DigitalOcean and
+Cloudflare ones from `[credentials.<cloud>]` ([guide](docs/guides/cloud-apis.md)); AWS and
+Google Cloud ones aren't handled yet ([ROADMAP.md](ROADMAP.md)).
 
 - `luoto init` reads the folder first and shows what it found (toolchains with the file that
   pins each, presets for the registries it uses) before creating anything. It looks three
   levels into subfolders (a monorepo's `frontend/` and `backend/`), skipping ignored,
   dependency, build and hidden folders. A runtime the project needs but pins nowhere gets a
-  default: Rust stable, node LTS or Python 3.14. `c` goes through the settings one at a time
+  default: Rust stable, node LTS or Python 3.14, and Java 17 for a Python dependency that
+  runs on it (pyspark). `c` goes through the settings one at a time
   (isolation, presets, toolchains, agents and their credentials, ports); `--preset` and
   `--tool node=24` override what it detected. A new or empty folder has nothing to detect, so
   `init` starts with those settings; `luoto up` in a folder without an env offers the same.
@@ -433,7 +437,15 @@ aren't handled yet ([ROADMAP.md](ROADMAP.md)).
 - Inside the env, you or an agent add a language with `mise use go@1.23` (it writes
   `mise.toml`). The `toolchains` preset, on by default, lets runtime downloads through: mise
   metadata and the vendors' download servers, read-only. Without it, `up` grants it only while
-  installing.
+  installing. Files from GitHub releases (Python, Java, Bun, pnpm, aqua tools, npm packages'
+  prebuilt binaries) come through the `github-releases` preset, also on by default; without
+  it, only while luoto installs: pin the version and run `up`, or `sandbox request --tool
+  python@3.13` from the env.
+- The `go` preset opens the module proxy and checksum database, which fetch from whatever host
+  a module path names, only for modules on code hosts and well-known module domains
+  ([the list](shared/presets/go.toml)). Another host's modules are denied by path; allowing
+  one takes `luoto allow proxy.golang.org --path '/<host>/**'` and
+  `luoto allow sum.golang.org --path '/lookup/<host>/**'`.
 - When an install is denied a host the presets don't know, `up` lists it and offers to allow
   it for installs (saved to `[deps] hosts`).
 
@@ -695,7 +707,10 @@ you use luoto: `luoto up` asks before switching.
   images, toolchains and workspaces fill it and doesn't shrink when they go. A full VM disk
   stops every env: `luoto doctor` shows how full it is and what the file takes here, `luoto up`
   and the UI warn under 10 GB free, and `luoto prune` removes luoto's superseded images and
-  trims the VM so the freed space returns to this machine.
+  trims the VM so the freed space returns to this machine. Each time the VM's disk has grown
+  10 GB (or a tenth of it) since luoto last said so, `up`, `down`, `luoto run` and the end of
+  a shell or agent session say so, with the env's biggest build folders (`target/`,
+  `node_modules/`, …); the watcher notifies when free space falls under 10 GB and 3 GB.
 
 ## Install details
 

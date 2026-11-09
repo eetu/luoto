@@ -9,15 +9,17 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
+use chrono::{DateTime, TimeDelta, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::env::{self, Ctx};
-use crate::paths::Paths;
+use crate::notify::Note;
+use crate::paths::{Paths, write_private};
 use crate::prompt::confirm;
 use crate::release::{self, repo_of};
 use crate::runtime::{Flavor, Runtime};
-use crate::{config, machine, names};
+use crate::{config, machine, names, text};
 
 /// Under this much free space `doctor`, `up` and the UI warn. An upgrade pulls a whole new set
 /// of luoto's images beside the old ones, and a toolchain install writes gigabytes into an
@@ -186,6 +188,254 @@ fn low_text(place: &str, s: &Space) -> String {
         human(s.free),
         human(s.size)
     )
+}
+
+/// How much more of luoto's VM disk is used, at least, before a hint says so: a tenth of the
+/// disk if that is more. Each repo's Rust `target/` alone can take gigabytes.
+const GROWTH_MIN: u64 = 10_000_000_000;
+
+/// Free space under each of these gets one desktop notification from the watcher.
+const FREE_MARKS: [u64; 2] = [LOW_FREE, 3_000_000_000];
+/// How far above a mark free space climbs before falling under it notifies again.
+const REARM: u64 = 2_000_000_000;
+
+/// What luoto remembers of the disk between commands and the watcher (`<data>/disk.json`).
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+struct Seen {
+    /// Used bytes growth is measured from: those at the last hint, or fewer seen since.
+    #[serde(default)]
+    base: Option<Mark>,
+    /// How many of [`FREE_MARKS`] free space was under when last looked at.
+    #[serde(default)]
+    marks: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+struct Mark {
+    used: u64,
+    at: DateTime<Utc>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Growth {
+    bytes: u64,
+    since: DateTime<Utc>,
+}
+
+impl Seen {
+    fn path(paths: &Paths) -> std::path::PathBuf {
+        paths.data.join("disk.json")
+    }
+
+    fn load(paths: &Paths) -> Self {
+        std::fs::read(Self::path(paths))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    /// Change what is remembered with `f`, read just before and written at once, since the
+    /// watcher writes it too; `f`'s result.
+    fn update<T>(paths: &Paths, f: impl FnOnce(&mut Self) -> T) -> T {
+        let mut seen = Self::load(paths);
+        let before = seen.clone();
+        let out = f(&mut seen);
+        if seen != before
+            && let Ok(json) = serde_json::to_vec_pretty(&seen)
+        {
+            let _ = write_private(&Self::path(paths), &json);
+        }
+        out
+    }
+
+    /// Whether `s` is a step of growth past the base, which it then becomes. Less used than the
+    /// base (a prune, an env removed) is the new base: growth counts from the lowest point.
+    fn grew(&mut self, s: &Space, now: DateTime<Utc>) -> Option<Growth> {
+        let here = Mark {
+            used: s.used,
+            at: now,
+        };
+        match self.base {
+            Some(b) if s.used >= b.used => {
+                let bytes = s.used - b.used;
+                if bytes < (s.size / 10).max(GROWTH_MIN) {
+                    return None;
+                }
+                self.base = Some(here);
+                Some(Growth { bytes, since: b.at })
+            }
+            _ => {
+                self.base = Some(here);
+                None
+            }
+        }
+    }
+
+    /// The mark free space in `s` fell under since last looked at, if it did. A mark counts
+    /// as passed again only once free space has climbed [`REARM`] above it.
+    fn crossed(&mut self, s: &Space) -> Option<u64> {
+        let under = |margin: u64| FREE_MARKS.iter().filter(|m| s.free < **m + margin).count();
+        let level = under(0);
+        self.marks = self.marks.min(under(REARM));
+        if level <= self.marks {
+            return None;
+        }
+        self.marks = level;
+        Some(FREE_MARKS[level - 1])
+    }
+}
+
+/// `in 5 hours`, for how long growth took.
+fn over(d: TimeDelta) -> String {
+    match d.num_hours() {
+        ..1 => "within the hour".into(),
+        1 => "in an hour".into(),
+        h @ 2..48 => format!("in {h} hours"),
+        _ => format!("in {} days", d.num_days()),
+    }
+}
+
+/// Folders tools fill with build output and dependencies, measured in a hint.
+const BUILD_DIRS: &[&str] = &[
+    "target",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "_build",
+    ".next",
+    ".gradle",
+    ".turbo",
+    ".zig-cache",
+];
+/// Folders smaller than this go unnamed in a hint.
+const BUILD_DIR_MIN: u64 = 500_000_000;
+/// How much of a folder's path a hint shows: the sandbox names folders.
+const BUILD_DIR_SHOWN: usize = 120;
+/// How long measuring them may take, in the env and from here.
+const BUILD_DIRS_SECS: u64 = 12;
+
+/// `du -sk` of each [`BUILD_DIRS`] folder up to four levels under `/workspace`, not looking
+/// inside one; in a subshell that `timeout` ends where the image has it.
+fn build_dirs_script() -> String {
+    let names: Vec<String> = BUILD_DIRS.iter().map(|n| format!("-name '{n}'")).collect();
+    format!(
+        "cd /workspace 2>/dev/null || exit 0; find . -maxdepth 4 -type d \\( {} \\) -prune \
+         -print 2>/dev/null | head -n 40 | while IFS= read -r d; do du -sk \"$d\" 2>/dev/null; \
+         done",
+        names.join(" -o ")
+    )
+}
+
+/// `du -sk` lines (`<KiB>\t./<path>`): the folders of at least [`BUILD_DIR_MIN`], biggest
+/// first, three at most, their paths as the sandbox wrote them.
+fn parse_build_dirs(out: &str) -> Vec<(u64, String)> {
+    let mut dirs: Vec<(u64, String)> = out
+        .lines()
+        .filter_map(|l| {
+            let (kib, path) = l.split_once('\t')?;
+            let bytes = kib.trim().parse::<u64>().ok()?.checked_mul(1024)?;
+            let path = path.strip_prefix("./").unwrap_or(path);
+            let path = match path.char_indices().nth(BUILD_DIR_SHOWN) {
+                Some((i, _)) => format!("{}…", &path[..i]),
+                None => path.to_string(),
+            };
+            Some((bytes, path))
+        })
+        .filter(|(b, _)| *b >= BUILD_DIR_MIN)
+        .collect();
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.0));
+    dirs.truncate(3);
+    dirs
+}
+
+/// The biggest build and dependency folders in `env`'s workspace, as `api/target 8.1 GB`.
+fn build_dirs(rt: &Runtime, env: &str) -> Vec<String> {
+    let outer = format!(
+        "if command -v timeout >/dev/null 2>&1; then exec timeout {BUILD_DIRS_SECS} sh -c \"$1\"; \
+         else exec sh -c \"$1\"; fi"
+    );
+    let dev = names::dev(env);
+    let script = build_dirs_script();
+    let out = rt.run_limited(
+        [
+            "exec",
+            "-u",
+            env::UID,
+            dev.as_str(),
+            "sh",
+            "-c",
+            outer.as_str(),
+            "sh",
+            script.as_str(),
+        ],
+        std::time::Duration::from_secs(BUILD_DIRS_SECS + 3),
+        64 * 1024,
+    );
+    out.map(|o| {
+        parse_build_dirs(&o)
+            .into_iter()
+            .map(|(b, p)| format!("{} {}", text::display(&p), human(b)))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// After `up`, `down` or a session in `env`: when luoto's VM disk has grown a step since the
+/// last hint (or the least it held since), say by how much and where to look. One call to the
+/// runtime; the env's build folders are measured only when the hint is due and its dev
+/// container runs.
+pub fn hint_growth(ctx: &Ctx, env: &str) {
+    if !machine::is_luoto(ctx.rt.connection.as_deref()) {
+        return;
+    }
+    let Ok(Some(s)) = space(&ctx.rt) else {
+        return;
+    };
+    let now = Utc::now();
+    let Some(g) = Seen::update(&ctx.paths, |seen| seen.grew(&s, now)) else {
+        return;
+    };
+    eprintln!(
+        "note: {} grew by {} {} ({} used, {} free)",
+        place(&ctx.rt),
+        human(g.bytes),
+        over(now - g.since),
+        human(s.used),
+        human(s.free)
+    );
+    if ctx.rt.is_running(&names::dev(env)) {
+        let dirs = build_dirs(&ctx.rt, env);
+        if !dirs.is_empty() {
+            eprintln!(
+                "  the biggest build folders in `{env}`: {}",
+                dirs.join(", ")
+            );
+        }
+    }
+    eprintln!(
+        "  `luoto ls --size` shows what each env takes, `luoto status --size -e {env}` where; \
+         `luoto prune` removes superseded images and returns freed space to this machine"
+    );
+}
+
+/// For the watcher: a notification when free space has fallen under one of [`FREE_MARKS`]
+/// since it last looked, once per crossing.
+pub fn free_note(ctx: &Ctx) -> Option<Note> {
+    let s = space(&ctx.rt).ok()??;
+    Seen::update(&ctx.paths, |seen| seen.crossed(&s))?;
+    Some(Note {
+        title: format!(
+            "{}: {} free in {}",
+            names::instance(),
+            human(s.free),
+            place(&ctx.rt)
+        ),
+        body: "A full disk stops every env. `luoto ls --size` shows what each takes; \
+               `luoto prune` removes superseded images."
+            .into(),
+    })
 }
 
 /// After a pull: how much the images it superseded take, and how to remove them.
@@ -1066,6 +1316,122 @@ CACHE ID   CACHE TYPE   SIZE      CREATED   LAST USED   USAGE     SHARED
         };
         assert!(s(9_999_999_999).low());
         assert!(!s(LOW_FREE).low());
+    }
+
+    fn space(used: u64) -> Space {
+        let size = 100_000_000_000;
+        Space {
+            size,
+            used,
+            free: size - used,
+        }
+    }
+
+    #[test]
+    fn growth_is_hinted_once_a_step_from_the_lowest_point() {
+        let t0 = DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let at = |h: i64| t0 + TimeDelta::hours(h);
+        let mut seen = Seen::default();
+        // The first look only sets the base.
+        assert_eq!(seen.grew(&space(40_000_000_000), at(0)), None);
+        assert_eq!(seen.grew(&space(49_000_000_000), at(1)), None);
+        assert_eq!(
+            seen.grew(&space(52_000_000_000), at(3)),
+            Some(Growth {
+                bytes: 12_000_000_000,
+                since: at(0)
+            })
+        );
+        // Not again until another step on from there.
+        assert_eq!(seen.grew(&space(55_000_000_000), at(4)), None);
+        // A prune lowers the base, and growth counts from there.
+        assert_eq!(seen.grew(&space(30_000_000_000), at(5)), None);
+        assert_eq!(
+            seen.grew(&space(41_000_000_000), at(6)),
+            Some(Growth {
+                bytes: 11_000_000_000,
+                since: at(5)
+            })
+        );
+        // On a bigger disk the step is a tenth of it.
+        let big = |used| Space {
+            size: 500_000_000_000,
+            used,
+            free: 500_000_000_000 - used,
+        };
+        let mut seen = Seen::default();
+        seen.grew(&big(100_000_000_000), at(0));
+        assert_eq!(seen.grew(&big(140_000_000_000), at(1)), None);
+        assert!(seen.grew(&big(150_000_000_000), at(1)).is_some());
+    }
+
+    #[test]
+    fn each_free_mark_notifies_once_per_crossing() {
+        let free = |f: u64| space(100_000_000_000 - f);
+        let mut seen = Seen::default();
+        assert_eq!(seen.crossed(&free(30_000_000_000)), None);
+        assert_eq!(seen.crossed(&free(9_000_000_000)), Some(LOW_FREE));
+        assert_eq!(seen.crossed(&free(8_000_000_000)), None);
+        // Back over the mark, but not by REARM: still passed.
+        assert_eq!(seen.crossed(&free(11_000_000_000)), None);
+        assert_eq!(seen.crossed(&free(9_500_000_000)), None);
+        assert_eq!(seen.crossed(&free(2_000_000_000)), Some(3_000_000_000));
+        assert_eq!(seen.crossed(&free(2_500_000_000)), None);
+        // Clear of both, then under the first again.
+        assert_eq!(seen.crossed(&free(13_000_000_000)), None);
+        assert_eq!(seen.marks, 0);
+        assert_eq!(seen.crossed(&free(9_000_000_000)), Some(LOW_FREE));
+        // Straight past both: the lower one is named.
+        let mut seen = Seen::default();
+        assert_eq!(seen.crossed(&free(1_000_000_000)), Some(3_000_000_000));
+    }
+
+    #[test]
+    fn seen_survives_a_round_trip_and_a_bad_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config: dir.path().join("config"),
+            data: dir.path().join("data"),
+        };
+        assert_eq!(Seen::load(&paths), Seen::default());
+        let t = Utc::now();
+        Seen::update(&paths, |s| s.grew(&space(1), t));
+        assert_eq!(Seen::load(&paths).base.map(|b| b.used), Some(1));
+        std::fs::write(Seen::path(&paths), b"not json").unwrap();
+        assert_eq!(Seen::load(&paths), Seen::default());
+    }
+
+    #[test]
+    fn growth_takes_hours_or_days() {
+        assert_eq!(over(TimeDelta::minutes(20)), "within the hour");
+        assert_eq!(over(TimeDelta::minutes(90)), "in an hour");
+        assert_eq!(over(TimeDelta::hours(30)), "in 30 hours");
+        assert_eq!(over(TimeDelta::days(9)), "in 9 days");
+    }
+
+    #[test]
+    fn build_dirs_are_the_biggest_three_over_the_minimum() {
+        let out = "8500000\t./api/target\n\
+                   120\t./web/dist\n\
+                   3100000\t./web/node_modules\n\
+                   900000\t./cli/target\n\
+                   2000000\t./tools/.venv\n\
+                   garbage line\n\
+                   x\t./bad\n";
+        let dirs = parse_build_dirs(out);
+        let paths: Vec<&str> = dirs.iter().map(|(_, p)| p.as_str()).collect();
+        assert_eq!(paths, ["api/target", "web/node_modules", "tools/.venv"]);
+        assert_eq!(dirs[0].0, 8_500_000 * 1024);
+        assert!(parse_build_dirs("").is_empty());
+        let long = format!("9000000\t./{}/target\n", "x".repeat(5000));
+        let shown = &parse_build_dirs(&long)[0].1;
+        assert_eq!(shown.chars().count(), BUILD_DIR_SHOWN + 1);
+        assert!(shown.ends_with('…'));
+        let script = build_dirs_script();
+        assert!(script.contains("-name 'target' -o -name 'node_modules'"));
+        assert!(script.contains("-prune"));
     }
 
     #[test]

@@ -135,6 +135,38 @@ const MANAGERS: &[(&str, &str, Option<&str>)] = &[
     ("pnpm-lock.yaml", "pnpm", None),
 ];
 
+/// Runtimes a dependency needs that its package manager doesn't install: (dependency as
+/// its registry names it, normalized; tool; version). The env gets it unless a version file
+/// pins one.
+const NEEDS: &[(&str, &str, &str)] = &[
+    // Java 17 is the one every Spark from 3.3 to 4 runs on; Temurin keeps its old LTS builds.
+    ("pyspark", "java", "temurin-17"),
+    ("apache-flink", "java", "temurin-17"),
+    ("jpype1", "java", "temurin-17"),
+    ("tabula-py", "java", "temurin-17"),
+];
+
+/// Files that name a Python project's dependencies (lockfiles their dependencies' too).
+const DEP_FILES: &[&str] = &[
+    "pyproject.toml",
+    "requirements.txt",
+    "Pipfile",
+    "uv.lock",
+    "poetry.lock",
+];
+
+/// The `NEEDS` entries `text` names as a whole word: a requirement (`pyspark>=3.5`), a TOML
+/// key or a lockfile's `name = "pyspark"`. Python names compare as PEP 503 normalizes them.
+fn needs_in(
+    text: &str,
+) -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
+    let words: HashSet<String> = text
+        .split(|c: char| !(c.is_ascii_alphanumeric() || "-_.".contains(c)))
+        .map(|w| w.to_ascii_lowercase().replace(['_', '.'], "-"))
+        .collect();
+    NEEDS.iter().filter(move |(dep, _, _)| words.contains(*dep))
+}
+
 /// What `package.json` can name as its package manager: once it names one, a lockfile of
 /// another is left over from before.
 const JS_MANAGERS: &[&str] = &["npm", "yarn", "pnpm", "bun"];
@@ -176,8 +208,10 @@ pub fn read_paths(files: &[String]) -> Vec<String> {
     let mut names: Vec<&str> = MISE_CONFIGS.to_vec();
     names.extend(VERSION_FILES.iter().map(|(f, _)| *f));
     names.extend(OTHER_PINS);
-    // What `MANAGERS` reads: pyproject's `[tool.*]` tables and yarn.lock's version.
-    names.extend(["pyproject.toml", "yarn.lock"]);
+    // What `MANAGERS` reads: pyproject's `[tool.*]` tables (a `DEP_FILES` one) and
+    // yarn.lock's version.
+    names.push("yarn.lock");
+    names.extend(DEP_FILES);
     names.extend(TF_FILES);
     let listed: HashSet<&str> = files.iter().map(String::as_str).collect();
     pin_dirs(files.iter().map(String::as_str))
@@ -536,6 +570,17 @@ fn detect_in(tree: &Listed, listed: &HashSet<&str>, rel: &str, d: &mut Detected)
             });
         }
     }
+    for file in DEP_FILES {
+        for (dep, tool, version) in read(file).into_iter().flat_map(needs_in) {
+            if !d.defaults.iter().any(|t| t.tool == *tool) {
+                d.defaults.push(ToolPin {
+                    tool: (*tool).to_string(),
+                    version: (*version).to_string(),
+                    source: format!("{dep} in {}", source(file)),
+                });
+            }
+        }
+    }
     for p in presets::all() {
         if !d.presets.iter().any(|(n, _)| *n == p.name)
             && let Some(f) = p.detect.iter().find(|f| has(f))
@@ -713,6 +758,51 @@ mod tests {
     }
 
     #[test]
+    fn a_dependency_brings_the_runtime_it_needs() {
+        let java = |files: &[(&str, &str)]| {
+            let d = tempfile::tempdir().unwrap();
+            for (f, s) in files {
+                let p = d.path().join(f);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, s).unwrap();
+            }
+            let r = detect(d.path());
+            r.defaults
+                .iter()
+                .find(|t| t.tool == "java")
+                .map(|t| (t.version.clone(), t.source.clone()))
+        };
+        let found = |source: &str| Some(("temurin-17".to_string(), source.to_string()));
+        assert_eq!(
+            java(&[(
+                "requirements.txt",
+                "numpy\nPySpark[sql]>=3.5 ; python_version>'3.9'\n"
+            )]),
+            found("pyspark in requirements.txt")
+        );
+        assert_eq!(
+            java(&[(
+                "jobs/pyproject.toml",
+                "[project]\ndependencies = [\"JPype1==1.5\"]\n"
+            )]),
+            found("jpype1 in jobs/pyproject.toml")
+        );
+        assert_eq!(
+            java(&[("uv.lock", "[[package]]\nname = \"tabula_py\"\n")]),
+            found("tabula-py in uv.lock")
+        );
+        assert_eq!(
+            java(&[("requirements.txt", "pyspark-stubs\nsparkly\n")]),
+            None
+        );
+        assert_eq!(
+            java(&[("requirements.txt", "pyspark\n"), (".java-version", "21\n"),]),
+            None,
+            "a pinned Java wins"
+        );
+    }
+
+    #[test]
     fn subfolders_count_and_unpinned_runtimes_get_defaults() {
         let d = tempfile::tempdir().unwrap();
         let w = |f: &str, s: &str| {
@@ -841,7 +931,10 @@ mod tests {
         ]
         .map(String::from)
         .to_vec();
-        assert_eq!(read_paths(&files), ["package.json", "shim/pyproject.toml"]);
+        assert_eq!(
+            read_paths(&files),
+            ["package.json", "shim/pyproject.toml", "shim/uv.lock"]
+        );
         let tree = Listed {
             texts: HashMap::from([
                 (

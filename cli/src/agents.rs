@@ -761,6 +761,7 @@ pub fn headless(
         Err(e) => eprintln!("warning: no summary of the gate's denials ({e:#})"),
     }
     relayed?;
+    crate::disk::hint_growth(&ctx, env_name);
     if down {
         match env::down(&ctx, env_name) {
             Ok(()) => eprintln!("env `{env_name}` stopped"),

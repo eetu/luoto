@@ -1,12 +1,77 @@
-description = "Go module proxy, checksum DB and toolchains (read-only)"
+description = "Go module proxy, checksum DB and toolchains (read-only), for modules on code hosts and well-known module domains"
 detect = ["go.mod"]
 tools = ["go", "go:*"]
 
+# The proxy and the checksum database fetch a module from whatever host its path names, so an
+# open path is a request to any domain the sandbox writes. Only module hosts whose request logs
+# a package's author can't read: code hosts (a repository's owner sees no lookups under it) and
+# domains the Go project, Google, the CNCF and Uber run, plus gopkg.in, a redirector to GitHub.
+# A module elsewhere is denied by path; allowing it takes its module and checksum paths (the go
+# command looks sums up at sum.golang.org itself), e.g. for filippo.io:
+#   luoto allow proxy.golang.org --path '/filippo.io/**'
+#   luoto allow sum.golang.org --path '/lookup/filippo.io/**'
+
 [[rule]]
 host = "proxy.golang.org"
+paths = [
+  "/github.com/**",
+  "/gitlab.com/**",
+  "/bitbucket.org/**",
+  "/golang.org/**",
+  "/google.golang.org/**",
+  "/cloud.google.com/**",
+  "/k8s.io/**",
+  "/sigs.k8s.io/**",
+  "/go.etcd.io/**",
+  "/go.opentelemetry.io/**",
+  "/go.uber.org/**",
+  "/gopkg.in/**",
+]
+note = "modules on code hosts and well-known module domains; the proxy fetches whatever host a path names"
+
+# The go command first asks the proxy whether it serves the checksum database: a 404 (today's
+# answer) sends it to sum.golang.org, but a 403 stops it, so `/supported` must reach the proxy.
+# The rest is for the day the answer is yes.
+[[rule]]
+host = "proxy.golang.org"
+paths = [
+  "/sumdb/sum.golang.org/supported",
+  "/sumdb/sum.golang.org/latest",
+  "/sumdb/sum.golang.org/tile/**",
+  "/sumdb/sum.golang.org/lookup/github.com/**",
+  "/sumdb/sum.golang.org/lookup/gitlab.com/**",
+  "/sumdb/sum.golang.org/lookup/bitbucket.org/**",
+  "/sumdb/sum.golang.org/lookup/golang.org/**",
+  "/sumdb/sum.golang.org/lookup/google.golang.org/**",
+  "/sumdb/sum.golang.org/lookup/cloud.google.com/**",
+  "/sumdb/sum.golang.org/lookup/k8s.io/**",
+  "/sumdb/sum.golang.org/lookup/sigs.k8s.io/**",
+  "/sumdb/sum.golang.org/lookup/go.etcd.io/**",
+  "/sumdb/sum.golang.org/lookup/go.opentelemetry.io/**",
+  "/sumdb/sum.golang.org/lookup/go.uber.org/**",
+  "/sumdb/sum.golang.org/lookup/gopkg.in/**",
+]
+note = "the checksum database through the proxy; a lookup of a new module fetches it"
 
 [[rule]]
 host = "sum.golang.org"
+paths = [
+  "/latest",
+  "/tile/**",
+  "/lookup/github.com/**",
+  "/lookup/gitlab.com/**",
+  "/lookup/bitbucket.org/**",
+  "/lookup/golang.org/**",
+  "/lookup/google.golang.org/**",
+  "/lookup/cloud.google.com/**",
+  "/lookup/k8s.io/**",
+  "/lookup/sigs.k8s.io/**",
+  "/lookup/go.etcd.io/**",
+  "/lookup/go.opentelemetry.io/**",
+  "/lookup/go.uber.org/**",
+  "/lookup/gopkg.in/**",
+]
+note = "checksum database lookups; a lookup of a new module fetches it"
 
 [[rule]]
 host = "storage.googleapis.com"

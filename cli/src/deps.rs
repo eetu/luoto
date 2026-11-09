@@ -648,6 +648,20 @@ mod tests {
     }
 
     #[test]
+    fn installs_open_github_release_files_an_env_without_them_leaves_shut() {
+        let without: Vec<String> = ["debian", "github", "toolchains"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(install_presets(["python"], &without), ["github-releases"]);
+        assert_eq!(install_presets(["go"], &without), ["go", "github-releases"]);
+        let defaults: Vec<String> = crate::init::DEFAULT_PRESETS
+            .iter()
+            .map(|p| p.to_string())
+            .collect();
+        assert!(install_presets(["python"], &defaults).is_empty());
+    }
+
+    #[test]
     fn mise_conf_has_settings_and_tools() {
         let tools = BTreeMap::from([
             ("node".to_string(), toml::Value::String("lts".into())),

@@ -143,7 +143,7 @@ pub fn compile(
     // Only HTTP(S) leaves the env, so SSH remotes go to HTTPS unless the vault's key logs in
     // to their host.
     if !over_ssh(forges::GITHUB) {
-        for from in ["git@github.com:", "ssh://git@github.com/"] {
+        for from in GITHUB_SSH_REMOTES {
             b.rewrites
                 .push(("https://github.com/".to_string(), from.to_string()));
         }
@@ -533,8 +533,16 @@ fn git_config(pairs: &[(String, String)]) -> String {
     out
 }
 
+/// The prefixes of a GitHub SSH remote, as `insteadOf` matches them (case-sensitively).
+const GITHUB_SSH_REMOTES: [&str; 3] = [
+    "git@github.com:",
+    "ssh://git@github.com/",
+    "ssh://git@github.com:22/",
+];
+
 /// Git over SSH: the key as a vault binding the env's agent signs with, a tunnel rule on
-/// port 22 for each host, and the hosts' pinned keys. The hosts, and their `known_hosts`.
+/// port 22 for each host (GitHub's on `ssh.github.com:443` with `github_port = 443`, its
+/// remotes rewritten there), and the hosts' pinned keys. The hosts, and their `known_hosts`.
 fn compile_ssh(b: &mut Builder, c: Option<&SshCred>) -> Result<(Vec<String>, String)> {
     let Some(c) = c else {
         return Ok((Vec::new(), String::new()));
@@ -542,6 +550,14 @@ fn compile_ssh(b: &mut Builder, c: Option<&SshCred>) -> Result<(Vec<String>, Str
     if c.hosts.is_empty() {
         bail!("credentials.ssh: list the hosts the key logs in to (`hosts = [\"github.com\"]`)");
     }
+    let github_443 = match c.github_port {
+        None | Some(22) => false,
+        Some(443) => true,
+        Some(p) => bail!(
+            "credentials.ssh: github_port is 22 or 443 (GitHub's SSH on {}), not {p}",
+            forges::GITHUB_SSH_443
+        ),
+    };
     let normalized: Vec<String> = c
         .hosts
         .iter()
@@ -552,6 +568,9 @@ fn compile_ssh(b: &mut Builder, c: Option<&SshCred>) -> Result<(Vec<String>, Str
         .collect::<Result<_>>()?;
     let mut hosts = Vec::new();
     extend_unique(&mut hosts, normalized);
+    if github_443 && !hosts.iter().any(|h| h == forges::GITHUB) {
+        bail!("credentials.ssh: github_port = 443 is for github.com, which hosts doesn't list");
+    }
     for line in &c.host_keys {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 3 {
@@ -568,8 +587,16 @@ fn compile_ssh(b: &mut Builder, c: Option<&SshCred>) -> Result<(Vec<String>, Str
     }
     let mut lines = Vec::new();
     for host in &hosts {
+        // Where the client connects, and the name known_hosts gives it there.
+        let (dial, port, known) = if github_443 && host == forges::GITHUB {
+            let dial = forges::GITHUB_SSH_443.to_string();
+            let known = format!("[{dial}]:443");
+            (dial, 443, known)
+        } else {
+            (host.clone(), 22, host.clone())
+        };
         let before = lines.len();
-        lines.extend(luoto_shared::forges::host_keys(host).map(|k| format!("{host} {k}")));
+        lines.extend(luoto_shared::forges::host_keys(host).map(|k| format!("{known} {k}")));
         lines.extend(
             c.host_keys
                 .iter()
@@ -578,7 +605,10 @@ fn compile_ssh(b: &mut Builder, c: Option<&SshCred>) -> Result<(Vec<String>, Str
                         .next()
                         .is_some_and(|h| h.eq_ignore_ascii_case(host))
                 })
-                .map(|l| l.split_whitespace().take(3).collect::<Vec<_>>().join(" ")),
+                .map(|l| {
+                    let key: Vec<&str> = l.split_whitespace().skip(1).take(2).collect();
+                    format!("{known} {}", key.join(" "))
+                }),
         );
         if lines.len() == before {
             bail!(
@@ -586,17 +616,23 @@ fn compile_ssh(b: &mut Builder, c: Option<&SshCred>) -> Result<(Vec<String>, Str
             );
         }
         b.rule(
-            format!("ssh-{host}"),
+            format!("ssh-{dial}"),
             "ssh",
             Rule {
-                host: host.clone(),
-                port: Some(22),
+                host: dial,
+                port: Some(port),
                 mode: Mode::Tunnel,
                 access: Access::Level(AccessLevel::Write),
                 note: Some("git over SSH; the vault signs the login".into()),
                 ..Default::default()
             },
         );
+    }
+    if github_443 {
+        let base = format!("ssh://git@{}:443/", forges::GITHUB_SSH_443);
+        for from in GITHUB_SSH_REMOTES {
+            b.rewrites.push((base.clone(), from.to_string()));
+        }
     }
     b.bindings.insert(
         SSH_BINDING.into(),
@@ -1707,6 +1743,58 @@ host_keys = ["git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0Sd
             "[credentials.ssh]\nkey = \"op://k\"\nhosts = []\n",
             "[credentials.ssh]\nkey = \"op://k\"\nhosts = [\"gitlab.com\"]\n",
             "[credentials.ssh]\nkey = \"op://k\"\nhosts = [\"github.com\"]\nhost_keys = [\"other.example ssh-ed25519 AAAA\"]\n",
+        ] {
+            assert!(compile("t", &cfg(bad), GATE, &[]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn github_ssh_can_go_over_port_443() {
+        let text = r#"
+[credentials.ssh]
+key = "op://v/ssh/key"
+hosts = ["github.com", "ssh.dev.azure.com"]
+github_port = 443
+"#;
+        let c = compile("t", &cfg(text), GATE, &[]).unwrap();
+        let p = &c.policy;
+        let now = Utc::now();
+        assert_eq!(
+            p.tunnel_rule("ssh.github.com", 443, now)
+                .map(|r| r.id.as_str()),
+            Some("ssh-ssh.github.com")
+        );
+        assert!(p.tunnel_rule("github.com", 22, now).is_none());
+        assert!(p.tunnel_rule("ssh.github.com", 22, now).is_none());
+        assert!(p.tunnel_rule("ssh.dev.azure.com", 22, now).is_some());
+        let github: Vec<&str> = c
+            .known_hosts
+            .lines()
+            .filter(|l| !l.starts_with("ssh.dev.azure.com "))
+            .collect();
+        assert_eq!(github.len(), 3, "{}", c.known_hosts);
+        assert!(
+            github
+                .iter()
+                .all(|l| l.starts_with("[ssh.github.com]:443 "))
+        );
+        let BindingSpec::SshAgent { host_keys, .. } = &c.bindings["ssh"] else {
+            panic!("ssh binding")
+        };
+        assert_eq!(host_keys.len(), 4);
+        assert!(c.git_config.contains(
+            "[url \"ssh://git@ssh.github.com:443/\"]\n\tinsteadOf = \"git@github.com:\"\n\tinsteadOf = \"ssh://git@github.com/\"\n\tinsteadOf = \"ssh://git@github.com:22/\"\n"
+        ));
+        assert!(!c.git_config.contains("https://github.com/"));
+
+        let port_22 =
+            "[credentials.ssh]\nkey = \"op://k\"\nhosts = [\"github.com\"]\ngithub_port = 22\n";
+        let c = compile("t", &cfg(port_22), GATE, &[]).unwrap();
+        assert!(c.policy.tunnel_rule("github.com", 22, now).is_some());
+        assert!(!c.git_config.contains("ssh.github.com"));
+        for bad in [
+            "[credentials.ssh]\nkey = \"op://k\"\nhosts = [\"ssh.dev.azure.com\"]\ngithub_port = 443\n",
+            "[credentials.ssh]\nkey = \"op://k\"\nhosts = [\"github.com\"]\ngithub_port = 2222\n",
         ] {
             assert!(compile("t", &cfg(bad), GATE, &[]).is_err(), "{bad}");
         }

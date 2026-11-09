@@ -32,7 +32,7 @@ pub struct InitOpts {
     #[arg(long)]
     pub image: Option<String>,
     /// Egress presets (repeatable), replacing the defaults and the detected ones:
-    /// debian, github, toolchains, npm, pypi, crates, go, maven, gradle, vscode, docs, …
+    /// debian, github, github-releases, toolchains, npm, pypi, crates, go, maven, vscode, …
     #[arg(long = "preset", add = ArgValueCandidates::new(complete::presets))]
     pub presets: Vec<String>,
     /// Default toolchain (repeatable), e.g. `--tool node=24`; the project's own version
@@ -147,7 +147,7 @@ fn remote_workspace(
 }
 
 /// Presets every new env starts with; the folder's files add more.
-pub const DEFAULT_PRESETS: &[&str] = &["debian", "github", "toolchains"];
+pub const DEFAULT_PRESETS: &[&str] = &["debian", "github", "github-releases", "toolchains"];
 
 /// The env `luoto init` would create.
 pub struct Proposal {

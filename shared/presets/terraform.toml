@@ -1,7 +1,21 @@
-description = "Terraform provider and module registry (read-only); providers download from releases.hashicorp.com and GitHub releases, which toolchains opens"
+description = "Terraform provider and module registry, and GitHub release downloads for providers (read-only); releases.hashicorp.com is toolchains'"
 tools = ["terraform"]
 # Its update and telemetry check (checkpoint-api.hashicorp.com) stays denied; this stops the tries.
 env = { CHECKPOINT_DISABLE = "1" }
 
 [[rule]]
 host = "registry.terraform.io"
+
+# `terraform init` downloads most providers from their GitHub releases, outside any install.
+[[rule]]
+host = "github.com"
+paths = ["/*/*/releases/download/**"]
+note = "provider downloads (terraform init); redirects to release-assets.githubusercontent.com"
+
+[[rule]]
+host = "release-assets.githubusercontent.com"
+note = "provider downloads (terraform init)"
+
+[[rule]]
+host = "objects.githubusercontent.com"
+note = "provider downloads (terraform init, older links)"
