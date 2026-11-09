@@ -1654,14 +1654,20 @@ mod tests {
             )]),
             ..Default::default()
         };
-        assert!(check(&ws("/p", "/q")).is_ok());
+        // Absolute here: a drive on Windows.
+        let (p, q) = if cfg!(windows) {
+            (r"C:\p", r"C:\q")
+        } else {
+            ("/p", "/q")
+        };
+        assert!(check(&ws(p, q)).is_ok());
         for bad in [
             r"\\attacker\share",
             "//attacker/share",
             r"\\?\UNC\attacker\s",
             "/net/h/x",
         ] {
-            let e = check(&ws(bad, "/q")).unwrap_err();
+            let e = check(&ws(bad, q)).unwrap_err();
             assert!(format!("{e:#}").contains("another machine"), "{e:#}");
             let e = check(&ws("/p", bad)).unwrap_err();
             assert!(format!("{e:#}").contains("[workspace.repos.api]"), "{e:#}");

@@ -156,12 +156,17 @@ fn no_env_here(paths: &Paths, cwd: &Path) -> String {
 
 /// A folder `pull --to` may write: never your home folder or one that holds it.
 pub fn check_pull_dest(dest: &Path) -> Result<()> {
-    let home = directories::BaseDirs::new().map(|b| {
-        b.home_dir()
-            .canonicalize()
-            .unwrap_or_else(|_| b.home_dir().to_path_buf())
-    });
-    if home.is_some_and(|h| h.starts_with(dest)) {
+    // Each as written and as resolved: a symlinked home, and Windows' `\\?\` form, which
+    // only one side may have.
+    let forms = |p: &Path| [Some(p.to_path_buf()), p.canonicalize().ok()];
+    let homes: Vec<PathBuf> = directories::BaseDirs::new()
+        .map(|b| forms(b.home_dir()))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .collect();
+    let dests: Vec<PathBuf> = forms(dest).into_iter().flatten().collect();
+    if homes.iter().any(|h| dests.iter().any(|d| h.starts_with(d))) {
         bail!(
             "{} is your home folder or holds it: pull into a project's own folder",
             dest.display()

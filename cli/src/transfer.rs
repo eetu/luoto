@@ -1156,7 +1156,8 @@ NPM_TOKEN = "env:NPM_TOKEN"
         let here = tempfile::tempdir().unwrap();
         let there = "/nonexistent/luoto-import/web";
         let summary_of = |dir: &str| {
-            let text = OPENS.replace(there, dir);
+            // In a TOML string: a Windows path's backslashes escaped.
+            let text = OPENS.replace(there, &dir.replace('\\', "\\\\"));
             let cfg = EnvFile::parse("web.toml".into(), &text).unwrap().cfg;
             let h = head(&text, None, Moved::default());
             summary(Path::new("x"), &h, "web", &cfg)
