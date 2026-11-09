@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use chrono::{TimeDelta, Utc};
+use luoto_shared::azure_identity::{Audience, AzureIdentity};
 use luoto_shared::creds::{BindingSpec, Injection, Placement};
 use luoto_shared::ctl::{GateCtl, VaultCtl};
 use luoto_shared::policy::{
@@ -24,7 +25,7 @@ use rustls::{
     ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
 };
 use sha2::{Digest, Sha256};
-use wiremock::matchers::{header, method, path, path_regex, query_param};
+use wiremock::matchers::{any, header, header_exists, method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
 const ENV: &str = "it";
@@ -195,6 +196,15 @@ impl Env {
 
     /// With `gate_env` added to the gate's environment.
     fn start_with(resolve: &[(&str, SocketAddr)], gate_env: &[(&str, &str)]) -> Env {
+        Env::start_both(resolve, gate_env, &[])
+    }
+
+    /// With `gate_env` and `vault_env` added to the gate's and the vault's environments.
+    fn start_both(
+        resolve: &[(&str, SocketAddr)],
+        gate_env: &[(&str, &str)],
+        vault_env: &[(&str, &str)],
+    ) -> Env {
         build();
         let dir = tempfile::tempdir().unwrap();
         let vault_sock = dir.path().join("v.sock");
@@ -206,6 +216,7 @@ impl Env {
             Command::new(bin.join("luoto-vault"))
                 .env("LUOTO_VAULT_ADDR", format!("127.0.0.1:{vault_port}"))
                 .env("LUOTO_CTL_SOCKET", &vault_sock)
+                .envs(vault_env.iter().copied())
                 .stdout(Stdio::null())
                 .spawn()
                 .unwrap(),
@@ -273,7 +284,10 @@ impl Env {
             .iter()
             .map(|(r, v)| (r.to_string(), v.to_string()))
             .collect();
-        self.vault(&VaultCtl::Load { secrets });
+        self.vault(&VaultCtl::Load {
+            secrets,
+            held_only: false,
+        });
     }
 
     /// One request through the proxy, absolute-form, with the URL's host as `Host` unless
@@ -457,6 +471,7 @@ fn credentialed_policy() -> Policy {
         binding: "t.key".into(),
         host: "api.test".into(),
         paths: vec![path.into()],
+        methods: Vec::new(),
         ignore_case: false,
         place,
     };
@@ -508,6 +523,14 @@ async fn locking_the_vault_fails_credentialed_requests_closed() {
     assert!(r.status == 403 && r.denied("locked"), "{}", r.head);
     // Egress without credentials keeps working while locked.
     assert_eq!(env.get("http://api.test/ok").status, 200);
+    // A renewal read before the lock leaves it locked.
+    let renewed = env.vault(&VaultCtl::Load {
+        secrets: BTreeMap::from([("env:X".to_string(), "renewed".to_string())]),
+        held_only: true,
+    });
+    assert_eq!(renewed["data"], 0, "{renewed}");
+    let r = env.get("http://api.test/secret");
+    assert!(r.status == 403 && r.denied("locked"), "{}", r.head);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1401,6 +1424,7 @@ async fn credentials_go_only_over_tls_in_place_of_the_clients_own() {
         binding: "t.key".into(),
         host: "plain.test".into(),
         paths: vec![],
+        methods: Vec::new(),
         ignore_case: false,
         place: Placement::Header {
             name: "x-api-key".into(),
@@ -1648,7 +1672,10 @@ async fn a_new_app_key_retires_the_minted_token_and_signs_the_next() {
     let value = || env.credential("github").json()["value"].clone();
     let load = |key: &str| {
         let secrets = BTreeMap::from([("env:APP".to_string(), key.to_string())]);
-        env.vault(&VaultCtl::Load { secrets });
+        env.vault(&VaultCtl::Load {
+            secrets,
+            held_only: false,
+        });
     };
 
     assert_eq!(value(), "ghs_1");
@@ -1662,4 +1689,472 @@ async fn a_new_app_key_retires_the_minted_token_and_signs_the_next() {
     assert!(app_jwt(&seen[0], APP_PUB).is_ok());
     assert!(app_jwt(&seen[1], ROTATED_PUB).is_ok());
     assert!(app_jwt(&seen[1], APP_PUB).is_err());
+}
+
+const SUB: &str = "0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0";
+const ARM: &str = "https://management.azure.com/";
+
+/// A signed JWT as Microsoft Entra ID issues one for `aud`, numbered `n`.
+fn entra_token(aud: &str, n: usize) -> String {
+    let now = Utc::now().timestamp();
+    let claims = serde_json::json!({
+        "aud": aud,
+        "oid": "aaaaaaaa-0000-0000-0000-000000000001",
+        "tid": "bbbbbbbb-0000-0000-0000-000000000002",
+        "appid": "cccccccc-0000-0000-0000-000000000003",
+        "nbf": now - 300,
+        "exp": now + 3600,
+        "upn": "someone@contoso.example",
+        "ipaddr": "203.0.113.7",
+        "n": n,
+    });
+    let key = jsonwebtoken::EncodingKey::from_secret(b"entra");
+    jsonwebtoken::encode(&jsonwebtoken::Header::default(), &claims, &key).unwrap()
+}
+
+/// Resource Manager readable under the test subscription, with the `azure-arm` token on
+/// reads there and from IMDS.
+fn azure_policy() -> Policy {
+    let paths = [format!("/subscriptions/{SUB}/**")];
+    let mut arm = rule(
+        "azure-arm",
+        "management.azure.com",
+        Access::Level(AccessLevel::Read),
+        &[],
+    );
+    arm.rule.paths = paths.to_vec();
+    arm.rule.ignore_case = true;
+    Policy {
+        rules: vec![arm],
+        injections: vec![Injection {
+            binding: "azure-arm".into(),
+            host: "management.azure.com".into(),
+            paths: paths.to_vec(),
+            methods: ["GET", "HEAD", "OPTIONS"].map(String::from).to_vec(),
+            ignore_case: true,
+            place: Placement::Header {
+                name: "authorization".into(),
+                format: "Bearer {secret}".into(),
+            },
+        }],
+        azure: Some(AzureIdentity {
+            audiences: BTreeMap::from([(Audience::Arm, "azure-arm".to_string())]),
+        }),
+        ..Default::default()
+    }
+}
+
+fn imds_path(resource: &str) -> String {
+    format!("/metadata/identity/oauth2/token?api-version=2018-02-01&resource={resource}")
+}
+
+impl Env {
+    /// IMDS's answer for `resource` through the proxy, as a client asks with `Metadata: true`.
+    fn imds(&self, resource: &str) -> Reply {
+        let url = format!("http://169.254.169.254{}", imds_path(resource));
+        self.request("GET", &url, &[("Metadata", "true")], b"")
+    }
+}
+
+/// `placeholder` is `real`'s header and the claims tools read, with a signature that can't
+/// verify.
+fn assert_placeholder(placeholder: &str, real: &str) {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let parts = |t: &str| -> Vec<String> { t.split('.').map(str::to_string).collect() };
+    let (p, r) = (parts(placeholder), parts(real));
+    assert_eq!(p[0], r[0], "the header is the real token's");
+    let claims = |payload: &str| -> serde_json::Value {
+        serde_json::from_slice(&b64.decode(payload).unwrap()).unwrap()
+    };
+    let (kept, all) = (claims(&p[1]), claims(&r[1]));
+    for k in ["aud", "oid", "tid", "appid", "nbf", "exp"] {
+        assert_eq!(kept[k], all[k], "{k}");
+    }
+    for k in ["upn", "ipaddr", "n"] {
+        assert!(all.get(k).is_some() && kept.get(k).is_none(), "{k}");
+    }
+    assert_ne!(p[2], r[2]);
+    assert_eq!(
+        b64.decode(&p[2]).unwrap(),
+        b"luoto: the gate adds the real token"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn imds_answers_with_a_placeholder_through_both_intakes() {
+    let transparent = free_port();
+    let redirect = format!("127.0.0.1:{transparent}=169.254.169.254:80");
+    let env = Env::start_with(&[], &[("LUOTO_TEST_TRANSPARENT", &redirect)]);
+    let real = entra_token(ARM, 1);
+    let real_sig = real.rsplit_once('.').unwrap().1;
+    env.credentials(
+        &[(
+            "azure-arm",
+            BindingSpec::Static {
+                secret_ref: "env:ARM".into(),
+            },
+        )],
+        &[("env:ARM", &real)],
+    );
+    env.apply(azure_policy());
+
+    let encoded = "https%3A%2F%2Fmanagement.azure.com%2F";
+    let raw = format!(
+        "GET {} HTTP/1.1\r\nHost: 169.254.169.254\r\nMetadata: true\r\nConnection: close\r\n\r\n",
+        imds_path(encoded)
+    );
+    for r in [env.imds(encoded), send(transparent, raw.as_bytes())] {
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert!(!r.body.contains(real_sig), "{}", r.body);
+        let j = r.json();
+        assert_placeholder(j["access_token"].as_str().unwrap(), &real);
+        assert_eq!(j["resource"], ARM);
+        assert_eq!(j["token_type"], "Bearer");
+        assert_eq!(j["client_id"], "cccccccc-0000-0000-0000-000000000003");
+        let expires_in: i64 = j["expires_in"].as_str().unwrap().parse().unwrap();
+        assert!((3500..=3600).contains(&expires_in), "{expires_in}");
+        let expires_on: i64 = j["expires_on"].as_str().unwrap().parse().unwrap();
+        assert!(expires_on > Utc::now().timestamp() + 3500);
+    }
+    // The spellings the Azure CLI and the SDKs use.
+    for resource in [
+        "https://management.core.windows.net/",
+        "https://management.azure.com",
+    ] {
+        assert_eq!(env.imds(resource).status, 200, "{resource}");
+    }
+    let r = env.request(
+        "GET",
+        "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&scope=https://management.azure.com/.default",
+        &[("Metadata", "true")],
+        b"",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+
+    // Clients probe for IMDS without the header.
+    let r = env.get(&format!("http://169.254.169.254{}", imds_path(encoded)));
+    assert_eq!(r.status, 400);
+    assert_eq!(r.json()["error"], "invalid_request");
+    assert_eq!(
+        r.json()["error_description"],
+        "Required metadata header not specified"
+    );
+    // An audience the env isn't granted.
+    let r = env.imds("https://vault.azure.net");
+    assert_eq!(r.status, 400);
+    assert_eq!(r.json()["error"], "invalid_resource");
+    assert!(
+        r.json()["error_description"]
+            .as_str()
+            .unwrap()
+            .contains("https://vault.azure.net"),
+        "{}",
+        r.body
+    );
+    // Anything else under /metadata is answered too; elsewhere the address is never dialed.
+    let r = env.request(
+        "GET",
+        "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
+        &[("Metadata", "true")],
+        b"",
+    );
+    assert_eq!(r.status, 404, "{}", r.body);
+    let r = env.get("http://169.254.169.254/latest/meta-data/");
+    assert!(r.status == 403 && r.denied("no_rule"), "{}", r.head);
+
+    env.vault(&VaultCtl::Lock);
+    env.gate(&GateCtl::FlushCredentials);
+    let r = env.imds(encoded);
+    assert_eq!(r.status, 400);
+    assert!(r.body.contains("luoto vault unlock"), "{}", r.body);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn resource_manager_gets_the_real_token_in_place_of_the_placeholder() {
+    let arm = MockServer::start().await;
+    let real = entra_token(ARM, 1);
+    Mock::given(header_exists("x-ms-authorization-auxiliary"))
+        .respond_with(ResponseTemplate::new(418))
+        .mount(&arm)
+        .await;
+    Mock::given(method("GET"))
+        .and(header("authorization", format!("Bearer {real}").as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})))
+        .mount(&arm)
+        .await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&arm)
+        .await;
+    let env = Env::start(&[("management.azure.com", *arm.address())]);
+    env.credentials(
+        &[(
+            "azure-arm",
+            BindingSpec::Static {
+                secret_ref: "env:ARM".into(),
+            },
+        )],
+        &[("env:ARM", &real)],
+    );
+    env.apply(azure_policy());
+
+    let placeholder = env.imds(ARM).json()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let bearer = format!("Bearer {placeholder}");
+    let groups = format!("/subscriptions/{SUB}/resourceGroups?api-version=2021-04-01");
+    for path in [groups.clone(), groups.to_uppercase()] {
+        let r = env.request(
+            "GET",
+            &format!("http://management.azure.com{path}"),
+            &[
+                ("Authorization", &bearer),
+                ("x-ms-authorization-auxiliary", "Bearer someone-elses"),
+            ],
+            b"",
+        );
+        assert_eq!(r.status, 200, "{path}: {}", r.head);
+    }
+    // Another subscription is not the env's.
+    let r = env.request(
+        "GET",
+        "http://management.azure.com/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups",
+        &[("Authorization", &bearer)],
+        b"",
+    );
+    assert!(
+        r.status == 403 && r.denied("path_not_allowed"),
+        "{}",
+        r.head
+    );
+
+    // A write another rule allows (an approved request) goes without the token, and without
+    // the client's own.
+    let mut policy = azure_policy();
+    policy.rules.push(rule(
+        "approved",
+        "management.azure.com",
+        Access::Level(AccessLevel::Write),
+        &[],
+    ));
+    env.apply(policy);
+    let keys = format!(
+        "/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/a/listKeys"
+    );
+    let r = env.request(
+        "POST",
+        &format!("http://management.azure.com{keys}"),
+        &[("Authorization", "Bearer from-the-sandbox")],
+        b"",
+    );
+    assert_eq!(r.status, 401, "{}", r.head);
+
+    let seen = arm.received_requests().await.unwrap();
+    assert_eq!(seen.len(), 3);
+    for req in &seen[..2] {
+        assert_eq!(
+            req.headers["authorization"],
+            format!("Bearer {real}").as_str()
+        );
+        assert!(!req.headers.contains_key("x-ms-authorization-auxiliary"));
+    }
+    assert_eq!(seen[2].method.as_str(), "POST");
+    assert!(!seen[2].headers.contains_key("authorization"));
+}
+
+/// Entra ID's token endpoint: a new token for the scope's audience on each call, for client
+/// secrets `good-1` and `good-2`; any other is refused as Entra refuses one.
+struct EntraMint {
+    minted: AtomicUsize,
+    /// How long each answer takes.
+    delay: Duration,
+}
+
+impl Respond for EntraMint {
+    fn respond(&self, req: &wiremock::Request) -> ResponseTemplate {
+        let body = String::from_utf8_lossy(&req.body);
+        if !["client_secret=good-1", "client_secret=good-2"]
+            .iter()
+            .any(|s| body.split('&').any(|kv| kv == *s))
+        {
+            return ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": "invalid_client",
+                "error_description": "AADSTS7000215: Invalid client secret provided.",
+            }));
+        }
+        let n = self.minted.fetch_add(1, Ordering::SeqCst) + 1;
+        ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({
+                "token_type": "Bearer",
+                "expires_in": 3599,
+                "ext_expires_in": 3599,
+                "access_token": entra_token(ARM, n),
+            }))
+            .set_delay(self.delay)
+    }
+}
+
+/// An env whose `azure-arm` binding is minted by `login` for a service principal with secret
+/// `secret`.
+async fn service_principal(login: &MockServer, delay: Duration, secret: &str) -> Env {
+    Mock::given(method("POST"))
+        .and(path("/contoso.onmicrosoft.com/oauth2/v2.0/token"))
+        .respond_with(EntraMint {
+            minted: AtomicUsize::new(0),
+            delay,
+        })
+        .mount(login)
+        .await;
+    let env = Env::start_both(&[], &[], &[("LUOTO_TEST_AZURE_LOGIN", &login.uri())]);
+    env.credentials(
+        &[(
+            "azure-arm",
+            BindingSpec::AzureServicePrincipal {
+                tenant: "contoso.onmicrosoft.com".into(),
+                client_id: "11111111-2222-3333-4444-555555555555".into(),
+                secret_ref: "env:SP".into(),
+                audience: ARM.into(),
+            },
+        )],
+        &[("env:SP", secret)],
+    );
+    env
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn requests_meanwhile_share_one_mint_and_a_refusal_is_not_asked_again_at_once() {
+    let login = MockServer::start().await;
+    let env = service_principal(&login, Duration::from_millis(500), "good-1").await;
+    let tokens: Vec<String> = std::thread::scope(|s| {
+        let asks: Vec<_> = (0..6)
+            .map(|_| s.spawn(|| env.credential("azure-arm")))
+            .collect();
+        asks.into_iter()
+            .map(|a| {
+                let r = a.join().unwrap();
+                assert_eq!(r.status, 200, "{}", r.body);
+                r.json()["value"].as_str().unwrap().to_string()
+            })
+            .collect()
+    });
+    assert!(tokens.windows(2).all(|w| w[0] == w[1]));
+    assert_eq!(login.received_requests().await.unwrap().len(), 1);
+
+    let refused = MockServer::start().await;
+    let env = service_principal(&refused, Duration::ZERO, "revoked").await;
+    let first = env.credential("azure-arm");
+    assert_eq!(first.status, 502, "{}", first.body);
+    for _ in 0..5 {
+        let again = env.credential("azure-arm");
+        assert_eq!((again.status, &again.body), (502, &first.body));
+    }
+    assert_eq!(refused.received_requests().await.unwrap().len(), 1);
+    // A new secret is tried at once.
+    env.vault(&VaultCtl::Load {
+        secrets: BTreeMap::from([("env:SP".to_string(), "good-1".to_string())]),
+        held_only: false,
+    });
+    assert_eq!(env.credential("azure-arm").status, 200);
+    assert_eq!(refused.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn a_service_principal_token_is_minted_in_the_vault_reused_and_retired_with_its_secret() {
+    let login = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/contoso.onmicrosoft.com/oauth2/v2.0/token"))
+        .respond_with(EntraMint {
+            minted: AtomicUsize::new(0),
+            delay: Duration::ZERO,
+        })
+        .mount(&login)
+        .await;
+    let env = Env::start_both(&[], &[], &[("LUOTO_TEST_AZURE_LOGIN", &login.uri())]);
+    let client = "11111111-2222-3333-4444-555555555555";
+    env.credentials(
+        &[(
+            "azure-arm",
+            BindingSpec::AzureServicePrincipal {
+                tenant: "contoso.onmicrosoft.com".into(),
+                client_id: client.into(),
+                secret_ref: "env:SP".into(),
+                audience: ARM.into(),
+            },
+        )],
+        &[("env:SP", "good-1")],
+    );
+    let value = || {
+        let r = env.credential("azure-arm");
+        assert_eq!(r.status, 200, "{}", r.body);
+        r.json()
+    };
+    let load = |secret: &str| {
+        let secrets = BTreeMap::from([("env:SP".to_string(), secret.to_string())]);
+        env.vault(&VaultCtl::Load {
+            secrets,
+            held_only: false,
+        });
+    };
+
+    let first = value();
+    let token = first["value"].as_str().unwrap().to_string();
+    let expires: chrono::DateTime<Utc> =
+        serde_json::from_value(first["expires_at"].clone()).unwrap();
+    assert!((expires - Utc::now()).num_seconds() > 3500);
+    assert_eq!(value()["value"], token.as_str(), "reused until near expiry");
+    load("good-1");
+    assert_eq!(
+        value()["value"],
+        token.as_str(),
+        "the same secret keeps the token"
+    );
+
+    // The gate's IMDS hands out its placeholder.
+    env.apply(azure_policy());
+    assert_placeholder(
+        env.imds(ARM).json()["access_token"].as_str().unwrap(),
+        &token,
+    );
+
+    load("good-2");
+    let rotated = value()["value"].as_str().unwrap().to_string();
+    assert_ne!(rotated, token);
+
+    load("not-the-secret");
+    let r = env.credential("azure-arm");
+    assert_eq!(r.status, 502, "{}", r.body);
+    assert!(r.body.contains("invalid_client") && r.body.contains("AADSTS7000215"));
+    assert!(!r.body.contains("not-the-secret"));
+    assert_eq!(
+        env.credential("azure-arm").body,
+        r.body,
+        "answered again, not asked"
+    );
+
+    let seen = login.received_requests().await.unwrap();
+    assert_eq!(seen.len(), 3);
+    for (req, secret) in seen.iter().zip(["good-1", "good-2", "not-the-secret"]) {
+        assert_eq!(
+            req.headers["content-type"],
+            "application/x-www-form-urlencoded"
+        );
+        let mut form: Vec<&str> = std::str::from_utf8(&req.body).unwrap().split('&').collect();
+        form.sort();
+        let secret = format!("client_secret={secret}");
+        let id = format!("client_id={client}");
+        let mut want = vec![
+            secret.as_str(),
+            id.as_str(),
+            "grant_type=client_credentials",
+            "scope=https%3A%2F%2Fmanagement.azure.com%2F%2F.default",
+        ];
+        want.sort();
+        assert_eq!(form, want);
+    }
 }

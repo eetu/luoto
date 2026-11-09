@@ -6,21 +6,25 @@ use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
+use luoto_shared::azure_identity::{
+    ARM_HOST, Audience, AzureIdentity, GRAPH_HOST, STORAGE_SERVICES, key_vault_host, storage_hosts,
+};
 use luoto_shared::creds::{
     BindingSpec, FORBIDDEN_GITHUB_PERMISSIONS, Injection, Placement, SSH_BINDING,
     default_github_api,
 };
 use luoto_shared::policy::{
     Access, AccessLevel, AzureGuard, BodyDeny, CompiledRule, DenyRule, GitGuard, GithubGuard,
-    InternalName, Mode, Policy, Rule, RuleOrigin, rule_error,
+    InternalName, Mode, Policy, READ_METHODS, Rule, RuleOrigin, rule_error,
 };
 use luoto_shared::{forges, presets, profiles};
 
-use crate::azure;
+use crate::azure_identity::AZCLI;
 use crate::config::{
-    AzureDevopsCred, CustomCred, EnvConfig, GitCred, GithubCred, ProviderValue, SshCred,
+    AzureCred, AzureDevopsCred, CustomCred, EnvConfig, GitCred, GithubCred, ProviderValue, SshCred,
     extend_unique,
 };
+use crate::{azure, azure_identity};
 
 pub struct Compiled {
     pub policy: Policy,
@@ -37,6 +41,9 @@ pub struct Compiled {
     /// CA certificates (PEM) the gate trusts upstream besides the public roots, each for its
     /// own host only: those of self-hosted git hosts.
     pub upstream_cas: BTreeMap<String, String>,
+    /// The `azcli:` ref whose token's tenant (`tid`) the env's `ARM_TENANT_ID` and
+    /// `AZURE_TENANT_ID` name, when `[credentials.azure]` names no tenant.
+    pub tenant_from: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -63,6 +70,9 @@ struct Builder {
     warnings: Vec<String>,
     /// `url.<base>.insteadOf` pairs, as (base, prefix it replaces).
     rewrites: Vec<(String, String)>,
+    /// The bindings `[credentials.azure]` reads from `az`, and their refs.
+    azcli: BTreeMap<String, String>,
+    tenant_from: Option<String>,
 }
 
 impl Builder {
@@ -150,6 +160,12 @@ pub fn compile(
         aliases,
         over_ssh(azure::SSH_HOST),
     ));
+    let azure_identity = cfg
+        .credentials
+        .azure
+        .as_ref()
+        .map(|c| compile_azure_identity(&mut b, c))
+        .transpose()?;
     let (git, upstream_cas) = compile_git(&mut b, &cfg.credentials.git)?;
     for c in &cfg.credentials.git {
         let host = c.host.split(':').next().unwrap_or_default();
@@ -190,6 +206,29 @@ pub fn compile(
     }
     b.dev_env.extend(cfg.env.clone());
 
+    // An `azcli:` ref is a token from your own az login, good for all of your Azure: only the
+    // bindings `[credentials.azure]` makes carry one, each to its own audience's hosts.
+    if let Some((name, spec)) = b.bindings.iter().find(|(name, spec)| {
+        spec.secret_ref().starts_with(AZCLI)
+            && b.azcli.get(*name).map(String::as_str) != Some(spec.secret_ref())
+    }) {
+        bail!(
+            "credential `{name}`: `{}` is luoto's own ref for [credentials.azure], which reads \
+             your az login without one",
+            spec.secret_ref()
+        );
+    }
+    if let Some((k, _)) = cfg
+        .sandbox_secrets
+        .iter()
+        .find(|(_, r)| r.starts_with(AZCLI))
+    {
+        bail!(
+            "sandbox_secrets.{k}: an `azcli:` ref would put a real token for all of your Azure in \
+             the sandbox; [credentials.azure] gives the env a managed identity instead"
+        );
+    }
+
     let policy = Policy {
         env: env.to_string(),
         rules: b.rules,
@@ -206,6 +245,7 @@ pub fn compile(
             })
             .into_iter()
             .collect(),
+        azure: azure_identity,
     };
     // A tunnel passes bytes unread: one you or a repository wrote can't cover a host whose
     // credentials, forge guards or denies the gate applies (`luoto allow` refuses it too).
@@ -226,6 +266,7 @@ pub fn compile(
         git_config: git_config(&b.rewrites),
         known_hosts,
         upstream_cas,
+        tenant_from: b.tenant_from,
         warnings: b.warnings,
     })
 }
@@ -268,8 +309,9 @@ pub fn check_agent_opts(
     Ok(())
 }
 
-/// A model provider: `[credentials.<provider>] <auth_kind> = "<ref>"` or `login_inside = true`,
-/// and `server_tools = true` to let it reach the network for the sandbox's requests.
+/// A model provider or cloud API: `[credentials.<provider>] <auth_kind> = "<ref>"` or
+/// `login_inside = true`, `server_tools = true` to let it reach the network for the sandbox's
+/// requests, and `write = true` for a provider that reads by default.
 fn compile_provider(
     b: &mut Builder,
     pname: &str,
@@ -281,14 +323,24 @@ fn compile_provider(
             profiles::provider_names().collect::<Vec<_>>().join(", ")
         );
     };
+    const SETTINGS: [&str; 3] = ["login_inside", "server_tools", "write"];
     if let Some(k) = entries.iter().find_map(|(k, v)| {
-        (matches!(v, ProviderValue::Flag(_)) && k != "login_inside" && k != "server_tools")
-            .then_some(k)
+        (matches!(v, ProviderValue::Flag(_)) && !SETTINGS.contains(&k.as_str())).then_some(k)
     }) {
-        bail!("credentials.{pname}: `{k}` is not a setting (login_inside, server_tools)");
+        bail!(
+            "credentials.{pname}: `{k}` is not a setting ({})",
+            SETTINGS.join(", ")
+        );
     }
     let login_inside = entries.get("login_inside") == Some(&ProviderValue::Flag(true));
     let server_tools = entries.get("server_tools") == Some(&ProviderValue::Flag(true));
+    let write = entries.get("write") == Some(&ProviderValue::Flag(true));
+    if write && p.access != Some(AccessLevel::Read) {
+        bail!(
+            "credentials.{pname}: `write` is for providers that only read without it; {pname} \
+             already writes"
+        );
+    }
     if login_inside
         && let Some(kind) = entries
             .iter()
@@ -300,7 +352,7 @@ fn compile_provider(
         );
     }
     let origin = format!("provider:{pname}");
-    for (i, (host, paths, access)) in p.hosts().into_iter().enumerate() {
+    for (i, (host, paths, access)) in p.hosts(write).into_iter().enumerate() {
         b.rule(
             match i {
                 0 => format!("provider-{pname}"),
@@ -381,11 +433,17 @@ fn compile_provider(
                 secret_ref: secret_ref.clone(),
             },
         );
-        for (host, paths, _) in p.hosts() {
+        for (host, paths, access) in p.hosts(write) {
+            // A rule that allows more on a read host (an approved request) gets no token.
+            let methods: Vec<String> = match access {
+                AccessLevel::Read => READ_METHODS.iter().map(|m| m.to_string()).collect(),
+                AccessLevel::Write => Vec::new(),
+            };
             b.injections.push(Injection {
                 binding: binding.clone(),
                 host: host.to_string(),
                 paths: paths.to_vec(),
+                methods: methods.clone(),
                 place: Placement::Header {
                     name: auth.header.clone(),
                     format: auth.format.clone(),
@@ -397,6 +455,7 @@ fn compile_provider(
                     binding: binding.clone(),
                     host: host.to_string(),
                     paths: paths.to_vec(),
+                    methods,
                     place: Placement::Query { param: q.clone() },
                     ignore_case: false,
                 });
@@ -434,6 +493,7 @@ fn compile_custom(b: &mut Builder, cname: &str, c: &CustomCred) -> Result<()> {
         binding,
         host: host.clone(),
         paths: c.paths.clone(),
+        methods: Vec::new(),
         place: Placement::Header {
             name: c.header.to_ascii_lowercase(),
             format: c.format.clone(),
@@ -810,6 +870,7 @@ fn compile_github_one(
             binding: binding.clone(),
             host: forges::GITHUB.into(),
             paths: paths.clone(),
+            methods: Vec::new(),
             place: Placement::Basic {
                 username: "x-access-token".into(),
             },
@@ -819,6 +880,7 @@ fn compile_github_one(
             binding,
             host: forges::GITHUB_API.into(),
             paths: api_paths,
+            methods: Vec::new(),
             place: Placement::Header {
                 name: "authorization".into(),
                 format: "Bearer {secret}".into(),
@@ -981,6 +1043,7 @@ fn compile_git(
                 binding: id.clone(),
                 host: host.clone(),
                 paths: paths.clone(),
+                methods: Vec::new(),
                 place: Placement::Basic {
                     username: c.username.clone(),
                 },
@@ -1009,6 +1072,13 @@ fn compile_git(
             });
         }
         if let Some(ca) = &c.ca {
+            if crate::workspace::network_path(ca) {
+                bail!(
+                    "credentials.git ({host}): its CA `{}` is on another machine; give a file on \
+                     this one",
+                    crate::text::display(ca)
+                );
+            }
             let path = crate::workspace::expand(ca);
             let text = std::fs::read_to_string(&path).with_context(|| {
                 format!("credentials.git ({host}): read its CA {}", path.display())
@@ -1033,6 +1103,203 @@ fn compile_git(
         b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     }
     Ok((guards, cas))
+}
+
+/// Resource Manager paths, at every scope (the root, management groups, subscriptions,
+/// resources), that give someone access: role assignments and definitions and PIM's requests
+/// and policies for them, federated identity credentials (a login from outside), Lighthouse
+/// delegations, key vault access policies, and `elevateAccess` (a Global Administrator's own
+/// way to the whole tenant). Refused for writes unless `role_assignments = true`.
+const AZURE_ACCESS_CONTROL: &[&str] = &[
+    "**/providers/Microsoft.Authorization/roleAssignments/**",
+    "**/providers/Microsoft.Authorization/roleDefinitions/**",
+    "**/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/**",
+    "**/providers/Microsoft.Authorization/roleEligibilityScheduleRequests/**",
+    "**/providers/Microsoft.Authorization/roleManagementPolicies/**",
+    "**/providers/Microsoft.Authorization/roleManagementPolicyAssignments/**",
+    "**/providers/Microsoft.Authorization/elevateAccess",
+    "**/federatedIdentityCredentials/**",
+    "**/providers/Microsoft.ManagedServices/registrationDefinitions/**",
+    "**/providers/Microsoft.ManagedServices/registrationAssignments/**",
+    "**/providers/Microsoft.KeyVault/vaults/*/accessPolicies/**",
+];
+
+/// Deployments act with all of the identity's roles: a template's nested deployment names any
+/// subscription, and a template or a script can assign roles. Refused for writes unless
+/// `deployments = true`.
+const AZURE_DEPLOYMENTS: &[&str] = &[
+    "**/providers/Microsoft.Resources/deployments/**",
+    "**/providers/Microsoft.Resources/deploymentScripts/**",
+    "**/providers/Microsoft.Resources/deploymentStacks/**",
+];
+
+const WRITE_METHODS: [&str; 4] = ["PUT", "PATCH", "POST", "DELETE"];
+
+/// `[credentials.azure]`: a binding per audience it grants (a token from `az` on the host, or
+/// minted by the vault for a service principal); Resource Manager's paths for its
+/// subscriptions, and the data plane hosts it names, allowed and given the audience's token
+/// with the methods allowed there. The identity the gate's IMDS answers for, and the variables
+/// tools in the env read.
+fn compile_azure_identity(b: &mut Builder, c: &AzureCred) -> Result<AzureIdentity> {
+    azure_identity::check(c)?;
+    let own_login = c.client_id.is_none();
+    let source = |aud: Audience| match (&c.client_id, &c.client_secret, &c.tenant) {
+        (Some(client_id), Some(secret), Some(tenant)) => BindingSpec::AzureServicePrincipal {
+            tenant: tenant.clone(),
+            client_id: client_id.clone(),
+            secret_ref: secret.clone(),
+            audience: aud.resource().into(),
+        },
+        _ => BindingSpec::Static {
+            secret_ref: azure_identity::azcli_ref(aud, c.tenant.as_deref()),
+        },
+    };
+    let mut identity = AzureIdentity::default();
+    let access = Access::Level(c.access);
+    let read = || Access::Level(AccessLevel::Read);
+    // Resource Manager reads paths in any case. The token goes only with the methods its rule
+    // allows: another rule for the host (an approved request) that allows more gets them
+    // without it.
+    let mut grant = |b: &mut Builder, aud: Audience, id: String, host: String, access, paths| {
+        let binding = aud.binding().to_string();
+        let spec = source(aud);
+        if own_login {
+            b.azcli
+                .insert(binding.clone(), spec.secret_ref().to_string());
+        }
+        b.bindings.insert(binding.clone(), spec);
+        identity.audiences.insert(aud, binding.clone());
+        let methods = match &access {
+            Access::Level(AccessLevel::Write) => Vec::new(),
+            Access::Level(AccessLevel::Read) => {
+                READ_METHODS.iter().map(|m| m.to_string()).collect()
+            }
+            Access::Methods(ms) => ms.clone(),
+        };
+        b.injections.push(Injection {
+            binding,
+            host: host.clone(),
+            paths: Vec::clone(&paths),
+            methods,
+            place: Placement::Header {
+                name: "authorization".into(),
+                format: "Bearer {secret}".into(),
+            },
+            ignore_case: aud == Audience::Arm,
+        });
+        b.rule(
+            id,
+            "azure",
+            Rule {
+                host,
+                access,
+                paths,
+                ignore_case: aud == Audience::Arm,
+                ..Default::default()
+            },
+        );
+    };
+    let subscriptions: Vec<String> = c
+        .subscriptions
+        .iter()
+        .map(|s| format!("/subscriptions/{s}/**"))
+        .collect();
+    grant(
+        b,
+        Audience::Arm,
+        "azure-arm".into(),
+        ARM_HOST.into(),
+        access.clone(),
+        subscriptions,
+    );
+    // What `az login` and the providers read beside the subscriptions: the subscriptions and
+    // tenants the identity sees, and the resource providers' metadata.
+    grant(
+        b,
+        Audience::Arm,
+        "azure-arm-read".into(),
+        ARM_HOST.into(),
+        read(),
+        vec![
+            "/subscriptions".into(),
+            "/tenants".into(),
+            "/providers".into(),
+            "/providers/*".into(),
+        ],
+    );
+    for name in &c.key_vaults {
+        let host = key_vault_host(name);
+        let id = format!("azure-keyvault-{}", name.to_ascii_lowercase());
+        grant(b, Audience::KeyVault, id, host, access.clone(), Vec::new());
+    }
+    for account in &c.storage_accounts {
+        for (host, service) in storage_hosts(account).into_iter().zip(STORAGE_SERVICES) {
+            let id = format!("azure-storage-{account}-{service}");
+            grant(b, Audience::Storage, id, host, access.clone(), Vec::new());
+        }
+    }
+    if c.graph {
+        let id = "azure-graph".to_string();
+        grant(
+            b,
+            Audience::Graph,
+            id,
+            GRAPH_HOST.into(),
+            read(),
+            Vec::new(),
+        );
+    }
+    // Whatever allows them: another rule for the host must not open them either.
+    let deny = |paths: &[&str], reason: &str| DenyRule {
+        host: ARM_HOST.into(),
+        paths: paths.iter().map(|p| p.to_string()).collect(),
+        methods: WRITE_METHODS.map(String::from).to_vec(),
+        reason: reason.into(),
+    };
+    if !c.role_assignments {
+        b.denies.push(deny(
+            AZURE_ACCESS_CONTROL,
+            "[credentials.azure] refuses writes that give someone access to Azure: role \
+             assignments and definitions, PIM, federated identity credentials, Lighthouse, key \
+             vault access policies, elevateAccess (`role_assignments = true` in the env's \
+             config allows them)",
+        ));
+    }
+    if !c.deployments {
+        b.denies.push(deny(
+            AZURE_DEPLOYMENTS,
+            "[credentials.azure] refuses template deployments, deployment scripts and \
+             deployment stacks: they act with all of the identity's roles, beyond the env's \
+             subscriptions (`deployments = true` in the env's config allows them)",
+        ));
+    }
+    if c.access == AccessLevel::Write && own_login {
+        b.warnings.push(
+            "credentials.azure: access = \"write\" with your own az login lets code in the env \
+             change whatever your Azure roles allow; a service principal with a narrow role \
+             keeps it smaller"
+                .into(),
+        );
+    }
+    let first = &c.subscriptions[0];
+    for (k, v) in [
+        ("ARM_USE_MSI", "true"),
+        ("ARM_SUBSCRIPTION_ID", first),
+        ("AZURE_SUBSCRIPTION_ID", first),
+        // Its telemetry goes to a host no env reaches.
+        ("AZURE_CORE_COLLECT_TELEMETRY", "false"),
+    ] {
+        b.dev_env.insert(k.into(), v.into());
+    }
+    match &c.tenant {
+        Some(t) => {
+            b.dev_env.insert("ARM_TENANT_ID".into(), t.clone());
+            b.dev_env.insert("AZURE_TENANT_ID".into(), t.clone());
+        }
+        // A service principal names its tenant; `az`'s current one is in its token.
+        None => b.tenant_from = Some(azure_identity::azcli_ref(Audience::Arm, None)),
+    }
+    Ok(identity)
 }
 
 /// Azure DevOps: the PAT added as basic auth on the repos' git paths, those paths allowed
@@ -1064,6 +1331,7 @@ fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Ve
         binding: "azure_devops".into(),
         host: azure::HOST.into(),
         paths: paths.clone(),
+        methods: Vec::new(),
         place: Placement::Basic {
             username: String::new(),
         },
@@ -1106,6 +1374,7 @@ fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Ve
             binding: "azure_devops".into(),
             host: azure::HOST.into(),
             paths: reads.iter().chain(&posts).cloned().collect(),
+            methods: Vec::new(),
             place: Placement::Basic {
                 username: String::new(),
             },
@@ -1240,7 +1509,11 @@ read_repos = ["invinite/InviniteInfra/lib"]
             ("POST", format!("{base}/pullrequests/12/threads/3/comments")),
         ] {
             assert!(allowed(method, &path), "{method} {path}");
-            assert_eq!(p.injections_for("dev.azure.com", &path).len(), 1, "{path}");
+            assert_eq!(
+                p.injections_for("GET", "dev.azure.com", &path).len(),
+                1,
+                "{path}"
+            );
         }
         for (method, path) in [
             ("PUT", format!("{base}/pullrequests/12/reviewers/me")),
@@ -1255,6 +1528,7 @@ read_repos = ["invinite/InviniteInfra/lib"]
         }
         assert!(
             p.injections_for(
+                "GET",
                 "dev.azure.com",
                 "/invinite/InviniteInfra/_apis/git/repositories/lib/pullrequests"
             )
@@ -1337,6 +1611,7 @@ repos = [
             );
         }
         let inj = p.injections_for(
+            "GET",
             "dev.azure.com",
             "/INVINITE/AppServices/_git/pseudo-registry/info/refs",
         );
@@ -1349,7 +1624,7 @@ repos = [
             }
         );
         assert_eq!(
-            p.injections_for("dev.azure.com", "/other/Web/_git/site/info/refs")
+            p.injections_for("GET", "dev.azure.com", "/other/Web/_git/site/info/refs")
                 .len(),
             1,
             "another organization's repo, with the same PAT"
@@ -1466,7 +1741,7 @@ repos = ["Eetu/Foo"]
             "a remote in the case it was cloned with"
         );
         assert_eq!(
-            p.injections_for("github.com", "/Eetu/Foo.git/info/refs")
+            p.injections_for("GET", "github.com", "/Eetu/Foo.git/info/refs")
                 .len(),
             1
         );
@@ -1525,12 +1800,12 @@ repos = ["Eetu/Foo"]
             );
         }
         assert_eq!(
-            p.injections_for("github.com", "/eetu/foo.git/info/refs")
+            p.injections_for("GET", "github.com", "/eetu/foo.git/info/refs")
                 .len(),
             1
         );
         assert!(
-            p.injections_for("github.com", "/other/repo.git/info/refs")
+            p.injections_for("GET", "github.com", "/other/repo.git/info/refs")
                 .is_empty()
         );
         assert!(c.vault_refs().contains("op://v/app/key"));
@@ -1577,7 +1852,11 @@ read_repos = ["org/Infra/agent"]
         ));
         assert!(!allowed("api.github.com", "POST", "/repos/acme/lib/pulls"));
         assert!(allowed("api.github.com", "POST", "/repos/acme/web/pulls"));
-        let binding = |path| p.injections_for("github.com", path)[0].binding.clone();
+        let binding = |path| {
+            p.injections_for("GET", "github.com", path)[0]
+                .binding
+                .clone()
+        };
         assert_eq!(binding("/acme/web.git/info/refs"), "github");
         assert_eq!(binding("/acme/lib.git/info/refs"), "github-read");
         let BindingSpec::GithubApp {
@@ -1623,7 +1902,7 @@ protected_branches = ["prod"]
         .unwrap();
         let p = &c.policy;
         let binding = |host, path| {
-            p.injections_for(host, path)
+            p.injections_for("GET", host, path)
                 .iter()
                 .map(|i| i.binding.clone())
                 .collect::<Vec<_>>()
@@ -1682,6 +1961,11 @@ ca = '{}'
             ca.display()
         );
         let c = compile("t", &cfg(&text), GATE, &[]).unwrap();
+        let remote_ca = text.replace(&ca.display().to_string(), r"\\server\share\ca.pem");
+        let Err(e) = compile("t", &cfg(&remote_ca), GATE, &[]) else {
+            panic!("a CA on another machine is read");
+        };
+        assert!(e.to_string().contains("another machine"), "{e}");
         let p = &c.policy;
         let allowed = |method, path| {
             matches!(
@@ -1703,10 +1987,10 @@ ca = '{}'
         assert!(allowed("GET", "/infra/lib.git/info/refs"));
         assert!(!allowed("POST", "/infra/lib.git/git-receive-pack"));
         assert!(!allowed("GET", "/other/repo.git/info/refs"));
-        let inj = p.injections_for("forge.internal", "/Infra/Platform/api/info/refs");
+        let inj = p.injections_for("GET", "forge.internal", "/Infra/Platform/api/info/refs");
         assert!(matches!(&inj[0].place, Placement::Basic { username } if username == "dev"));
         assert!(
-            p.injections_for("forge.internal", "/other/repo/info/refs")
+            p.injections_for("GET", "forge.internal", "/other/repo/info/refs")
                 .is_empty()
         );
         assert_eq!(p.git[0].repos, ["infra/platform/api"]);
@@ -1743,7 +2027,7 @@ ca = '{}'
         .unwrap();
         let p = &c.policy;
         let graphql: Vec<&str> = p
-            .injections_for("api.github.com", "/graphql")
+            .injections_for("GET", "api.github.com", "/graphql")
             .iter()
             .map(|i| i.binding.as_str())
             .collect();
@@ -1888,7 +2172,7 @@ repos = ["o/r"]
         .unwrap();
         let p = &c.policy;
         let copilot = |host, path| {
-            p.injections_for(host, path)
+            p.injections_for("GET", host, path)
                 .iter()
                 .any(|i| i.binding == "copilot.token")
         };
@@ -1960,6 +2244,157 @@ mode = "tunnel"
             decide(p, "api.github.com", "PATCH", "/user"),
             Decision::Allow { .. }
         ));
+    }
+
+    /// Each cloud API: its exact hosts and paths, the bearer token there, the placeholders its
+    /// CLI and terraform provider read, and reads until the env sets `write = true`.
+    #[test]
+    fn cloud_apis_get_their_token_on_reads_until_the_env_writes() {
+        struct Cloud {
+            name: &'static str,
+            /// (host, a path on it) for every host the token goes to.
+            hosts: &'static [(&'static str, &'static str)],
+            env: &'static [&'static str],
+        }
+        let clouds = [
+            Cloud {
+                name: "hetzner",
+                hosts: &[
+                    ("api.hetzner.cloud", "/v1/servers"),
+                    ("api.hetzner.com", "/v1/storage_boxes"),
+                ],
+                env: &["HCLOUD_TOKEN"],
+            },
+            Cloud {
+                name: "upcloud",
+                hosts: &[("api.upcloud.com", "/1.3/server")],
+                env: &["UPCLOUD_TOKEN"],
+            },
+            Cloud {
+                name: "digitalocean",
+                hosts: &[("api.digitalocean.com", "/v2/droplets")],
+                env: &["DIGITALOCEAN_ACCESS_TOKEN", "DIGITALOCEAN_TOKEN"],
+            },
+            Cloud {
+                name: "cloudflare",
+                hosts: &[("api.cloudflare.com", "/client/v4/zones")],
+                env: &[
+                    "CLOUDFLARE_API_TOKEN",
+                    "WRANGLER_SEND_METRICS",
+                    "WRANGLER_SEND_ERROR_REPORTS",
+                ],
+            },
+        ];
+        for cloud in clouds {
+            let name = cloud.name;
+            let compiled = |extra: &str| {
+                let text =
+                    format!("[credentials.{name}]\ntoken = \"op://p/{name}/token\"\n{extra}");
+                compile("t", &cfg(&text), GATE, &[]).unwrap()
+            };
+            let token = |c: &Compiled, method, host, path| {
+                let inj = c.policy.injections_for(method, host, path);
+                inj.iter().any(|i| {
+                    i.binding == format!("{name}.token")
+                        && i.place
+                            == Placement::Header {
+                                name: "authorization".into(),
+                                format: "Bearer {secret}".into(),
+                            }
+                })
+            };
+            let allowed = |c: &Compiled, method, host, path| {
+                matches!(
+                    decide(&c.policy, host, method, path),
+                    Decision::Allow { .. }
+                )
+            };
+
+            let read = compiled("");
+            let hosts: BTreeSet<&str> = read
+                .policy
+                .rules
+                .iter()
+                .filter(|r| r.origin == format!("provider:{name}"))
+                .map(|r| r.rule.host.as_str())
+                .collect();
+            let want: BTreeSet<&str> = cloud.hosts.iter().map(|(h, _)| *h).collect();
+            assert_eq!(hosts, want, "{name}: exact hosts");
+            assert!(read.bindings.contains_key(&format!("{name}.token")));
+            for var in cloud.env {
+                assert!(read.dev_env.contains_key(*var), "{name}: {var}");
+            }
+            for (host, path) in cloud.hosts {
+                assert!(read.policy.is_credentialed_host(host), "{name}: {host}");
+                assert!(
+                    allowed(&read, "GET", host, path),
+                    "{name}: GET {host}{path}"
+                );
+                assert!(
+                    token(&read, "GET", host, path),
+                    "{name}: token on GET {host}"
+                );
+                assert!(
+                    !allowed(&read, "POST", host, path),
+                    "{name}: POST {host}{path}"
+                );
+                assert!(!token(&read, "DELETE", host, path), "{name}: DELETE {host}");
+            }
+
+            let write = compiled("write = true");
+            for (host, path) in cloud.hosts {
+                for method in ["POST", "PUT", "PATCH", "DELETE"] {
+                    assert!(allowed(&write, method, host, path), "{name}: {method}");
+                    assert!(token(&write, method, host, path), "{name}: {method}");
+                }
+            }
+        }
+
+        // The token stays on Cloudflare's API paths.
+        let cf = compile(
+            "t",
+            &cfg("[credentials.cloudflare]\ntoken = \"env:T\""),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        assert!(
+            cf.policy
+                .injections_for("GET", "api.cloudflare.com", "/x")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn write_is_only_for_providers_that_read_without_it() {
+        let c = cfg("[credentials.anthropic]\napi_key = \"env:K\"\nwrite = true");
+        let err = compile("t", &c, GATE, &[]).err().expect("refused");
+        assert!(err.to_string().contains("already writes"), "{err}");
+        let c = cfg("[credentials.hetzner]\ntoken = \"env:K\"\nwrites = true");
+        let err = compile("t", &c, GATE, &[]).err().expect("refused");
+        assert!(err.to_string().contains("not a setting"), "{err}");
+    }
+
+    #[test]
+    fn a_rule_that_allows_more_on_a_read_host_gets_no_token() {
+        let c = cfg(r#"
+[credentials.hetzner]
+token = "env:K"
+
+[[allow]]
+host = "api.hetzner.cloud"
+access = "write"
+"#);
+        let c = compile("t", &c, GATE, &[]).unwrap();
+        assert!(matches!(
+            decide(&c.policy, "api.hetzner.cloud", "POST", "/v1/servers"),
+            Decision::Allow { .. }
+        ));
+        assert!(
+            c.policy
+                .injections_for("POST", "api.hetzner.cloud", "/v1/servers")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2047,5 +2482,460 @@ methods = ["DELETE"]
         let muted = cfg("[[mute]]\nhost = \"telemetry.example\"\npaths = [\"/v1/**\"]");
         let c = compile("t", &muted, GATE, &[]).unwrap();
         assert!(c.policy.denies.is_empty());
+    }
+
+    const SUB: &str = "0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0";
+
+    #[test]
+    fn azure_reaches_its_subscriptions_with_the_arm_token_in_any_case() {
+        let text = format!("[credentials.azure]\nsubscriptions = [\"{SUB}\"]\n");
+        let c = compile("t", &cfg(&text), GATE, &[]).unwrap();
+        let p = &c.policy;
+        let allowed = |method: &str, path: &str| {
+            matches!(
+                decide(p, "management.azure.com", method, path),
+                Decision::Allow { .. }
+            )
+        };
+        let bound = |p: &Policy, method: &str, path: &str| -> Vec<String> {
+            p.injections_for(method, "management.azure.com", path)
+                .iter()
+                .map(|i| i.binding.clone())
+                .collect()
+        };
+        let rg = format!("/subscriptions/{SUB}/resourceGroups/rg");
+        for (method, path) in [
+            ("GET", "/subscriptions".to_string()),
+            ("GET", "/tenants".into()),
+            ("GET", "/providers".into()),
+            ("GET", "/providers/Microsoft.Compute".into()),
+            ("GET", format!("/subscriptions/{SUB}")),
+            ("GET", rg.clone()),
+            ("GET", rg.to_uppercase()),
+            ("HEAD", rg.clone()),
+            ("OPTIONS", rg.clone()),
+        ] {
+            assert!(allowed(method, &path), "{method} {path}");
+            assert_eq!(bound(p, method, &path), ["azure-arm"], "{method} {path}");
+        }
+        // Read: no writes, and nothing outside the subscriptions and the lists beside them.
+        let other = "/subscriptions/11111111-2222-3333-4444-555555555555";
+        for (method, path) in [
+            ("PUT", rg.clone()),
+            (
+                "POST",
+                format!("{rg}/providers/Microsoft.Storage/storageAccounts/a/listKeys"),
+            ),
+            ("DELETE", rg.clone()),
+            ("POST", "/subscriptions".into()),
+            (
+                "PUT",
+                "/providers/Microsoft.Management/managementGroups/x".into(),
+            ),
+            (
+                "GET",
+                "/providers/Microsoft.Management/managementGroups/x".into(),
+            ),
+            ("GET", "/providers/Microsoft.Compute/operations".into()),
+            ("GET", format!("{other}/resourceGroups")),
+        ] {
+            assert!(!allowed(method, &path), "{method} {path}");
+            assert!(bound(p, method, &path).is_empty(), "{method} {path}");
+        }
+
+        // A rule of yours (or an approved request) that allows a write there gets no token
+        // with it; the client's own is stripped all the same.
+        let yours = cfg(&format!(
+            "{text}[[allow]]\nhost = \"management.azure.com\"\naccess = \"write\"\n"
+        ));
+        let c = compile("t", &yours, GATE, &[]).unwrap();
+        assert!(matches!(
+            decide(&c.policy, "management.azure.com", "PUT", &rg),
+            Decision::Allow { .. }
+        ));
+        assert!(bound(&c.policy, "PUT", &rg).is_empty());
+        assert!(c.policy.is_credentialed_host("management.azure.com"));
+
+        let write = cfg(&format!("{text}access = \"write\"\n"));
+        let c = compile("t", &write, GATE, &[]).unwrap();
+        assert!(matches!(
+            decide(&c.policy, "management.azure.com", "PUT", &rg),
+            Decision::Allow { .. }
+        ));
+        assert_eq!(bound(&c.policy, "PUT", &rg), ["azure-arm"]);
+        assert!(!matches!(
+            decide(&c.policy, "management.azure.com", "PUT", "/subscriptions"),
+            Decision::Allow { .. }
+        ));
+        assert!(bound(&c.policy, "POST", "/subscriptions").is_empty());
+        assert!(c.warnings.iter().any(|w| w.contains("your own az login")));
+    }
+
+    #[test]
+    fn azure_data_planes_are_exact_hosts_with_their_own_audience() {
+        let text = format!(
+            r#"
+[credentials.azure]
+subscriptions = ["{SUB}"]
+key_vaults = ["KV-Prod"]
+storage_accounts = ["acct"]
+graph = true
+"#
+        );
+        let c = compile("t", &cfg(&text), GATE, &[]).unwrap();
+        let p = &c.policy;
+        let binding = |host: &str| -> Vec<String> {
+            p.injections_for("GET", host, "/x")
+                .iter()
+                .map(|i| i.binding.clone())
+                .collect()
+        };
+        assert_eq!(binding("kv-prod.vault.azure.net"), ["azure-keyvault"]);
+        for service in STORAGE_SERVICES {
+            assert_eq!(
+                binding(&format!("acct.{service}.core.windows.net")),
+                ["azure-storage"]
+            );
+        }
+        assert_eq!(binding("graph.microsoft.com"), ["azure-graph"]);
+        assert!(binding("other.vault.azure.net").is_empty());
+        for i in &p.injections {
+            assert!(!i.host.contains('*'), "{}", i.host);
+        }
+        for r in p.rules.iter().filter(|r| r.origin == "azure") {
+            assert!(!r.rule.host.contains('*'), "{}", r.rule.host);
+        }
+        // Graph stays read-only whatever `access` says.
+        let w = cfg(&format!("{text}access = \"write\"\n"));
+        let w = compile("t", &w, GATE, &[]).unwrap();
+        for (host, method, allowed) in [
+            ("kv-prod.vault.azure.net", "POST", true),
+            ("acct.blob.core.windows.net", "PUT", true),
+            ("graph.microsoft.com", "GET", true),
+            ("graph.microsoft.com", "POST", false),
+        ] {
+            let d = decide(&w.policy, host, method, "/x");
+            assert_eq!(
+                matches!(d, Decision::Allow { .. }),
+                allowed,
+                "{method} {host}"
+            );
+            let tokens = w.policy.injections_for(method, host, "/x").len();
+            assert_eq!(tokens, usize::from(allowed), "{method} {host}");
+        }
+        assert!(matches!(
+            decide(p, "kv-prod.vault.azure.net", "POST", "/keys/k/decrypt"),
+            Decision::Deny(DenyReason::MethodNotAllowed { .. })
+        ));
+        // Under read, the data planes' tokens go on reads only, whatever else allows a write.
+        for host in ["kv-prod.vault.azure.net", "acct.blob.core.windows.net"] {
+            assert_eq!(p.injections_for("GET", host, "/x").len(), 1, "{host}");
+            assert!(p.injections_for("PUT", host, "/x").is_empty(), "{host}");
+        }
+
+        let audiences = &p.azure.as_ref().unwrap().audiences;
+        assert_eq!(audiences.keys().copied().collect::<Vec<_>>(), Audience::ALL);
+        for (aud, binding) in audiences {
+            assert_eq!(
+                c.bindings[binding],
+                BindingSpec::Static {
+                    secret_ref: format!("azcli:{}", aud.resource())
+                }
+            );
+        }
+        assert_eq!(c.dev_env["ARM_USE_MSI"], "true");
+        assert_eq!(c.dev_env["AZURE_SUBSCRIPTION_ID"], SUB);
+        assert!(!c.dev_env.contains_key("AZURE_TENANT_ID"));
+
+        // Only the audiences it names.
+        let arm = compile(
+            "t",
+            &cfg(&format!(
+                "[credentials.azure]\nsubscriptions = [\"{SUB}\"]\n"
+            )),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        let audiences = &arm.policy.azure.as_ref().unwrap().audiences;
+        assert_eq!(
+            audiences.keys().copied().collect::<Vec<_>>(),
+            [Audience::Arm]
+        );
+        assert_eq!(arm.bindings.len(), 1);
+    }
+
+    #[test]
+    fn a_service_principal_is_minted_in_the_vault_from_its_secret() {
+        let text = format!(
+            r#"
+[credentials.azure]
+subscriptions = ["{SUB}"]
+tenant = "contoso.onmicrosoft.com"
+client_id = "11111111-2222-3333-4444-555555555555"
+client_secret = "op://Dev/sp/secret"
+key_vaults = ["kv1"]
+"#
+        );
+        let c = compile("t", &cfg(&text), GATE, &[]).unwrap();
+        for (binding, audience) in [
+            ("azure-arm", "https://management.azure.com/"),
+            ("azure-keyvault", "https://vault.azure.net"),
+        ] {
+            assert_eq!(
+                c.bindings[binding],
+                BindingSpec::AzureServicePrincipal {
+                    tenant: "contoso.onmicrosoft.com".into(),
+                    client_id: "11111111-2222-3333-4444-555555555555".into(),
+                    secret_ref: "op://Dev/sp/secret".into(),
+                    audience: audience.into(),
+                }
+            );
+        }
+        assert_eq!(
+            c.vault_refs().into_iter().collect::<Vec<_>>(),
+            ["op://Dev/sp/secret"]
+        );
+        assert_eq!(c.dev_env["ARM_TENANT_ID"], "contoso.onmicrosoft.com");
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+
+        // With your own login, the tenant goes to `az`.
+        let mine = format!(
+            "[credentials.azure]\nsubscriptions = [\"{SUB}\"]\ntenant = \"contoso.onmicrosoft.com\"\n"
+        );
+        let c = compile("t", &cfg(&mine), GATE, &[]).unwrap();
+        assert_eq!(
+            c.bindings["azure-arm"].secret_ref(),
+            "azcli:https://management.azure.com/?tenant=contoso.onmicrosoft.com"
+        );
+        for r in c.vault_refs() {
+            crate::secrets::check_vault_ref(&r).unwrap();
+        }
+    }
+
+    #[test]
+    fn azure_keeps_access_control_and_deployments_shut_unless_asked() {
+        let decide_with = |extra: &str, method: &str, path: &str| {
+            let text = format!("[credentials.azure]\nsubscriptions = [\"{SUB}\"]\n{extra}");
+            let c = compile("t", &cfg(&text), GATE, &[]).unwrap();
+            decide(&c.policy, "management.azure.com", method, path)
+        };
+        let explicit = |d: &Decision| matches!(d, Decision::Deny(DenyReason::Explicit { .. }));
+        let allowed = |d: &Decision| matches!(d, Decision::Allow { .. });
+        let guid = "00000000-0000-0000-0000-000000000001";
+        let sub = format!("/subscriptions/{SUB}");
+        let rg = format!("{sub}/resourceGroups/rg");
+        let mg = "/providers/Microsoft.Management/managementGroups/mg";
+        let auth = "providers/Microsoft.Authorization";
+        // In the subscription, which write opens: shut unless `role_assignments = true`.
+        let access_control = [
+            ("PUT", format!("{sub}/{auth}/roleAssignments/{guid}")),
+            (
+                "PUT",
+                format!("{rg}/providers/microsoft.authorization/ROLEASSIGNMENTS/{guid}"),
+            ),
+            (
+                "DELETE",
+                format!(
+                    "{rg}/providers/Microsoft.Storage/storageAccounts/s/{auth}/roleAssignments/{guid}"
+                ),
+            ),
+            ("PUT", format!("{sub}/{auth}/roleDefinitions/{guid}")),
+            (
+                "PUT",
+                format!("{sub}/{auth}/roleAssignmentScheduleRequests/{guid}"),
+            ),
+            (
+                "PUT",
+                format!("{rg}/{auth}/roleEligibilityScheduleRequests/{guid}"),
+            ),
+            (
+                "PATCH",
+                format!("{sub}/{auth}/roleManagementPolicies/{guid}"),
+            ),
+            (
+                "PUT",
+                format!("{sub}/{auth}/roleManagementPolicyAssignments/{guid}"),
+            ),
+            (
+                "PUT",
+                format!(
+                    "{rg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id/federatedIdentityCredentials/gh"
+                ),
+            ),
+            (
+                "PUT",
+                format!("{sub}/providers/Microsoft.ManagedServices/registrationDefinitions/{guid}"),
+            ),
+            (
+                "PUT",
+                format!("{sub}/providers/Microsoft.ManagedServices/registrationAssignments/{guid}"),
+            ),
+            (
+                "PUT",
+                format!("{rg}/providers/Microsoft.KeyVault/vaults/kv/accessPolicies/add"),
+            ),
+        ];
+        // Outside the subscriptions, which no write reaches anyway: shut whatever allows them.
+        let outside = [
+            ("POST", format!("/{auth}/elevateAccess")),
+            ("PUT", format!("/{auth}/roleAssignments/{guid}")),
+            ("PUT", format!("{mg}/{auth}/roleAssignments/{guid}")),
+            ("PUT", format!("{mg}/{auth}/roleDefinitions/{guid}")),
+        ];
+        let deployments = [
+            (
+                "PUT",
+                format!("{rg}/providers/Microsoft.Resources/deployments/d"),
+            ),
+            (
+                "POST",
+                format!("{sub}/providers/Microsoft.Resources/deployments/d/validate"),
+            ),
+            (
+                "PUT",
+                format!("{rg}/providers/Microsoft.Resources/deploymentScripts/s"),
+            ),
+            (
+                "PUT",
+                format!("{sub}/providers/Microsoft.Resources/deploymentStacks/s"),
+            ),
+            (
+                "PUT",
+                format!("{mg}/providers/Microsoft.Resources/deployments/d"),
+            ),
+        ];
+        let write = "access = \"write\"\n";
+        // Under read too: a rule of yours or an approved request can't open them.
+        let your_rule = "[[allow]]\nhost = \"management.azure.com\"\naccess = \"write\"\n";
+        for (method, path) in access_control.iter().chain(&outside).chain(&deployments) {
+            for extra in [write, your_rule] {
+                let d = decide_with(extra, method, path);
+                assert!(explicit(&d), "{extra}: {method} {path}: {d:?}");
+            }
+        }
+        let opened = format!("{write}role_assignments = true\n");
+        for (method, path) in &access_control {
+            assert!(
+                allowed(&decide_with(&opened, method, path)),
+                "{method} {path}"
+            );
+        }
+        for (method, path) in &outside {
+            assert!(
+                !explicit(&decide_with(&opened, method, path)),
+                "{method} {path}"
+            );
+        }
+        let opened = format!("{write}deployments = true\n");
+        for (method, path) in &deployments[..4] {
+            assert!(
+                allowed(&decide_with(&opened, method, path)),
+                "{method} {path}"
+            );
+        }
+        // One opens the other's paths no more than before.
+        assert!(explicit(&decide_with(&opened, "PUT", &access_control[0].1)));
+        // Reading them, and every other write, stay as `access` says.
+        for (method, path) in [
+            ("GET", access_control[0].1.clone()),
+            ("GET", deployments[0].1.clone()),
+            ("PUT", rg.clone()),
+            (
+                "PUT",
+                format!("{rg}/providers/Microsoft.Storage/storageAccounts/s"),
+            ),
+            (
+                "PUT",
+                format!("{rg}/providers/Microsoft.KeyVault/vaults/kv"),
+            ),
+        ] {
+            assert!(
+                allowed(&decide_with(write, method, &path)),
+                "{method} {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn azure_names_cannot_reach_another_host() {
+        for extra in [
+            "key_vaults = [\"evil.example/x\"]",
+            "key_vaults = [\"*\"]",
+            "storage_accounts = [\"acct.blob.core.windows.net\"]",
+            "storage_accounts = [\"evil.example#\"]",
+        ] {
+            let text = format!("[credentials.azure]\nsubscriptions = [\"{SUB}\"]\n{extra}\n");
+            assert!(compile("t", &cfg(&text), GATE, &[]).is_err(), "{extra}");
+        }
+    }
+
+    #[test]
+    fn azcli_refs_are_only_the_azure_credentials_own() {
+        let azure = format!("[credentials.azure]\nsubscriptions = [\"{SUB}\"]\n");
+        let arm = "azcli:https://management.azure.com/";
+        for (extra, why) in [
+            (
+                format!("[sandbox_secrets]\nARM_TOKEN = \"{arm}\"\n"),
+                "sandbox_secrets.ARM_TOKEN",
+            ),
+            (
+                format!("[credentials.custom.x]\nhost = \"api.example.com\"\nsecret = \"{arm}\"\n"),
+                "credential `custom.x`",
+            ),
+            (
+                format!("[credentials.github]\ntoken = \"{arm}\"\nrepos = [\"o/r\"]\n"),
+                "credential `github`",
+            ),
+        ] {
+            for text in [extra.clone(), format!("{azure}{extra}")] {
+                let e = compile("t", &cfg(&text), GATE, &[]).err().expect(&text);
+                assert!(e.to_string().contains(why), "{e}");
+            }
+        }
+        // A service principal's secret is yours to name, never an az token.
+        let sp = format!(
+            "{azure}tenant = \"contoso.onmicrosoft.com\"\n\
+             client_id = \"11111111-2222-3333-4444-555555555555\"\nclient_secret = \"{arm}\"\n"
+        );
+        let e = compile("t", &cfg(&sp), GATE, &[]).err().unwrap();
+        assert!(e.to_string().contains("credential `azure-arm`"), "{e}");
+        assert!(compile("t", &cfg(&azure), GATE, &[]).is_ok());
+    }
+
+    #[test]
+    fn the_tenant_comes_from_the_config_or_the_az_token() {
+        let azure = format!("[credentials.azure]\nsubscriptions = [\"{SUB}\"]\n");
+        let c = compile("t", &cfg(&azure), GATE, &[]).unwrap();
+        assert_eq!(
+            c.tenant_from.as_deref(),
+            Some("azcli:https://management.azure.com/")
+        );
+        assert!(!c.dev_env.contains_key("ARM_TENANT_ID"));
+        let named = format!("{azure}tenant = \"contoso.onmicrosoft.com\"\n");
+        let c = compile("t", &cfg(&named), GATE, &[]).unwrap();
+        assert_eq!(c.tenant_from, None);
+        assert_eq!(c.dev_env["AZURE_TENANT_ID"], "contoso.onmicrosoft.com");
+        let none = compile("t", &EnvConfig::default(), GATE, &[]).unwrap();
+        assert_eq!(none.tenant_from, None);
+    }
+
+    #[test]
+    fn config_toml_carries_no_credentials() {
+        let e = crate::config::parse_global(&format!(
+            "[credentials.azure]\nsubscriptions = [\"{SUB}\"]\n"
+        ))
+        .unwrap_err();
+        assert!(format!("{e:#}").contains("envs/<env>.toml"), "{e:#}");
+        for source in [
+            "[sources.op]\nmode = \"service-account\"\nservice_account_token = \"azcli:https://management.azure.com/\"",
+            "[sources.vault]\naddr = \"https://bao\"\ntoken = \"azcli:https://vault.azure.net\"",
+        ] {
+            let e = crate::config::parse_global(source).unwrap_err();
+            assert!(e.to_string().contains("azcli:"), "{e}");
+        }
+        assert!(
+            crate::config::parse_global("[sources.vault]\naddr = \"x\"\ntoken = \"env:T\"").is_ok()
+        );
     }
 }

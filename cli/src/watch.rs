@@ -1,7 +1,8 @@
 //! The background watcher: one per config dir, started by `up`, `down` and commands that work
 //! in an env. Every 2 s it forwards the ports running envs listen on (see `ports`) and posts
 //! desktop notifications (see `notify`); every 30 s it reads again the credentials upstreams
-//! refused, from sources that need no one; every minute it stops envs that have been idle for
+//! refused, from sources that need no one, and the Azure CLI's tokens the vault holds before
+//! they expire; every minute it stops envs that have been idle for
 //! `idle_stop` (see `idle`), and luoto's VM once no env has run for that long. It exits when
 //! nothing is left to watch, or when the luoto binary changes, so a new version starts its own.
 
@@ -17,7 +18,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx};
 use crate::paths::Paths;
-use crate::{events, idle, machine, names, notify, ports, secrets, sync};
+use crate::{azure_identity, events, idle, machine, names, notify, ports, secrets, sync};
 
 const TICK: Duration = Duration::from_secs(2);
 const IDLE_EVERY: Duration = Duration::from_secs(60);
@@ -25,6 +26,13 @@ const CREDS_EVERY: Duration = Duration::from_secs(30);
 /// How soon a refused credential is read again: code in the sandbox can make an upstream
 /// refuse one at will.
 const REREAD_AFTER: Duration = Duration::from_secs(600);
+/// How long before an `azcli:` token expires it is read again. The Azure CLI hands out the
+/// token it holds until under five minutes are left, and only then gets a new one.
+const AZCLI_RENEW: TimeDelta = TimeDelta::minutes(5);
+/// How soon an `azcli:` token is read again after a read: one that is still due, or failed
+/// (`az` logged out), waits this long.
+const AZCLI_AGAIN: Duration = Duration::from_secs(60);
+const AZCLI_FAILED_AGAIN: Duration = Duration::from_secs(300);
 /// How long `stop` waits: past a tick and the slowest round of work in it.
 const STOP_WAIT: Duration = Duration::from_secs(20);
 
@@ -138,6 +146,7 @@ pub fn watch() -> Result<ExitCode> {
     let mut creds_checked = Instant::now();
     let mut creds_since: HashMap<String, DateTime<Utc>> = HashMap::new();
     let mut reread: HashMap<String, Instant> = HashMap::new();
+    let mut azcli = Azcli::default();
     loop {
         std::thread::sleep(TICK);
         // `stop` (luoto uninstall) removed it, and waits for this process to leave.
@@ -233,6 +242,7 @@ pub fn watch() -> Result<ExitCode> {
         if creds_checked.elapsed() >= CREDS_EVERY {
             creds_checked = Instant::now();
             reread_refused(&ctx, &running, &mut creds_since, &mut reread);
+            azcli.renew(&ctx, &running);
         }
 
         if idle_checked.elapsed() < IDLE_EVERY {
@@ -281,6 +291,87 @@ fn record(
     match ports::save_watched(paths, &now) {
         Ok(()) => *recorded = Some(now),
         Err(e) => println!("{} forwards not recorded: {e:#}", Utc::now()),
+    }
+}
+
+/// The `azcli:` tokens the vault holds for running envs, kept from expiring.
+#[derive(Default)]
+struct Azcli {
+    /// When each token read expires.
+    expires: HashMap<String, DateTime<Utc>>,
+    /// When each was last read, and whether that failed.
+    read: HashMap<String, (Instant, bool)>,
+}
+
+impl Azcli {
+    /// Read again the tokens that expire within [`AZCLI_RENEW`], and any not read yet, if the
+    /// vault holds them: one it doesn't hold (locked) stays unloaded.
+    fn renew(&mut self, ctx: &Ctx, running: &[String]) {
+        let mut refs = BTreeSet::new();
+        for name in running {
+            if let Ok(plan) = env::plan(ctx, name) {
+                refs.extend(
+                    plan.compiled
+                        .vault_refs()
+                        .into_iter()
+                        .filter(|r| r.starts_with(azure_identity::AZCLI)),
+                );
+            }
+        }
+        self.expires.retain(|r, _| refs.contains(r));
+        self.read.retain(|r, _| refs.contains(r));
+        let now = Utc::now();
+        let due: BTreeSet<String> = refs
+            .into_iter()
+            .filter(|r| self.expires.get(r).is_none_or(|e| *e - now < AZCLI_RENEW))
+            .filter(|r| {
+                self.read.get(r).is_none_or(|(at, failed)| {
+                    at.elapsed()
+                        >= if *failed {
+                            AZCLI_FAILED_AGAIN
+                        } else {
+                            AZCLI_AGAIN
+                        }
+                })
+            })
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let Ok(status) = crate::ctl::vault_status(&ctx.rt) else {
+            return;
+        };
+        let due: BTreeSet<String> = due
+            .into_iter()
+            .filter(|r| status.loaded_refs.contains(r))
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let r = match sync::reload(ctx, &due, true) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("{} Azure tokens not renewed: {e:#}", Utc::now());
+                return;
+            }
+        };
+        for d in &due {
+            let exp = r.expires.get(d);
+            self.read.insert(d.clone(), (Instant::now(), exp.is_none()));
+            if let Some(exp) = exp {
+                self.expires.insert(d.clone(), *exp);
+            }
+        }
+        if r.changed > 0 {
+            println!(
+                "{} renewed {} Azure token(s) from az",
+                Utc::now(),
+                r.changed
+            );
+        }
+        for f in r.failed {
+            println!("{}   not renewed: {f}", Utc::now());
+        }
     }
 }
 
@@ -338,7 +429,7 @@ fn reread_refused(
         return;
     }
     let refs: Vec<&str> = due.iter().map(String::as_str).collect();
-    match sync::reload(ctx, &due) {
+    match sync::reload(ctx, &due, true) {
         Ok(r) => {
             println!(
                 "{} read refused secret(s) again ({}): {} changed",

@@ -86,12 +86,13 @@ pub fn env_image(ctx: &Ctx, cfg: &EnvConfig) -> String {
     cfg.image.clone().unwrap_or_else(|| ctx.image("base"))
 }
 
-/// IDs of the images `up` runs.
+/// IDs of the images `up` runs, and whether it pulled any.
 struct ImageIds {
     gate: String,
     vault: String,
     tools: String,
     dev: String,
+    pulled: bool,
 }
 
 /// luoto's images and the env's own `dev` image, each pulled (with progress) when missing, as
@@ -104,16 +105,14 @@ fn ensure_images(ctx: &Ctx, dev: &str) -> Result<ImageIds> {
         dev.to_string(),
     ];
     // One call when everything is there, the common case.
-    let ids = match image_ids(&ctx.rt, &all) {
-        Some(ids) => ids,
+    let (ids, pulled) = match image_ids(&ctx.rt, &all) {
+        Some(ids) => (ids, false),
         None => {
-            for img in all.iter().filter(|img| !ctx.rt.image_exists(img)) {
-                if img.starts_with("localhost/") {
-                    bail!("missing image {img}: a local image (`luoto setup` builds luoto's own)");
-                }
-                ctx.rt.pull(img)?;
+            for img in &all {
+                ensure_image(ctx, img)?;
             }
-            image_ids(&ctx.rt, &all).context("inspect the env's images")?
+            let ids = image_ids(&ctx.rt, &all).context("inspect the env's images")?;
+            (ids, true)
         }
     };
     let [gate, vault, tools, dev] = ids;
@@ -122,7 +121,34 @@ fn ensure_images(ctx: &Ctx, dev: &str) -> Result<ImageIds> {
         vault,
         tools,
         dev,
+        pulled,
     })
+}
+
+/// `image`, pulled (with progress) when missing. A local image (`localhost/…`, a source
+/// build's) can't be pulled.
+pub fn ensure_image(ctx: &Ctx, image: &str) -> Result<()> {
+    if ctx.rt.image_exists(image) {
+        return Ok(());
+    }
+    if image.starts_with("localhost/") {
+        bail!("missing image {image}: a local image (`luoto setup` builds luoto's own)");
+    }
+    ctx.rt.pull(image)
+}
+
+/// Create the env's volume `what` (`work`, `home`, …) unless it exists; true when it was
+/// created.
+pub fn create_volume(ctx: &Ctx, env: &str, what: &str) -> Result<bool> {
+    ctx.rt
+        .create_volume(&names::volume(env, what), &labels(env, what))
+}
+
+/// Where the user namespace of env `octet`'s dev container starts. In luoto's VM each env's
+/// dev container has its own ID range, and its root is not the VM user that owns podman (so
+/// not the vault's or other envs' owner either).
+pub fn dev_id_map(rt: &Runtime, octet: u8) -> Option<u32> {
+    machine::is_luoto(rt.connection.as_deref()).then(|| machine::dev_id_start(octet))
 }
 
 pub fn ensure_vault(ctx: &Ctx) -> Result<()> {
@@ -299,11 +325,10 @@ pub fn plan(ctx: &Ctx, env: &str) -> Result<Plan> {
     let state = EnvState::load(&ctx.paths, env)?;
     let gate = state.as_ref().map(|s| names::addrs(s.octet).gate);
     let compiled = compile(env, &cfg, gate, &azure::aliases(&cfg.workspace))?;
-    for r in compiled
-        .vault_refs()
-        .iter()
-        .chain(compiled.sandbox_refs.values())
-    {
+    for r in compiled.vault_refs() {
+        secrets::check_vault_ref(&r)?;
+    }
+    for r in compiled.sandbox_refs.values() {
         secrets::check_ref(r)?;
     }
     Ok(Plan {
@@ -354,6 +379,8 @@ pub struct UpOptions {
     /// Skip the isolation self-test after a start.
     pub no_selftest: bool,
     pub quiet: bool,
+    /// Install what a remote cloned into the workspace pins without asking (`init --yes`).
+    pub accept_installs: bool,
 }
 
 /// Remove the dev container so the next `up` makes a new one; workspace and home volumes stay.
@@ -401,6 +428,9 @@ fn ask_credentials(ctx: &Ctx, env: &str) -> Result<()> {
 
 pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     ensure_vm(ctx)?;
+    if !opts.quiet {
+        crate::disk::warn_if_low(ctx);
+    }
     EnvFile::load(&ctx.paths, env)?.prune_expired()?;
     ask_credentials(ctx, env)?;
     let image = env_image(ctx, &layered(ctx, env)?);
@@ -433,9 +463,9 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     rt.create_bridge_network(&names::egress_net(env), &labels(env, "net"))?;
     // The workspace is filled once per volume: the host remembers that it did, but a volume
     // created now (a new VM, a removed volume) starts empty whatever the host remembers.
-    let fresh_work = rt.create_volume(&names::volume(env, "work"), &labels(env, "work"))?;
+    let fresh_work = create_volume(ctx, env, "work")?;
     for v in ["home", "gate"] {
-        rt.create_volume(&names::volume(env, v), &labels(env, v))?;
+        create_volume(ctx, env, v)?;
     }
     populate_tools(ctx, env, &state, &ids.tools, &env_ca.cert_pem)?;
 
@@ -462,15 +492,41 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         opts.quiet,
     )?;
 
+    // Nothing the clone of the env's own remote brings runs, installs or is granted until the
+    // user has seen its luoto.toml (`project::review`) and what it would install (below).
+    let mut cloned_workspace = false;
     if fresh_work || !state.seeded {
-        let dir = workspace::canonical(p.cfg.workspace.dir.as_deref().with_context(|| {
-            format!("env `{env}` has no folder: set `[workspace] dir` (`luoto edit -e {env}`)")
-        })?)?;
-        println!("copying {} into the env…", dir.display());
-        let n = workspace::push(ctx, env, &dir, None)?;
-        println!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
-        EnvState::update(&ctx.paths, env, |s| s.seeded = true)?;
+        let ws = &p.cfg.workspace;
+        match (&ws.dir, &ws.url) {
+            (Some(dir), _) => {
+                let dir = workspace::canonical(dir)?;
+                println!("copying {} into the env…", dir.display());
+                let n = workspace::push(ctx, env, &dir, None)?;
+                println!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
+            }
+            (None, Some(url)) => {
+                let locked = repos::creds_locked(ctx, env);
+                if let Err(e) = repos::clone_workspace(ctx, env, url, ws.branch.as_deref(), locked)
+                {
+                    if repos::undecline(ctx, env, url)? {
+                        eprintln!(
+                            "note: it was answered as public; `luoto up` asks for its access again"
+                        );
+                    }
+                    return Err(e);
+                }
+                cloned_workspace = true;
+            }
+            (None, None) => bail!(
+                "env `{env}` has no folder or remote: set `[workspace] dir` or `url` \
+                 (`luoto edit -e {env}`)"
+            ),
+        }
+        // The install question outlives this `up`: one cut short, or unable to ask, leaves it
+        // for the next.
+        EnvState::update(&ctx.paths, env, |s| filled(s, cloned_workspace))?;
     }
+    let installs_pending = cloned_workspace || state.installs_pending;
     // A new volume holds none of the repos, whatever the host remembers.
     let seeded_repos = if fresh_work {
         Default::default()
@@ -509,27 +565,52 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     }
     // New clones bring files of their own: the presets and toolchains they suggest, offered
     // as `luoto init` offers a folder's.
-    if cloned {
+    let mut install = true;
+    if cloned || installs_pending {
         match deps::detect_in_env(ctx, env) {
             Ok(found) => {
-                let heading = format!("the repos cloned into `{env}` suggest:");
+                let heading = if installs_pending {
+                    format!("the repository cloned into `{env}` suggests:")
+                } else {
+                    format!("the repos cloned into `{env}` suggest:")
+                };
                 if crate::init::offer(ctx, env, &found, &heading, false, true)? {
                     sync::reapply(ctx, env)?;
                     p = plan(ctx, env)?;
                 }
+                if installs_pending {
+                    install = ask_installs(ctx, env, &p.cfg, &found, opts.accept_installs);
+                    if install {
+                        EnvState::update(&ctx.paths, env, |s| s.installs_pending = false)?;
+                    }
+                }
             }
-            Err(e) => eprintln!("warning: the cloned repos weren't read ({e:#})"),
+            Err(e) => {
+                eprintln!("warning: the cloned repos weren't read ({e:#})");
+                // What the clone pins is unknown: nothing installs without a look at it.
+                if installs_pending {
+                    install = false;
+                    println!("nothing installed yet: `luoto up -e {env}` asks again");
+                }
+            }
         }
     }
-    if let Err(e) = deps::ensure(ctx, env, &p.cfg, state.home()) {
-        eprintln!(
-            "warning: deps not installed: {e:#}\n         \
-             see `luoto egress -e {env} --denied --since 30m`; `luoto up -e {env}` retries"
-        );
+    if install {
+        if let Err(e) = deps::ensure(ctx, env, &p.cfg, state.home()) {
+            eprintln!(
+                "warning: deps not installed: {e:#}\n         \
+                 see `luoto egress -e {env} --denied --since 30m`; `luoto up -e {env}` retries"
+            );
+        }
+        let agents: Vec<String> = p.cfg.agents.names().cloned().collect();
+        if let Err(e) = crate::agents::ensure(ctx, env, &agents, opts.quiet) {
+            eprintln!("warning: agents not installed: {e:#}\n         `luoto up -e {env}` retries");
+        }
     }
-    let agents: Vec<String> = p.cfg.agents.names().cloned().collect();
-    if let Err(e) = crate::agents::ensure(ctx, env, &agents, opts.quiet) {
-        eprintln!("warning: agents not installed: {e:#}\n         `luoto up -e {env}` retries");
+    // After deps: the image or [deps] may be what brings `az`, which then runs in the
+    // workspace (a mise shim reads its files), so not before the installs were wanted.
+    if install && let Some(c) = &p.cfg.credentials.azure {
+        crate::azure_identity::login_in_env(ctx, env, c);
     }
 
     crate::watch::spawn(ctx);
@@ -560,8 +641,91 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         );
         println!("  egress:  luoto egress -e {env}");
         println!("  web UI:  luoto ui");
+        // Now that the gate and vault run on the new images, the old ones are unused.
+        if ids.pulled {
+            crate::disk::note_superseded(ctx);
+        }
     }
     Ok(())
+}
+
+/// After the env's own remote is cloned in: what installing would act on (the toolchains the
+/// clone pins, which mise installs reading its files, the presets those installs open for a
+/// while, the env's agents and `[deps]`), then one question. `accept` is `init --yes`'s answer.
+/// Whether to install on this `up`; without one, the next `up` installs.
+fn ask_installs(
+    ctx: &Ctx,
+    env: &str,
+    cfg: &EnvConfig,
+    found: &crate::detect::Detected,
+    accept: bool,
+) -> bool {
+    let defaults = deps::tools_for(ctx, cfg);
+    let pins: Vec<String> = found
+        .tools
+        .iter()
+        .map(|t| crate::text::display(&format!("{} {} ({})", t.tool, t.version, t.source)))
+        .chain(
+            defaults
+                .iter()
+                .filter(|(k, _)| !found.tools.iter().any(|t| &t.tool == *k))
+                .map(|(k, v)| format!("{k} {} (default)", v.as_str().unwrap_or("?"))),
+        )
+        .collect();
+    let tools = found
+        .tools
+        .iter()
+        .map(|t| t.tool.as_str())
+        .chain(defaults.keys().map(String::as_str));
+    let presets = deps::install_presets(tools, &cfg.presets);
+    println!(
+        "\nInstalling reads the clone: mise installs what its files pin, and a mise.toml can run \
+         commands in the env."
+    );
+    println!(
+        "  toolchains {}",
+        if pins.is_empty() {
+            "none pinned".to_string()
+        } else {
+            pins.join(", ")
+        }
+    );
+    if !presets.is_empty() {
+        println!(
+            "  presets    {}, opened only while they install",
+            presets.join(", ")
+        );
+    }
+    let agents: Vec<&str> = cfg.agents.names().map(String::as_str).collect();
+    if !agents.is_empty() {
+        println!("  agents     {}", agents.join(", "));
+    }
+    let d = deps::merged(&ctx.global.deps, &cfg.deps);
+    if !d.system.is_empty() || !d.run.is_empty() {
+        println!("  [deps]     system packages and setup commands, as the env's config says");
+    }
+    if accept {
+        return true;
+    }
+    if !crate::prompt::interactive() {
+        println!(
+            "nothing installed: installing waits for a yes, which `luoto up -e {env}` asks for \
+             on a terminal"
+        );
+        return false;
+    }
+    if crate::prompt::ask("Install them now? [Y/n]", 'y') == 'n' {
+        println!("nothing installed yet: `luoto up -e {env}` asks again");
+        return false;
+    }
+    true
+}
+
+/// The state once the workspace is filled: a clone of the env's own remote also opens the
+/// install question, which only a yes closes.
+fn filled(s: &mut EnvState, cloned: bool) {
+    s.seeded = true;
+    s.installs_pending |= cloned;
 }
 
 /// The gate's log is the env's event history: over 100 000 events, and a flood of them can't
@@ -675,8 +839,8 @@ fn start_gate(
     sync::apply_policy(ctx, env, &p.compiled)?;
     // Credentials failing to unlock must not block the env: credentialed hosts fail closed
     // ("credentials locked") until `luoto vault unlock` succeeds.
-    if let Err(e) =
-        bound.and_then(|()| sync::load_secrets(ctx, &p.compiled.vault_refs(), &format!("`{env}`")))
+    if let Err(e) = bound
+        .and_then(|()| sync::load_secrets(ctx, &p.compiled.vault_refs(), &format!("`{env}`"), true))
     {
         eprintln!(
             "warning: {e:#}\n         their hosts return 403 until the reference is fixed \
@@ -726,10 +890,7 @@ fn dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &str) ->
         } else {
             Vec::new()
         },
-        // In luoto's VM each env's dev container has its own ID range, and its root is not
-        // the VM user that owns podman (so not the vault's or other envs' owner either).
-        id_map: machine::is_luoto(rt.connection.as_deref())
-            .then(|| machine::dev_id_start(state.octet)),
+        id_map: dev_id_map(rt, state.octet),
         // init.sh comes from the tools image and runs only at container start, so a new
         // tools image makes the container's spec stale.
         labels: [
@@ -993,4 +1154,30 @@ pub fn remove(ctx: &Ctx, env: &str) -> Result<()> {
         std::fs::remove_dir_all(&state)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_install_question_outlives_an_up_that_didnt_answer_it() {
+        let mut s = EnvState::fresh(1, None);
+        filled(&mut s, true);
+        assert!(s.seeded && s.installs_pending);
+        // An `up` cut short after the clone: the next one finds the state saved so.
+        let saved = serde_json::to_vec(&s).unwrap();
+        let mut next: EnvState = serde_json::from_slice(&saved).unwrap();
+        assert!(next.installs_pending);
+        // A workspace volume filled again doesn't answer it.
+        filled(&mut next, false);
+        assert!(next.installs_pending);
+        let mut copied = EnvState::fresh(2, None);
+        filled(&mut copied, false);
+        assert!(!copied.installs_pending);
+        let old: EnvState =
+            serde_json::from_str(r#"{"octet":3,"home":null,"vault_token":"t","seeded":true}"#)
+                .unwrap();
+        assert!(!old.installs_pending);
+    }
 }

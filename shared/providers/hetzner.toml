@@ -1,0 +1,14 @@
+description = "Hetzner Cloud API (hcloud, terraform's hcloud provider)"
+host = "api.hetzner.cloud"
+# The Hetzner API (Storage Boxes), which takes the same project token.
+also = [{ host = "api.hetzner.com" }]
+# Infrastructure tools change things: reads unless the env sets `write = true`.
+access = "read"
+
+[auth.token]
+label = "Hetzner Cloud API token"
+how = "Hetzner Console > your project > Security > API tokens > Generate API token. A Read token is enough unless the env sets `write = true`."
+header = "authorization"
+format = "Bearer {secret}"
+# The CLI and the terraform provider refuse a token that isn't exactly 64 characters.
+env = { HCLOUD_TOKEN = "LuotoPlaceholder000000000000000000000000000000000000000000000000" }

@@ -46,6 +46,10 @@ A launchpad is a repository that holds a `luoto.toml` listing the remotes, and u
 $ git clone https://github.com/acme/platform && cd platform && luoto init
 ```
 
+Or with nothing on your machine: `luoto init acme/platform` clones the launchpad inside the
+env, and its repos once you accept its `luoto.toml` there
+([untrusted-repo.md](untrusted-repo.md)).
+
 `luoto.toml` is reviewed before it applies, like any repository's, and names remotes only,
 never your folders. Presets, agents, ports, `[deps]`, `allow` rules and denies can go there
 too; `luoto project suggest` drafts one from an env that works.

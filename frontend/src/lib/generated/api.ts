@@ -74,6 +74,18 @@ export type Detection = {
   wsl: string | null;
 };
 
+export type DiskPart = {
+  what: string;
+  bytes: number;
+};
+
+/** Used and free bytes of the disk that holds the runtime's images, containers and volumes. */
+export type DiskSpace = {
+  size: number;
+  used: number;
+  free: number;
+};
+
 export type EnvDetail = {
   name: string;
   path: string;
@@ -88,6 +100,16 @@ export type EnvDetail = {
   missing_secrets: string[];
   sandbox_secrets: string[];
   ports: EnvPorts;
+};
+
+/** One env's disk use. */
+export type EnvDisk = {
+  /**
+   * Its volumes (`workspace`, `home`, `tools`, `gate`) and `containers` (the writable
+   * layers of its dev and gate containers); what doesn't exist yet is left out.
+   */
+  parts: DiskPart[];
+  total: number;
 };
 
 /** Where an env's servers answer on this machine. */
@@ -105,6 +127,10 @@ export type EnvRow = {
   dev: string;
   gate: string;
   dir: string | null;
+  /** The remote the workspace is cloned from, in the env, when the env has no folder. */
+  remote: string | null;
+  /** The branch that clone checks out. */
+  branch: string | null;
   /** Repositories beside the folder (`repos.rs`). */
   repos: Repo[];
   pending: number;
@@ -298,7 +324,12 @@ export type ProjectState =
   /** It can't be read or parsed. */
   | "invalid"
   /** The file is gone; the accepted settings still apply. */
-  | "removed";
+  | "removed"
+  /**
+   * The env is stopped and its workspace exists only in the env (a clone), so the file
+   * can't be read; the accepted settings still apply.
+   */
+  | "unread";
 
 export type ProjectStatus = {
   state: ProjectState;
@@ -318,6 +349,11 @@ export type Proposal = {
   name: string;
   /** The folder is missing (created with the env) or empty: nothing to detect. */
   new_folder: boolean;
+  /**
+   * The choice names a remote, not a folder: such an env is made in a terminal (`luoto
+   * init <remote>`), where its first `up` shows the clone's luoto.toml and installs.
+   */
+  remote: string | null;
   presets: ProposedPreset[];
   tools: ToolPin[];
   /** The folder's luoto.toml as `[label, value]` lines; creating the env accepts it. */
@@ -378,6 +414,8 @@ export type Reloaded = {
   changed: number;
   /** The references that couldn't be read, and the gates that weren't flushed. */
   failed: string[];
+  /** When the values read expire, for those whose source says (`azcli:` tokens). */
+  expires: Record<string, string>;
 };
 
 export type Repo = {
@@ -482,3 +520,16 @@ export type VaultStatus = {
 };
 
 export type Verdict = "allow" | "deny";
+
+/** The disk holding envs, as the UI shows it. */
+export type VmDisk = {
+  /** `luoto's VM`, or `the runtime's disk` (Linux). */
+  place: string;
+  /** None while luoto's VM is stopped, or where the runtime doesn't tell (Docker Desktop). */
+  space: DiskSpace | null;
+  /** Under 10 GB is free (`LOW_FREE`). */
+  low: boolean;
+  /** The images `luoto prune` removes, and up to how many bytes that frees. */
+  prunable: number;
+  prunable_bytes: number;
+};

@@ -14,6 +14,7 @@ mod dns;
 mod events;
 mod guards;
 mod handler;
+mod imds;
 mod limits;
 mod mitm;
 mod proxy;
@@ -23,7 +24,7 @@ mod respond;
 mod state;
 #[cfg(target_os = "linux")]
 mod system;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", feature = "test-hooks"))]
 mod transparent;
 mod upstream;
 
@@ -160,6 +161,13 @@ async fn serve() -> Result<()> {
     #[cfg(target_os = "linux")]
     if let Some(l) = transparent {
         tokio::spawn(transparent::serve(state.clone(), l));
+    }
+    #[cfg(feature = "test-hooks")]
+    if let Some((listen, dst)) = state.cfg.test_transparent {
+        let l = TcpListener::bind(listen)
+            .await
+            .with_context(|| format!("bind test transparent {listen}"))?;
+        tokio::spawn(transparent::serve_as(state.clone(), l, dst));
     }
     for (port, l) in relays {
         tokio::spawn(relay::serve(state.clone(), l, port));

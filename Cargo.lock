@@ -1861,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "luoto"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1900,7 +1900,7 @@ dependencies = [
 
 [[package]]
 name = "luoto-gate"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1934,8 +1934,9 @@ dependencies = [
 
 [[package]]
 name = "luoto-integration"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
+ "base64 0.23.1",
  "chrono",
  "hex",
  "jsonwebtoken",
@@ -1952,7 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "luoto-shared"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "idna",
@@ -1966,7 +1967,7 @@ dependencies = [
 
 [[package]]
 name = "luoto-tools"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1981,7 +1982,7 @@ dependencies = [
 
 [[package]]
 name = "luoto-vault"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

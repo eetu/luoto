@@ -26,6 +26,10 @@ pub struct EnvState {
     /// Repositories copied or cloned into the workspace volume, or found there (`repos.rs`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub repos: BTreeSet<String>,
+    /// The env's own remote is cloned and nobody has said yes to installing what it pins:
+    /// until someone does, `up` asks, or installs nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub installs_pending: bool,
     /// Login user in the dev container (uid 1000).
     #[serde(default)]
     pub user: Option<String>,
@@ -87,32 +91,65 @@ pub fn ensure(ctx: &Ctx, env: &str, image: &str) -> Result<EnvState> {
     if let Some(s) = EnvState::load(&ctx.paths, env)? {
         return Ok(s);
     }
-    let s = EnvState {
-        octet: allocate_octet(ctx)?,
-        home: detect_home(ctx, image),
-        vault_token: hex::encode(rand::random::<[u8; 32]>()),
-        seeded: false,
-        repos: BTreeSet::new(),
-        user: None,
-        tools: None,
-        dev_ca: None,
-    };
+    let home = detect_home(ctx, image);
+    reserve(ctx, env, |octet| EnvState::fresh(octet, home))
+}
+
+/// Save `env`'s first state, `make` given a free octet: under a lock, and with the state
+/// written before the lock goes, so an `up` or import running beside it picks another.
+pub fn reserve(ctx: &Ctx, env: &str, make: impl FnOnce(u8) -> EnvState) -> Result<EnvState> {
+    std::fs::create_dir_all(&ctx.paths.data)?;
+    let lock = std::fs::File::create(ctx.paths.data.join("octets.lock"))?;
+    lock.lock().context("lock the subnets")?;
+    let used = ctx.rt.used_subnets()?;
+    let octet = free_octet(&taken(&ctx.paths)?, &used)
+        .context("no free 10.213.x.0/24 subnet left for a new env")?;
+    let s = make(octet);
     s.save(&ctx.paths, env)?;
     Ok(s)
 }
 
-/// Pick a free 10.213.x.0/24 for a new env.
-fn allocate_octet(ctx: &Ctx) -> Result<u8> {
-    let used = ctx.rt.used_subnets()?;
-    let mut taken: BTreeSet<u8> = BTreeSet::new();
-    for env in config::list_envs(&ctx.paths)? {
-        if let Some(s) = EnvState::load(&ctx.paths, &env)? {
+impl EnvState {
+    /// A new env's state on subnet `octet`, with a vault token of its own.
+    pub fn fresh(octet: u8, home: Option<String>) -> Self {
+        EnvState {
+            octet,
+            home,
+            vault_token: hex::encode(rand::random::<[u8; 32]>()),
+            seeded: false,
+            repos: BTreeSet::new(),
+            installs_pending: false,
+            user: None,
+            tools: None,
+            dev_ca: None,
+        }
+    }
+}
+
+/// The octets of every env with state here, one whose config isn't written yet (an import
+/// under way) included. The octet also picks the env's dev container's ID range
+/// (`env::dev_id_map`).
+fn taken(paths: &Paths) -> Result<BTreeSet<u8>> {
+    let mut names: BTreeSet<String> = config::list_envs(paths)?.into_iter().collect();
+    if let Ok(dirs) = std::fs::read_dir(paths.data.join("envs")) {
+        names.extend(
+            dirs.flatten()
+                .filter_map(|d| d.file_name().into_string().ok())
+                .filter(|n| config::validate_name(n).is_ok()),
+        );
+    }
+    let mut taken = BTreeSet::new();
+    for env in names {
+        if let Some(s) = EnvState::load(paths, &env)? {
             taken.insert(s.octet);
         }
     }
-    (1..=254u8)
-        .find(|o| !taken.contains(o) && !used.iter().any(|s| s == &names::addrs(*o).subnet))
-        .context("no free 10.213.x.0/24 subnet left for a new env")
+    Ok(taken)
+}
+
+/// The first octet no env here has (`taken`) and no network's subnet (`used`) holds.
+fn free_octet(taken: &BTreeSet<u8>, used: &[String]) -> Option<u8> {
+    (1..=254u8).find(|o| !taken.contains(o) && !used.iter().any(|s| s == &names::addrs(*o).subnet))
 }
 
 /// Home of uid 1000 in the image, or None.
@@ -132,4 +169,35 @@ fn detect_home(ctx: &Ctx, image: &str) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| s.starts_with('/'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_env_gets_an_octet_no_env_here_or_network_has() {
+        let taken: BTreeSet<u8> = [1, 2, 4].into();
+        let used = vec!["10.213.3.0/24".to_string(), "10.88.0.0/16".to_string()];
+        assert_eq!(free_octet(&taken, &used), Some(5));
+        assert_eq!(free_octet(&BTreeSet::new(), &[]), Some(1));
+        let all: BTreeSet<u8> = (1..=253).collect();
+        assert_eq!(free_octet(&all, &[]), Some(254));
+        assert_eq!(free_octet(&all, &["10.213.254.0/24".to_string()]), None);
+    }
+
+    #[test]
+    fn an_env_with_state_but_no_config_yet_holds_its_octet() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config: dir.path().join("config"),
+            data: dir.path().join("data"),
+        };
+        std::fs::create_dir_all(paths.envs_dir()).unwrap();
+        std::fs::write(paths.env_config("web"), "").unwrap();
+        EnvState::fresh(3, None).save(&paths, "web").unwrap();
+        // An import under way: its state first, its config once its volumes are written.
+        EnvState::fresh(4, None).save(&paths, "moving").unwrap();
+        assert_eq!(taken(&paths).unwrap(), BTreeSet::from([3, 4]));
+    }
 }

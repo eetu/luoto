@@ -34,6 +34,8 @@ const MISE_CONF: &str = "/etc/mise/conf.d/luoto.toml";
 const VERSION: u32 = 2;
 
 const SYSTEM: &str = r#"set -e
+# Python packages byte-compile as they install, and older ones warn about their own docstrings.
+export PYTHONWARNINGS=ignore::SyntaxWarning
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   # A source the env doesn't allow (luoto-base lists cli.github.com) fails the update; apt
@@ -429,6 +431,20 @@ fn run_job(e: &Env, d: &Deps, job: &mut Job) -> Result<()> {
     Ok(())
 }
 
+/// The presets (luoto's own data) that serve `tools` and `have` lacks: installing those tools
+/// opens them for as long as the install runs.
+pub fn install_presets<'a>(
+    tools: impl IntoIterator<Item = &'a str>,
+    have: &[String],
+) -> Vec<String> {
+    let tools: BTreeSet<&str> = tools.into_iter().collect();
+    presets::all()
+        .into_iter()
+        .filter(|p| tools.iter().any(|t| p.serves_tool(t)) && !have.contains(&p.name))
+        .map(|p| p.name)
+        .collect()
+}
+
 /// Hosts the gate denied for this env since `since`, as install-grant candidates: neither a
 /// muted denial nor an explicit deny's, which no grant lifts.
 fn denied_since(
@@ -486,20 +502,17 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
         run: due && !d.run.is_empty(),
     };
 
-    let mut wanted: BTreeSet<String> = BTreeSet::new();
-    if job.system && matches!(found.os.as_str(), "debian" | "ubuntu" | "alpine") {
-        wanted.insert(found.os);
+    let mut granted = Vec::new();
+    if job.system
+        && matches!(found.os.as_str(), "debian" | "ubuntu" | "alpine")
+        && !cfg.presets.contains(&found.os)
+    {
+        granted.push(found.os);
     }
-    let names = job.tool_names();
-    for p in presets::all() {
-        if names.iter().any(|t| p.serves_tool(t)) {
-            wanted.insert(p.name.clone());
-        }
-    }
-    let granted: Vec<String> = wanted
-        .into_iter()
-        .filter(|p| !cfg.presets.contains(p))
-        .collect();
+    extend_unique(
+        &mut granted,
+        install_presets(job.tool_names(), &cfg.presets),
+    );
     let mut hosts = d.hosts.clone();
     let mut asked = false;
     loop {

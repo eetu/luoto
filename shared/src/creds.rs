@@ -69,6 +69,12 @@ pub const AUTH_HEADERS: &[&str] = &[
     "private-token",
     "job-token",
     "cookie",
+    // Azure Resource Manager's token for another tenant, read beside the one the gate adds.
+    "x-ms-authorization-auxiliary",
+    // Cloudflare's legacy key auth, which would act for another account.
+    "x-auth-key",
+    "x-auth-email",
+    "x-auth-user-service-key",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -90,6 +96,10 @@ pub struct Injection {
     /// Empty = every path on the host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+    /// The methods it goes on, upper-case; empty = every method. A request another rule
+    /// allows with a method outside these goes without it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<String>,
     pub place: Placement,
     /// Match `paths` without regard to ASCII case (see `Rule::ignore_case`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -99,6 +109,10 @@ pub struct Injection {
 impl Injection {
     pub fn path_matches(&self, path: &str) -> bool {
         glob::matches_any(&self.paths, self.ignore_case, path)
+    }
+
+    pub fn method_matches(&self, method: &str) -> bool {
+        self.methods.is_empty() || self.methods.iter().any(|m| m == method)
     }
 }
 
@@ -135,6 +149,16 @@ pub enum BindingSpec {
         key_ref: String,
         host_keys: Vec<String>,
     },
+    /// A Microsoft Entra ID token for `audience`, minted by the client-credentials flow with a
+    /// service principal's secret; the secret never leaves the vault.
+    AzureServicePrincipal {
+        /// Tenant ID or domain.
+        tenant: String,
+        client_id: String,
+        secret_ref: String,
+        /// The resource the token is for (`https://management.azure.com/`).
+        audience: String,
+    },
 }
 
 pub fn default_github_api() -> String {
@@ -145,7 +169,8 @@ impl BindingSpec {
     /// The source ref of the secret the binding is made from.
     pub fn secret_ref(&self) -> &str {
         match self {
-            BindingSpec::Static { secret_ref } => secret_ref,
+            BindingSpec::Static { secret_ref }
+            | BindingSpec::AzureServicePrincipal { secret_ref, .. } => secret_ref,
             BindingSpec::GithubApp { key_ref, .. } | BindingSpec::SshAgent { key_ref, .. } => {
                 key_ref
             }

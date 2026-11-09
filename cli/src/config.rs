@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use luoto_shared::policy::{Deny, Mute, Rule};
+use luoto_shared::policy::{AccessLevel, Deny, Mute, Rule};
 use serde::{Deserialize, Serialize};
 use toml_edit::DocumentMut;
 
@@ -66,8 +66,25 @@ pub struct GlobalConfig {
     /// Mutes for every env, beside each env's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mute: Vec<Mute>,
+    /// Refused, with where credentials go instead ([`env_only`]).
+    #[serde(
+        rename = "credentials",
+        default,
+        skip_serializing,
+        deserialize_with = "env_only"
+    )]
+    _credentials: (),
     #[serde(default)]
     pub sources: Sources,
+}
+
+/// `[credentials.*]` in config.toml. Each env names its own, so none reaches an account it
+/// doesn't name.
+fn env_only<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
+    Err(serde::de::Error::custom(
+        "credentials go in each env's own file (envs/<env>.toml, `luoto edit -e <env>`), not \
+         in config.toml",
+    ))
 }
 
 impl GlobalConfig {
@@ -147,9 +164,16 @@ pub struct Deps {
 #[serde(deny_unknown_fields)]
 pub struct Workspace {
     /// The project's host folder (absolute), copied into the env's workspace volume on the
-    /// first `up`; `luoto pull` writes back to it. Every env has one.
+    /// first `up`; `luoto pull` writes back to it. An env has this or `url`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
+    /// A remote cloned into `/workspace` inside the env, through the gate, on the first `up`
+    /// (`repos::clone_workspace`): the env has nothing on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The branch that clone checks out (default: the remote's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// Repositories beside the folder, each at `/workspace/<name>` (`repos.rs`), over the
     /// accepted luoto.toml's of the same name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -255,6 +279,51 @@ pub struct AzureDevopsCred {
     pub protected_branches: Vec<String>,
     #[serde(default)]
     pub allow_tags: bool,
+}
+
+/// Azure Resource Manager and the data planes listed, as a managed identity: the gate answers
+/// IMDS in the env with placeholder tokens and adds the real ones on these hosts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AzureCred {
+    /// Subscription IDs whose Resource Manager paths the env may reach.
+    pub subscriptions: Vec<String>,
+    /// `read` (GET, HEAD, OPTIONS) or `write` (every method), on Resource Manager and the
+    /// data planes.
+    #[serde(default = "read_access")]
+    pub access: AccessLevel,
+    /// Tenant ID or domain: required with a service principal; else `az`'s current tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    /// Key vault names whose data plane (`<name>.vault.azure.net`) the env may reach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_vaults: Vec<String>,
+    /// Storage account names whose blob, queue, table, file and dfs hosts the env may reach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub storage_accounts: Vec<String>,
+    /// Microsoft Graph, read-only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub graph: bool,
+    /// Under `access = "write"`, also what gives someone access: role assignments and
+    /// definitions, PIM requests and policies, federated identity credentials, Lighthouse
+    /// delegations, key vault access policies and `elevateAccess`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub role_assignments: bool,
+    /// Under `access = "write"`, also template deployments, deployment scripts and deployment
+    /// stacks, which act with all of the identity's roles, beyond `subscriptions` too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deployments: bool,
+    /// A service principal's application ID, as the token source in place of `az` on this
+    /// machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Ref to its client secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+}
+
+fn read_access() -> AccessLevel {
+    AccessLevel::Read
 }
 
 /// Git over HTTPS on any other host (GitLab, Forgejo, Gitea, Bitbucket, GitHub Enterprise
@@ -388,6 +457,8 @@ pub struct Credentials {
     pub github: GithubCreds,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure_devops: Option<AzureDevopsCred>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure: Option<AzureCred>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<SshCred>,
     /// `[[credentials.git]]`, one per host.
@@ -654,11 +725,33 @@ pub fn validate_name(name: &str) -> Result<()> {
 pub fn load_global(paths: &Paths) -> Result<GlobalConfig> {
     let p = paths.global_config();
     match std::fs::read_to_string(&p) {
-        Ok(s) => toml::from_str(&crate::format::upgrade(&p, &s)?.text)
+        Ok(s) => parse_global(&crate::format::upgrade(&p, &s)?.text)
             .with_context(|| format!("parse {}", p.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(GlobalConfig::default()),
         Err(e) => Err(e).with_context(|| format!("read {}", p.display())),
     }
+}
+
+/// config.toml's text, its source tokens checked: an `azcli:` ref is a token for all of your
+/// Azure, which only `[credentials.azure]` hands out, to the hosts it names.
+pub fn parse_global(text: &str) -> Result<GlobalConfig> {
+    let cfg: GlobalConfig = toml::from_str(text)?;
+    let tokens = [
+        (
+            "sources.op.service_account_token",
+            cfg.sources.op.service_account_token.as_deref(),
+        ),
+        (
+            "sources.vault.token",
+            cfg.sources.vault.as_ref().map(|v| v.token.as_str()),
+        ),
+    ];
+    for (key, r) in tokens {
+        if r.is_some_and(|r| r.starts_with(crate::azure_identity::AZCLI)) {
+            bail!("{key}: an `azcli:` ref is only for [credentials.azure], which writes its own");
+        }
+    }
+    Ok(cfg)
 }
 
 pub fn save_global(paths: &Paths, cfg: &GlobalConfig) -> Result<()> {
@@ -1350,6 +1443,28 @@ host = "telemetry.example"
         assert_eq!(hosts, ["b.example", "d.example"]);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.starts_with("# my env") && !saved.contains("a.example"));
+    }
+
+    #[test]
+    fn a_workspace_is_a_folder_or_a_remote_never_both() {
+        let f = EnvFile::parse(
+            "t.toml".into(),
+            "[workspace]\nurl = \"acme/web\"\nbranch = \"develop\"\n",
+        )
+        .unwrap();
+        assert_eq!(f.cfg.workspace.dir, None);
+        assert_eq!(f.cfg.workspace.url.as_deref(), Some("acme/web"));
+        assert_eq!(f.cfg.workspace.branch.as_deref(), Some("develop"));
+        assert!(crate::compile::compile("web", &f.cfg, None, &[]).is_ok());
+        let both = EnvFile::parse(
+            "t.toml".into(),
+            "[workspace]\ndir = \"/home/me/web\"\nurl = \"acme/web\"\n",
+        )
+        .unwrap();
+        let Err(e) = crate::compile::compile("web", &both.cfg, None, &[]) else {
+            panic!("a folder and a remote compiled");
+        };
+        assert!(format!("{e:#}").contains("not both"), "{e:#}");
     }
 
     #[test]

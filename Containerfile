@@ -9,6 +9,9 @@
 # lockfile, so a change to luoto's own code recompiles only its crates. CI keeps that layer
 # in GitHub's cache (ci.yaml); locally the runtime's layer cache does the same.
 FROM docker.io/library/rust:1-alpine AS chef
+# On the build stages (planner and build inherit it): their images are build cache, which
+# `luoto prune` tells by this label; a source build's older than its current images go.
+LABEL luoto.build=cache
 RUN apk add --no-cache musl-dev gcc make perl
 RUN cargo install cargo-chef --locked --version 0.1.78
 WORKDIR /src
@@ -39,6 +42,7 @@ RUN cargo build --release --locked -p luoto-gate -p luoto-vault -p luoto-tools &
     mkdir -p /out && cp target/release/luoto-gate target/release/luoto-vault target/release/sandbox /out/
 
 FROM docker.io/library/alpine:3.23 AS certs
+LABEL luoto.build=cache
 RUN apk add --no-cache ca-certificates
 
 FROM docker.io/library/alpine:3.23 AS gate

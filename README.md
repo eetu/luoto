@@ -19,8 +19,8 @@ luoto gives each project a sandbox where that doesn't work:
 - **It reaches only what you allowed.** Every request leaves through a gate with per-host
   rules, read-only unless you say otherwise. Anything else is blocked and shown to you, with a
   one-click allow.
-- **Your secrets never enter it.** Agent, GitHub and Azure DevOps tokens stay in a vault
-  outside the sandbox; the gate adds them to the requests you allowed, and code inside sees
+- **Your secrets never enter it.** Agent, GitHub, Azure DevOps and Azure tokens stay in a
+  vault outside the sandbox; the gate adds them to the requests you allowed, and code inside sees
   placeholders. Git tokens work only for the repositories you named.
 
 You keep working as usual: your editor attaches over SSH, agents run with their prompts off
@@ -155,10 +155,12 @@ env has run for as long. `luoto up` brings it back in about 10 s and unlocks the
 ## Day to day
 
 Commands act on the env of the current folder; `-e NAME` picks another (`luoto status -e web`).
+An env cloned from a remote has no folder here, so it always takes `-e`.
 
 | you want                                                                                             | run                                                                                                                                |
 | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | an env for a folder (copied in)                                                                      | `luoto init [DIR]`                                                                                                                 |
+| an env for a repository you haven't cloned, or don't trust: cloned inside, nothing on this machine   | `luoto init acme/web`<br>`luoto init git@gitlab.com:acme/web.git --branch dev`                                                     |
 | related repositories beside it (a host folder, or a remote cloned in the env)                        | `luoto init --repo ~/dev/api --repo acme/web`<br>`luoto repo add acme/lib`<br>`luoto repo list`                                    |
 | a new project (the folder is created)                                                                | `luoto init ~/dev/new-app`                                                                                                         |
 | to review, apply or ignore the team's `luoto.toml`, or draft one from your env                       | `luoto project`<br>`luoto project apply`<br>`luoto project ignore`<br>`luoto project suggest`                                      |
@@ -173,9 +175,12 @@ Commands act on the env of the current folder; `-e NAME` picks another (`luoto s
 | image or config changes applied (volumes are kept)                                                   | `luoto up --recreate`                                                                                                              |
 | a fresh home: dotfiles, shell history, agents' logins and state, toolchains (the workspace stays)    | `luoto reset-home`                                                                                                                 |
 | to stop an env, or delete it with its volumes and config (your folder stays)                         | `luoto down` (`--all`: every env)<br>`luoto rm`                                                                                    |
+| an env in another luoto (a source build's in the release) or on another machine, in one file         | `luoto export` (`--no-home`)<br>`luoto import web.luoto.tar`                                                                       |
 | the env back after a reboot or an idle stop (unlocks the vault if needed)                            | `luoto up` (`--all`: every env)<br>`luoto vault unlock`                                                                            |
 | a secret you rotated in your secret store, in use                                                    | `luoto vault reload` (`-e <env>` for one env's)                                                                                    |
 | the gate's log, the background watcher's, or what the env's installs printed                         | `luoto logs`<br>`luoto logs watcher`<br>`luoto logs installs -f`                                                                   |
+| what each env takes on disk, and how full luoto's VM is                                              | `luoto status --size`<br>`luoto ls --size`<br>`luoto doctor`                                                                             |
+| the space luoto's superseded images take, back on this machine (volumes stay)                        | `luoto prune`                                                                                                                      |
 | to check isolation, or a bug report with secrets and what identifies you taken out                   | `luoto doctor`<br>`luoto doctor --report`                                                                                          |
 | to remove luoto: envs, vault, images, keychain entries, config and data (the binary stays)           | `luoto uninstall`                                                                                                                  |
 
@@ -239,6 +244,7 @@ node = "lts"
 
 [workspace]
 dir = "/Users/me/dev/web"     # the project folder, copied in on the first `up`
+# url = "acme/web"            # instead of `dir`: a remote cloned into the env (`branch = "dev"`)
 
 [[allow]]
 host = "docs.rs"
@@ -269,6 +275,21 @@ repos = ["myorg/Project/repo"]   # `org/project/repo`, or the clone URL
 # read_repos = ["myorg/Project/lib"]   # fetched only
 protected_branches = ["main"]
 
+[credentials.azure]           # Azure: az, terraform and the SDKs see a managed identity
+subscriptions = ["<subscription id>"]   # Resource Manager paths the env may reach
+access = "read"               # GET, HEAD, OPTIONS; "write": every method, as your Azure role allows
+# tenant = "contoso.onmicrosoft.com"    # required with a service principal; else az's current
+# key_vaults = ["kv-prod"]    # data planes, by name: read or write as `access` says
+# storage_accounts = ["acct"] # its blob, queue, table, file and dfs hosts
+# graph = true                # Microsoft Graph, read-only
+# role_assignments = true     # under write, also what gives access: role assignments and
+                              # definitions, PIM requests and policies, federated identity
+                              # credentials, Lighthouse, key vault access policies, elevateAccess
+# deployments = true          # under write, also template deployments, deployment scripts and
+                              # stacks, which act with all of the identity's roles, anywhere
+# client_id = "<app id>"      # a service principal instead of your `az login` on this machine
+# client_secret = "op://Dev/azure-sp/secret"
+
 [[credentials.git]]           # git over HTTPS on any other host: GitLab, Forgejo, Gitea, …
 host = "gitlab.example.com"   # `host:port` for another port
 token = "op://Dev/gitlab/token"
@@ -284,6 +305,10 @@ hosts = ["github.com"]        # GitHub's and Azure DevOps' host keys are pinned
 
 [credentials.anthropic]       # or openai, openrouter, gemini, mistral, groq, copilot
 oauth_token = "op://Private/claude-code/token"
+
+[credentials.hetzner]         # or upcloud, digitalocean, cloudflare: their CLI and terraform
+token = "op://Dev/hcloud-web/token"
+# write = true                # every method (apply); without it GET, HEAD and OPTIONS only
 
 [credentials.custom.stripe]   # any API: inject a header on one host
 host = "api.stripe.com"
@@ -310,8 +335,8 @@ hosts = ["dl.k8s.io"]         # extra hosts readable only while installs run
 
 `config.toml` takes `[tools]`, `[deps]`, `[[deny]]`, `[[mute]]`, `idle_stop` and
 `auto_forward` too, for every env, and `[agents.<name>]` options (`model`, `effort`) for every
-env that has that agent; an env's own, and its `luoto.toml`'s, come on top.
-`notifications = false` there turns desktop notifications off.
+env that has that agent; an env's own, and its `luoto.toml`'s, come on top. Credentials go
+only in each env's own file. `notifications = false` there turns desktop notifications off.
 
 A `[[deny]]` beats every allow: a preset's, a rule's, an approved request's. It applies to the
 HTTP(S) the gate reads: a tunnel rule can't cover a denied host, and SSH to
@@ -321,7 +346,8 @@ the UI and the offers to allow them; `luoto egress --all` shows them.
 
 Secret refs: `op://…` (1Password CLI, desktop or service account), `vault://mount/path#field`
 (OpenBao / HashiCorp Vault), `keyring:service/account` (OS keychain), `env:NAME`, `file:path`.
-Sources are configured in `~/.config/luoto/config.toml`.
+Sources are configured in `~/.config/luoto/config.toml`. `[credentials.azure]` reads your `az`
+login itself, with no ref.
 
 `[sandbox_secrets]` are resolved on your machine at `up` and written to a memory-only file in
 the dev container that every shell loads; they leave with the container. Anything that only
@@ -342,6 +368,19 @@ working as they are: SSH ones (`git@ssh.dev.azure.com:v3/…`, or a host alias f
 API by the repository's name (`…/_apis/git/repositories/<repo>/pullrequests`): opened,
 commented on, their title, description, draft state and target changed; completing them, and
 votes, stay with you. `az repos pr` addresses repos by ID, which the gate doesn't match.
+
+An Azure credential gives the env a managed identity: the gate answers the instance metadata
+service (`169.254.169.254`) itself, so `az` (logged in by `up`), terraform's azurerm
+(`ARM_USE_MSI`) and the SDKs' `DefaultAzureCredential` work unchanged. The token they get is a
+placeholder with the claims tools read; the gate puts the real token on Resource Manager
+requests for the listed subscriptions and on the key vaults, storage accounts and Graph you
+name, with the methods `access` allows there. It comes from your `az login` on this machine,
+refreshed before it expires, or from a service principal whose secret the vault keeps and
+mints with ([guide](docs/guides/azure.md)).
+
+A Hetzner, UpCloud, DigitalOcean or Cloudflare credential puts its API token on that cloud's
+API for its CLI and terraform provider, which see a placeholder; the token goes with GET, HEAD
+and OPTIONS only, unless `write = true` ([guide](docs/guides/cloud-apis.md)).
 
 A `[[credentials.git]]` works with any forge, as git speaks the same protocol to all: the gate
 adds the token to the listed repos' git requests only and guards pushes as on GitHub. It
@@ -367,8 +406,11 @@ java, go, rust, php, ruby, terraform, ….
 Terraform and OpenTofu are found by `.terraform-version`, `.opentofu-version`, `main.tf`,
 `versions.tf`, `terraform.tf` (or `main.tofu`, `versions.tofu`) and `.terraform.lock.hcl`,
 whose providers' registry tells the two apart; an exact `required_version` sets the version.
-Their presets (`terraform`, `opentofu`) open the provider and module registry. Cloud credentials for `plan` and `apply` aren't handled yet
-([ROADMAP.md](ROADMAP.md)).
+Their presets (`terraform`, `opentofu`) open the provider and module registry. Azure
+credentials for `plan` and `apply` come from `[credentials.azure]`
+([guide](docs/guides/azure.md)); Hetzner, UpCloud, DigitalOcean and Cloudflare ones from
+`[credentials.<cloud>]` ([guide](docs/guides/cloud-apis.md)); AWS and Google Cloud ones
+aren't handled yet ([ROADMAP.md](ROADMAP.md)).
 
 - `luoto init` reads the folder first and shows what it found (toolchains with the file that
   pins each, presets for the registries it uses) before creating anything. It looks three
@@ -441,7 +483,9 @@ Anyone who can write the repository writes this file, code in the sandbox includ
 only proposes:
 
 - `luoto init` shows its settings and asks about them separately (default: no); accepting
-  records that exact text. `--yes` accepts it, `--no-project` leaves it out.
+  records that exact text. `--yes` accepts it, `--no-project` leaves it out. An env cloned
+  from a remote reads it in the env, so its first `up` asks, after the clone, and `--yes`
+  leaves it for `luoto project apply`.
 - A changed file (from a `git pull` in the env, or the sandbox itself) applies only after you
   accept the difference: `up` lists it and asks; where it can't ask (no terminal, the UI,
   `up --all`) it waits for `luoto project apply`. `luoto project ignore` stops applying it.
@@ -450,9 +494,9 @@ only proposes:
   wildcards, no private addresses). Write access and uninspected tunnels are spelled out in
   the review. Its denies only tighten.
 
-## Folders
+## Folders and remotes
 
-Every env belongs to a folder, and gets a copy of it: the first `up` puts the folder, git
+An env belongs to a folder, and gets a copy of it: the first `up` puts the folder, git
 history included, into the env, and the sandbox never writes to your folder. From a git
 repository it copies what git doesn't ignore, so ignored files such as `.env`, `*.tfvars` or
 state files stay on your machine. Development happens inside, in Zed or VS Code attached to
@@ -463,6 +507,22 @@ files, skips risky ones (in the folder or any folder within it, such as a reposi
 `.git` or `.envrc`) unless you pass `--include-risky`, refuses paths or symlinks that leave
 the folder, and never writes through host symlinks. `.git` and heavy directories
 (`node_modules`, `target`, …) are skipped.
+
+Or it belongs to a remote, with nothing on your machine: `luoto init acme/web` (an https or
+ssh URL, `user@host:path` or Azure DevOps too; `--branch` picks one) clones it into
+`/workspace` inside the env, through the gate, on the first `up`. An argument that could be a
+folder is one (it exists, or its parent does, or it starts with `.`, `/` or `~`), so
+`./acme/web` is a new folder; the proposal says which it took. Before the gate starts, `up`
+asks for the remote's access (Enter: it is public). After the clone it shows the repository's
+`luoto.toml` (Enter: not applied) and then what installing would do (the toolchains its files
+pin, which mise installs, and the presets those installs open for a while), asking once
+before anything runs. `--yes` installs, and leaves `luoto.toml` for `luoto project apply`.
+`luoto init acme/web` again finds the env and offers what the clone suggests now; `--name`
+makes a second one. Work leaves by git push; `luoto pull --to <new folder>` copies files out
+(into a new or empty folder unless you confirm, never your home folder), and `luoto rm` first
+says what isn't pushed. The UI lists these envs and reviews their `luoto.toml`; they are
+created in a terminal. [docs/guides/untrusted-repo.md](docs/guides/untrusted-repo.md) walks
+through one.
 
 ## Several repositories
 
@@ -631,6 +691,11 @@ you use luoto: `luoto up` asks before switching.
   tunnel or websocket after an hour without traffic. A rule's `idle` (`luoto allow
   k8s.example.com --idle 2h`, at most 24h) gives its host that long instead, for long polls
   such as `kubectl logs -f`.
+- luoto's VM keeps its disk in a file on yours (up to 100 GB, podman's default) that grows as
+  images, toolchains and workspaces fill it and doesn't shrink when they go. A full VM disk
+  stops every env: `luoto doctor` shows how full it is and what the file takes here, `luoto up`
+  and the UI warn under 10 GB free, and `luoto prune` removes luoto's superseded images and
+  trims the VM so the freed space returns to this machine.
 
 ## Install details
 
@@ -643,6 +708,8 @@ container images are signed and pinned by digest in the binary.
 `scoop update luoto`); `luoto doctor` says when a newer release is out. After an update, the
 next `luoto up` pulls the release's images, showing progress, and moves the env's gate and
 the vault onto them; `luoto up --recreate` moves its dev container too, keeping its volumes.
+The images it replaced stay in luoto's VM until `luoto prune` removes them (`up` says how much
+they take).
 What each release changed is in [CHANGELOG.md](CHANGELOG.md).
 
 `luoto uninstall` lists what it removes and asks once: every env's containers and volumes,
@@ -659,8 +726,11 @@ stay, so read it before you share it.
 A source build runs as `luoto-dev`, beside a release in the same VM: its config is in
 `~/.config/luoto-dev`, its envs' containers are `luoto-dev-<env>`, it has a vault of its own,
 keeps new keychain entries under `luoto-dev`, and serves `luoto ui` on port 47879;
-`luoto-dev uninstall` removes only what it made. Its tab completion calls `luoto-dev`;
-`just link-dev` links that name to the checkout's debug build.
+`luoto-dev uninstall` removes only what it made, and `luoto-dev prune` only its superseded
+builds and older build cache. Its tab completion calls `luoto-dev`;
+`just link-dev` links that name to the checkout's debug build. `luoto-dev export -e web`, then
+`luoto import web.luoto.tar`, moves its env `web` to the release
+([docs/guides/moving-envs.md](docs/guides/moving-envs.md)).
 
 Tab completion covers commands, flags, env names, agents, editors and presets. Homebrew
 installs it; otherwise add one line to your shell's startup file:

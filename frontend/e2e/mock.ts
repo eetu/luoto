@@ -1,16 +1,30 @@
 import type { Page, Request } from "@playwright/test";
 
 import detect from "./fixtures/detect";
+import disk from "./fixtures/disk";
 import egress from "./fixtures/egress";
 import env from "./fixtures/env";
+import envDisk from "./fixtures/envDisk";
 import meta from "./fixtures/meta";
 import overview from "./fixtures/overview";
 import project from "./fixtures/project";
+import remote from "./fixtures/remote";
 import requests from "./fixtures/requests";
 
 // Fixtures are real `luoto ui` responses (env renamed to `web`), each checked against its
 // generated API type by `yarn typecheck`, so one that drifts from the Rust types fails there.
-const fixtures = { detect, egress, env, meta, overview, project, requests };
+const fixtures = {
+  detect,
+  disk,
+  egress,
+  env,
+  envDisk,
+  meta,
+  overview,
+  project,
+  remote,
+  requests,
+};
 
 export const fixture = <K extends keyof typeof fixtures>(name: K): (typeof fixtures)[K] =>
   structuredClone(fixtures[name]);
@@ -20,6 +34,8 @@ type Route = { method: string; path: RegExp; body: (req: Request) => unknown };
 const routes: Route[] = [
   { method: "GET", path: /^\/api\/overview$/, body: () => fixture("overview") },
   { method: "GET", path: /^\/api\/meta$/, body: () => fixture("meta") },
+  { method: "GET", path: /^\/api\/disk$/, body: () => fixture("disk") },
+  { method: "GET", path: /^\/api\/disk\/envs$/, body: () => fixture("envDisk") },
   { method: "GET", path: /^\/api\/envs\/web$/, body: () => fixture("env") },
   { method: "GET", path: /^\/api\/envs\/web\/egress$/, body: () => fixture("egress") },
   { method: "GET", path: /^\/api\/envs\/web\/requests$/, body: () => fixture("requests") },

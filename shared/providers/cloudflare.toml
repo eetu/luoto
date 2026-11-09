@@ -1,0 +1,14 @@
+description = "Cloudflare API (wrangler, terraform's cloudflare provider)"
+host = "api.cloudflare.com"
+paths = ["/client/v4/**"]
+# Infrastructure tools change things: reads unless the env sets `write = true`.
+access = "read"
+
+[auth.token]
+label = "Cloudflare API token"
+how = "dash.cloudflare.com/profile/api-tokens > Create Token (or an account token under Manage Account > API Tokens), with read permissions unless the env sets `write = true`. A Global API Key isn't supported."
+header = "authorization"
+format = "Bearer {secret}"
+# The terraform provider takes 40 to 80 letters, digits, `-` and `_`. Wrangler's usage
+# statistics and error reports stay off.
+env = { CLOUDFLARE_API_TOKEN = "luotoplaceholder000000000000000000000000", WRANGLER_SEND_METRICS = "false", WRANGLER_SEND_ERROR_REPORTS = "false" }

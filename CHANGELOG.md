@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.4.0 (2026-11-09)
+
+Cloud credentials that stay outside the sandbox (Azure, Hetzner, UpCloud, DigitalOcean,
+Cloudflare), envs started from a remote or moved between machines, and disk use in sight.
+
+- **Azure credentials:** `[credentials.azure]` in an env's config gives it a managed identity:
+  the gate answers the instance metadata service (169.254.169.254) with placeholder tokens,
+  so `az login --identity`, terraform (`ARM_USE_MSI`) and the Azure SDKs work unchanged, and
+  puts the real token on Resource Manager for the listed `subscriptions`, the named
+  `key_vaults` and `storage_accounts`, and Microsoft Graph (`graph = true`, read-only).
+  `access = "read"` (GET, HEAD, OPTIONS) or `"write"`; the token goes only on those methods,
+  whatever other rule allows a request.
+- **Token sources:** your `az` login on this machine (renewed before it expires), or a service
+  principal (`client_id`, `client_secret`) whose secret the vault keeps and mints with. The
+  env's tenant comes from `tenant`, or the token.
+- **What write leaves shut:** role assignments and definitions, PIM requests and policies,
+  federated identity credentials, Lighthouse delegations, key vault access policies and
+  `elevateAccess` (unless `role_assignments = true`); template deployments, deployment
+  scripts and stacks, which act beyond the listed subscriptions (unless `deployments = true`).
+- **Cloud APIs:** `[credentials.hetzner]`, `upcloud`, `digitalocean` and `cloudflare` take a
+  `token` the gate adds for each cloud's CLI and terraform/OpenTofu provider, on reads unless
+  `write = true` ([guide](docs/guides/cloud-apis.md)).
+- **Start from a remote:** `luoto init acme/web` (or any https or ssh URL) makes an env cloned
+  through the gate, with nothing on this machine. The repo's `luoto.toml` and the installs
+  its files pin each wait for a yes; `--yes` installs and leaves `luoto.toml` pending.
+  `luoto ls` shows where each env comes from.
+- **Moving envs:** `luoto export -e <env>` writes an env to one private file (config,
+  accepted `luoto.toml`, workspace, and home unless `--no-home`), owners kept; `luoto import
+  FILE [--name NAME]` makes it in another luoto or on another machine, with its own subnet, CA
+  and vault token, after listing the secret refs it will read. Every entry is checked, and
+  nothing is unpacked on this machine.
+- **Pull:** never writes into your home folder or one holding it; an env cloned from a remote
+  needs `--to <new folder>`.
+- **Credentialed hosts:** a rule over a host that gets a credential (yours, an approved
+  request's, a `luoto.toml`'s) names that credential among the risks you accept.
+- **luoto.toml review:** names `image` (pulled outside the gate), `ports` and `run`.
+- **Vault:** a changed secret retires only the tokens minted from it; a mint is shared by
+  concurrent requests, bounded in time and size, and a failed one isn't retried for 30 s.
+- **Disk use:** `luoto status --size` shows what an env's workspace, home, toolchains and
+  containers take, `luoto ls --size` each env's total, `luoto doctor` the VM's disk and its
+  file on this machine; the UI shows both, and `up` warns under 10 GB free.
+- **`luoto prune`:** removes this luoto's superseded images that nothing uses, keeping the
+  other instance's, everything else in the VM and every volume, then trims the VM's disk so
+  the space returns to this machine.
+- **Quieter installs:** Python packages' byte-compile warnings stay out of `up`'s output.
+
 ## 0.3.1 (2026-11-08)
 
 Your own deny and mute rules, notifications and port requests, gate limits, and commands for

@@ -1,10 +1,11 @@
 //! What the vault holds, in memory only: root secrets by source ref, each env's token hash
 //! and bindings, the tokens minted for them, and the SSH sessions bound on agent connections.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -15,7 +16,7 @@ use luoto_shared::events::{Event, Source};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use crate::{agent, github};
+use crate::{agent, entra, github};
 
 struct EnvEntry {
     token_sha256: [u8; 32],
@@ -24,11 +25,17 @@ struct EnvEntry {
     generation: u64,
 }
 
+/// An env and one of its bindings.
+type Key = (String, String);
+
 #[derive(Default)]
 struct Inner {
     secrets: HashMap<String, String>,
     envs: HashMap<String, EnvEntry>,
-    minted: HashMap<(String, String), (String, DateTime<Utc>)>,
+    minted: HashMap<Key, (String, DateTime<Utc>)>,
+    /// The last mint that failed for each binding: its error, when, and the env's generation
+    /// then (a new one, from a bind, a wipe or a changed secret, tries again at once).
+    failed: HashMap<Key, (String, Instant, u64)>,
     /// The last generation given out; none repeats, across unbinds too.
     generation: u64,
 }
@@ -46,6 +53,11 @@ impl Inner {
 
 /// Mints one request tries while the env's bindings keep changing under them.
 const MINT_ATTEMPTS: usize = 3;
+/// How long a failed mint's error is the answer. Code in the sandbox makes the gate ask for a
+/// token with every request to the host, and a mint that fails (a revoked secret, throttling,
+/// a removed App installation) would post to Entra ID or GitHub as often: this keeps it to
+/// two a minute per binding, while a new secret (`luoto vault reload`) is tried at once.
+const MINT_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 pub struct Vault {
     started: DateTime<Utc>,
@@ -55,9 +67,11 @@ pub struct Vault {
     tls: Arc<rustls::ClientConfig>,
     /// SSH sessions bound on each env's agent connections.
     sessions: Mutex<agent::Sessions>,
+    /// One mint at a time for each binding: requests that come meanwhile take its token.
+    minting: Mutex<HashMap<Key, Arc<tokio::sync::Mutex<()>>>>,
 }
 
-/// TLS towards GitHub's API, for minting App tokens.
+/// TLS towards where tokens are minted: GitHub's API and Microsoft Entra ID.
 pub fn client_tls() -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -77,6 +91,7 @@ impl Vault {
             inner: Mutex::default(),
             tls: Arc::new(tls),
             sessions: Mutex::default(),
+            minting: Mutex::default(),
         }
     }
 
@@ -112,6 +127,14 @@ impl Vault {
         binding: &str,
     ) -> Result<CredentialValue, CredentialError> {
         let key = (env.to_string(), binding.to_string());
+        let turn = self
+            .minting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key.clone())
+            .or_default()
+            .clone();
+        let _turn = turn.lock().await;
         for _ in 0..MINT_ATTEMPTS {
             let (spec, secret, generation) = {
                 let inner = self.lock();
@@ -129,47 +152,77 @@ impl Vault {
                     .get(spec.secret_ref())
                     .ok_or(CredentialError::Locked)?
                     .clone();
-                if let BindingSpec::GithubApp { .. } = spec
-                    && let Some((tok, exp)) = inner.minted.get(&key)
-                    && *exp - Utc::now() > chrono::TimeDelta::minutes(10)
+                if let BindingSpec::GithubApp { .. } | BindingSpec::AzureServicePrincipal { .. } =
+                    spec
                 {
-                    return Ok(CredentialValue {
-                        value: tok.clone(),
-                        expires_at: Some(*exp),
-                    });
+                    if let Some((tok, exp)) = inner.minted.get(&key)
+                        && *exp - Utc::now() > chrono::TimeDelta::minutes(10)
+                    {
+                        return Ok(CredentialValue {
+                            value: tok.clone(),
+                            expires_at: Some(*exp),
+                        });
+                    }
+                    if let Some((why, at, generation)) = inner.failed.get(&key)
+                        && *generation == entry.generation
+                        && at.elapsed() < MINT_RETRY_AFTER
+                    {
+                        return Err(CredentialError::Failed(why.clone()));
+                    }
                 }
                 (spec.clone(), secret, entry.generation)
             };
-            let BindingSpec::GithubApp {
-                app_id,
-                installation_id,
-                repos,
-                permissions,
-                api_base,
-                ..
-            } = &spec
-            else {
-                return Ok(CredentialValue {
-                    value: secret,
-                    expires_at: None,
-                });
+            let minted = match &spec {
+                BindingSpec::GithubApp {
+                    app_id,
+                    installation_id,
+                    repos,
+                    permissions,
+                    api_base,
+                    ..
+                } => {
+                    github::installation_token(
+                        &self.tls,
+                        api_base,
+                        app_id,
+                        *installation_id,
+                        &secret,
+                        repos,
+                        permissions,
+                    )
+                    .await
+                }
+                BindingSpec::AzureServicePrincipal {
+                    tenant,
+                    client_id,
+                    audience,
+                    ..
+                } => {
+                    entra::client_credentials(&self.tls, tenant, client_id, &secret, audience).await
+                }
+                BindingSpec::Static { .. } | BindingSpec::SshAgent { .. } => {
+                    return Ok(CredentialValue {
+                        value: secret,
+                        expires_at: None,
+                    });
+                }
             };
-            let (token, exp) = github::installation_token(
-                &self.tls,
-                api_base,
-                app_id,
-                *installation_id,
-                &secret,
-                repos,
-                permissions,
-            )
-            .await
-            .map_err(|e| CredentialError::Failed(format!("{e:#}")))?;
             let mut inner = self.lock();
-            // Bound or wiped again during the mint: this token has the old scope.
+            // Bound or wiped again during the mint: this token has the old scope, and an error
+            // may be the old secret's.
             if inner.generation_of(env) != Some(generation) {
                 continue;
             }
+            let (token, exp) = match minted {
+                Ok(t) => t,
+                Err(e) => {
+                    let why = format!("{e:#}");
+                    let failed = (why.clone(), Instant::now(), generation);
+                    inner.failed.insert(key, failed);
+                    return Err(CredentialError::Failed(why));
+                }
+            };
+            inner.failed.remove(&key);
             inner.minted.insert(key, (token.clone(), exp));
             return Ok(CredentialValue {
                 value: token,
@@ -244,12 +297,14 @@ impl Vault {
     }
 
     /// Merge resolved secrets into memory; how many were new or changed. A changed one (a
-    /// rotated token, a new App key) also retires every minted token, as one could come from
-    /// the old key.
-    pub fn load(&self, secrets: BTreeMap<String, String>) -> usize {
+    /// rotated token, a new App key) also retires the tokens minted from it, as one could
+    /// come from the old key; tokens minted from other secrets stay (`azcli:` tokens change
+    /// every hour). With `held_only`, refs it doesn't hold are left out: a renewal read before
+    /// a lock must not fill the wiped vault again.
+    pub fn load(&self, secrets: BTreeMap<String, String>, held_only: bool) -> usize {
         let mut inner = self.lock();
         let mut n = 0;
-        let mut rotated = false;
+        let mut rotated: BTreeSet<String> = BTreeSet::new();
         for (r, value) in secrets {
             match inner.secrets.get_mut(&r) {
                 Some(old) if *old == value => {}
@@ -257,20 +312,31 @@ impl Vault {
                     // SAFETY: zero bytes keep the String valid UTF-8.
                     unsafe { old.as_bytes_mut().fill(0) };
                     *old = value;
-                    rotated = true;
+                    rotated.insert(r);
                     n += 1;
                 }
+                None if held_only => {}
                 None => {
                     inner.secrets.insert(r, value);
                     n += 1;
                 }
             }
         }
-        if rotated {
-            inner.minted.clear();
+        if !rotated.is_empty() {
             let generation = inner.next_generation();
-            for e in inner.envs.values_mut() {
-                e.generation = generation;
+            let Inner { envs, minted, .. } = &mut *inner;
+            for (env, entry) in envs.iter_mut() {
+                let from_rotated: Vec<&String> = entry
+                    .bindings
+                    .iter()
+                    .filter(|(_, spec)| rotated.contains(spec.secret_ref()))
+                    .map(|(b, _)| b)
+                    .collect();
+                if from_rotated.is_empty() {
+                    continue;
+                }
+                minted.retain(|(e, b), _| !(e == env && from_rotated.contains(&b)));
+                entry.generation = generation;
             }
         }
         n
@@ -295,6 +361,12 @@ impl Vault {
         let mut inner = self.lock();
         inner.envs.remove(env);
         inner.minted.retain(|(e, _), _| e != env);
+        inner.failed.retain(|(e, _), _| e != env);
+        drop(inner);
+        self.minting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(e, _), _| e != env);
     }
 
     /// Wipe every secret and minted token from memory.
@@ -342,22 +414,57 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_secret_retires_minted_tokens() {
+    fn a_renewal_changes_only_what_the_vault_holds() {
         let v = Vault::new(client_tls());
-        v.bind("e", [0; 32], BTreeMap::new());
-        let load = |val: &str| v.load(BTreeMap::from([("op://a/b/c".into(), val.into())]));
+        let arm = "azcli:https://management.azure.com/";
+        let secrets = |val: &str| BTreeMap::from([(arm.to_string(), val.to_string())]);
+        assert_eq!(v.load(secrets("t1"), true), 0);
+        assert!(v.status().locked);
+        assert_eq!(v.load(secrets("t1"), false), 1);
+        assert_eq!(v.load(secrets("t2"), true), 1);
+        assert_eq!(v.lock().secrets[arm], "t2");
+        // Locked while it was read: the vault stays empty.
+        v.wipe();
+        assert_eq!(v.load(secrets("t3"), true), 0);
+        assert!(v.status().locked && v.status().loaded_refs.is_empty());
+    }
+
+    #[test]
+    fn a_changed_secret_retires_the_tokens_minted_from_it() {
+        let v = Vault::new(client_tls());
+        let static_ref = |r: &str| BindingSpec::Static {
+            secret_ref: r.into(),
+        };
+        v.bind(
+            "e",
+            [0; 32],
+            BTreeMap::from([
+                ("github".into(), static_ref("op://a/b/c")),
+                (
+                    "azure-arm".into(),
+                    static_ref("azcli:https://management.azure.com/"),
+                ),
+            ]),
+        );
+        let load = |r: &str, val: &str| v.load(BTreeMap::from([(r.into(), val.into())]), false);
         let mint = || {
             v.lock()
                 .minted
                 .insert(("e".into(), "github".into()), ("ghs_x".into(), Utc::now()));
         };
-        assert_eq!(load("one"), 1);
+        assert_eq!(load("op://a/b/c", "one"), 1);
+        assert_eq!(load("azcli:https://management.azure.com/", "t1"), 1);
         mint();
         let before = v.lock().generation_of("e");
-        assert_eq!(load("one"), 0);
+        assert_eq!(load("op://a/b/c", "one"), 0);
         assert_eq!(v.lock().minted.len(), 1);
-        assert_eq!(load("two"), 1);
+        // Another secret's change (an hourly az token) keeps it.
+        assert_eq!(load("azcli:https://management.azure.com/", "t2"), 1);
+        assert_eq!(v.lock().minted.len(), 1);
+        let kept = v.lock().generation_of("e");
+        assert_eq!(load("op://a/b/c", "two"), 1);
         assert!(v.lock().minted.is_empty());
+        assert_ne!(v.lock().generation_of("e"), kept);
         assert_ne!(v.lock().generation_of("e"), before);
         assert_eq!(v.lock().secrets["op://a/b/c"], "two");
     }

@@ -414,6 +414,7 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
 
     let rt = Runtime::from_config(&global)?;
     global.runtime.get_or_insert_with(|| rt.bin.clone());
+    let mut new_images = true;
     if o.build {
         // Built images replace the release's pinned ones until `images` is removed again.
         let tag = global.images.get_or_insert_with(|| "dev".into()).clone();
@@ -428,6 +429,7 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
             .collect();
         let missing: Vec<&String> = refs.iter().filter(|r| !rt.image_exists(r)).collect();
         if missing.is_empty() {
+            new_images = false;
             println!("\nimages present; `luoto setup --build` rebuilds them from source");
         } else if release::pinned() && global.images.is_none() {
             for r in missing {
@@ -442,6 +444,9 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
     config::save_global(&paths, &global)?;
     let ctx = Ctx { paths, global, rt };
     env::ensure_vault(&ctx)?;
+    if new_images {
+        crate::disk::note_superseded(&ctx);
+    }
     let home = ctx.paths.home_files();
     if crate::personal::seed_home(&home)? {
         println!(
@@ -547,6 +552,9 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
             "image {img}: {}",
             if present { "ok" } else { "missing" }
         ));
+    }
+    for line in crate::disk::doctor_lines(ctx) {
+        out.say(line);
     }
     out.say(match crate::ctl::vault_status(&ctx.rt) {
         Ok(v) => format!(

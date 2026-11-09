@@ -1,0 +1,13 @@
+description = "DigitalOcean API (doctl, terraform's digitalocean provider)"
+host = "api.digitalocean.com"
+# Infrastructure tools change things: reads unless the env sets `write = true`.
+access = "read"
+
+[auth.token]
+label = "DigitalOcean personal access token"
+how = "cloud.digitalocean.com/account/api/tokens > Generate New Token. Read Only, or custom scopes, is enough unless the env sets `write = true`."
+header = "authorization"
+format = "Bearer {secret}"
+# doctl reads DIGITALOCEAN_ACCESS_TOKEN, terraform DIGITALOCEAN_TOKEN first. A `do` prefix and
+# 71 characters, the shape doctl's token prompt accepts.
+env = { DIGITALOCEAN_ACCESS_TOKEN = "dop_v1_luotoplaceholder000000000000000000000000000000000000000000000000", DIGITALOCEAN_TOKEN = "dop_v1_luotoplaceholder000000000000000000000000000000000000000000000000" }

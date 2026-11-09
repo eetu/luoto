@@ -11,6 +11,7 @@ publish = false
 luoto-shared.workspace = true
 chrono.workspace = true
 jsonwebtoken.workspace = true
+base64.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 serde.workspace = true

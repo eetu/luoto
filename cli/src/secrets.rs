@@ -7,6 +7,7 @@
 //! - `keyring:service/account` — macOS Keychain, Windows Credential Manager, Secret Service
 //! - `env:NAME` — an environment variable of the luoto process
 //! - `file:/path` or `file:~/path` — a file readable by the user
+//! - `azcli:<resource>[?tenant=<tenant>]` — a token from the Azure CLI's login on this machine
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Write};
@@ -14,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 
+use crate::azure_identity::{self, AZCLI};
 use crate::config::GlobalConfig;
 
 pub fn resolve_all(
@@ -29,17 +32,25 @@ pub fn resolve_all(
     Ok(out)
 }
 
-pub fn scheme_ok(r: &str) -> bool {
+fn scheme_ok(r: &str) -> bool {
     ["op://", "vault://", "keyring:", "env:", "file:"]
         .iter()
         .any(|p| r.starts_with(p))
 }
 
-/// Why `r` can't be resolved as written, if it can't.
+/// Why `r`, a ref written in a config, can't be resolved as written, if it can't. `azcli:` is
+/// not one: only the bindings `[credentials.azure]` compiles to use it ([`check_vault_ref`]).
 pub fn check_ref(r: &str) -> Result<()> {
+    if r.starts_with(AZCLI) {
+        bail!(
+            "`{r}` is luoto's own ref for [credentials.azure], which reads your az login \
+             without one"
+        );
+    }
     if !scheme_ok(r) {
         bail!(
-            "secret ref `{r}` has an unknown scheme (use op://, vault://, keyring:, env: or file:)"
+            "secret ref `{r}` has an unknown scheme (use op://, vault://, keyring:, env: or \
+             file:)"
         );
     }
     if let Some(path) = r.strip_prefix("file:") {
@@ -48,7 +59,27 @@ pub fn check_ref(r: &str) -> Result<()> {
     Ok(())
 }
 
+/// [`check_ref`] for a ref a compiled binding uses, which may be an `azcli:` one
+/// (`compile` lets only `[credentials.azure]`'s bindings have it).
+pub fn check_vault_ref(r: &str) -> Result<()> {
+    if r.starts_with(AZCLI) {
+        return azure_identity::parse_ref(r).map(|_| ());
+    }
+    check_ref(r)
+}
+
+/// `r`'s value, and when it expires where its source says (an `azcli:` token).
+pub fn resolve_expiring(global: &GlobalConfig, r: &str) -> Result<(String, Option<DateTime<Utc>>)> {
+    if r.starts_with(AZCLI) {
+        return azure_identity::read(r);
+    }
+    Ok((resolve(global, r)?, None))
+}
+
 pub fn resolve(global: &GlobalConfig, r: &str) -> Result<String> {
+    if r.starts_with(AZCLI) {
+        return Ok(azure_identity::read(r)?.0);
+    }
     if r.starts_with("op://") {
         return op_read(global, r);
     }
@@ -85,14 +116,17 @@ pub fn unattended(global: &GlobalConfig, r: &str) -> bool {
     if r.starts_with("op://") {
         return global.sources.op.mode.as_deref() == Some("service-account");
     }
-    ["keyring:", "file:", "vault://"]
+    ["keyring:", "file:", "vault://", AZCLI]
         .iter()
         .any(|p| r.starts_with(p))
 }
 
 /// A `file:` ref's path. Only absolute and `~/` paths: a relative one would resolve against
-/// whichever folder luoto happens to run in.
+/// whichever folder luoto happens to run in. Only this machine's (`workspace::network_path`).
 fn file_path(p: &str) -> Result<PathBuf> {
+    if crate::workspace::network_path(p) {
+        bail!("`file:{p}` is on another machine; keep the secret in a file on this one");
+    }
     if let Some(rest) = p.strip_prefix("~/") {
         let dirs = directories::BaseDirs::new().context("no home directory to expand `~/` in")?;
         return Ok(dirs.home_dir().join(rest));
@@ -301,7 +335,19 @@ mod tests {
             assert!(check_ref(&format!("file:{rel}")).is_err());
         }
         assert!(check_ref("file:~/k").is_ok());
+        for remote in [
+            r"file:\\server\share\k",
+            "file://server/share/k",
+            "file:/net/h/k",
+        ] {
+            assert!(check_ref(remote).is_err(), "{remote}");
+        }
         assert!(check_ref("op://v/i/f").is_ok());
         assert!(check_ref("http://x").is_err());
+        let azcli = "azcli:https://management.azure.com/";
+        assert!(check_ref(azcli).is_err());
+        assert!(check_vault_ref(azcli).is_ok());
+        assert!(check_vault_ref("azcli:https://x?tenant=a/b").is_err());
+        assert!(check_vault_ref("http://x").is_err());
     }
 }

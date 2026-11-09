@@ -3,7 +3,8 @@
 What luoto knows about each coding agent it sets up: how it installs, which credential it
 takes and where to get one, which hosts it reaches, what it is denied on purpose, and what is
 still unverified. The profiles themselves are TOML files in
-[`shared/agents`](../shared/agents) and [`shared/providers`](../shared/providers).
+[`shared/agents`](../shared/agents) and [`shared/providers`](../shared/providers), which also
+holds the cloud APIs ([guides/cloud-apis.md](guides/cloud-apis.md) has their facts).
 
 Status: run with a real account for Claude Code and Antigravity CLI (its login inside; a
 Gemini API key is untested); installed only for OpenCode and Codex; untested for Copilot CLI

@@ -2,7 +2,9 @@
 //! way out is a policy gate you control; secrets stay in a vault outside the sandbox.
 
 mod agents;
+mod archive;
 mod azure;
+mod azure_identity;
 mod ca;
 mod commands;
 mod compile;
@@ -12,6 +14,7 @@ mod connect;
 mod ctl;
 mod deps;
 mod detect;
+mod disk;
 mod env;
 mod events;
 mod format;
@@ -37,6 +40,7 @@ mod ssh;
 mod state;
 mod sync;
 mod text;
+mod transfer;
 mod ui;
 mod uninstall;
 mod upgrade;
@@ -89,6 +93,13 @@ enum Cmd {
         #[arg(long, short)]
         yes: bool,
     },
+    /// Remove luoto's superseded images (none a container uses or this luoto runs), after
+    /// listing them, and return the freed space to this machine; volumes stay.
+    Prune {
+        /// Don't ask first.
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// Start the local web UI.
     Ui {
         /// Outside the ports envs forward to this machine (1024–32767), so no env can serve
@@ -98,7 +109,8 @@ enum Cmd {
         #[arg(long)]
         no_open: bool,
     },
-    /// Create an env for a folder (default: the current one) and start it.
+    /// Create an env for a folder (default: the current one), or for a remote cloned inside
+    /// it (`luoto init acme/web`), and start it.
     Init(init::InitOpts),
     /// Create or update the env's containers from its config and start it.
     Up {
@@ -121,7 +133,8 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// Delete the env: containers, workspace and home volumes, config (your folder stays).
+    /// Delete the env: containers, workspace and home volumes, config (your folder stays; an
+    /// env cloned from a remote keeps only what was pushed).
     Rm {
         /// Don't ask first.
         #[arg(long, short)]
@@ -134,14 +147,47 @@ enum Cmd {
         #[arg(long, short)]
         yes: bool,
     },
+    /// Write the env to one file, to import into another luoto (a source build's into the
+    /// release, say) or on another machine: its config, workspace and home; secrets stay refs.
+    /// A running env is stopped first, after asking.
+    Export {
+        /// The archive (default: <env>.luoto.tar here; in a folder, that name there).
+        file: Option<String>,
+        /// Leave the home out: the imported env starts with a new one.
+        #[arg(long)]
+        no_home: bool,
+        /// Stop a running env without asking.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Make an env from a file `luoto export` wrote, with its own subnet, CA and vault token;
+    /// `luoto up` starts it.
+    Import {
+        file: String,
+        /// Its name here (default: the one it had).
+        #[arg(long)]
+        name: Option<String>,
+        /// Don't ask first.
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// List envs.
     #[command(visible_alias = "list")]
-    Ls,
+    Ls {
+        /// Also what each env takes on disk (the runtime walks every volume, which takes a
+        /// while).
+        #[arg(long)]
+        size: bool,
+    },
     /// Show the env's state, workspace, forwarded ports, credentials, rules, denies and mutes.
     Status {
         /// The compiled policy as JSON.
         #[arg(long)]
         json: bool,
+        /// Also what the env takes on disk, part by part (the runtime walks every volume,
+        /// which takes a while).
+        #[arg(long)]
+        size: bool,
     },
     /// Open the env's config in $EDITOR, validate and apply it.
     Edit,
@@ -205,7 +251,9 @@ enum Cmd {
     /// Copy changed files from the env back to its folder, and its repos copied in from
     /// folders back to theirs (reviewed first).
     Pull {
-        /// Write here instead of the env's folder (or the `--repo`'s).
+        /// Write here instead of the env's folder (or the `--repo`'s). An env cloned from a
+        /// remote has no folder: it pulls only here, into a new or empty folder unless you
+        /// confirm. Never your home folder.
         #[arg(long)]
         to: Option<String>,
         /// Only this repo: to its host folder, or else (a clone) the same name in the env's
@@ -418,6 +466,10 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             anyhow::bail!("uninstall removes every env: leave out -e")
         }
         Cmd::Uninstall { yes } => uninstall::uninstall(yes),
+        Cmd::Prune { .. } if env_arg.is_some() => {
+            anyhow::bail!("prune acts on luoto's images, not an env: leave out -e")
+        }
+        Cmd::Prune { yes } => disk::prune(yes),
         Cmd::Ui { port, no_open } => ui::serve(port, !no_open),
         Cmd::Init(o) => {
             if env_arg.is_some() {
@@ -452,8 +504,15 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Down { all: false } => c::down(&env()?),
         Cmd::Rm { yes } => c::rm(&env()?, yes),
         Cmd::ResetHome { yes } => c::reset_home(&env()?, yes),
-        Cmd::Ls => c::ls(),
-        Cmd::Status { json } => c::status(&env()?, json),
+        Cmd::Export { file, no_home, yes } => {
+            transfer::export(&env()?, file.as_deref(), no_home, yes)
+        }
+        Cmd::Import { .. } if env_arg.is_some() => {
+            anyhow::bail!("`import` names the env with --name, not -e")
+        }
+        Cmd::Import { file, name, yes } => transfer::import(&file, name.as_deref(), yes),
+        Cmd::Ls { size } => c::ls(size),
+        Cmd::Status { json, size } => c::status(&env()?, json, size),
         Cmd::Edit => c::edit(&env()?),
         Cmd::Project { action } => match action {
             None => c::project(&env()?, false, false, false),
@@ -660,5 +719,42 @@ mod tests {
         let cli = parse(&["uninstall", "-e", "web"]);
         let e = run(cli.env, cli.cmd).unwrap_err().to_string();
         assert!(e.contains("leave out -e"), "{e}");
+    }
+
+    #[test]
+    fn prune_takes_no_env_and_sizes_are_asked_for() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat()).unwrap();
+        let cli = parse(&["prune", "-e", "web", "--yes"]);
+        let e = run(cli.env, cli.cmd).unwrap_err().to_string();
+        assert!(e.contains("leave out -e"), "{e}");
+        assert!(matches!(parse(&["ls"]).cmd, Cmd::Ls { size: false }));
+        assert!(matches!(
+            parse(&["list", "--size"]).cmd,
+            Cmd::Ls { size: true }
+        ));
+    }
+
+    #[test]
+    fn import_names_its_env_with_name_and_export_takes_a_file() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat()).unwrap();
+        let cli = parse(&["import", "web.luoto.tar", "-e", "web"]);
+        let e = run(cli.env, cli.cmd).unwrap_err().to_string();
+        assert!(e.contains("--name, not -e"), "{e}");
+        assert!(matches!(
+            parse(&["import", "web.luoto.tar", "--name", "api", "-y"]).cmd,
+            Cmd::Import { name: Some(n), yes: true, .. } if n == "api"
+        ));
+        assert!(matches!(
+            parse(&["export", "--no-home", "-y"]).cmd,
+            Cmd::Export {
+                file: None,
+                no_home: true,
+                yes: true
+            }
+        ));
+        assert!(matches!(
+            parse(&["-e", "web", "export", "/tmp"]).cmd,
+            Cmd::Export { file: Some(f), .. } if f == "/tmp"
+        ));
     }
 }

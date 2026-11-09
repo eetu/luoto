@@ -1,6 +1,7 @@
 //! JSON API for the UI. Handlers call the same core functions as the CLI; anything that
 //! shells out to the runtime runs on the blocking pool.
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 
 use axum::extract::{Path, Query, State};
@@ -22,7 +23,7 @@ use super::Ui;
 use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx, UpOptions};
 use crate::{
-    commands, ctl, detect, events, init, names, ports, project, rules, setup, sync, workspace,
+    commands, ctl, detect, disk, events, init, names, ports, project, rules, setup, sync, workspace,
 };
 
 pub struct ApiError(StatusCode, Value);
@@ -70,6 +71,8 @@ pub fn routes() -> Router<Ui> {
         .route("/setup/install", post(setup_install))
         .route("/envs", post(create_env))
         .route("/detect", post(detect))
+        .route("/disk", get(vm_disk))
+        .route("/disk/envs", get(envs_disk))
         .route("/envs/{name}", get(env_detail))
         .route("/envs/{name}/egress", get(egress))
         .route("/envs/{name}/events", get(env_events))
@@ -94,6 +97,10 @@ struct EnvRow {
     dev: String,
     gate: String,
     dir: Option<String>,
+    /// The remote the workspace is cloned from, in the env, when the env has no folder.
+    remote: Option<String>,
+    /// The branch that clone checks out.
+    branch: Option<String>,
     /// Repositories beside the folder (`repos.rs`).
     repos: Vec<crate::repos::Listed>,
     pending: usize,
@@ -125,13 +132,13 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
                     .filter(|r| r.status == RequestStatus::Pending)
                     .count()
             });
-            let (dir, mutes, error) = match EnvFile::load(&ctx.paths, &name) {
-                Ok(f) => (
-                    f.cfg.workspace.dir.clone(),
-                    ctx.global.mutes_for(&f.cfg),
-                    None,
+            let (ws, mutes, error) = match EnvFile::load(&ctx.paths, &name) {
+                Ok(f) => (f.cfg.workspace.clone(), ctx.global.mutes_for(&f.cfg), None),
+                Err(e) => (
+                    config::Workspace::default(),
+                    ctx.global.mute.clone(),
+                    Some(format!("{e:#}")),
                 ),
-                Err(e) => (None, ctx.global.mute.clone(), Some(format!("{e:#}"))),
             };
             let denied_recent = store.denied_since(&name, since, &events::Mutes::new(&mutes));
             let (repos, error) = match crate::repos::listed(&ctx, &name) {
@@ -142,7 +149,9 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
                 name,
                 dev,
                 gate,
-                dir,
+                dir: ws.dir,
+                remote: ws.url,
+                branch: ws.branch,
                 repos,
                 pending,
                 denied_recent,
@@ -166,6 +175,17 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
     })
     .await
     .map(Json)
+}
+
+/// The disk holding envs: how full it is, and what `luoto prune` frees. Kept off the
+/// overview, which the UI polls.
+async fn vm_disk() -> ApiResult<disk::VmDisk> {
+    blocking(|| disk::vm(&Ctx::load()?)).await.map(Json)
+}
+
+/// Every env's disk use, from one walk of the runtime's storage, which takes seconds.
+async fn envs_disk() -> ApiResult<BTreeMap<String, disk::EnvDisk>> {
+    blocking(|| disk::by_env(&Ctx::load()?)).await.map(Json)
 }
 
 /// A preset or agent a new env can start with.
@@ -310,6 +330,9 @@ struct Proposal {
     name: String,
     /// The folder is missing (created with the env) or empty: nothing to detect.
     new_folder: bool,
+    /// The choice names a remote, not a folder: such an env is made in a terminal (`luoto
+    /// init <remote>`), where its first `up` shows the clone's luoto.toml and installs.
+    remote: Option<String>,
     presets: Vec<ProposedPreset>,
     tools: Vec<detect::ToolPin>,
     /// The folder's luoto.toml as `[label, value]` lines; creating the env accepts it.
@@ -352,6 +375,7 @@ async fn detect(Json(n): Json<NewEnv>) -> ApiResult<Proposal> {
             project_sha: p.project.as_ref().map(|(text, _)| project::sha(text)),
             project_error: p.project_error.as_deref().map(crate::text::display),
             new_folder: p.new_folder,
+            remote: p.cfg.workspace.url.clone(),
             tools: p.found.tools,
             name: p.name,
         })
@@ -374,12 +398,19 @@ async fn create_env(Json(n): Json<NewEnv>) -> ApiResult<CreatedEnv> {
         }
         let reviewed = n.project_sha.clone();
         let mut p = init::propose(&ctx.paths, &new_opts(n))?;
+        // Its first `up` asks about the clone's luoto.toml and installs, which needs a terminal.
+        if let Some(url) = &p.cfg.workspace.url {
+            anyhow::bail!(
+                "an env from a remote is made in a terminal: `luoto init {}`",
+                crate::text::display(url)
+            );
+        }
         if let Some((text, _)) = &p.project {
             check_reviewed(text, reviewed.as_deref())?;
         }
         init::create(&ctx, &mut p, true, true)?;
         crate::agents::login_inside_unless_set(&ctx, &p.name)?;
-        init::start(&ctx, &p.name, true)?;
+        init::start(&ctx, &p.name, true, false)?;
         Ok(CreatedEnv {
             ok: true,
             name: p.name,
@@ -727,7 +758,7 @@ async fn vault_action(Path(action): Path<String>) -> ApiResult<Value> {
                     .loaded_refs
                     .into_iter()
                     .collect();
-                Ok(serde_json::to_value(sync::reload(&ctx, &refs)?)?)
+                Ok(serde_json::to_value(sync::reload(&ctx, &refs, true)?)?)
             }
             "lock" => {
                 let failed = sync::lock_all(&ctx)?;

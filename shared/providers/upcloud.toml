@@ -1,0 +1,14 @@
+description = "UpCloud API (upctl, terraform's upcloud provider), with an API token"
+host = "api.upcloud.com"
+# Infrastructure tools change things: reads unless the env sets `write = true`. UpCloud tokens
+# have no read-only kind.
+access = "read"
+
+[auth.token]
+label = "UpCloud API token"
+how = "UpCloud Control Panel > Account > API tokens (it starts with ucat_), under a subaccount with only the permissions the env needs."
+header = "authorization"
+format = "Bearer {secret}"
+# The token only: upcloud-go-api's client from the environment refuses UPCLOUD_USERNAME or
+# UPCLOUD_PASSWORD beside it.
+env = { UPCLOUD_TOKEN = "ucat_LUOTOPLACEHOLDER0000000000" }

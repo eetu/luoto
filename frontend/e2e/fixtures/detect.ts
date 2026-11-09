@@ -3,6 +3,7 @@ import type { Proposal } from "../../src/lib/types";
 export default {
   "name": "api",
   "new_folder": false,
+  "remote": null,
   "presets": [
     { "name": "debian", "reason": null },
     { "name": "github", "reason": null },

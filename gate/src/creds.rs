@@ -225,6 +225,7 @@ mod tests {
             binding: "a".into(),
             host: "api.anthropic.com".into(),
             paths: vec![],
+            methods: Vec::new(),
             ignore_case: false,
             place: Placement::Header {
                 name: "x-api-key".into(),
@@ -239,6 +240,7 @@ mod tests {
             binding: "g".into(),
             host: "github.com".into(),
             paths: vec![],
+            methods: Vec::new(),
             ignore_case: false,
             place: Placement::Basic {
                 username: "x-access-token".into(),
@@ -257,6 +259,7 @@ mod tests {
             binding: "gem".into(),
             host: "generativelanguage.googleapis.com".into(),
             paths: vec![],
+            methods: Vec::new(),
             ignore_case: false,
             place: Placement::Query {
                 param: "key".into(),

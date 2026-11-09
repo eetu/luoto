@@ -14,6 +14,7 @@ use anyhow::{Result, bail};
 
 use crate::paths::Paths;
 use crate::prompt::confirm;
+use crate::release::repo_of;
 use crate::runtime::{Flavor, Runtime};
 use crate::{config, machine, names, release, ssh, watch};
 
@@ -573,15 +574,6 @@ fn image_family() -> String {
     format!("{}*", gate.trim_end_matches("gate"))
 }
 
-/// An image reference without its tag or digest.
-fn repo_of(reference: &str) -> &str {
-    let r = reference.split('@').next().unwrap_or(reference);
-    match r.rfind(':') {
-        Some(i) if i > r.rfind('/').unwrap_or(0) => &r[..i],
-        _ => r,
-    }
-}
-
 /// From an `images` listing (repository, tag, digest), a reference to each image of `repos`:
 /// by tag, else by digest (a release's images are pulled by digest).
 fn image_refs(listing: &str, repos: &[String]) -> Vec<String> {
@@ -661,7 +653,7 @@ fn config_texts(paths: &Paths) -> Vec<String> {
 }
 
 /// The accounts of `keyring:<service>/<account>` refs in `text`.
-fn keyring_accounts(text: &str, service: &str) -> BTreeSet<String> {
+pub fn keyring_accounts(text: &str, service: &str) -> BTreeSet<String> {
     let needle = format!("keyring:{service}/");
     text.match_indices(&needle)
         .map(|(i, _)| {

@@ -1,13 +1,15 @@
 //! luoto-vault: one per runtime VM. Holds root secrets in memory only (pushed by `luoto
 //! vault unlock`), knows which env may use which binding, and hands each gate only its own
-//! credentials — static values as-is, GitHub tokens minted per env. `luoto-vault ctl`
+//! credentials: static values as-is, GitHub and Azure tokens minted per env. `luoto-vault ctl`
 //! forwards one control request from stdin (host → vault via `exec -i`).
 
 mod agent;
 mod ctl;
+mod entra;
 mod github;
 mod http;
 mod state;
+mod upstream;
 
 use std::net::SocketAddr;
 use std::process::ExitCode;

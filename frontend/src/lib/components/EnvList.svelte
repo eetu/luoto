@@ -4,6 +4,7 @@
   import Plus from "@lucide/svelte/icons/plus";
 
   import { api } from "$lib/api";
+  import VmDiskStatus from "$lib/components/VmDiskStatus.svelte";
   import { openMenu } from "$lib/menu.svelte";
   import { act, app, copyText, selectEnv } from "$lib/stores/app.svelte";
   import type { EnvRow } from "$lib/types";
@@ -87,6 +88,8 @@
       <span class="pill">{vault.loaded_refs.length}</span>
     {/if}
   </button>
+
+  <VmDiskStatus />
 </nav>
 
 <style>

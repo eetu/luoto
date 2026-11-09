@@ -2,6 +2,7 @@
   import { api } from "$lib/api";
   import ConnectSection from "$lib/components/ConnectSection.svelte";
   import CredentialsSection from "$lib/components/CredentialsSection.svelte";
+  import DiskSection from "$lib/components/DiskSection.svelte";
   import PortsSection from "$lib/components/PortsSection.svelte";
   import ProjectSection from "$lib/components/ProjectSection.svelte";
   import RulesSection from "$lib/components/RulesSection.svelte";
@@ -42,6 +43,7 @@
       {#each d.warnings as w, n (n)}<p class="warn">{w}</p>{/each}
 
       <WorkspaceSection />
+      <DiskSection />
       <ProjectSection />
       <PortsSection />
       <ConnectSection />

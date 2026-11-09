@@ -46,6 +46,28 @@ pub fn canonical(p: &str) -> Result<PathBuf> {
         .with_context(|| format!("{} does not exist", path.display()))
 }
 
+/// Whether `p` names a place on another machine, which merely looking it up reaches: a UNC
+/// path (`\\server\share`, `//server/share`, `\\?\UNC\…`), to which Windows sends the user's
+/// credentials, or `/net/<host>`, which macOS's automounter mounts. `\\?\C:\…` is a local
+/// drive in Windows' long form.
+pub fn network_path(p: &str) -> bool {
+    let sep = |c: u8| c == b'/' || c == b'\\';
+    let b = p.as_bytes();
+    if b.len() >= 2 && sep(b[0]) && sep(b[1]) {
+        let local_drive = b.len() >= 6
+            && (b[2] == b'?' || b[2] == b'.')
+            && sep(b[3])
+            && b[4].is_ascii_alphabetic()
+            && b[5] == b':';
+        return !local_drive;
+    }
+    sep(b.first().copied().unwrap_or_default())
+        && p[1..]
+            .split(['/', '\\'])
+            .next()
+            .is_some_and(|first| first.eq_ignore_ascii_case("net"))
+}
+
 /// A valid env name from a directory or repo name: `My_Project` → `my-project`.
 pub fn name_from(s: &str) -> String {
     let base = s
@@ -104,21 +126,60 @@ pub fn resolve(paths: &Paths, arg: Option<&str>) -> Result<String> {
         }
         _ => {
             let cwd = std::env::current_dir()?.canonicalize()?;
-            env_for_dir(paths, &cwd)?.with_context(|| {
-                format!(
-                    "no env for {} — name one, or create it here with `luoto init`",
-                    cwd.display()
-                )
-            })
+            env_for_dir(paths, &cwd)?.with_context(|| no_env_here(paths, &cwd))
         }
     }
+}
+
+/// Why no env acts on `cwd`, naming the envs no folder leads to: those cloned from a remote.
+fn no_env_here(paths: &Paths, cwd: &Path) -> String {
+    let remote: Vec<String> = config::list_envs(paths)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| {
+            EnvFile::load(paths, n)
+                .is_ok_and(|f| f.cfg.workspace.dir.is_none() && f.cfg.workspace.url.is_some())
+        })
+        .collect();
+    let mut msg = format!(
+        "no env for {} — name one with -e, or create it here with `luoto init`",
+        cwd.display()
+    );
+    if !remote.is_empty() {
+        msg.push_str(&format!(
+            "; envs cloned from a remote have no folder here, so -e picks them: {}",
+            remote.join(", ")
+        ));
+    }
+    msg
+}
+
+/// A folder `pull --to` may write: never your home folder or one that holds it.
+pub fn check_pull_dest(dest: &Path) -> Result<()> {
+    // Each as written and as resolved: a symlinked home, and Windows' `\\?\` form, which
+    // only one side may have.
+    let forms = |p: &Path| [Some(p.to_path_buf()), p.canonicalize().ok()];
+    let homes: Vec<PathBuf> = directories::BaseDirs::new()
+        .map(|b| forms(b.home_dir()))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .collect();
+    let dests: Vec<PathBuf> = forms(dest).into_iter().flatten().collect();
+    if homes.iter().any(|h| dests.iter().any(|d| h.starts_with(d))) {
+        bail!(
+            "{} is your home folder or holds it: pull into a project's own folder",
+            dest.display()
+        );
+    }
+    Ok(())
 }
 
 /// A path component as macOS (APFS/HFS+) and Windows (NTFS) compare it: case-folded, with
 /// the invisible characters HFS+ ignores removed and the trailing dots and spaces NTFS drops.
 /// `.GIT`, `.g\u{200c}it` and `.git.` all name `.git` there. Folding goes through upper case
 /// first, as the filesystems' tables do: `ſ` (long s) names `s`, `ı` names `i`.
-fn fold(component: &str) -> String {
+pub(crate) fn fold(component: &str) -> String {
     let s: String = component
         .chars()
         .filter(|c| !crate::text::is_format(*c))
@@ -617,12 +678,17 @@ pub fn pull_targets(
     repo: Option<&str>,
     present: &BTreeSet<String>,
 ) -> Result<Vec<PullTarget>> {
-    let root =
-        || -> Result<PathBuf> {
-            canonical(ws.dir.as_deref().context(
-                "the env has no folder to pull into (`luoto pull --to <dir>` picks one)",
-            )?)
-        };
+    // Every folder a pull writes: a config from elsewhere (`luoto import`) names them too.
+    let checked = |d: PathBuf| -> Result<PathBuf> {
+        check_pull_dest(&d)?;
+        Ok(d)
+    };
+    let to = to.map(checked).transpose()?;
+    let root = || -> Result<PathBuf> {
+        checked(canonical(ws.dir.as_deref().context(
+            "the env has no folder to pull into (`luoto pull --to <dir>` picks one)",
+        )?)?)
+    };
     if let Some(name) = repo {
         let r = ws.repos.get(name).with_context(|| {
             format!(
@@ -632,7 +698,7 @@ pub fn pull_targets(
         })?;
         let dest = match (to, &r.dir) {
             (Some(t), _) => t,
-            (None, Some(d)) => canonical(d)?,
+            (None, Some(d)) => checked(canonical(d)?)?,
             (None, None) => {
                 let d = root()?.join(name);
                 std::fs::create_dir_all(&d)?;
@@ -671,7 +737,7 @@ pub fn pull_targets(
                 d
             }
             None => match canonical(dir) {
-                Ok(d) => d,
+                Ok(d) => checked(d)?,
                 Err(e) => {
                     eprintln!("warning: repo {name} left out: {e:#}");
                     continue;
@@ -1225,6 +1291,7 @@ mod tests {
                     },
                 ),
             ]),
+            ..Default::default()
         };
         let present = BTreeSet::from(["api".to_string(), "web".to_string()]);
         let all = pull_targets(&ws, None, None, &present).unwrap();
@@ -1262,6 +1329,112 @@ mod tests {
         let web = pull_targets(&ws, None, Some("web"), &present).unwrap();
         assert_eq!(web[0].dest, canon(root.path()).join("web"));
         assert!(pull_targets(&ws, None, Some("nope"), &present).is_err());
+    }
+
+    #[test]
+    fn a_clone_pulls_only_to_a_folder_you_name_never_home() {
+        let ws = Workspace {
+            url: Some("acme/web".into()),
+            repos: BTreeMap::from([(
+                "api".to_string(),
+                config::Repo {
+                    url: Some("acme/api".into()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let present = BTreeSet::from(["api".to_string()]);
+        let e = pull_targets(&ws, None, None, &present).unwrap_err();
+        assert!(format!("{e:#}").contains("--to"), "{e:#}");
+        assert!(pull_targets(&ws, None, Some("api"), &present).is_err());
+        let to = tempfile::tempdir().unwrap();
+        let all = pull_targets(&ws, Some(to.path().to_path_buf()), None, &present).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].dest, to.path());
+        assert_eq!(all[0].skip, ["api"]);
+
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .canonicalize()
+            .unwrap();
+        assert!(check_pull_dest(&home).is_err());
+        assert!(check_pull_dest(home.parent().unwrap()).is_err());
+        assert!(check_pull_dest(home.ancestors().last().unwrap()).is_err());
+        assert!(check_pull_dest(&to.path().canonicalize().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn network_paths_are_told_from_local_ones() {
+        for p in [
+            r"\\server\share\proj",
+            "//server/share/proj",
+            r"\\?\UNC\server\share",
+            r"\\.\UNC\server\share",
+            r"/\server\share",
+            "/net/host/export",
+            "/NET/host",
+            "/net",
+        ] {
+            assert!(network_path(p), "{p}");
+        }
+        for p in [
+            "/Users/me/proj",
+            r"C:\Users\me\proj",
+            r"\\?\C:\Users\me\proj",
+            "~/proj",
+            "/network/x",
+            "/home/me/net/x",
+            "",
+        ] {
+            assert!(!network_path(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn no_folder_a_config_names_pulls_into_home() {
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
+        let other = tempfile::tempdir().unwrap();
+        let folder = |d: &Path| config::Repo {
+            dir: Some(d.display().to_string()),
+            ..Default::default()
+        };
+        let present = BTreeSet::from(["api".to_string()]);
+        let at_home = Workspace {
+            dir: Some(home.display().to_string()),
+            ..Default::default()
+        };
+        assert!(pull_targets(&at_home, None, None, &present).is_err());
+        let repo_above_home = Workspace {
+            dir: Some(other.path().display().to_string()),
+            repos: BTreeMap::from([("api".to_string(), folder(home.parent().unwrap()))]),
+            ..Default::default()
+        };
+        let e = pull_targets(&repo_above_home, None, None, &present).unwrap_err();
+        assert!(format!("{e:#}").contains("home folder"), "{e:#}");
+        assert!(pull_targets(&repo_above_home, None, Some("api"), &present).is_err());
+        assert!(pull_targets(&at_home, Some(home.clone()), None, &present).is_err());
+    }
+
+    #[test]
+    fn with_no_env_here_the_error_names_the_envs_cloned_from_a_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config: dir.path().join("config"),
+            data: dir.path().join("data"),
+        };
+        let mut cfg = config::EnvConfig::default();
+        cfg.workspace.url = Some("acme/web".into());
+        EnvFile::create(&paths, "web", &cfg).unwrap();
+        let mut own = config::EnvConfig::default();
+        own.workspace.dir = Some(dir.path().display().to_string());
+        EnvFile::create(&paths, "api", &own).unwrap();
+        let msg = no_env_here(&paths, Path::new("/tmp"));
+        assert!(msg.ends_with("so -e picks them: web"), "{msg}");
     }
 
     #[test]

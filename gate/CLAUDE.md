@@ -18,9 +18,14 @@ sockets, then drops to uid 65534 (`system.rs`).
   Azure DevOps and `[[credentials.git]]` hosts (granted repos, protected branches, tags, no
   deletes), GitHub GraphQL mutations, matched without case like the rules, and model API
   bodies asking for server tools (`body_denies`, read whole up to 32 MiB) → credential
-  strip/inject over TLS only (`creds.rs`, vault client) → `upstream.rs` (resolve, vet every
+  strip on the host, inject for the injection's paths and methods, over TLS only (`creds.rs`,
+  vault client) → `upstream.rs` (resolve, vet every
   address, dial) → metered response + event. `body.rs` holds the body types (capped,
   metered, replayed prefix).
+- `imds.rs` for an env with an Azure identity, answers 169.254.169.254:80 `/metadata/…` from
+  either intake before the policy: managed identity tokens for the granted audiences, as
+  placeholders (the real token's header and the claims tools read, a signature that can't
+  verify). The real token only goes out through the injections on Azure hosts.
 - `limits.rs` what the sandbox can't exhaust: one cap on open client connections over every
   intake (beyond it refused, reported as `conn_limit` events), sized to the open-file limit it
   raises at start, and idle-based timeouts carried by each connection's `Activity` (response
@@ -31,4 +36,6 @@ sockets, then drops to uid 65534 (`system.rs`).
   restarted gate serves at once; secrets are never persisted.
 - `test-hooks` feature (integration tests only): `LUOTO_TEST_RESOLVE` maps names to local
   test servers, bypasses the private-address check for those names and lets them get
-  credentials over plain HTTP; `LUOTO_TEST_LIMITS` shrinks the limits.
+  credentials over plain HTTP; `LUOTO_TEST_LIMITS` shrinks the limits;
+  `LUOTO_TEST_TRANSPARENT=<listen>=<destination>` serves the transparent intake on a listener
+  whose connections count as redirected from that destination (no iptables, also on macOS).

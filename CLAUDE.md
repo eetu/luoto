@@ -42,9 +42,14 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   A `[[mute]]` only hides: every view of denials (egress, UI, notifications, run summary)
   filters through `events::Mutes`.
 - Every env has a folder (`[workspace] dir`), copied into its workspace volume on the first
-  `up`; `luoto init` creates a missing one. `workspace.rs` owns env-from-cwd resolution and
+  `up` (`luoto init` creates a missing one), or a remote (`[workspace] url`), cloned into
+  `/workspace` inside the env on the first `up` (`repos::clone_workspace`), never both. Of a
+  clone, nothing reaches the host but `read_files` text and luoto.toml, and nothing it wrote
+  runs, installs or is granted before the user's yes to its luoto.toml (`project::review`)
+  and to its installs (`env::ask_installs`). `workspace.rs` owns env-from-cwd resolution and
   push/pull (tar over exec, so no VM file sharing needed). Anything that brings
-  sandbox-written files to the host goes through its `risky_nested()` and path/symlink checks.
+  sandbox-written files to the host goes through its `risky_nested()` and path/symlink checks;
+  `pull` never writes into the home folder or one that holds it.
 - `repos.rs` owns an env's repos at `/workspace/<name>`: a host folder copied in, or a remote
   cloned in the env (through the gate, as the dev user) on `up`; seeded names live in the env's
   state. A `luoto.toml` names remotes only, never host folders.
@@ -62,6 +67,15 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
 - The SSH key is a vault binding (`SshAgent`) that never leaves the vault, not even to the
   gate. The agent signs only logins to sessions a pinned host key bound
   (`shared/src/forges.rs`, plus `host_keys`; `vault/src/agent.rs`).
+- Azure (`[credentials.azure]`, not Azure DevOps' `azure.rs`): audiences, their hosts and
+  name rules in `shared/src/azure_identity.rs`; one binding per audience. The gate answers IMDS
+  itself (`gate/src/imds.rs`) with placeholders (real header, the claims tools read, unusable
+  signature) and never returns a real token; injections carry the methods their rule allows.
+  The vault mints service principal tokens (`vault/src/entra.rs`, only
+  `login.microsoftonline.com`); `azcli:` refs read the host's `az`
+  (`cli/src/azure_identity.rs`) and are only the Azure bindings' (`compile` refuses them
+  elsewhere), and the watcher renews them before they expire, into a vault that holds them.
+  An env's own file is the only place for it.
 - `project.rs`: a repo's `luoto.toml` is untrusted. It layers in (`env::plan`) only as the
   exact text the user accepted (kept in the env's state); changes need a fresh accept. Never
   let it carry secret refs or mutes or skip `RuleOrigin::Sandbox` validation, and print its
@@ -74,6 +88,10 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   format and `--fix` rewrites them (a copy kept); a `luoto.toml` is only shown as a diff for
   the team to commit. Unknown keys stay errors.
 - `personal.rs` data only flows host → sandbox, on every `up`.
+- `archive.rs` is the file `luoto export` writes and `luoto import` reads (`transfer.rs`):
+  untrusted input, so every entry is decoded, checked and written anew. Volume contents move
+  only through a container in the env's user namespace (`env::dev_id_map`), never onto the
+  host; secrets, the CA and the vault token never go in.
 - `ssh.rs` owns `<config>/ssh_config`; never edit the user's `~/.ssh/config`.
 - Secret values never touch disk or argv: host resolves refs and pipes them over `exec -i`
   stdin to the vault. Per-run env for the sandbox goes to its `/run/luoto` tmpfs.
@@ -81,6 +99,11 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   per env, gVisor plus the `luoto-runsc` wrapper (podman keeps a container's runtime path but
   not its flags). The remote podman client can't choose a runtime, so gVisor containers are
   created by podman inside the VM (`podman machine ssh`); every later call uses the connection.
+- `disk.rs` reads sizes and free space (podman and docker print them differently; its parsers
+  read both) and picks what `luoto prune` removes: this instance's images by repository (an
+  unnamed one by podman's names history, or the build stages' `luoto.build` label), never one
+  a container uses or either instance runs, never a volume. Sizes walk every volume: never on
+  the UI's polls.
 - `watch.rs` is the one background process per config dir; port forwarding (`ports.rs`) goes
   through `exec … sandbox relay`, never a network path. Its desktop notifications
   (`notify.rs`) pass sandbox text to the OS notifier cleaned, capped and as arguments, never

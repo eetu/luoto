@@ -45,6 +45,9 @@ pub enum VaultCtl {
     /// Resolved secret values keyed by their source ref. Merged into memory.
     Load {
         secrets: BTreeMap<String, String>,
+        /// Only replace refs the vault holds: a renewal, which leaves a locked vault empty.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        held_only: bool,
     },
     /// Register (or replace) an env: its gate's token hash and its bindings.
     Bind {

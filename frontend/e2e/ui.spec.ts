@@ -63,6 +63,72 @@ test("a new env waits until its folder's luoto.toml is on screen", async ({ page
   });
 });
 
+test("an env cloned from a remote shows where it comes from and pulls only in a terminal", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const overview = fixture("overview");
+  await page.route(
+    (url) => url.pathname === "/api/overview",
+    (route) => route.fulfill({ json: { ...overview, envs: [...overview.envs, fixture("remote")] } }),
+  );
+  const detail = { ...fixture("env"), name: "api", path: "/home/me/.config/luoto/envs/api.toml" };
+  await page.route(
+    (url) => url.pathname === "/api/envs/api",
+    (route) => route.fulfill({ json: detail }),
+  );
+  await page.route(
+    (url) => /^\/api\/envs\/api\/(egress|requests)$/.test(url.pathname),
+    (route) => route.fulfill({ json: [] }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/envs/api/project",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...fixture("project"),
+          state: "unread",
+          accepted: [["presets", "npm"]],
+        },
+      }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await expect(page.getByRole("button", { name: "pull changes…" })).toBeVisible();
+
+  await page.getByRole("button", { name: /^api/ }).click();
+  await expect(page.getByText("cloned from", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("acme/api", { exact: true })).toBeVisible();
+  await expect(page.getByText("(develop)")).toBeVisible();
+  await expect(page.getByText("luoto pull --to <new folder>")).toBeVisible();
+  await expect(page.getByRole("button", { name: "pull changes…" })).toHaveCount(0);
+  await expect(page.getByText(/in the env's clone, read when it starts/)).toBeVisible();
+});
+
+test("a remote in the new-env dialog is made in a terminal", async ({ page }) => {
+  const writes = await mockApi(page);
+  await page.route("**/api/detect", (route) =>
+    route.fulfill({
+      json: {
+        ...fixture("detect"),
+        name: "web",
+        remote: "acme/web",
+        presets: [],
+        tools: [],
+        project: null,
+        project_sha: null,
+      },
+    }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: "new env" }).click();
+  await page.getByPlaceholder("~/dev/my-project").fill("acme/web");
+
+  await expect(page.getByText("luoto init acme/web")).toBeVisible();
+  await expect(page.getByRole("button", { name: "create", exact: true })).toBeDisabled();
+  expect(writes).toHaveLength(0);
+});
+
 test("applying luoto.toml names the text that was reviewed", async ({ page }) => {
   await mockApi(page);
   const status = {
@@ -346,4 +412,49 @@ test("with desktop notifications on, the page shows none of its own", async ({ p
   const bell = page.getByRole("button", { name: "browser notifications" });
   await expect(bell).toBeDisabled();
   await expect(bell).toHaveAttribute("title", /notifications = false/);
+});
+
+test("an env's disk use is measured when its panel shows and on refresh", async ({ page }) => {
+  await mockApi(page);
+  let reads = 0;
+  await page.route(
+    (url) => url.pathname === "/api/disk/envs",
+    (route) => {
+      reads += 1;
+      return route.fulfill({ json: fixture("envDisk") });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  const parts = page.locator("dl.parts");
+  await expect(page.getByText("3.0 GB", { exact: true })).toBeVisible();
+  await expect(parts).toContainText("workspace");
+  await expect(parts).toContainText("2.1 GB");
+  await expect(page.getByText("45.5 GB free of 106.8 GB")).toBeVisible();
+  await expect(page.getByText(/nearly full/)).toHaveCount(0);
+  expect(reads).toBe(1);
+
+  await page.getByRole("button", { name: "measure disk use again" }).click();
+  await expect.poll(() => reads).toBe(2);
+});
+
+test("a nearly full VM disk is flagged beside the envs, with what frees it", async ({ page }) => {
+  await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/disk",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...fixture("disk"),
+          space: { size: 106769133568, used: 102569133568, free: 4200000000 },
+          low: true,
+        },
+      }),
+  );
+  await open(page);
+  await expect(page.getByText("4.2 GB free of 106.8 GB")).toBeVisible();
+  await expect(page.getByText(/nearly full, and a full disk stops every env/)).toBeVisible();
+  await expect(page.getByText(/41 superseded image\(s\), up to 18\.3 GB/)).toBeVisible();
+  await expect(page.getByText("luoto prune", { exact: true })).toBeVisible();
 });

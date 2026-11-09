@@ -53,6 +53,15 @@
     {:else if status.state === "removed"}
       <p class="small muted">gone from the project; the accepted settings still apply</p>
       <button class="btn" onclick={() => run("forget")}>drop them</button>
+    {:else if status.state === "unread"}
+      <p class="small muted">
+        in the env's clone, read when it starts{status.accepted.length
+          ? "; the accepted settings apply"
+          : ""}
+      </p>
+      {#if status.accepted.length}
+        <div class="lines"><LabelledLines lines={status.accepted} /></div>
+      {/if}
     {/if}
     {#if status.needs.length > 0}
       <p class="small muted">credentials it needs (add them with <code>luoto edit</code>):</p>

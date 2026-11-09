@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use luoto_shared::policy::{Access, AccessLevel, Deny, Mode, Rule, RuleOrigin, rule_error};
+use luoto_shared::policy::{Access, AccessLevel, Deny, Mode, Policy, Rule, RuleOrigin, rule_error};
 use luoto_shared::{presets, profiles};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -239,9 +239,31 @@ pub fn write_host(dir: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Write `text` as the running env's `/workspace/luoto.toml`, as the dev user: a new file
+/// moved into place, replacing whatever is there.
+pub fn write_env(ctx: &Ctx, env: &str, text: &str) -> Result<()> {
+    let dev = names::dev(env);
+    ctx.rt
+        .run_stdin(
+            [
+                "exec",
+                "-i",
+                "-u",
+                crate::env::UID,
+                dev.as_str(),
+                "sh",
+                "-c",
+                r#"t=$(mktemp /workspace/.luoto.toml.XXXXXX) && cat >"$t" && chmod 644 "$t" && mv -f "$t" /workspace/luoto.toml || { rm -f "$t"; exit 1; }"#,
+            ],
+            text.as_bytes(),
+        )
+        .with_context(|| format!("write /workspace/{FILE} in env `{env}`"))?;
+    Ok(())
+}
+
 /// The file as the env's workspace has it now (a `git pull` inside may have changed it):
 /// the whole text or an error, never a part of it.
-fn read_env(ctx: &Ctx, env: &str) -> Result<Option<String>> {
+pub fn read_env(ctx: &Ctx, env: &str) -> Result<Option<String>> {
     let rel = [FILE.to_string()];
     match workspace::read_files(ctx, env, &rel, MAX_BYTES, Oversize::Refuse)?.remove(FILE) {
         Some(b) => Ok(Some(
@@ -252,12 +274,12 @@ fn read_env(ctx: &Ctx, env: &str) -> Result<Option<String>> {
 }
 
 /// The accepted text.
-fn snapshot_path(ctx: &Ctx, env: &str) -> PathBuf {
+pub fn snapshot_path(ctx: &Ctx, env: &str) -> PathBuf {
     ctx.paths.env_state(env).join("project.toml")
 }
 
 /// `sha` of a text the user declined, so it isn't offered again.
-fn declined_path(ctx: &Ctx, env: &str) -> PathBuf {
+pub fn declined_path(ctx: &Ctx, env: &str) -> PathBuf {
     ctx.paths.env_state(env).join("project.declined")
 }
 
@@ -474,6 +496,9 @@ pub fn suggest(env: &str, own: &EnvConfig, accepted: Option<&ProjectConfig>) -> 
     if c.azure_devops.is_some() {
         creds.push("azure_devops".into());
     }
+    if c.azure.is_some() {
+        creds.push("azure".into());
+    }
     if c.ssh.is_some() {
         creds.push("ssh".into());
     }
@@ -515,7 +540,7 @@ pub fn suggest(env: &str, own: &EnvConfig, accepted: Option<&ProjectConfig>) -> 
 }
 
 /// Every setting of a rule, so no change to it can pass the review unseen.
-fn rule_line(r: &Rule) -> String {
+pub fn rule_line(r: &Rule) -> String {
     let mut parts = vec![match &r.access {
         Access::Level(AccessLevel::Read) => "read".to_string(),
         Access::Level(AccessLevel::Write) => "WRITE".to_string(),
@@ -609,11 +634,23 @@ fn items(p: &ProjectConfig) -> Vec<(&'static str, String)> {
         p.deps
             .run
             .iter()
-            .map(|s| format!("`{}`", display(s)))
+            .map(|s| format!("`{}` (a command the env runs on `up`)", display(s)))
             .collect(),
     );
-    add("ports", p.ports.iter().map(u16::to_string).collect());
-    add("image", p.image.iter().map(|s| display(s)).collect());
+    add(
+        "ports",
+        p.ports
+            .iter()
+            .map(|p| format!("{p} (published on 127.0.0.1 on this machine)"))
+            .collect(),
+    );
+    add(
+        "image",
+        p.image
+            .iter()
+            .map(|s| format!("{} (pulled outside the gate; the env runs it)", display(s)))
+            .collect(),
+    );
     add(
         "repos",
         p.repos
@@ -686,6 +723,18 @@ pub fn diff(old: &ProjectConfig, new: &ProjectConfig) -> Vec<String> {
     out
 }
 
+/// The credentials of yours that the rules `new` adds over `old` would carry (`policy` is the
+/// env's), one line each below the diff.
+fn credentials_reached(policy: &Policy, old: &ProjectConfig, new: &ProjectConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    for r in new.allow.iter().filter(|r| !old.allow.contains(r)) {
+        for why in policy.credentials_reached(r) {
+            out.push(format!("! {:<8} {}: {why}", "allow", display(&r.host)));
+        }
+    }
+    out
+}
+
 /// Config snippets for credentials the project needs and the env lacks.
 pub fn missing_needs(p: &ProjectConfig, cfg: &EnvConfig) -> Vec<String> {
     let mut out = Vec::new();
@@ -706,6 +755,14 @@ pub fn missing_needs(p: &ProjectConfig, cfg: &EnvConfig) -> Vec<String> {
                 out.push(format!(
                     "[credentials.custom.{name}]\nhost = \"<api host>\"\nsecret = \"op://<vault>/<item>/<field>\""
                 ));
+            }
+        } else if c == "azure" {
+            if cfg.credentials.azure.is_none() {
+                out.push(
+                    "[credentials.azure]\nsubscriptions = [\"<subscription id>\"]   # your az \
+                     login's token; or client_id + client_secret + tenant"
+                        .into(),
+                );
             }
         } else if !cfg.credentials.providers.contains_key(c) {
             let kind = profiles::provider(c)
@@ -763,6 +820,9 @@ pub enum State {
     Invalid,
     /// The file is gone; the accepted settings still apply.
     Removed,
+    /// The env is stopped and its workspace exists only in the env (a clone), so the file
+    /// can't be read; the accepted settings still apply.
+    Unread,
 }
 
 #[derive(Debug, Serialize)]
@@ -788,19 +848,27 @@ impl Status {
     }
 }
 
-/// The project's luoto.toml now: from the running env's workspace, else the host folder.
-fn current(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<Option<String>> {
-    if ctx.rt.container_state(&names::dev(env)).as_deref() == Some("running") {
-        return read_env(ctx, env);
+/// Where the project's luoto.toml is read now.
+#[derive(Debug, PartialEq)]
+enum Source {
+    /// The running env's workspace, where the work happens.
+    Env,
+    /// The env's host folder.
+    Host(PathBuf),
+    /// Nowhere until the env runs: its workspace is a clone that exists only in the env.
+    Unread,
+    /// Nowhere: the env is stopped and its folder is gone.
+    Nothing,
+}
+
+fn source(running: bool, ws: &crate::config::Workspace) -> Source {
+    if running {
+        return Source::Env;
     }
-    match cfg
-        .workspace
-        .dir
-        .as_deref()
-        .map(crate::workspace::canonical)
-    {
-        Some(Ok(d)) => read_host(&d),
-        _ => Ok(None),
+    match (ws.dir.as_deref().map(crate::workspace::canonical), &ws.url) {
+        (Some(Ok(d)), _) => Source::Host(d),
+        (None, Some(_)) => Source::Unread,
+        _ => Source::Nothing,
     }
 }
 
@@ -817,8 +885,20 @@ pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
         sha: None,
         text: None,
     };
-    let new =
-        current(ctx, env, &cfg).and_then(|t| t.map(|t| parse(&t).map(|p| (t, p))).transpose());
+    let running = ctx.rt.container_state(&names::dev(env)).as_deref() == Some("running");
+    let text = match source(running, &cfg.workspace) {
+        Source::Env => read_env(ctx, env),
+        Source::Host(d) => read_host(&d),
+        Source::Unread => {
+            s.state = State::Unread;
+            if let Some((_, p)) = &old {
+                s.needs = missing_needs(p, &cfg);
+            }
+            return Ok(s);
+        }
+        Source::Nothing => Ok(None),
+    };
+    let new = text.and_then(|t| t.map(|t| parse(&t).map(|p| (t, p))).transpose());
     let (text, new) = match new {
         Ok(Some(found)) => found,
         Ok(None) => {
@@ -836,16 +916,23 @@ pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
     };
     s.current = summary(&new);
     s.needs = missing_needs(&new, &cfg);
+    let none = ProjectConfig::default();
+    let changed_from = match &old {
+        Some((t, p)) if *t == text || *p == new => None,
+        Some((_, p)) => Some(p),
+        None => Some(&none),
+    };
+    if let Some(before) = changed_from {
+        s.diff = diff(before, &new);
+        if let Ok(plan) = crate::env::plan(ctx, env) {
+            s.diff
+                .extend(credentials_reached(&plan.compiled.policy, before, &new));
+        }
+    }
     s.state = match &old {
         Some((t, p)) if *t == text || *p == new => State::Accepted,
-        Some((_, p)) => {
-            s.diff = diff(p, &new);
-            State::Changed
-        }
-        None => {
-            s.diff = diff(&ProjectConfig::default(), &new);
-            State::New
-        }
+        Some(_) => State::Changed,
+        None => State::New,
     };
     if s.state != State::Accepted && declined(ctx, env, &text) {
         s.state = State::Declined;
@@ -876,7 +963,24 @@ pub fn review(ctx: &Ctx, env: &str) -> Result<bool> {
         State::New if parse(text).is_ok_and(|p| p == ProjectConfig::default()) => {
             accept(ctx, env, text)?;
         }
-        State::Changed | State::New => {
+        State::New => {
+            println!(
+                "\nthe project's luoto.toml, not applied (written in the repository, so review it):"
+            );
+            print_entries(&st.current, "  ");
+            if crate::prompt::confirm("Apply these settings to this env?") {
+                accept(ctx, env, text)?;
+                println!("applied");
+                return Ok(true);
+            }
+            if crate::prompt::interactive() {
+                set_declined(ctx, env, Some(sha(text)))?;
+                println!("not applied (`luoto project apply -e {env}` applies it later)");
+            } else {
+                println!("not applied: run `luoto project apply -e {env}` to review and apply");
+            }
+        }
+        State::Changed => {
             println!("the project's luoto.toml changed (written in the repository, so review it):");
             if st.diff.is_empty() {
                 println!("  settings changed in a way this summary can't show; read luoto.toml");
@@ -898,7 +1002,7 @@ pub fn review(ctx: &Ctx, env: &str) -> Result<bool> {
                 println!("not applied: run `luoto project apply -e {env}` to review and apply");
             }
         }
-        State::Accepted | State::None | State::Declined => {}
+        State::Accepted | State::None | State::Declined | State::Unread => {}
     }
     Ok(false)
 }
@@ -934,8 +1038,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_projects_rule_over_your_credentials_host_says_so() {
+        let cfg: EnvConfig = toml::from_str(
+            "[credentials.azure]\nsubscriptions = [\"0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0\"]\n\
+             graph = true\n",
+        )
+        .unwrap();
+        let policy = crate::compile::compile("t", &cfg, None, &[])
+            .unwrap()
+            .policy;
+        let old = parse("[[allow]]\nhost = \"docs.rs\"").unwrap();
+        let new = parse("[[allow]]\nhost = \"docs.rs\"\n[[allow]]\nhost = \"graph.microsoft.com\"")
+            .unwrap();
+        assert_eq!(
+            credentials_reached(&policy, &old, &new),
+            [
+                "! allow    graph.microsoft.com: requests it allows to graph.microsoft.com carry \
+              your `azure-graph` credential"
+            ]
+        );
+        assert!(credentials_reached(&policy, &new, &new).is_empty());
+    }
+
+    #[test]
+    fn a_project_needing_azure_gets_its_section_suggested() {
+        let p = parse("[needs]\ncredentials = [\"azure\"]").unwrap();
+        let needs = missing_needs(&p, &EnvConfig::default());
+        assert_eq!(needs.len(), 1);
+        assert!(
+            needs[0].starts_with("[credentials.azure]\nsubscriptions"),
+            "{needs:?}"
+        );
+    }
+
+    #[test]
     fn refuses_secrets_tools_and_risky_rules() {
         assert!(parse("[credentials.github]\ntoken = \"op://x\"").is_err());
+        assert!(parse("[credentials.azure]\nsubscriptions = [\"x\"]").is_err());
         assert!(parse("[sandbox_secrets]\nX = \"op://x\"").is_err());
         assert!(parse("[tools]\nnode = \"22\"").is_err());
         assert!(parse("[[allow]]\nhost = \"*\"").is_err());
@@ -1071,7 +1210,49 @@ credentials = ["anthropic"]
             assert_eq!(diff(&a, &b).len(), 2, "{extra} must show in the diff");
         }
         let image = parse("image = \"x\"").unwrap();
-        assert_eq!(diff(&ProjectConfig::default(), &image), ["+ image    x"]);
+        assert_eq!(
+            diff(&ProjectConfig::default(), &image),
+            ["+ image    x (pulled outside the gate; the env runs it)"]
+        );
+    }
+
+    #[test]
+    fn the_review_says_what_reaches_past_the_gate() {
+        let p = parse(
+            "image = \"ghcr.io/acme/dev:1\"\nports = [5173]\n[deps]\nrun = [\"make setup\"]\n\
+             [repos.api]\nurl = \"acme/api\"\n",
+        )
+        .unwrap();
+        let s = summary(&p);
+        let line = |l: &str| s.iter().find(|(k, _)| k == l).unwrap().1.clone();
+        assert!(line("image").contains("pulled outside the gate"));
+        assert!(line("ports").contains("published on 127.0.0.1"));
+        assert!(line("run").contains("`make setup` (a command the env runs"));
+        assert_eq!(line("repos"), "api cloned from acme/api");
+    }
+
+    #[test]
+    fn a_stopped_env_without_a_folder_has_its_luoto_toml_unread() {
+        let remote = crate::config::Workspace {
+            url: Some("acme/web".into()),
+            ..Default::default()
+        };
+        assert_eq!(source(false, &remote), Source::Unread);
+        assert_eq!(source(true, &remote), Source::Env);
+        let dir = tempfile::tempdir().unwrap();
+        let folder = crate::config::Workspace {
+            dir: Some(dir.path().display().to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            source(false, &folder),
+            Source::Host(dir.path().canonicalize().unwrap())
+        );
+        let gone = crate::config::Workspace {
+            dir: Some("/nonexistent/luoto-test".into()),
+            ..Default::default()
+        };
+        assert_eq!(source(false, &gone), Source::Nothing);
     }
 
     const FULL_ENV: &str = r#"

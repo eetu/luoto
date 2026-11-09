@@ -7,6 +7,7 @@ import type {
   CreatedEnv,
   Decision,
   EnvDetail,
+  EnvDisk,
   HostSummary,
   InstallOutput,
   LuotoEvent,
@@ -26,6 +27,7 @@ import type {
   SelftestReport,
   SetupInfo,
   Shown,
+  VmDisk,
 } from "./types";
 
 const TOKEN_KEY = "luoto:token";
@@ -104,6 +106,8 @@ export const api = {
   createEnv: (body: NewEnv) => request<CreatedEnv, NewEnv>("POST", "/envs", body),
   detect: (body: NewEnv) => request<Proposal, NewEnv>("POST", "/detect", body),
   env: (name: string) => request<EnvDetail>("GET", env(name)),
+  disk: () => request<VmDisk>("GET", "/disk"),
+  envsDisk: () => request<Record<string, EnvDisk>>("GET", "/disk/envs"),
   projectStatus: (name: string) => request<ProjectStatus>("GET", `${env(name)}/project`),
   projectAction: (name: string, action: "accept" | "forget", sha?: string) =>
     request<ProjectStatus, ProjectAction>("POST", `${env(name)}/project`, { action, sha }),
