@@ -104,10 +104,6 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   unnamed one by podman's names history, or the build stages' `luoto.build` label), never one
   a container uses or either instance runs, never a volume. Sizes walk every volume: never on
   the UI's polls.
-- A slow step goes through `progress::step` (its line; a spinner on a terminal), and a line
-  printed during one through `progress::say`. What a command in the env prints goes through
-  `progress::tool`: escaped, on the terminal only after `o`, with `-v` or, its last lines,
-  when it fails.
 - `watch.rs` is the one background process per config dir; port forwarding (`ports.rs`) goes
   through `exec … sandbox relay`, never a network path. Its desktop notifications
   (`notify.rs`) pass sandbox text to the OS notifier cleaned, capped and as arguments, never
@@ -120,6 +116,36 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   `init.rs`, `project.rs`, `sync.rs`), so the two can't drift.
 - Gate, vault and `sandbox` are Linux binaries; Linux-only modules are `cfg(target_os =
   "linux")` so the workspace still builds on macOS/Windows.
+
+## CLI conventions
+
+What the CLI asks and prints follows one grammar, whatever the feature:
+
+- **Questions** (inquire, through `wizard.rs` and `prompt.rs`): the recommended or least
+  privileged answer comes first and is preselected, marked `(recommended)` where the choice
+  needs it. Labels are plain words with a short description, never config keys
+  (`oauth_token`); a long how-to shows once, after the pick. Every menu carries the shared
+  help line naming its keys. Esc goes back one question; at the first it means "later"
+  (nothing written) or, when changing a setting, "unchanged". A weaker choice (login inside,
+  a write grant) is written only when picked, never because of Esc, a bare Enter or a missing
+  terminal, unless that no-terminal default is documented. A menu with one option is no
+  question.
+- **Nothing is stored before what it is for is confirmed:** a pasted secret reaches the
+  keychain or 1Password only for an env that exists or is being changed.
+- **A step that writes config ends with one summary:** the thing, what it is set to (a ref
+  through `secrets::shown_ref`, never a value) and the command that changes it (`luoto agent
+  auth`, `luoto repo auth`), never `luoto edit` or hand-edited TOML.
+- **Say a thing once.** A warning repeated on every `up` is one the user can act on. "Ready"
+  means it works; an agent without a credential is "installed". A command asks only about what
+  it names.
+- **Errors and hints** give the cause in one line and the command that fixes it, in
+  backticks. Without a terminal nothing blocks: the message gives the scripted form with the
+  real choices (`--credential oauth_token=<ref>`).
+- **Output** fits 80 columns. Text from the sandbox or a remote goes through `text::display` /
+  `text::Relay`; what a command in the env prints, through `progress::tool` (on the terminal
+  after `o`, with `-v`, or its last lines when it fails). A slow step goes through
+  `progress::step`, and a line printed during one through `progress::say`. Color only through
+  `progress::accent` / `prompt::theme` (the UI's accent), none under `NO_COLOR`.
 
 ## Working on this repo
 
