@@ -438,10 +438,12 @@ fn collect(
         .flatten();
     let Some(files) = files else {
         if dir.join(".git").exists() {
-            eprintln!(
-                "warning: git can't list {}; copying all of it, ignored files included",
-                dir.display()
-            );
+            crate::progress::say(|| {
+                eprintln!(
+                    "warning: git can't list {}; copying all of it, ignored files included",
+                    dir.display()
+                );
+            });
         }
         return walk(src, rel, false, out, seen);
     };

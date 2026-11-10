@@ -1869,12 +1869,14 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "crossterm",
  "directories",
  "futures-util",
  "hex",
  "inquire",
  "keyring",
  "keyring-core",
+ "libc",
  "luoto-shared",
  "mime_guess",
  "open",
@@ -1895,6 +1897,7 @@ dependencies = [
  "toml_edit",
  "tower",
  "tower-http",
+ "unicode-width",
  "x509-parser",
 ]
 

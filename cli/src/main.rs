@@ -70,8 +70,7 @@ struct Cli {
     #[arg(short = 'e', long = "env", global = true, value_name = "ENV",
           add = ArgValueCandidates::new(complete::envs))]
     env: Option<String>,
-    /// Also show what tools print while luoto installs and clones (escaped), instead of a
-    /// spinner; a failed one shows its last lines either way.
+    /// Show what tools print as they run, instead of a spinner.
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
     #[command(subcommand)]
@@ -453,6 +452,7 @@ fn main() -> ExitCode {
     if cli.verbose {
         progress::set_verbose();
     }
+    prompt::theme();
     match run(cli.env, cli.cmd) {
         Ok(code) => code,
         Err(e) => {

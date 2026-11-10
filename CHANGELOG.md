@@ -15,10 +15,13 @@
   so an item's custom fields are typed by name; luoto reads only the field you pick. The
   refs the wizard writes, browsed or saved, name the vault and item by ID, so a rename
   doesn't break them.
-- **Progress:** installs, clones and copies print their line and, on a terminal, a spinner
-  with the time so far. What installers and git print goes to the install log (`luoto logs
-  installs`), and to the terminal with `-v` (`--verbose`, any command) or, its last lines,
-  when one fails; it reaches the terminal escaped, as other text from the env does.
+- **Progress:** installs, clones and copies print their line and, on a terminal, a dot
+  pulsing in the UI's orange with the time so far and the latest line the tool printed; `o`
+  shows the tool's whole output from there. What installers and git print goes to the install
+  log (`luoto logs installs`), and to the terminal after `o`, with `-v` (`--verbose`, any
+  command) or, its last lines, when one fails; it reaches the terminal escaped, as other text
+  from the env does. Prompts mark their choices in the same orange; `NO_COLOR` turns colors
+  off.
 - **Agents that sign in inside:** the ready line puts the command first, then how to sign in;
   `up` warns about `login_inside` only for a provider whose credential the gate could add
   instead.
