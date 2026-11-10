@@ -33,6 +33,9 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   host tools act on (`.git/config`, hooks, `.envrc`, editor and pre-commit configs).
 - **`luoto run` jobs:** a clean-checkout start, a CI recipe.
 - **Detached agents:** `agent run --detach`, `agent ps`, `agent attach`.
+- **Orchestrators drive envs:** agent orchestrators (Paperclip; the parallel-agent tools that
+  give each agent only a git worktree) run each task in a luoto env through `luoto run` or an
+  API, with the env's access requests and denials in the orchestrator's own approvals.
 - **`luoto push`:** a reviewed copy-in.
 - **The UI does what the CLI does:** editing an env's presets, tools, agents, ports,
   credentials and repos, removing it, and the questions `init` and installs ask (prompts and
