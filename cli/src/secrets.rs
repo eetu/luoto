@@ -2,7 +2,9 @@
 //! never written to disk by luoto.
 //!
 //! Ref schemes:
-//! - `op://vault/item/field` — 1Password CLI (desktop biometric unlock, or a service account)
+//! - `op://vault/item/field` — 1Password CLI (desktop biometric unlock, or a service account);
+//!   `?account=<sign-in address>` reads it from that account, when the app has several
+//!   (luoto's own parameter: 1Password's refs name no account)
 //! - `vault://mount/path#field` — OpenBao / HashiCorp Vault KV via the `bao` or `vault` CLI
 //! - `keyring:service/account` — macOS Keychain, Windows Credential Manager, Secret Service
 //! - `env:NAME` — an environment variable of the luoto process
@@ -55,6 +57,59 @@ pub fn check_ref(r: &str) -> Result<()> {
     }
     if let Some(path) = r.strip_prefix("file:") {
         file_path(path)?;
+    }
+    if r.starts_with("op://")
+        && let (_, Some(account)) = op_parts(r)
+    {
+        check_op_account(&account)?;
+    }
+    Ok(())
+}
+
+/// An `op://` ref as `op` reads it, and the account it names (`?account=`), which luoto takes
+/// out: the rest of the query (`?ssh-format=openssh`) stays.
+pub fn op_parts(r: &str) -> (String, Option<String>) {
+    let Some((base, query)) = r.split_once('?') else {
+        return (r.to_string(), None);
+    };
+    let mut account = None;
+    let rest: Vec<&str> = query
+        .split('&')
+        .filter(|kv| match kv.strip_prefix("account=") {
+            Some(a) => {
+                account = Some(a.to_string());
+                false
+            }
+            None => true,
+        })
+        .collect();
+    let op_ref = if rest.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", rest.join("&"))
+    };
+    (op_ref, account)
+}
+
+/// `r` read from 1Password account `account` instead of the one it names, if any.
+pub fn op_with_account(r: &str, account: &str) -> String {
+    let (op_ref, _) = op_parts(r);
+    let sep = if op_ref.contains('?') { '&' } else { '?' };
+    format!("{op_ref}{sep}account={account}")
+}
+
+/// An account as `op --account` takes one: a sign-in address, shorthand or ID, never a flag.
+fn check_op_account(account: &str) -> Result<()> {
+    let plain = !account.is_empty()
+        && !account.starts_with('-')
+        && account
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".-_:/".contains(c));
+    if !plain {
+        bail!(
+            "`account={account}` in an op:// ref is a 1Password sign-in address \
+             (my.1password.com), shorthand or ID"
+        );
     }
     Ok(())
 }
@@ -139,12 +194,12 @@ fn file_path(p: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(p))
 }
 
-/// `op <args>` as `config.toml`'s 1Password source says: its account, and the service
-/// account's token when that mode is on.
-fn op(global: &GlobalConfig, args: &[&str]) -> Result<Command> {
+/// `op <args>` as `config.toml`'s 1Password source says: `account` (a ref's own) or its
+/// account, and the service account's token when that mode is on.
+fn op(global: &GlobalConfig, args: &[&str], account: Option<&str>) -> Result<Command> {
     let mut cmd = Command::new("op");
     cmd.args(args);
-    if let Some(acct) = &global.sources.op.account {
+    if let Some(acct) = account.or(global.sources.op.account.as_deref()) {
         cmd.args(["--account", acct]);
     }
     if global.sources.op.mode.as_deref() == Some("service-account") {
@@ -201,7 +256,19 @@ fn op_output(mut cmd: Command, what: &str, input: Option<&[u8]>) -> Result<Vec<u
 /// Trimmed as a `file:` is: text typed into 1Password (a Secure Note's) often ends in a line
 /// break, which no header value can carry.
 fn op_read(global: &GlobalConfig, r: &str) -> Result<String> {
-    let out = op_output(op(global, &["read", "--no-newline", r])?, "op read", None)?;
+    let (op_ref, account) = op_parts(r);
+    if let Some(a) = &account {
+        check_op_account(a)?;
+    }
+    let out = op_output(
+        op(
+            global,
+            &["read", "--no-newline", &op_ref],
+            account.as_deref(),
+        )?,
+        "op read",
+        None,
+    )?;
     Ok(String::from_utf8_lossy(&out)
         .trim_end_matches(['\r', '\n'])
         .to_string())
@@ -217,10 +284,41 @@ pub fn op_available() -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// Names of the 1Password vaults the account can see.
-pub fn op_vaults(global: &GlobalConfig) -> Result<Vec<String>> {
+/// An account added to the 1Password app.
+pub struct OpAccount {
+    /// Its sign-in address (`my.1password.com`), as `--account` takes it.
+    pub address: String,
+    pub email: String,
+}
+
+/// The accounts added to the 1Password app; none when `op` can't say.
+pub fn op_accounts() -> Vec<OpAccount> {
+    let Ok(out) = Command::new("op")
+        .args(["account", "list", "--format", "json"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    let list: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    list.iter()
+        .filter_map(|a| {
+            let url = a["url"].as_str()?;
+            let address = url.strip_prefix("https://").unwrap_or(url);
+            check_op_account(address).ok()?;
+            Some(OpAccount {
+                address: address.to_string(),
+                email: a["email"].as_str().unwrap_or_default().to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Names of the 1Password vaults `account` (or the default one) can see.
+pub fn op_vaults(global: &GlobalConfig, account: Option<&str>) -> Result<Vec<String>> {
     let out = op_output(
-        op(global, &["vault", "list", "--format", "json"])?,
+        op(global, &["vault", "list", "--format", "json"], account)?,
         "op vault list",
         None,
     )?;
@@ -232,11 +330,12 @@ pub fn op_vaults(global: &GlobalConfig) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Save `secret` as a new API Credential item in `vault` and return its `op://` reference
-/// (by item id, so a second item with the same title can't make it ambiguous). The secret
-/// reaches `op` on stdin, never in its arguments.
+/// Save `secret` as a new API Credential item in `vault` (of `account`, or the default one) and
+/// return its `op://` reference (by item id, so a second item with the same title can't make it
+/// ambiguous). The secret reaches `op` on stdin, never in its arguments.
 pub fn op_save(
     global: &GlobalConfig,
+    account: Option<&str>,
     vault: &str,
     title: &str,
     secret: &str,
@@ -254,6 +353,7 @@ pub fn op_save(
         op(
             global,
             &["item", "create", "--vault", vault, "--format", "json", "-"],
+            account,
         )?,
         "op item create",
         Some(&serde_json::to_vec(&item)?),
@@ -270,7 +370,11 @@ pub fn op_save(
             .as_str()
             .context("op item create: no vault")?,
     };
-    Ok(format!("op://{vault_ref}/{id}/credential"))
+    let r = format!("op://{vault_ref}/{id}/credential");
+    Ok(match account {
+        Some(a) => op_with_account(&r, a),
+        None => r,
+    })
 }
 
 fn vault_read(global: &GlobalConfig, rest: &str) -> Result<String> {
@@ -323,6 +427,38 @@ fn vault_read(global: &GlobalConfig, rest: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_op_ref_can_name_its_account() {
+        assert_eq!(op_parts("op://v/i/f"), ("op://v/i/f".into(), None));
+        assert_eq!(
+            op_parts("op://v/i/f?account=my.1password.com"),
+            ("op://v/i/f".into(), Some("my.1password.com".into()))
+        );
+        assert_eq!(
+            op_parts("op://v/ssh/private key?ssh-format=openssh&account=acme.1password.com"),
+            (
+                "op://v/ssh/private key?ssh-format=openssh".into(),
+                Some("acme.1password.com".into())
+            )
+        );
+        assert_eq!(
+            op_with_account("op://v/i/f", "my.1password.com"),
+            "op://v/i/f?account=my.1password.com"
+        );
+        assert_eq!(
+            op_with_account(
+                "op://v/k?ssh-format=openssh&account=old",
+                "new.1password.com"
+            ),
+            "op://v/k?ssh-format=openssh&account=new.1password.com"
+        );
+        assert!(check_ref("op://v/i/f?account=https://my.1password.com").is_ok());
+        for bad in ["", "-x", "a b", "a;b", "a$(id)"] {
+            let r = format!("op://v/i/f?account={bad}");
+            assert!(check_ref(&r).is_err(), "{r}");
+        }
+    }
 
     #[test]
     fn file_refs_are_absolute_or_from_home() {

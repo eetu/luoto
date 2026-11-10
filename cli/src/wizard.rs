@@ -455,47 +455,97 @@ pub fn secret(
             let Some(secret) = paste(label)? else {
                 return Ok(None);
             };
-            let Some(vault) =
-                Select::new("1Password vault:", secrets::op_vaults(global)?).prompt_skippable()?
-            else {
+            let account = pick_op_account("1Password account to save it in:", None)?;
+            let vaults = secrets::op_vaults(global, account.as_deref())?;
+            let Some(vault) = Select::new("1Password vault:", vaults).prompt_skippable()? else {
                 return Ok(None);
             };
             let note = format!(
                 "{label}. luoto hands it to its gate, which adds it to requests; the sandbox \
                  never sees it."
             );
-            let r = secrets::op_save(global, &vault, title, &secret, &note)?;
+            let r = secrets::op_save(global, account.as_deref(), &vault, title, &secret, &note)?;
             println!("saved in 1Password ({vault}) as \"{title}\": {r}");
             r
         }
         Source::Reference => {
             println!("  {OP_FIELDS}");
-            // Resolved once here (the value is dropped), so a typo shows now rather than as a
-            // locked credential at `up`.
-            let global = global.clone();
-            let label = label.to_string();
-            let Some(r) = Text::new(&format!("Reference to the {label}:"))
-                .with_placeholder("op://<vault>/<item>/<field>")
-                .with_help_message("checked against your secret store; Esc for later")
-                .with_validator(move |s: &str| {
-                    let s = s.trim();
-                    Ok(
-                        match secrets::check_ref(s).and_then(|()| secrets::resolve(&global, s)) {
-                            Ok(v) => match not_alone(&v, &label) {
-                                Some(why) => Validation::Invalid(why.into()),
-                                None => Validation::Valid,
-                            },
+            let mut last = String::new();
+            loop {
+                // The prompt checks only the form: reading the ref runs `op`, which may ask on the
+                // terminal, so it runs after the prompt has given the terminal back.
+                let Some(r) = Text::new(&format!("Reference to the {label}:"))
+                    .with_initial_value(&last)
+                    .with_placeholder("op://<vault>/<item>/<field>")
+                    .with_help_message("read from your secret store on enter; Esc for later")
+                    .with_validator(|s: &str| {
+                        Ok(match secrets::check_ref(s.trim()) {
+                            Ok(()) => Validation::Valid,
                             Err(e) => Validation::Invalid(format!("{e:#}").into()),
-                        },
-                    )
-                })
-                .prompt_skippable()?
-            else {
-                return Ok(None);
-            };
-            r.trim().to_string()
+                        })
+                    })
+                    .prompt_skippable()?
+                else {
+                    return Ok(None);
+                };
+                let r = r.trim().to_string();
+                // Read once here (the value is dropped), so a typo shows now rather than as a
+                // locked credential at `up`.
+                match readable(global, &r, label) {
+                    Ok(()) => break r,
+                    Err(e) => println!("  {}", crate::text::lines(&format!("{e:#}"))),
+                }
+                last = r;
+                // A ref naming no account is read from op's default; the token may be in another.
+                if last.starts_with("op://")
+                    && secrets::op_parts(&last).1.is_none()
+                    && let Some(a) = pick_op_account(
+                        "Which 1Password account holds it?",
+                        Some("none of these: edit the reference"),
+                    )?
+                {
+                    let with = secrets::op_with_account(&last, &a);
+                    match readable(global, &with, label) {
+                        Ok(()) => break with,
+                        Err(e) => println!("  {}", crate::text::lines(&format!("{e:#}"))),
+                    }
+                    last = with;
+                }
+            }
         }
     }))
+}
+
+/// Whether reference `r` reads, as the token `label` alone.
+fn readable(global: &GlobalConfig, r: &str, label: &str) -> Result<()> {
+    let value = secrets::resolve(global, r)?;
+    match not_alone(&value, label) {
+        Some(why) => bail!("{why}"),
+        None => Ok(()),
+    }
+}
+
+/// The sign-in address of the 1Password account picked, asked only when the app has several;
+/// `none` names a last choice that picks none.
+fn pick_op_account(question: &str, none: Option<&str>) -> Result<Option<String>> {
+    let accounts = secrets::op_accounts();
+    if accounts.len() < 2 {
+        return Ok(None);
+    }
+    let mut options: Vec<Choice<Option<String>>> = accounts
+        .into_iter()
+        .map(|a| {
+            let label = format!("{}  {}", a.address, crate::text::display(&a.email));
+            choice(Some(a.address.clone()), a.address, label)
+        })
+        .collect();
+    if let Some(n) = none {
+        options.push(choice(None, n, n));
+    }
+    Ok(Select::new(question, options)
+        .with_formatter(&short)
+        .prompt_skippable()?
+        .and_then(|c| c.value))
 }
 
 /// The field a token is in, by 1Password item type.

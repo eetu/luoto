@@ -40,7 +40,8 @@ sees a placeholder of the right format. Without one, `init`, `agent add` and `ag
 which kind you have, say where to get it, and keep it where you choose: your
 OS keychain (`keyring:luoto/<provider>.<kind>`, reused by later envs), a new 1Password item
 (the secret reaches `op` on stdin), or a reference to where it already is (`op://`,
-`vault://`, `keyring:`, `env:`, `file:`).
+`vault://`, `keyring:`, `env:`, `file:`), read once you press enter. With several 1Password
+accounts it asks which one, and the ref names it (`?account=`).
 
 `login_inside = true` is the exception: the agent signs in itself and keeps the session in
 the env's home, where any code in the sandbox can read it. Providers that allow it open their

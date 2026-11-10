@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.2
+
+- **1Password accounts:** an `op://` ref can name the account it is in
+  (`op://Private/claude/token?account=my.1password.com`), so refs from a work and a personal
+  account work side by side. With several accounts in the app, the wizard asks which one
+  holds a reference that didn't read, and which one to save a pasted secret in.
+- **Secret reference prompt:** the reference is read after you press enter, not inside the
+  prompt: an `op` error no longer garbles it, and the reference comes back to edit.
+
 ## 0.4.1 (2026-11-09)
 
 - **Agent credentials:** before you choose one, each kind of credential says where to get it;
