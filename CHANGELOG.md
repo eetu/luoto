@@ -11,8 +11,10 @@
 - **Browse 1Password:** when you give a reference, the wizard can find it for you: account,
   vault and item, filtered as you type, and the field from the item's kind (a Login's,
   Password's or Database's `password`, an API Credential's `credential`, a Secure Note's
-  `notesPlain`), or one you type; luoto reads only that field. The refs the wizard writes,
-  browsed or saved, name the vault and item by ID, so a rename doesn't break them.
+  `notesPlain`), or one you type; Esc steps back. Browsing lists names only, never a value,
+  so an item's custom fields are typed by name; luoto reads only the field you pick. The
+  refs the wizard writes, browsed or saved, name the vault and item by ID, so a rename
+  doesn't break them.
 - **Secret reference prompt:** the reference is read after you press enter, not inside the
   prompt: an `op` error no longer garbles it, and the reference comes back to edit.
 
