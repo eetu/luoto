@@ -7,7 +7,9 @@ paths = ["/upload/**", "/v1beta/files", "/v1beta/files/**", "/v1beta/cachedConte
 reason = "file upload, cache and batch endpoints of the Gemini API are not reachable from the sandbox"
 
 [auth.api_key]
-label = "Gemini API key (Google AI Studio)"
+label = "Gemini API key"
+short = "from Google AI Studio (aistudio.google.com/apikey)"
+prefix = "AIza"
 how = "aistudio.google.com/apikey > Create API key (it starts with AIza). On the free tier Google may use prompts to improve its products."
 header = "x-goog-api-key"
 format = "{secret}"

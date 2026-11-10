@@ -6,6 +6,7 @@ access = "read"
 
 [auth.token]
 label = "Cloudflare API token"
+short = "read permissions unless the env writes"
 how = "dash.cloudflare.com/profile/api-tokens > Create Token (or an account token under Manage Account > API Tokens), with read permissions unless the env sets `write = true`. A Global API Key isn't supported."
 header = "authorization"
 format = "Bearer {secret}"

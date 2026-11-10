@@ -183,18 +183,22 @@ pub fn resolve(global: &GlobalConfig, r: &str) -> Result<String> {
             .split_once('/')
             .context("keyring refs are keyring:<service>/<account>")?;
         let entry = keyring::Entry::new(service, account).context("open OS keyring")?;
-        return entry
-            .get_password()
-            .with_context(|| format!("no keyring entry {service}/{account}"));
+        return entry.get_password().map_err(|e| match e {
+            keyring::Error::NoEntry => anyhow::anyhow!("not in the keychain"),
+            e => anyhow::anyhow!("{e}"),
+        });
     }
+    // Each error names what went wrong, not the ref: callers put the ref before it.
     if let Some(name) = r.strip_prefix("env:") {
-        return std::env::var(name)
-            .with_context(|| format!("environment variable {name} is not set"));
+        return std::env::var(name).map_err(|e| match e {
+            std::env::VarError::NotPresent => anyhow::anyhow!("environment variable not set"),
+            e => anyhow::anyhow!("{e}"),
+        });
     }
     if let Some(path) = r.strip_prefix("file:") {
         let path = file_path(path)?;
         return Ok(std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?
+            .map_err(|e| anyhow::anyhow!("{e}"))?
             .trim_end_matches(['\r', '\n'])
             .to_string());
     }

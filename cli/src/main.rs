@@ -247,7 +247,8 @@ enum Cmd {
         #[command(subcommand)]
         action: AgentCmd,
     },
-    /// Repositories beside the env's folder, each at /workspace/<name>: list, add, remove.
+    /// Repositories beside the env's folder, each at /workspace/<name>: list, add, remove, and
+    /// what the env may do with a repo.
     Repo {
         #[command(subcommand)]
         action: Option<RepoCmd>,
@@ -409,6 +410,11 @@ enum RepoCmd {
     },
     /// Remove a repo from the env's config; its copy in the env stays.
     Rm { name: String },
+    /// Change what the env may do with a repo: fetch it public, read it or push, with a token.
+    Auth {
+        /// The repo's name in the workspace, or its path on the forge (`acme/api`).
+        repo: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -579,6 +585,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
                 branch,
             } => repos::add(&env()?, &source, name.as_deref(), branch.as_deref()),
             RepoCmd::Rm { name } => repos::rm(&env()?, &name),
+            RepoCmd::Auth { repo } => repos::auth(&env()?, &repo),
         },
         Cmd::Pull {
             to,

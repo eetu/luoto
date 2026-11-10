@@ -50,6 +50,58 @@ pub fn confirm(question: &str) -> bool {
     matches!(line.trim(), "y" | "Y" | "yes")
 }
 
+/// The help line under every menu: its keys, and what Esc does there (`back` past the first
+/// question; at the first, `later` or `unchanged`).
+pub fn menu_help(esc: &str) -> String {
+    format!("↑↓ to move, Enter to pick, Esc: {esc}")
+}
+
+/// Menu entries as a label and a description, the descriptions lined up after the widest
+/// label. A line fits `width` with the two columns inquire draws before it: the description
+/// is cut, never the label.
+pub fn menu_rows(rows: &[(String, String)], width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+    let wide = rows.iter().map(|(l, _)| l.width()).max().unwrap_or(0);
+    rows.iter()
+        .map(|(label, desc)| {
+            if desc.is_empty() {
+                return label.clone();
+            }
+            let room = width.saturating_sub(2 + wide + 2);
+            let pad = " ".repeat(wide - label.width());
+            format!("{label}{pad}  {}", crate::text::fit(desc, room, true))
+        })
+        .collect()
+}
+
+/// The closing summary of a step that wrote config: what it is about, then a row per setting
+/// (`credential`, `access`) and the command that changes it. Every summary's values start in
+/// the same column, unless a key is longer.
+pub fn summary(title: &str, rows: &[(&str, String)]) -> String {
+    let wide = rows
+        .iter()
+        .map(|(k, _)| k.len() + 3)
+        .max()
+        .unwrap_or(0)
+        .max("credential".len() + 3);
+    let mut out = title.to_string();
+    for (k, v) in rows {
+        out.push_str(&format!("\n  {k:<wide$}{v}"));
+    }
+    out
+}
+
+/// `what` and the command that acts on it: on one line where it fits `width`, else the
+/// command on a line of its own.
+pub fn with_command(what: &str, command: &str, width: usize) -> String {
+    let one = format!("{what}; {command}");
+    if one.chars().count() <= width {
+        one
+    } else {
+        format!("{what}:\n  {command}")
+    }
+}
+
 /// One-letter answer to `question`; Enter picks `default`.
 pub fn ask(question: &str, default: char) -> char {
     print!("{question} ");

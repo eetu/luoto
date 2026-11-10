@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::queue;
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::runtime::Runtime;
 use crate::text::{self, Relay};
@@ -339,7 +338,7 @@ fn rest(look: Look, took: Duration, latest: Option<&str>, key: bool, width: usiz
         let _ = paint(
             &mut out,
             look.grey(),
-            &format!("  {}", fit(l, room, look.unicode)),
+            &format!("  {}", text::fit(l, room, look.unicode)),
         );
     }
     if key {
@@ -353,25 +352,6 @@ fn paint(e: &mut impl Write, color: Option<Color>, s: &str) -> std::io::Result<(
         Some(c) => queue!(e, SetForegroundColor(c), Print(s), ResetColor),
         None => queue!(e, Print(s)),
     }
-}
-
-/// `s` cut to `room` columns, ending in an ellipsis when cut.
-fn fit(s: &str, room: usize, unicode: bool) -> String {
-    if s.width() <= room {
-        return s.to_string();
-    }
-    let more = if unicode { "…" } else { "..." };
-    let mut out = String::new();
-    let mut used = more.width();
-    for c in s.chars() {
-        let w = c.width().unwrap_or(0);
-        if used + w > room {
-            break;
-        }
-        out.push(c);
-        used += w;
-    }
-    out + more
 }
 
 /// `12s`, `3m 05s`.
@@ -472,6 +452,50 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
+    tool_with(rt, args, also, &|out| last_lines(out, TAIL_LINES))
+}
+
+/// [`tool`] for git in the env: a failure shows [`git_tail`].
+pub fn git<I, S>(rt: &Runtime, args: I) -> Result<ExitStatus>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    tool_with(rt, args, &|_| {}, &git_tail)
+}
+
+/// What a failed git shows of its output: its `fatal:` and `error:` lines, and the reason the
+/// gate gave for a request it refused; its last lines when it printed none of those.
+fn git_tail(out: &[u8]) -> Vec<String> {
+    let kept: Vec<String> = last_lines(out, usize::MAX)
+        .into_iter()
+        .filter_map(|l| {
+            let t = l.trim_start();
+            if t.starts_with("fatal:") || t.starts_with("error:") {
+                Some(t.to_string())
+            } else {
+                t.strip_prefix("remote: reason:")
+                    .map(|r| format!("the gate: {}", r.trim()))
+            }
+        })
+        .collect();
+    if kept.is_empty() {
+        last_lines(out, TAIL_LINES)
+    } else {
+        kept
+    }
+}
+
+fn tool_with<I, S>(
+    rt: &Runtime,
+    args: I,
+    also: &(dyn Fn(&[u8]) + Sync),
+    tail: &dyn Fn(&[u8]) -> Vec<String>,
+) -> Result<ExitStatus>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
     let out = Arc::new(Mutex::new(Output::new(
         verbose() || SHOWN.load(Ordering::Relaxed),
     )));
@@ -493,7 +517,7 @@ where
     if o.shown {
         o.finish();
     } else if !status.success() {
-        let tail = last_lines(&o.kept, TAIL_LINES);
+        let tail = tail(&o.kept);
         say(|| {
             for line in tail {
                 eprintln!("  {line}");
@@ -711,6 +735,7 @@ mod term {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthStr;
 
     const TRUE: Look = Look {
         colors: Colors::True,
@@ -778,11 +803,26 @@ mod tests {
     }
 
     #[test]
-    fn the_latest_line_is_cut_to_the_columns_left() {
-        assert_eq!(fit("short", 10, true), "short");
-        assert_eq!(fit("Downloading release", 10, true), "Downloadi…");
-        assert_eq!(fit("Downloading release", 10, false), "Downloa...");
-        assert_eq!(fit("日本語の行", 7, true), "日本語…");
+    fn a_failed_git_shows_its_errors_and_the_gates_reason() {
+        let out = b"Cloning into '/workspace/.api.luoto-clone'...\n\
+            remote: luoto: egress blocked by the sandbox policy of env \"web\"\n\
+            remote: request: GET https://github.com/acme/api.git/info/refs\n\
+            remote: reason:  no rule allows github.com\n\
+            remote:\n\
+            remote: To allow it, the user can run on the host:\n\
+            remote:   luoto allow -e web github.com\n\
+            fatal: unable to access 'https://github.com/acme/api.git/': The requested URL \
+            returned error: 403\n";
+        assert_eq!(
+            git_tail(out),
+            [
+                "the gate: no rule allows github.com",
+                "fatal: unable to access 'https://github.com/acme/api.git/': The requested URL \
+                 returned error: 403",
+            ]
+        );
+        // Nothing it recognizes: its last lines, as any tool's.
+        assert_eq!(git_tail(b"one\ntwo\n"), ["one", "two"]);
     }
 
     /// What a terminal shows of `bytes`: control sequences left out.

@@ -291,7 +291,52 @@ fn check(p: &Proposal) -> Result<()> {
     Ok(())
 }
 
-fn print_proposal(p: &Proposal) {
+/// How each of the proposal's agents signs in once the env exists: what `--credential`
+/// (`specs`) gives it, else what its first `up` does (asks, when it `asks`; else a login
+/// inside where the provider allows one).
+fn credential_rows(p: &Proposal, specs: &[String], asks: bool) -> Vec<String> {
+    use luoto_shared::profiles;
+    let mut rows = Vec::new();
+    for name in p.cfg.agents.names() {
+        let Some(a) = profiles::agent(name) else {
+            continue;
+        };
+        if a.providers.is_empty() {
+            continue;
+        }
+        let providers: Vec<profiles::Provider> = a
+            .providers
+            .iter()
+            .filter_map(|n| profiles::provider(n))
+            .collect();
+        let given = specs.iter().find_map(|s| {
+            let (key, r) = match s.split_once('=') {
+                Some((k, r)) => (k.trim(), Some(r.trim())),
+                None => (s.trim(), None),
+            };
+            let kind = key.rsplit('.').next().unwrap_or(key);
+            providers.iter().find_map(|p| match r {
+                Some(r) => p
+                    .auth
+                    .get(kind)
+                    .map(|k| format!("{} = {}", k.label, crate::secrets::shown_ref(r))),
+                None => (kind == "login_inside" && !p.login_hosts.is_empty())
+                    .then(|| "log in inside the sandbox".to_string()),
+            })
+        });
+        let login = providers.iter().any(|p| !p.login_hosts.is_empty());
+        let how = match given {
+            Some(g) => g,
+            None if asks => "not set (asked at the first up)".into(),
+            None if login => "log in inside the sandbox (no terminal to ask on)".into(),
+            None => format!("not set (`luoto agent auth -e {} {name}`)", p.name),
+        };
+        rows.push(format!("{name}: {how}"));
+    }
+    rows
+}
+
+fn print_proposal(p: &Proposal, specs: &[String], asks: bool) {
     const INDENT: &str = "             ";
     let ws = &p.cfg.workspace;
     println!(
@@ -416,17 +461,8 @@ fn print_proposal(p: &Proposal) {
         let names: Vec<&str> = p.cfg.agents.names().map(String::as_str).collect();
         println!("  agents     {}", names.join(", "));
     }
-    for (provider, entries) in &p.cfg.credentials.providers {
-        let how: Vec<String> = entries
-            .iter()
-            .map(|(k, v)| match v {
-                config::ProviderValue::Ref(r) => {
-                    format!("{k} from {}", crate::secrets::shown_ref(r))
-                }
-                config::ProviderValue::Flag(_) => "logs in inside the sandbox".to_string(),
-            })
-            .collect();
-        println!("  credential {provider}: {}", how.join(", "));
+    for row in credential_rows(p, specs, asks) {
+        println!("  credential {row}");
     }
     if !p.cfg.ports.is_empty() {
         let ports: Vec<String> = p.cfg.ports.iter().map(u16::to_string).collect();
@@ -609,11 +645,11 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
                 "new"
             }
         );
-        crate::wizard::customize(&mut p, &ctx.global)?;
+        crate::wizard::customize(&mut p)?;
         check(&p)?;
         println!();
     }
-    print_proposal(&p);
+    print_proposal(&p, &o.credentials, interactive);
     if interactive {
         loop {
             match ask("\nCreate it? [Y/n/c = customize]", 'y') {
@@ -623,10 +659,10 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
                     return Ok(ExitCode::SUCCESS);
                 }
                 'c' => {
-                    crate::wizard::customize(&mut p, &ctx.global)?;
+                    crate::wizard::customize(&mut p)?;
                     check(&p)?;
                     println!();
-                    print_proposal(&p);
+                    print_proposal(&p, &o.credentials, interactive);
                 }
                 _ => println!("y creates it, n stops, c goes through the settings one by one"),
             }
@@ -960,6 +996,35 @@ mod tests {
             ..Default::default()
         };
         assert!(propose(&paths, &branch_on_folder).is_err());
+    }
+
+    #[test]
+    fn the_proposal_says_how_each_agent_will_sign_in() {
+        let o = InitOpts {
+            dir: Some(tempfile::tempdir().unwrap().keep().display().to_string()),
+            agents: vec!["claude".into(), "copilot".into()],
+            ..Default::default()
+        };
+        let p = propose(&paths(), &o).unwrap();
+        assert_eq!(
+            credential_rows(&p, &[], true),
+            [
+                "claude: not set (asked at the first up)",
+                "copilot: not set (asked at the first up)"
+            ]
+        );
+        let name = &p.name;
+        assert_eq!(
+            credential_rows(&p, &[], false),
+            [
+                "claude: log in inside the sandbox (no terminal to ask on)".to_string(),
+                format!("copilot: not set (`luoto agent auth -e {name} copilot`)"),
+            ]
+        );
+        assert_eq!(
+            credential_rows(&p, &["oauth_token=env:T".into()], true)[0],
+            "claude: Claude subscription token = env:T"
+        );
     }
 
     #[test]

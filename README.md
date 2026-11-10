@@ -171,6 +171,7 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | to answer access requests from inside                                                                | `luoto requests` (`--watch` waits)<br>`luoto approve 3 --ttl 1h`<br>`luoto approve 3 --read --path '/v1/**'`<br>`luoto reject 3`   |
 | an agent (installed on first run)                                                                    | `luoto agent run claude --yolo`<br>`luoto agent list`                                                                              |
 | another credential for an agent, or a login inside instead                                           | `luoto agent auth claude`                                                                                                          |
+| what the env may do with a repo: fetch it if public, read it, or push                                | `luoto repo auth acme/api`                                                                                                         |
 | a dev server in your browser                                                                         | run it: its port is forwarded to localhost here (`luoto status` lists it)<br>`luoto forward 8080:5173` (to another local port)     |
 | your work out: push from the env (with a GitHub, Azure DevOps or SSH credential), or copy files back | `git push`<br>`luoto pull`                                                                                                         |
 | image or config changes applied (volumes are kept)                                                   | `luoto up --recreate`                                                                                                              |
@@ -524,7 +525,7 @@ repository it copies what git doesn't ignore, so ignored files such as `.env`, `
 state files stay on your machine. Development happens inside, in Zed or VS Code attached to
 the env, and work leaves as git pushes (with a `[credentials.github]`,
 `[credentials.azure_devops]` or `[[credentials.git]]` for the repo, or `[credentials.ssh]` for
-an SSH remote; `up` asks for the ones the env's remotes need). `luoto pull` brings files back when you need them on the host: it lists changed
+an SSH remote; `up` asks for the ones the env's remotes need, `luoto repo auth` changes one). `luoto pull` brings files back when you need them on the host: it lists changed
 files, skips risky ones (in the folder or any folder within it, such as a repository's own
 `.git` or `.envrc`) unless you pass `--include-risky`, refuses paths or symlinks that leave
 the folder, and never writes through host symlinks. `.git` and heavy directories

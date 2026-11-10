@@ -8,24 +8,44 @@
   asks which one holds a reference that didn't read, and which one to save a pasted secret in,
   and writes its ID; luoto shows the account as its address and email. A sign-in address
   works too, unless several accounts share it, as personal and family ones do.
-- **Browse 1Password:** when you give a reference, the wizard can find it for you: account,
+- **Browse 1Password:** "It's already in 1Password" finds a reference for you: account,
   vault and item, filtered as you type, and the field from the item's kind (a Login's,
   Password's or Database's `password`, an API Credential's `credential`, a Secure Note's
   `notesPlain`), or one you type; Esc steps back. Browsing lists names only, never a value,
   so an item's custom fields are typed by name; luoto reads only the field you pick. The
   refs the wizard writes, browsed or saved, name the vault and item by ID, so a rename
   doesn't break them.
-- **`luoto agent auth`:** asks again how an agent the env has authenticates, each question
-  opening on what the env has: its kind marked (current), "keep the current one" first, a
-  typed reference starting from it. Esc at the first question leaves it unchanged. It writes
-  only the provider's kind or `login_inside`, keeping `server_tools` and `write`, as
-  `--credential` does, and a running env takes it at once.
-- **Credential questions:** Esc goes back a question; at the first, Esc or "later" writes
-  nothing, and the next `up` or `agent run` asks again. `login_inside` is written when you
-  pick it, or without a terminal. A paste into 1Password comes after its account and vault.
-  Each menu names its keys. The questions end with one line: the reference, the login inside
-  with how to sign in, or no credential yet, and the `luoto agent auth` command that changes
-  it. `server_tools = true` alone is no credential: the questions are asked.
+- **`luoto agent auth`:** asks again how an agent the env has signs in, each question
+  opening on what the env has, marked (current): "Keep the current one" first, a typed
+  reference starting from it. Esc at the first question leaves it unchanged. OpenCode picks
+  the provider first, so it can have a credential for several; an agent that only signs in
+  inside (Antigravity) has nothing to choose. Without a terminal it names the
+  `--credential` forms the agent takes (`oauth_token=<ref>`, `api_key=<ref>`,
+  `login_inside`). It writes only the provider's kind or `login_inside`, keeping
+  `server_tools` and `write`, and a running env takes it at once.
+- **Credential questions:** each kind is named with what sets it apart, the provider's usual
+  one first and (recommended), and the one you pick says where to get it; then one menu asks
+  where it is kept: pasted into your OS keychain or 1Password, already in 1Password, or
+  somewhere else (a reference). A value that doesn't start as its kind does (`sk-ant-oat`,
+  `sk-ant-api`, `sk-`, …) is asked for again, without being shown. Esc goes back a question;
+  at the first, Esc or "Later" writes nothing, and the next `up` or `agent run` asks again.
+  `login_inside` is written when you pick it, or without a terminal. A paste into 1Password
+  comes after its account and vault. Each menu names its keys and fits 80 columns. The
+  questions end with a summary: the credential (its reference) or none yet, and the `luoto
+  agent auth` command that changes it. `server_tools = true` alone is no credential: the
+  questions are asked. `agent add` asks only about the agent it adds, and prints the env's
+  closing block only when it started the env; `luoto init` leaves the questions to the env's
+  first `up`, so nothing is stored for an env you don't create.
+- **Repo access:** for a repo no credential covers, `up` asks what the env may do with it,
+  least privilege first: fetch it if it is public, read it, or read and push, with the token
+  scopes its forge names. Every answer ends with a summary and the `luoto repo auth` command
+  that changes it; "Later" clones nothing. A clone that fails shows git's errors and the
+  gate's reason, not all it printed.
+- **`luoto repo auth <repo>`:** asks a repo's access again, opening on what the env has, its
+  token kept or replaced; it moves the repo between `repos` and `read_repos` of its
+  credential, keeping the credential's other settings, and a running env takes it and clones
+  a repo that waited. A new token replaces the credential's for every repo it lists, and the
+  question names them first.
 - **Progress:** installs, clones and copies print their line and, on a terminal, a dot
   pulsing in the UI's orange with the time so far and the latest line the tool printed; `o`
   shows the tool's whole output from there. What installers and git print goes to the install
@@ -33,11 +53,12 @@
   command) or, its last lines, when one fails; it reaches the terminal escaped, as other text
   from the env does. Prompts mark their choices in the same orange; `NO_COLOR` turns colors
   off.
-- **Agents that sign in inside:** the ready line puts the command first, then how to sign in;
-  `up` warns about `login_inside` only for a provider whose credential the gate could add
-  instead.
+- **Agents:** "ready" only for an agent that can sign in; one without a credential is
+  "installed", with the command that gives it one. `up` warns about `login_inside` only for a
+  provider whose credential the gate could add instead.
 - **Secret reference prompt:** the reference is read after you press enter, not inside the
-  prompt: an `op` error no longer garbles it, and the reference comes back to edit.
+  prompt: an `op` error no longer garbles it, one that doesn't read says why on one line, and
+  the reference comes back to edit.
 
 ## 0.4.1 (2026-11-09)
 

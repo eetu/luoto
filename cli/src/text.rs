@@ -84,6 +84,64 @@ pub fn sh_quote(s: &str) -> String {
     }
 }
 
+/// `s` cut to `room` columns, ending in an ellipsis when cut.
+pub fn fit(s: &str, room: usize, unicode: bool) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if s.width() <= room {
+        return s.to_string();
+    }
+    let more = if unicode { "…" } else { "..." };
+    let mut out = String::new();
+    let mut used = more.width();
+    for c in s.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > room {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out + more
+}
+
+/// The columns luoto's own prose takes: 80, or fewer on a narrower terminal; one to spare,
+/// so a line never wraps.
+pub fn columns() -> usize {
+    crossterm::terminal::size()
+        .ok()
+        .map(|(w, _)| usize::from(w))
+        .filter(|w| *w > 0)
+        .unwrap_or(80)
+        .min(80)
+        - 1
+}
+
+/// `s` broken at spaces into lines of at most `width` columns, each after `indent`; a word
+/// longer than a line keeps a line of its own.
+pub fn wrap(s: &str, indent: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let room = width.saturating_sub(indent.width()).max(20);
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in s.split_whitespace() {
+        if !line.is_empty() && line.width() + 1 + word.width() > room {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+        .iter()
+        .map(|l| format!("{indent}{l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Unicode general category Cf (format) code points that affect how text renders.
 pub fn is_format(c: char) -> bool {
     matches!(
@@ -108,7 +166,27 @@ pub fn is_format(c: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Relay, display, sh_quote};
+    use super::{Relay, display, fit, sh_quote, wrap};
+
+    #[test]
+    fn prose_breaks_at_spaces_within_its_width() {
+        let s = "Run `claude setup-token` on your machine (not in the env): it opens your browser";
+        let w = wrap(s, "  ", 40);
+        assert_eq!(
+            w,
+            "  Run `claude setup-token` on your\n  machine (not in the env): it opens\n  your browser"
+        );
+        assert!(w.lines().all(|l| l.len() <= 40));
+        assert_eq!(wrap("", "  ", 40), "");
+    }
+
+    #[test]
+    fn cut_text_ends_in_an_ellipsis() {
+        assert_eq!(fit("short", 10, true), "short");
+        assert_eq!(fit("Downloading release", 10, true), "Downloadi…");
+        assert_eq!(fit("Downloading release", 10, false), "Downloa...");
+        assert_eq!(fit("日本語の行", 7, true), "日本語…");
+    }
 
     #[test]
     fn relayed_output_keeps_its_lines_and_progress_but_no_controls() {

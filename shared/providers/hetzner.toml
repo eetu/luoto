@@ -7,6 +7,7 @@ access = "read"
 
 [auth.token]
 label = "Hetzner Cloud API token"
+short = "a project's token, Read unless the env writes"
 how = "Hetzner Console > your project > Security > API tokens > Generate API token. A Read token is enough unless the env sets `write = true`."
 header = "authorization"
 format = "Bearer {secret}"

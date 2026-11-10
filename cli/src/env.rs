@@ -379,6 +379,9 @@ pub struct UpOptions {
     /// Skip the isolation self-test after a start.
     pub no_selftest: bool,
     pub quiet: bool,
+    /// Leave out the closing block (`env … is up` and the commands for it): the env was
+    /// running, and the command is about something in it.
+    pub brief: bool,
     /// Install what a remote cloned into the workspace pins without asking (`init --yes`).
     pub accept_installs: bool,
 }
@@ -495,8 +498,12 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     // Nothing the clone of the env's own remote brings runs, installs or is granted until the
     // user has seen its luoto.toml (`project::review`) and what it would install (below).
     let mut cloned_workspace = false;
-    if fresh_work || !state.seeded {
-        let ws = &p.cfg.workspace;
+    let ws = &p.cfg.workspace;
+    // A remote whose access was left for later: its clone would only fail.
+    let waits = |ws: &crate::config::Workspace| {
+        ws.dir.is_none() && ws.url.as_deref().is_some_and(|u| repos::waits(env, u))
+    };
+    if (fresh_work || !state.seeded) && !waits(ws) {
         match (&ws.dir, &ws.url) {
             (Some(dir), _) => {
                 let dir = workspace::canonical(dir)?;
@@ -617,7 +624,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
 
     crate::watch::spawn(ctx);
 
-    if !opts.quiet {
+    if !opts.quiet && !opts.brief {
         println!(
             "env `{env}` is up{}",
             if dev == Launch::Created {

@@ -36,20 +36,24 @@ sandbox is the boundary, so the prompts guard nothing luoto doesn't.
 
 A provider credential lives outside the sandbox. luoto reads it on your machine, the vault
 keeps it in memory, and the gate adds it to the agent's requests to that provider. The agent
-sees a placeholder of the right format. Without one, `init`, `agent add` and `agent run` ask
-which kind you have, say where to get it, and keep it where you choose: your
-OS keychain (`keyring:luoto/<provider>.<kind>`, reused by later envs), a new 1Password item
-(the secret reaches `op` on stdin), or a reference to where it already is (`op://`,
-`vault://`, `keyring:`, `env:`, `file:`), read once you press enter. The reference can be
-typed, or found by browsing 1Password: account, vault and item, filtered as you type, with
-the field the item's kind keeps a secret in (or one you type). With several 1Password
-accounts it asks which one, and the ref names it by ID (`?account=<account ID>`).
+sees a placeholder of the right format. Without one, the env's first `up` (also after `init`),
+`agent add` and `agent run` ask how the agent signs in, the provider's usual kind first and
+marked (recommended), then say where to get the one you pick and ask where it is kept: pasted
+into your OS keychain (`keyring:luoto/<provider>.<kind>`, reused by later envs) or into a new
+1Password item (the secret reaches `op` on stdin), found by browsing 1Password, or somewhere
+else (`op://`, `vault://`, `keyring:`, `env:`, `file:`), read once you press enter. A pasted
+or referenced value that doesn't start as its kind does (`sk-ant-oat` for a Claude
+subscription token, `sk-ant-api` for an Anthropic API key) is asked for again. Browsing goes
+account, vault and item, filtered as you type, then the field the item's kind keeps a secret
+in (or one you type); with several 1Password accounts it asks which one, and the ref names it
+by ID (`?account=<account ID>`). `agent add` asks only about the agent it adds.
 
-Esc goes back a question. At the first, Esc or "later" writes nothing, and the next `up` or
-`agent run` asks again. The questions end with one line: what the env has now, and
-`luoto agent auth -e <env> <agent>`, which asks them again for an agent the env has, opening
-on its current kind and reference (Esc at the first question leaves it unchanged). Without a
-terminal, `agent add --credential` sets it
+Esc goes back a question. At the first, Esc or "Later" writes nothing, and the next `up` or
+`agent run` asks again. The questions end with a summary: the credential the env has now
+(its reference, never its value) and `luoto agent auth -e <env> <agent>`, which asks them
+again for an agent the env has, each opening on what it has, marked (current); Esc at the
+first leaves it unchanged. For OpenCode it first asks which provider, so it can have a
+credential for several. Without a terminal, `agent add --credential` sets it
 ([guides/agent-settings.md](guides/agent-settings.md#credentials-without-the-prompt)). Either
 replaces only the provider's kind or `login_inside`: its `server_tools` and `write` stay.
 
