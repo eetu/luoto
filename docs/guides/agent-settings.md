@@ -30,7 +30,9 @@ $ luoto init --agent claude --credential oauth_token=op://Private/claude/token
 ```
 
 It takes `KIND=REF`, `PROVIDER.KIND=REF` where two agents' providers share a kind, or
-`login_inside`; the reference must resolve, and replaces the credential the env has.
+`login_inside`; the reference must resolve. It replaces the provider's kind or `login_inside`,
+and its other settings (`server_tools`, `write`) stay. On a terminal, `luoto agent auth claude`
+does the same through the questions, opening on what the env has.
 
 ## Your settings in every env
 

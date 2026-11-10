@@ -1,7 +1,7 @@
 description = "OpenAI API (Codex, OpenCode, …)"
 host = "api.openai.com"
 login_hosts = ["auth.openai.com", "chatgpt.com"]
-login_how = "In `luoto shell`, run `codex` and sign in with ChatGPT. The session stays in the env's home, where its code can read it."
+login_how = "In `luoto shell`, run `codex` and sign in with ChatGPT."
 # Codex streams responses over wss://api.openai.com/v1/responses before falling back to HTTPS.
 ws = true
 

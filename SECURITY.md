@@ -253,8 +253,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   opens them only for modules on code hosts and on domains the Go project, Google, the CNCF
   and Uber run, and gopkg.in; allowing another host's paths opens a request to that host.
 - **`sandbox_secrets`** and `login_inside` provider logins put credentials inside the sandbox
-  by design. An agent added without a credential logs in inside where its provider allows it,
-  so its session is in the sandbox until you configure a credential instead.
+  by design. On a terminal, an agent logs in inside only when you pick it; one added without a
+  terminal or a credential logs in inside where its provider allows it, so its session is in
+  the sandbox until `luoto agent auth` gives it a credential outside.
 
 ## Reporting
 

@@ -1,7 +1,7 @@
 description = "Anthropic API (Claude models; Claude Code)"
 host = "api.anthropic.com"
 login_hosts = ["claude.ai", "claude.com", "platform.claude.com", "console.anthropic.com"]
-login_how = "In `luoto shell`, run `claude` and log in. The session, with full scopes, stays in the env's home, where its code can read it."
+login_how = "In `luoto shell`, run `claude` and log in; the session has full scopes."
 suggested = "oauth_token"
 
 [[deny]]

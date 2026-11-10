@@ -1,10 +1,11 @@
 //! Coding agents inside envs: install (through short-lived egress grants), link the luoto
 //! briefing into the agent's global instructions, register the sandbox MCP server, run.
 
+use std::collections::BTreeSet;
 use std::io::{self, IsTerminal};
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -12,13 +13,12 @@ use chrono::TimeDelta;
 use luoto_shared::policy::Rule;
 use luoto_shared::profiles;
 
-use std::collections::BTreeMap;
-
-use crate::config::{EnvFile, ProviderValue};
+use crate::config::{EnvConfig, EnvFile, ProviderValue};
 use crate::connect::exec_login;
 use crate::env::{self, Ctx, UID};
 use crate::logs::InstallLog;
 use crate::text::sh_quote;
+use crate::wizard::Answer;
 use crate::{events, names, secrets, sync};
 
 pub fn list() -> Result<ExitCode> {
@@ -131,13 +131,123 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
     Ok(())
 }
 
-/// The agents `cfg` lists (the accepted luoto.toml's included) that have no credential.
-fn lacking(ctx: &Ctx, env_name: &str, cfg: &crate::config::EnvConfig) -> Result<Vec<String>> {
+/// How an agent's model API authenticates in an env.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Auth {
+    /// `<kind> = "<reference>"` under `[credentials.<provider>]`: the gate adds it.
+    Kind {
+        provider: String,
+        kind: String,
+        reference: String,
+    },
+    /// `login_inside = true`: the agent signs in itself, its session in the env.
+    LoginInside { provider: String },
+}
+
+impl Auth {
+    pub fn provider(&self) -> &str {
+        match self {
+            Auth::Kind { provider, .. } | Auth::LoginInside { provider } => provider,
+        }
+    }
+
+    /// Its key and value under `[credentials.<provider>]`.
+    pub fn entry(&self) -> (&str, ProviderValue) {
+        match self {
+            Auth::Kind {
+                kind, reference, ..
+            } => (kind, ProviderValue::Ref(reference.clone())),
+            Auth::LoginInside { .. } => ("login_inside", ProviderValue::Flag(true)),
+        }
+    }
+}
+
+/// How `cfg` has agent `a` authenticate: a reference for an auth kind of one of its providers,
+/// or `login_inside = true`. The table's other keys (`server_tools`, `write`) say nothing of it.
+pub fn current(cfg: &EnvConfig, a: &profiles::Agent) -> Option<Auth> {
+    a.providers.iter().find_map(|name| {
+        let entries = cfg.credentials.providers.get(name)?;
+        if entries.get("login_inside") == Some(&ProviderValue::Flag(true)) {
+            return Some(Auth::LoginInside {
+                provider: name.clone(),
+            });
+        }
+        profiles::provider(name)?
+            .auth
+            .keys()
+            .find_map(|kind| match entries.get(kind) {
+                Some(ProviderValue::Ref(r)) => Some(Auth::Kind {
+                    provider: name.clone(),
+                    kind: kind.clone(),
+                    reference: r.clone(),
+                }),
+                _ => None,
+            })
+    })
+}
+
+/// Whether the env says how agent `a` authenticates. Agents without providers (local models)
+/// need nothing.
+pub fn has_credential(cfg: &EnvConfig, a: &profiles::Agent) -> bool {
+    a.providers.is_empty() || current(cfg, a).is_some()
+}
+
+/// The (env, agent) pairs whose credential step ended in this command, with [`settle`]'s line:
+/// a "later" holds until the command ends, and the ready line doesn't say it again.
+static SETTLED: Mutex<BTreeSet<(String, String)>> = Mutex::new(BTreeSet::new());
+
+fn settled(env_name: &str, name: &str) -> bool {
+    SETTLED
+        .lock()
+        .is_ok_and(|s| s.contains(&(env_name.to_string(), name.to_string())))
+}
+
+/// End a credential step for agent `name` with one line: what the env has now (`None`:
+/// nothing), and the command that changes it.
+pub fn settle(env_name: &str, name: &str, a: &profiles::Agent, now: Option<&Auth>) {
+    println!("{}", settled_line(env_name, name, a, now));
+    if let Ok(mut s) = SETTLED.lock() {
+        s.insert((env_name.to_string(), name.to_string()));
+    }
+}
+
+fn settled_line(env_name: &str, name: &str, a: &profiles::Agent, now: Option<&Auth>) -> String {
+    let change = format!("`luoto agent auth -e {env_name} {name}`");
+    match now {
+        Some(Auth::Kind {
+            kind, reference, ..
+        }) => format!(
+            "credential: {kind} = {}. Change it: {change}",
+            secrets::shown_ref(reference)
+        ),
+        Some(Auth::LoginInside { provider }) => {
+            let p = profiles::provider(provider);
+            let mut line = format!(
+                "{} signs in inside `{env_name}` (its session is readable by code in the env).",
+                a.description
+            );
+            if let Some(how) = p.as_ref().and_then(|p| p.login_how.as_deref()) {
+                line.push(' ');
+                line.push_str(how);
+            }
+            if p.is_some_and(|p| !p.auth.is_empty()) {
+                line.push_str(&format!(" Keep a credential outside instead: {change}"));
+            }
+            line
+        }
+        None => format!("No credential for {} yet. Set one: {change}", a.description),
+    }
+}
+
+/// The agents `cfg` lists (the accepted luoto.toml's included) that have no credential and
+/// weren't left for later in this command.
+fn lacking(ctx: &Ctx, env_name: &str, cfg: &EnvConfig) -> Result<Vec<String>> {
     let own = EnvFile::load(&ctx.paths, env_name)?.cfg;
     Ok(cfg
         .agents
         .names()
         .filter(|n| profiles::agent(n).is_some_and(|a| !has_credential(&own, &a)))
+        .filter(|n| !settled(env_name, n))
         .cloned()
         .collect())
 }
@@ -145,13 +255,15 @@ fn lacking(ctx: &Ctx, env_name: &str, cfg: &crate::config::EnvConfig) -> Result<
 /// For the agents `cfg` lists with no credential: on a terminal, ask how each authenticates,
 /// as `agent add` does, and write the answer into the env's config (`up` asks before it
 /// starts the gate, so the gate has it). Without one, say what to add and change nothing.
-pub fn ask_missing(ctx: &Ctx, env_name: &str, cfg: &crate::config::EnvConfig) -> Result<()> {
+pub fn ask_missing(ctx: &Ctx, env_name: &str, cfg: &EnvConfig) -> Result<()> {
     let lacking = lacking(ctx, env_name, cfg)?;
     if crate::prompt::interactive() {
         return credentials(ctx, env_name, &lacking, true);
     }
-    for a in lacking.iter().filter_map(|n| profiles::agent(n)) {
-        eprintln!("note: {}", credential_help(&a, env_name));
+    for name in &lacking {
+        if let Some(a) = profiles::agent(name) {
+            eprintln!("note: {}", credential_help(ctx, env_name, name, &a));
+        }
     }
     Ok(())
 }
@@ -209,7 +321,7 @@ pub fn ensure(ctx: &Ctx, env_name: &str, agents: &[String], quiet: bool) -> Resu
             println!(
                 "{} is ready: luoto agent run -e {env_name} {name} ({})",
                 a.description,
-                auth_summary(&cfg, a, env_name)
+                auth_summary(&cfg, env_name, name, a)
             );
         }
     }
@@ -219,114 +331,103 @@ pub fn ensure(ctx: &Ctx, env_name: &str, agents: &[String], quiet: bool) -> Resu
     Ok(())
 }
 
-/// How agent `a` authenticates in the env, in a few words.
-fn auth_summary(cfg: &crate::config::EnvConfig, a: &profiles::Agent, env_name: &str) -> String {
-    let found = a
-        .providers
-        .iter()
-        .find_map(|p| Some((p, cfg.credentials.providers.get(p)?)));
-    match found {
+/// How agent `name` authenticates in the env, in a few words; fewer when this command's
+/// [`settle`] line said it.
+fn auth_summary(cfg: &EnvConfig, env_name: &str, name: &str, a: &profiles::Agent) -> String {
+    let said = settled(env_name, name);
+    match current(cfg, a) {
         _ if a.providers.is_empty() => "no credential needed".into(),
-        Some((_, entries))
-            if entries
-                .values()
-                .any(|v| matches!(v, ProviderValue::Flag(true))) =>
-        {
-            format!(
-                "it signs in inside: `{}` in `luoto shell -e {env_name}`",
-                a.command
-            )
-        }
-        Some((p, entries)) => format!(
-            "the gate adds [credentials.{p}] {}",
-            entries.keys().cloned().collect::<Vec<_>>().join(", ")
+        Some(Auth::LoginInside { .. }) if said => "signs in inside".into(),
+        Some(Auth::LoginInside { .. }) => format!(
+            "it signs in inside: `{}` in `luoto shell -e {env_name}`",
+            a.command
         ),
-        None => format!("no credential yet: {}", credential_help(a, env_name)),
+        Some(Auth::Kind { provider, kind, .. }) => {
+            format!("the gate adds [credentials.{provider}] {kind}")
+        }
+        None if said => "no credential yet".into(),
+        None => format!("no credential yet: `luoto agent auth -e {env_name} {name}`"),
     }
 }
 
 /// For each of `agents` that has no credential in the env yet: ask for one on a terminal (as
 /// `agent add` does), else log in inside where the provider allows it, else say how to add one.
 fn credentials(ctx: &Ctx, env_name: &str, agents: &[String], interactive: bool) -> Result<()> {
-    for a in agents.iter().filter_map(|n| profiles::agent(n)) {
-        if !ask_credential(ctx, env_name, &a, interactive)? {
-            println!("\n{}", credential_help(&a, env_name));
+    for name in agents {
+        let Some(a) = profiles::agent(name) else {
+            continue;
+        };
+        // An answer for an earlier agent may serve this one: they share a provider.
+        if has_credential(&EnvFile::load(&ctx.paths, env_name)?.cfg, &a) {
+            continue;
+        }
+        if interactive {
+            ask(ctx, env_name, name, &a, false)?;
+        } else if !login_inside(ctx, env_name, name, &a)? {
+            println!("\n{}", credential_help(ctx, env_name, name, &a));
         }
     }
     Ok(())
 }
 
-/// Whether agent `a` can authenticate in the env, asking for a credential when `interactive`
-/// and it can't yet; the answer goes into the env's config. With none chosen, an agent whose
-/// provider allows it logs in inside the env, so an agent the user added works at once. Only
-/// without that does the provider's API stay closed: installed, but unable to connect.
-fn ask_credential(
-    ctx: &Ctx,
-    env_name: &str,
-    a: &profiles::Agent,
-    interactive: bool,
-) -> Result<bool> {
+/// Ask how agent `name` authenticates and write the answer into the env's config; `change`
+/// (`agent auth`) starts from what the config has, and Esc at the first question keeps it.
+/// Whether anything was written.
+fn ask(ctx: &Ctx, env_name: &str, name: &str, a: &profiles::Agent, change: bool) -> Result<bool> {
     let mut f = EnvFile::load(&ctx.paths, env_name)?;
-    if has_credential(&f.cfg, a) {
-        return Ok(true);
+    let now = current(&f.cfg, a);
+    let esc = if change { "unchanged" } else { "later" };
+    match crate::wizard::credential(a, &ctx.global, now.as_ref(), esc)? {
+        Answer::Set(auth) => {
+            let (key, value) = auth.entry();
+            f.set_provider_kind(auth.provider(), key, &value)?;
+            settle(env_name, name, a, Some(&auth));
+            Ok(true)
+        }
+        Answer::Leave if change => {
+            println!("unchanged");
+            Ok(false)
+        }
+        Answer::Leave => {
+            settle(env_name, name, a, None);
+            Ok(false)
+        }
     }
-    if interactive
-        && let Some((provider, entries)) = crate::wizard::credential(&f.cfg, a, &ctx.global)?
-    {
-        f.set_provider_credential(&provider, &entries)?;
-        return Ok(true);
-    }
-    let Some((name, p)) = a.providers.iter().find_map(|n| {
-        profiles::provider(n)
-            .filter(|p| !p.login_hosts.is_empty())
-            .map(|p| (n, p))
-    }) else {
+}
+
+/// With no one to ask: `login_inside = true` for the first of agent `a`'s providers that allows
+/// it, so an agent the user added works at once. Whether one did; without, the provider's API
+/// stays closed: installed, but unable to connect.
+fn login_inside(ctx: &Ctx, env_name: &str, name: &str, a: &profiles::Agent) -> Result<bool> {
+    let Some(provider) = a
+        .providers
+        .iter()
+        .find(|n| profiles::provider(n).is_some_and(|p| !p.login_hosts.is_empty()))
+    else {
         return Ok(false);
     };
-    let entry = ("login_inside".to_string(), ProviderValue::Flag(true));
-    f.set_provider_credential(name, &BTreeMap::from([entry]))?;
-    println!("\n{}", login_notice(a, name, &p, env_name));
+    let auth = Auth::LoginInside {
+        provider: provider.clone(),
+    };
+    let (key, value) = auth.entry();
+    EnvFile::load(&ctx.paths, env_name)?.set_provider_kind(provider, key, &value)?;
+    settle(env_name, name, a, Some(&auth));
     Ok(true)
 }
 
-/// Says that `a` logs in inside the env, what that costs, and how to keep a credential outside.
-fn login_notice(a: &profiles::Agent, name: &str, p: &profiles::Provider, env_name: &str) -> String {
-    // Each provider's `login_how` says where the session lives.
-    let mut out = format!(
-        "{} logs in inside the env ([credentials.{name}] login_inside = true). {}",
-        a.description,
-        p.login_how.as_deref().unwrap_or_default()
-    );
-    if !p.auth.is_empty() {
-        let kinds: Vec<&str> = p.auth.keys().map(String::as_str).collect();
-        out.push_str(&format!(
-            "\nTo keep a credential outside instead, the gate adding it to each request, replace \
-             login_inside with {} (`luoto edit -e {env_name}`).",
-            kinds.join(" or ")
-        ));
-    }
-    out
-}
-
-/// Whether the env holds a credential (or a login-inside opt-in) for one of the agent's
-/// providers. Agents without providers (local models) need none.
-fn has_credential(cfg: &crate::config::EnvConfig, a: &profiles::Agent) -> bool {
-    a.providers.is_empty()
-        || cfg
-            .credentials
-            .providers
-            .keys()
-            .any(|p| a.providers.contains(p))
-}
-
-/// What to add so the gate can authenticate the agent's model API.
-fn credential_help(a: &profiles::Agent, env_name: &str) -> String {
+/// What gives agent `name` a credential, for when no one was asked: `agent auth` on a
+/// terminal; without one, `agent add --credential` or the env's config.
+fn credential_help(ctx: &Ctx, env_name: &str, name: &str, a: &profiles::Agent) -> String {
     let provider = a.providers.first().and_then(|p| profiles::provider(p));
-    let name = a.providers.first().map_or("anthropic", String::as_str);
+    let pname = a.providers.first().map_or("anthropic", String::as_str);
+    let file = ctx.paths.env_config(env_name).display().to_string();
+    let on_terminal = format!("`luoto agent auth -e {env_name} {name}` on a terminal");
+    let add = format!("luoto agent add -e {env_name} {name} --credential");
     if let Some(p) = provider.as_ref().filter(|p| p.auth.is_empty()) {
         return format!(
-            "{} signs in inside the sandbox. Allow it in the env's config (`luoto edit -e \
-             {env_name}`):\n\n  [credentials.{name}]\n  login_inside = true\n\n{}",
+            "{} signs in inside the sandbox, where code in the env can read its session. Allow \
+             it with {on_terminal}, or `{add} login_inside`, or add to {file}:\n\n  \
+             [credentials.{pname}]\n  login_inside = true\n\n{}",
             a.description,
             p.login_how.as_deref().unwrap_or_default()
         );
@@ -339,10 +440,16 @@ fn credential_help(a: &profiles::Agent, env_name: &str) -> String {
                 .or_else(|| p.auth.keys().next().cloned())
         })
         .unwrap_or_else(|| "api_key".into());
+    // Several providers may share the kind: the provider's name tells them apart.
+    let spec = if a.providers.len() > 1 {
+        format!("{pname}.{kind}")
+    } else {
+        kind.clone()
+    };
     let mut out = format!(
         "{} needs a credential for {}. The gate adds it to each request; the sandbox never \
-         holds it. Add to the env's config (`luoto edit -e {env_name}`):\n\n  \
-         [credentials.{name}]\n  {kind} = \"op://<vault>/<item>/<field>\"   # or keyring:<service>/<account>, env:<NAME>",
+         holds it. Set it with {on_terminal}, or `{add} {spec}=<ref>`, or add to {file}:\n\n  \
+         [credentials.{pname}]\n  {kind} = \"op://<vault>/<item>/<field>\"   # or keyring:<service>/<account>, env:<NAME>",
         a.description,
         a.providers.join(" or ")
     );
@@ -352,7 +459,8 @@ fn credential_help(a: &profiles::Agent, env_name: &str) -> String {
         }
         if let Some(how) = p.login_how.as_deref().filter(|_| !p.login_hosts.is_empty()) {
             out.push_str(&format!(
-                "\n\nlogin_inside = true: log in inside the sandbox instead. {how}"
+                "\n\nlogin_inside = true: sign in inside the sandbox instead, where code in the \
+                 env can read the session. {how}"
             ));
         }
     }
@@ -486,8 +594,7 @@ pub fn set_credentials(
             }
             None => ProviderValue::Flag(true),
         };
-        EnvFile::load(&ctx.paths, env_name)?
-            .set_provider_credential(provider, &BTreeMap::from([(kind.to_string(), value)]))?;
+        EnvFile::load(&ctx.paths, env_name)?.set_provider_kind(provider, kind, &value)?;
         println!("[credentials.{provider}] {kind} written to env `{env_name}`");
     }
     Ok(())
@@ -511,8 +618,36 @@ pub fn add(env_name: &str, agent: &str, credential: Option<&str>) -> Result<Exit
         println!(
             "{} is in `{env_name}` already ({}): luoto agent run -e {env_name} {agent}",
             a.description,
-            auth_summary(&cfg, &a, env_name)
+            auth_summary(&cfg, env_name, agent, &a)
         );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `luoto agent auth`: the credential questions again for an agent the env has, each opening
+/// on what its config says. The answer replaces only how the agent authenticates, and a
+/// running env takes it at once.
+pub fn auth(env_name: &str, agent: &str) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    let a = profile(agent)?;
+    if !env::layered(&ctx, env_name)?.agents.contains(agent) {
+        bail!(
+            "env `{env_name}` has no agent `{agent}`; `luoto agent add -e {env_name} {agent}` \
+             adds it"
+        );
+    }
+    if a.providers.is_empty() {
+        println!("{} needs no credential", a.description);
+        return Ok(ExitCode::SUCCESS);
+    }
+    if !crate::prompt::interactive() {
+        bail!(
+            "agent auth needs a terminal; set it with `luoto agent add -e {env_name} {agent} \
+             --credential <kind>=<ref>`"
+        );
+    }
+    if ask(&ctx, env_name, agent, &a, true)? {
+        sync::reapply(&ctx, env_name)?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -627,7 +762,10 @@ pub fn headless(
         bail!("`luoto up -e {env_name}` failed");
     }
     if !has_credential(&EnvFile::load(&ctx.paths, env_name)?.cfg, &a) {
-        bail!("{}", credential_help(&a, env_name));
+        bail!(
+            "{} has no credential in `{env_name}` (the note above says how to set one)",
+            a.description
+        );
     }
     let argv: Vec<String> = std::iter::once(sh_quote(&a.command))
         .chain(
@@ -905,11 +1043,9 @@ pub fn run(env_name: &str, agent: &str, yolo: bool, args: &[String]) -> Result<E
     } else {
         ready(&ctx, env_name)?;
     }
+    // `up` asked, or without a terminal said how to set one.
     if !has_credential(&EnvFile::load(&ctx.paths, env_name)?.cfg, &a) {
-        eprintln!(
-            "{}\n\nThen run `luoto agent run -e {env_name} {agent}` again.",
-            credential_help(&a, env_name)
-        );
+        eprintln!("Then run `luoto agent run -e {env_name} {agent}` again.");
         return Ok(ExitCode::FAILURE);
     }
     let mut argv = vec![sh_quote(&a.command)];
@@ -923,6 +1059,114 @@ pub fn run(env_name: &str, agent: &str, yolo: bool, args: &[String]) -> Result<E
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cfg(text: &str) -> EnvConfig {
+        toml::from_str(text).unwrap()
+    }
+
+    fn agent(name: &str) -> profiles::Agent {
+        profiles::agent(name).unwrap()
+    }
+
+    #[test]
+    fn only_an_auth_kind_or_a_login_inside_is_a_credential() {
+        let claude = agent("claude");
+        for (text, has) in [
+            ("", false),
+            ("[credentials.anthropic]\nserver_tools = true", false),
+            ("[credentials.anthropic]\nlogin_inside = false", false),
+            ("[credentials.openai]\napi_key = \"env:KEY\"", false),
+            (
+                "[credentials.anthropic]\noauth_token = \"env:T\"\nserver_tools = true",
+                true,
+            ),
+            ("[credentials.anthropic]\nlogin_inside = true", true),
+        ] {
+            assert_eq!(has_credential(&cfg(text), &claude), has, "{text}");
+        }
+        assert_eq!(
+            current(
+                &cfg("[credentials.anthropic]\napi_key = \"env:K\"\nserver_tools = true"),
+                &claude
+            ),
+            Some(Auth::Kind {
+                provider: "anthropic".into(),
+                kind: "api_key".into(),
+                reference: "env:K".into(),
+            })
+        );
+        assert_eq!(
+            current(
+                &cfg("[credentials.openai]\nlogin_inside = true"),
+                &agent("opencode")
+            ),
+            Some(Auth::LoginInside {
+                provider: "openai".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_credential_step_ends_with_the_command_that_changes_it() {
+        let claude = agent("claude");
+        let kind = Auth::Kind {
+            provider: "anthropic".into(),
+            kind: "oauth_token".into(),
+            reference: "keyring:luoto/anthropic.oauth_token".into(),
+        };
+        assert_eq!(
+            settled_line("web", "claude", &claude, Some(&kind)),
+            "credential: oauth_token = keyring:luoto/anthropic.oauth_token. Change it: `luoto \
+             agent auth -e web claude`"
+        );
+        let inside = Auth::LoginInside {
+            provider: "anthropic".into(),
+        };
+        assert_eq!(
+            settled_line("web", "claude", &claude, Some(&inside)),
+            "Claude Code signs in inside `web` (its session is readable by code in the env). In \
+             `luoto shell`, run `claude` and log in; the session has full scopes. Keep a \
+             credential outside instead: `luoto agent auth -e web claude`"
+        );
+        // Antigravity has no credential the gate could add.
+        let agy = Auth::LoginInside {
+            provider: "antigravity".into(),
+        };
+        assert!(!settled_line("web", "agy", &agent("agy"), Some(&agy)).contains("Keep"));
+        assert_eq!(
+            settled_line("web", "claude", &claude, None),
+            "No credential for Claude Code yet. Set one: `luoto agent auth -e web claude`"
+        );
+    }
+
+    #[test]
+    fn the_ready_line_is_short_once_the_step_said_it() {
+        let claude = agent("claude");
+        let none = EnvConfig::default();
+        assert_eq!(
+            auth_summary(&none, "said", "claude", &claude),
+            "no credential yet: `luoto agent auth -e said claude`"
+        );
+        settle("said", "claude", &claude, None);
+        assert_eq!(
+            auth_summary(&none, "said", "claude", &claude),
+            "no credential yet"
+        );
+        let inside = cfg("[credentials.anthropic]\nlogin_inside = true");
+        assert_eq!(
+            auth_summary(&inside, "said", "claude", &claude),
+            "signs in inside"
+        );
+        assert_eq!(
+            auth_summary(&inside, "unsaid", "claude", &claude),
+            "it signs in inside: `claude` in `luoto shell -e unsaid`"
+        );
+        let kind = cfg("[credentials.anthropic]\noauth_token = \"env:T\"\nserver_tools = true");
+        assert_eq!(
+            auth_summary(&kind, "unsaid", "claude", &claude),
+            "the gate adds [credentials.anthropic] oauth_token"
+        );
+    }
 
     #[test]
     fn a_timeout_is_a_duration_above_zero() {

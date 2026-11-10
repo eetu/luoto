@@ -1450,9 +1450,18 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
                 }
                 Forge::Azure(_) => {}
             }
-            match crate::wizard::secret(&label, &acct, &title, LATER, &known, &ctx.global)? {
-                Some(r) => Some(r),
-                None => continue,
+            let ask = crate::wizard::SecretAsk {
+                label: &label,
+                acct: &acct,
+                title: &title,
+                later: Some(LATER),
+                known: &known,
+                current: None,
+                help: &crate::wizard::menu_help("later"),
+            };
+            match crate::wizard::secret(&ask, &ctx.global)? {
+                crate::wizard::Step::Got(crate::wizard::Secret::Ref(r)) => Some(r),
+                _ => continue,
             }
         };
         match &forge {

@@ -98,7 +98,7 @@ Saving applies it. luoto reads the secrets on your machine and hands them to the
 lives outside the sandbox. Inside, `GH_TOKEN` and Claude's token are placeholders; the gate
 puts the real ones on requests to GitHub and Anthropic, for `you/my-app` only, and refuses
 pushes to `main`. No secret store? `luoto agent add claude` asks for the token and keeps it in
-your OS keychain.
+your OS keychain; `luoto agent auth claude` asks again to change it.
 
 `luoto ui` shows which credentials an env has, never their values:
 
@@ -170,6 +170,7 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | to see or remove rules                                                                               | `luoto status`<br>`luoto revoke <id-or-host>`                                                                                      |
 | to answer access requests from inside                                                                | `luoto requests` (`--watch` waits)<br>`luoto approve 3 --ttl 1h`<br>`luoto approve 3 --read --path '/v1/**'`<br>`luoto reject 3`   |
 | an agent (installed on first run)                                                                    | `luoto agent run claude --yolo`<br>`luoto agent list`                                                                              |
+| another credential for an agent, or a login inside instead                                           | `luoto agent auth claude`                                                                                                          |
 | a dev server in your browser                                                                         | run it: its port is forwarded to localhost here (`luoto status` lists it)<br>`luoto forward 8080:5173` (to another local port)     |
 | your work out: push from the env (with a GitHub, Azure DevOps or SSH credential), or copy files back | `git push`<br>`luoto pull`                                                                                                         |
 | image or config changes applied (volumes are kept)                                                   | `luoto up --recreate`                                                                                                              |
@@ -201,7 +202,8 @@ env's `agents` or its `luoto.toml`), applies the env's current config and starts
 flag for it), since the sandbox is the boundary. After that first run the command (`claude`,
 `codex`, …) also works in any env terminal, including an editor's. Each agent needs a credential
 for one of its providers under `[credentials.<provider>]`; the gate adds it to every request and
-the sandbox sees only a placeholder. [docs/agents.md](docs/agents.md#credentials) covers where
+the sandbox sees only a placeholder. `luoto agent auth <agent>` changes it, its questions
+opening on what the env has. [docs/agents.md](docs/agents.md#credentials) covers where
 to get one, how the prompt keeps it, and logins inside the sandbox, with the hosts and
 verification status of each agent. `luoto agent list` shows agents and providers. Model,
 effort, your own agent settings and commits without AI attribution:

@@ -15,6 +15,17 @@
   so an item's custom fields are typed by name; luoto reads only the field you pick. The
   refs the wizard writes, browsed or saved, name the vault and item by ID, so a rename
   doesn't break them.
+- **`luoto agent auth`:** asks again how an agent the env has authenticates, each question
+  opening on what the env has: its kind marked (current), "keep the current one" first, a
+  typed reference starting from it. Esc at the first question leaves it unchanged. It writes
+  only the provider's kind or `login_inside`, keeping `server_tools` and `write`, as
+  `--credential` does, and a running env takes it at once.
+- **Credential questions:** Esc goes back a question; at the first, Esc or "later" writes
+  nothing, and the next `up` or `agent run` asks again. `login_inside` is written when you
+  pick it, or without a terminal. A paste into 1Password comes after its account and vault.
+  Each menu names its keys. The questions end with one line: the reference, the login inside
+  with how to sign in, or no credential yet, and the `luoto agent auth` command that changes
+  it. `server_tools = true` alone is no credential: the questions are asked.
 - **Progress:** installs, clones and copies print their line and, on a terminal, a dot
   pulsing in the UI's orange with the time so far and the latest line the tool printed; `o`
   shows the tool's whole output from there. What installers and git print goes to the install

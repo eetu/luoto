@@ -22,7 +22,7 @@ pub struct Provider {
     /// Extra hosts needed only when the user logs in inside the sandbox.
     #[serde(default)]
     pub login_hosts: Vec<String>,
-    /// How to log in inside the sandbox, and what that leaves there.
+    /// How to log in inside the sandbox; luoto says that code in the env can read the session.
     #[serde(default)]
     pub login_how: Option<String>,
     #[serde(default)]

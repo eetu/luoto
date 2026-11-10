@@ -45,11 +45,20 @@ typed, or found by browsing 1Password: account, vault and item, filtered as you 
 the field the item's kind keeps a secret in (or one you type). With several 1Password
 accounts it asks which one, and the ref names it by ID (`?account=<account ID>`).
 
+Esc goes back a question. At the first, Esc or "later" writes nothing, and the next `up` or
+`agent run` asks again. The questions end with one line: what the env has now, and
+`luoto agent auth -e <env> <agent>`, which asks them again for an agent the env has, opening
+on its current kind and reference (Esc at the first question leaves it unchanged). Without a
+terminal, `agent add --credential` sets it
+([guides/agent-settings.md](guides/agent-settings.md#credentials-without-the-prompt)). Either
+replaces only the provider's kind or `login_inside`: its `server_tools` and `write` stay.
+
 `login_inside = true` is the exception: the agent signs in itself and keeps the session in
 the env's home, where any code in the sandbox can read it. Providers that allow it open their
-sign-in hosts for it; luoto warns about it at `up`. It is also the default when you choose no
-credential (no terminal, "later", or a new env from the UI), so an agent you add can work at
-once; replacing it with a credential kind moves the credential outside.
+sign-in hosts for it; luoto warns about it at `up`. On a terminal it is set only when you pick
+it. Without one (`init --yes`, `agent add` in a script, a new env from the UI) it is what an
+agent with no credential gets, so an agent you add can work at once; `luoto agent auth`
+replaces it with a credential kind, which moves the credential outside.
 
 Server tools have the provider reach the network for a request: fetch a URL, call an MCP
 server. Code in the sandbox could use them to send data anywhere, so the gate reads requests
@@ -136,7 +145,8 @@ use prompts to improve its products, until its Google Cloud project has billing.
   `config.fish` (luoto already has `~/.local/bin` on `PATH`), and logs
   `ERROR: logging before google.Init` lines that are only its own logging.
 - Signs in with your Google account inside the env (`[credentials.antigravity] login_inside
-  = true`, which `agent add` sets): run `agy` in `luoto shell`, open the URL it prints in your
+  = true`, which you pick when `agent add` asks, and which it sets without a terminal): run
+  `agy` in `luoto shell`, open the URL it prints in your
   browser and paste the code back. Its backend is `cloudcode-pa.googleapis.com` and
   `daily-cloudcode-pa.googleapis.com`; the token comes from `oauth2.googleapis.com`.
 - Also reads the signed-in profile (`www.googleapis.com` `/oauth2/v2/userinfo` and

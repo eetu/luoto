@@ -482,6 +482,33 @@ pub enum ProviderValue {
     Flag(bool),
 }
 
+/// The keys of `[credentials.<provider>]` that say how it authenticates, one at a time: its
+/// auth kinds and `login_inside`.
+fn auth_keys(provider: &str) -> Result<Vec<String>> {
+    let p = luoto_shared::profiles::provider(provider)
+        .with_context(|| format!("unknown provider `{provider}`"))?;
+    Ok(p.auth
+        .into_keys()
+        .chain(std::iter::once("login_inside".to_string()))
+        .collect())
+}
+
+impl Credentials {
+    /// [`EnvFile::set_provider_kind`] on a config not written yet.
+    pub fn set_provider_kind(
+        &mut self,
+        provider: &str,
+        key: &str,
+        value: &ProviderValue,
+    ) -> Result<()> {
+        let drop = auth_keys(provider)?;
+        let entries = self.providers.entry(provider.to_string()).or_default();
+        entries.retain(|k, _| k == key || !drop.contains(k));
+        entries.insert(key.to_string(), value.clone());
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EnvConfig {
@@ -918,28 +945,40 @@ impl EnvFile {
         Ok(removed)
     }
 
-    /// Write `[credentials.<provider>]`, replacing any entries it had.
-    pub fn set_provider_credential(
+    /// Set `key` (an auth kind of `provider`, or `login_inside`) under
+    /// `[credentials.<provider>]`, in place of whichever of those it had. The table's other
+    /// keys (`server_tools`, `write`) stay.
+    pub fn set_provider_kind(
         &mut self,
         provider: &str,
-        entries: &BTreeMap<String, ProviderValue>,
+        key: &str,
+        value: &ProviderValue,
     ) -> Result<()> {
-        let mut table = toml_edit::Table::new();
-        for (k, v) in entries {
-            table[k] = match v {
-                ProviderValue::Ref(r) => toml_edit::value(r.as_str()),
-                ProviderValue::Flag(b) => toml_edit::value(*b),
-            };
-        }
+        let drop = auth_keys(provider)?;
+        let path = self.path.display().to_string();
         let creds = self.doc.entry("credentials").or_insert_with(|| {
             let mut t = toml_edit::Table::new();
             t.set_implicit(true);
             toml_edit::Item::Table(t)
         });
-        let Some(creds) = creds.as_table_like_mut() else {
-            bail!("`credentials` in {} is not a table", self.path.display());
-        };
-        creds.insert(provider, toml_edit::Item::Table(table));
+        let creds = creds
+            .as_table_like_mut()
+            .with_context(|| format!("`credentials` in {path} is not a table"))?;
+        let table = creds
+            .entry(provider)
+            .or_insert_with(toml_edit::table)
+            .as_table_like_mut()
+            .with_context(|| format!("`credentials.{provider}` in {path} is not a table"))?;
+        for k in drop.iter().filter(|k| *k != key) {
+            table.remove(k);
+        }
+        table.insert(
+            key,
+            match value {
+                ProviderValue::Ref(r) => toml_edit::value(r.as_str()),
+                ProviderValue::Flag(b) => toml_edit::value(*b),
+            },
+        );
         self.save()
     }
 
@@ -1377,6 +1416,54 @@ oauth_token = "op://Private/claude/token"
         assert_eq!(f.cfg.allow.len(), 2);
         assert_eq!(f.remove_rules("r1").unwrap(), 1);
         assert_eq!(f.cfg.allow.len(), 1);
+    }
+
+    #[test]
+    fn a_credential_kind_replaces_only_the_providers_auth_keys() {
+        let text = "[credentials.anthropic]\noauth_token = \"op://Private/claude/token\"\n\
+                    # kept\nserver_tools = true\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        std::fs::write(&path, text).unwrap();
+        let mut f = EnvFile::parse(path.clone(), text).unwrap();
+        let entries = |f: &EnvFile| f.cfg.credentials.providers["anthropic"].clone();
+
+        let key = ProviderValue::Ref("keyring:luoto/anthropic.api_key".into());
+        f.set_provider_kind("anthropic", "api_key", &key).unwrap();
+        assert_eq!(
+            entries(&f),
+            BTreeMap::from([
+                ("api_key".to_string(), key.clone()),
+                ("server_tools".to_string(), ProviderValue::Flag(true)),
+            ])
+        );
+        f.set_provider_kind("anthropic", "login_inside", &ProviderValue::Flag(true))
+            .unwrap();
+        assert_eq!(
+            entries(&f),
+            BTreeMap::from([
+                ("login_inside".to_string(), ProviderValue::Flag(true)),
+                ("server_tools".to_string(), ProviderValue::Flag(true)),
+            ])
+        );
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("# kept"), "{on_disk}");
+
+        f.set_provider_kind("openai", "api_key", &key).unwrap();
+        assert_eq!(f.cfg.credentials.providers["openai"]["api_key"], key);
+        assert!(f.set_provider_kind("nobody", "api_key", &key).is_err());
+
+        // A config not written yet, as `init`'s walk-through fills it.
+        let mut c = EnvFile::parse(path, text).unwrap().cfg.credentials;
+        c.set_provider_kind("anthropic", "login_inside", &ProviderValue::Flag(true))
+            .unwrap();
+        assert_eq!(
+            c.providers["anthropic"],
+            BTreeMap::from([
+                ("login_inside".to_string(), ProviderValue::Flag(true)),
+                ("server_tools".to_string(), ProviderValue::Flag(true)),
+            ])
+        );
     }
 
     #[test]

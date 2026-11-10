@@ -242,7 +242,7 @@ enum Cmd {
         #[arg(long)]
         down: bool,
     },
-    /// Run, add or list coding agents.
+    /// Run, add, authenticate or list coding agents.
     Agent {
         #[command(subcommand)]
         action: AgentCmd,
@@ -378,6 +378,11 @@ enum AgentCmd {
         /// `PROVIDER.KIND=REF`, or `login_inside`; replaces the one the env has.
         #[arg(long, value_name = "KIND=REF")]
         credential: Option<String>,
+    },
+    /// Change how an agent the env has authenticates: its credential, or a login inside.
+    Auth {
+        #[arg(add = ArgValueCandidates::new(complete::agents))]
+        agent: String,
     },
     /// List known agents and providers.
     #[command(visible_alias = "ls")]
@@ -563,6 +568,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             AgentCmd::Add { agent, credential } => {
                 agents::add(&env()?, &agent, credential.as_deref())
             }
+            AgentCmd::Auth { agent } => agents::auth(&env()?, &agent),
             AgentCmd::List => agents::list(),
         },
         Cmd::Repo { action } => match action.unwrap_or(RepoCmd::List) {

@@ -28,6 +28,7 @@ pub fn theme() {
     r.answered_prompt_prefix = Styled::new(">").with_fg(c);
     r.highlighted_option_prefix = Styled::new(">").with_fg(c);
     r.selected_checkbox = Styled::new("[x]").with_fg(c);
+    r.selected_option = Some(StyleSheet::empty().with_attr(Attributes::BOLD));
     r.answer = StyleSheet::empty().with_attr(Attributes::BOLD);
     r.help_message = StyleSheet::empty().with_fg(Color::DarkGrey);
     inquire::set_global_render_config(r);
