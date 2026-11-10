@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.2
+## 0.4.2 (2026-11-10)
 
 - **1Password accounts:** an `op://` ref can name the account it is in
   (`op://Private/claude/token?account=<account ID>`, from `op account list`), so refs from a
