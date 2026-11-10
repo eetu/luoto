@@ -663,7 +663,7 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
                 println!("  credentials: {}", e.bindings.join(", "));
             }
             if !e.missing.is_empty() {
-                println!("  missing secrets: {}", e.missing.join(", "));
+                println!("  missing secrets: {}", shown_refs(&e.missing));
             }
         }
     }
@@ -1119,11 +1119,18 @@ pub fn vault_status() -> Result<ExitCode> {
             if e.missing.is_empty() {
                 String::new()
             } else {
-                format!("  (missing: {})", e.missing.join(", "))
+                format!("  (missing: {})", shown_refs(&e.missing))
             }
         );
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn shown_refs(refs: &[String]) -> String {
+    refs.iter()
+        .map(|r| crate::secrets::shown_ref(r))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn unlock() -> Result<ExitCode> {

@@ -348,10 +348,14 @@ the UI and the offers to allow them; `luoto egress --all` shows them.
 Secret refs: `op://…` (1Password CLI, desktop or service account), `vault://mount/path#field`
 (OpenBao / HashiCorp Vault), `keyring:service/account` (OS keychain), `env:NAME`, `file:path`.
 In 1Password, a token is an API Credential's `credential` field, a Password's `password`, or a
-Secure Note's `notesPlain` holding the token alone; with several accounts in the app,
-`?account=my.1password.com` on a ref reads it from that one (`[sources.op] account` sets the
-default). Sources are configured in `~/.config/luoto/config.toml`. `[credentials.azure]` reads
-your `az` login itself, with no ref.
+Secure Note's `notesPlain` holding the token alone. With several accounts in the app,
+`?account=<account ID>` on a ref reads it from that one (`op account list` shows the IDs;
+`[sources.op] account` sets the default). A sign-in address works where only one account has
+it; every personal and family account signs in at `my.1password.com`. When you give a
+reference, the wizard can browse 1Password for it: account, vault and item, the field from the
+item's kind. The refs it writes name the vault and item by ID, so a rename doesn't break them.
+Sources are configured in `~/.config/luoto/config.toml`. `[credentials.azure]` reads your
+`az` login itself, with no ref.
 
 `[sandbox_secrets]` are resolved on your machine at `up` and written to a memory-only file in
 the dev container that every shell loads; they leave with the container. Anything that only

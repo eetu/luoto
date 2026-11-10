@@ -420,7 +420,9 @@ fn print_proposal(p: &Proposal) {
         let how: Vec<String> = entries
             .iter()
             .map(|(k, v)| match v {
-                config::ProviderValue::Ref(r) => format!("{k} from {r}"),
+                config::ProviderValue::Ref(r) => {
+                    format!("{k} from {}", crate::secrets::shown_ref(r))
+                }
                 config::ProviderValue::Flag(_) => "logs in inside the sandbox".to_string(),
             })
             .collect();

@@ -658,7 +658,10 @@ fn summary(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) -> Vec<String>
     } else {
         line("secrets", "read on this machine at `up`, from:".into());
         for (key, r) in &refs {
-            line("", format!("{} = {}", display(key), display(r)));
+            line(
+                "",
+                format!("{} = {}", display(key), crate::secrets::shown_ref(r)),
+            );
         }
         if az {
             line("", "credentials.azure: your `az` login here".into());

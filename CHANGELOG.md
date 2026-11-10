@@ -3,9 +3,16 @@
 ## 0.4.2
 
 - **1Password accounts:** an `op://` ref can name the account it is in
-  (`op://Private/claude/token?account=my.1password.com`), so refs from a work and a personal
-  account work side by side. With several accounts in the app, the wizard asks which one
-  holds a reference that didn't read, and which one to save a pasted secret in.
+  (`op://Private/claude/token?account=<account ID>`, from `op account list`), so refs from a
+  work and a personal account work side by side. With several accounts in the app, the wizard
+  asks which one holds a reference that didn't read, and which one to save a pasted secret in,
+  and writes its ID; luoto shows the account as its address and email. A sign-in address
+  works too, unless several accounts share it, as personal and family ones do.
+- **Browse 1Password:** when you give a reference, the wizard can find it for you: account,
+  vault and item, filtered as you type, and the field from the item's kind (a Login's,
+  Password's or Database's `password`, an API Credential's `credential`, a Secure Note's
+  `notesPlain`), or one you type; luoto reads only that field. The refs the wizard writes,
+  browsed or saved, name the vault and item by ID, so a rename doesn't break them.
 - **Secret reference prompt:** the reference is read after you press enter, not inside the
   prompt: an `op` error no longer garbles it, and the reference comes back to edit.
 

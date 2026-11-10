@@ -3,8 +3,8 @@
 //!
 //! Ref schemes:
 //! - `op://vault/item/field` — 1Password CLI (desktop biometric unlock, or a service account);
-//!   `?account=<sign-in address>` reads it from that account, when the app has several
-//!   (luoto's own parameter: 1Password's refs name no account)
+//!   `?account=<account ID>` reads it from that account, when the app has several (luoto's own
+//!   parameter: 1Password's refs name no account)
 //! - `vault://mount/path#field` — OpenBao / HashiCorp Vault KV via the `bao` or `vault` CLI
 //! - `keyring:service/account` — macOS Keychain, Windows Credential Manager, Secret Service
 //! - `env:NAME` — an environment variable of the luoto process
@@ -15,12 +15,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 
 use crate::azure_identity::{self, AZCLI};
 use crate::config::GlobalConfig;
+use crate::text::display;
 
 pub fn resolve_all(
     global: &GlobalConfig,
@@ -98,7 +100,8 @@ pub fn op_with_account(r: &str, account: &str) -> String {
     format!("{op_ref}{sep}account={account}")
 }
 
-/// An account as `op --account` takes one: a sign-in address, shorthand or ID, never a flag.
+/// An account as `op --account` takes one: an account ID, sign-in address or shorthand, never
+/// a flag.
 fn check_op_account(account: &str) -> Result<()> {
     let plain = !account.is_empty()
         && !account.starts_with('-')
@@ -107,8 +110,42 @@ fn check_op_account(account: &str) -> Result<()> {
             .all(|c| c.is_ascii_alphanumeric() || ".-_:/".contains(c));
     if !plain {
         bail!(
-            "`account={account}` in an op:// ref is a 1Password sign-in address \
-             (my.1password.com), shorthand or ID"
+            "`account={}` in an op:// ref is a 1Password account ID (`op account list` shows \
+             them), sign-in address (my.1password.com) or shorthand",
+            display(account)
+        );
+    }
+    Ok(())
+}
+
+/// An account ID (`account_uuid`): upper-case letters and digits.
+fn is_op_account_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// Refuses `account` when several of `accounts` sign in at that address, as every individual
+/// and family account does (`my.1password.com`): it can't say which one holds the ref.
+fn check_unique_address(account: &str, accounts: &[OpAccount]) -> Result<()> {
+    let address = |s: &str| {
+        s.strip_prefix("https://")
+            .unwrap_or(s)
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    };
+    let wanted = address(account);
+    let same: Vec<String> = accounts
+        .iter()
+        .filter(|a| address(&a.address) == wanted)
+        .map(|a| format!("{} (ID {})", a.shown(), a.id))
+        .collect();
+    if same.len() > 1 {
+        bail!(
+            "`account={account}`: {} accounts in the 1Password app sign in at that address: {}; \
+             name the one that holds it by its ID (`?account=<ID>`)",
+            same.len(),
+            same.join(", ")
         );
     }
     Ok(())
@@ -169,7 +206,7 @@ pub fn resolve(global: &GlobalConfig, r: &str) -> Result<String> {
 /// read again on their own when an upstream refuses them.
 pub fn unattended(global: &GlobalConfig, r: &str) -> bool {
     if r.starts_with("op://") {
-        return global.sources.op.mode.as_deref() == Some("service-account");
+        return op_service_account(global);
     }
     ["keyring:", "file:", "vault://", AZCLI]
         .iter()
@@ -202,7 +239,7 @@ fn op(global: &GlobalConfig, args: &[&str], account: Option<&str>) -> Result<Com
     if let Some(acct) = account.or(global.sources.op.account.as_deref()) {
         cmd.args(["--account", acct]);
     }
-    if global.sources.op.mode.as_deref() == Some("service-account") {
+    if op_service_account(global) {
         let token_ref = global
             .sources
             .op
@@ -259,6 +296,9 @@ fn op_read(global: &GlobalConfig, r: &str) -> Result<String> {
     let (op_ref, account) = op_parts(r);
     if let Some(a) = &account {
         check_op_account(a)?;
+        if !is_op_account_id(a) {
+            check_unique_address(a, &op_accounts())?;
+        }
     }
     let out = op_output(
         op(
@@ -284,11 +324,30 @@ pub fn op_available() -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// Whether `op` runs as `config.toml`'s service account, which is in one account only.
+pub fn op_service_account(global: &GlobalConfig) -> bool {
+    global.sources.op.mode.as_deref() == Some("service-account")
+}
+
 /// An account added to the 1Password app.
+#[derive(Clone, Debug, PartialEq)]
 pub struct OpAccount {
-    /// Its sign-in address (`my.1password.com`), as `--account` takes it.
+    /// Its ID (`account_uuid`), as refs name it: unique, and the same for every member.
+    pub id: String,
+    /// Its sign-in address, which every individual and family account shares
+    /// (`my.1password.com`).
     pub address: String,
     pub email: String,
+}
+
+impl OpAccount {
+    /// Its address and email, escaped.
+    pub fn shown(&self) -> String {
+        if self.email.is_empty() {
+            return self.address.clone();
+        }
+        format!("{}, {}", self.address, display(&self.email))
+    }
 }
 
 /// The accounts added to the 1Password app; none when `op` can't say.
@@ -301,13 +360,24 @@ pub fn op_accounts() -> Vec<OpAccount> {
     else {
         return Vec::new();
     };
-    let list: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    parse_op_accounts(&out.stdout)
+}
+
+/// `op account list --format json`, less the accounts whose address or ID `--account` couldn't
+/// take.
+fn parse_op_accounts(json: &[u8]) -> Vec<OpAccount> {
+    let list: Vec<serde_json::Value> = serde_json::from_slice(json).unwrap_or_default();
     list.iter()
         .filter_map(|a| {
             let url = a["url"].as_str()?;
             let address = url.strip_prefix("https://").unwrap_or(url);
+            let id = a["account_uuid"].as_str()?;
             check_op_account(address).ok()?;
+            if !is_op_account_id(id) {
+                return None;
+            }
             Some(OpAccount {
+                id: id.to_string(),
                 address: address.to_string(),
                 email: a["email"].as_str().unwrap_or_default().to_string(),
             })
@@ -315,24 +385,187 @@ pub fn op_accounts() -> Vec<OpAccount> {
         .collect()
 }
 
-/// Names of the 1Password vaults `account` (or the default one) can see.
-pub fn op_vaults(global: &GlobalConfig, account: Option<&str>) -> Result<Vec<String>> {
+/// The account ID an `op://` ref names, if it names one by ID.
+fn op_account_id(r: &str) -> Option<String> {
+    if !r.starts_with("op://") {
+        return None;
+    }
+    op_parts(r).1.filter(|a| is_op_account_id(a))
+}
+
+/// `r` as luoto shows it, escaped: the account its `account=<ID>` names follows it as its
+/// address and email, when `accounts` has it.
+fn describe_ref(r: &str, accounts: &[OpAccount]) -> String {
+    let shown = display(r);
+    match op_account_id(r).and_then(|id| accounts.iter().find(|a| a.id == id)) {
+        Some(a) => format!("{shown} ({})", a.shown()),
+        None => shown,
+    }
+}
+
+/// [`describe_ref`] with the accounts in the 1Password app, asked once, and only for a ref
+/// that names one.
+pub fn shown_ref(r: &str) -> String {
+    static ACCOUNTS: OnceLock<Vec<OpAccount>> = OnceLock::new();
+    if op_account_id(r).is_none() {
+        return display(r);
+    }
+    describe_ref(r, ACCOUNTS.get_or_init(op_accounts))
+}
+
+/// A 1Password vault: its ID, as refs name it, and its name, written by whoever made it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpVault {
+    pub id: String,
+    pub name: String,
+}
+
+/// An item as `op item list` gives it: an overview, which holds no field values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpItem {
+    pub id: String,
+    pub title: String,
+    pub category: String,
+}
+
+impl OpItem {
+    /// "title (kind)", escaped: in a shared vault, other people write the titles.
+    pub fn shown(&self) -> String {
+        display(&format!("{} ({})", self.title, op_kind(&self.category)))
+    }
+}
+
+/// `s` when it is a 1Password ID: letters and digits, safe as a ref's segment or an argument.
+fn op_id(s: &str) -> Option<String> {
+    (!s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric())).then(|| s.to_string())
+}
+
+/// The vaults `account` (or the default one) can see, by name.
+pub fn op_vaults(global: &GlobalConfig, account: Option<&str>) -> Result<Vec<OpVault>> {
     let out = op_output(
         op(global, &["vault", "list", "--format", "json"], account)?,
         "op vault list",
         None,
     )?;
-    let vaults: Vec<serde_json::Value> =
-        serde_json::from_slice(&out).context("op vault list: unexpected output")?;
-    Ok(vaults
-        .iter()
-        .filter_map(|v| v["name"].as_str().map(str::to_string))
-        .collect())
+    parse_op_vaults(&out)
 }
 
-/// Save `secret` as a new API Credential item in `vault` (of `account`, or the default one) and
-/// return its `op://` reference (by item id, so a second item with the same title can't make it
-/// ambiguous). The secret reaches `op` on stdin, never in its arguments.
+fn parse_op_vaults(json: &[u8]) -> Result<Vec<OpVault>> {
+    let list: Vec<serde_json::Value> =
+        serde_json::from_slice(json).context("op vault list: unexpected output")?;
+    let mut vaults: Vec<OpVault> = list
+        .iter()
+        .filter_map(|v| {
+            Some(OpVault {
+                id: op_id(v["id"].as_str()?)?,
+                name: v["name"].as_str()?.to_string(),
+            })
+        })
+        .collect();
+    vaults.sort_by_cached_key(|v| (v.name.to_lowercase(), v.id.clone()));
+    Ok(vaults)
+}
+
+/// The items in vault `vault` (an ID) of `account` (or the default one), by title.
+pub fn op_items(global: &GlobalConfig, account: Option<&str>, vault: &str) -> Result<Vec<OpItem>> {
+    let vault = op_id(vault).context("a 1Password vault ID is letters and digits")?;
+    let out = op_output(
+        op(
+            global,
+            &["item", "list", "--vault", &vault, "--format", "json"],
+            account,
+        )?,
+        "op item list",
+        None,
+    )?;
+    parse_op_items(&out)
+}
+
+fn parse_op_items(json: &[u8]) -> Result<Vec<OpItem>> {
+    let list: Vec<serde_json::Value> =
+        serde_json::from_slice(json).context("op item list: unexpected output")?;
+    let mut items: Vec<OpItem> = list
+        .iter()
+        .filter_map(|i| {
+            Some(OpItem {
+                id: op_id(i["id"].as_str()?)?,
+                title: i["title"].as_str().unwrap_or_default().to_string(),
+                category: i["category"].as_str().unwrap_or_default().to_string(),
+            })
+        })
+        .collect();
+    items.sort_by_cached_key(|i| (i.title.to_lowercase(), i.id.clone()));
+    Ok(items)
+}
+
+/// What 1Password calls items of `category`.
+pub fn op_kind(category: &str) -> String {
+    match category {
+        "LOGIN" => "Login".into(),
+        "PASSWORD" => "Password".into(),
+        "DATABASE" => "Database".into(),
+        "API_CREDENTIAL" => "API Credential".into(),
+        "SECURE_NOTE" => "Secure Note".into(),
+        "SSH_KEY" => "SSH Key".into(),
+        c => c.to_lowercase().replace('_', " "),
+    }
+}
+
+/// The field an item of `category` keeps its secret in.
+pub fn op_field(category: &str) -> Option<&'static str> {
+    match category {
+        "LOGIN" | "PASSWORD" | "DATABASE" => Some("password"),
+        "API_CREDENTIAL" => Some("credential"),
+        "SECURE_NOTE" => Some("notesPlain"),
+        "SSH_KEY" => Some("private key"),
+        _ => None,
+    }
+}
+
+/// A field name as a ref's last segment, where `/`, `?`, `&` or `=` would change what the ref
+/// names.
+pub fn check_op_field(field: &str) -> Result<()> {
+    if field.is_empty() {
+        bail!("name the field");
+    }
+    if let Some(c) = field
+        .chars()
+        .find(|c| "/?&=".contains(*c) || c.is_control() || crate::text::is_format(*c))
+    {
+        bail!("a field name here can't hold {c:?}");
+    }
+    Ok(())
+}
+
+/// The ref to `field` of `item` in vault `vault` (an ID), from `account` when given. It names
+/// the vault and item by ID: a name may hold `/`, `?` or `=`, and a rename leaves the ref
+/// working. An SSH key's private key is read in OpenSSH format, as `[credentials.ssh]` takes it.
+pub fn op_item_ref(
+    account: Option<&str>,
+    vault: &str,
+    item: &OpItem,
+    field: &str,
+) -> Result<String> {
+    check_op_field(field)?;
+    let (Some(vault), Some(id)) = (op_id(vault), op_id(&item.id)) else {
+        bail!("a 1Password vault or item ID is letters and digits");
+    };
+    let mut r = format!("op://{vault}/{id}/{field}");
+    if item.category == "SSH_KEY" && field == "private key" {
+        r.push_str("?ssh-format=openssh");
+    }
+    Ok(match account {
+        Some(a) => {
+            check_op_account(a)?;
+            op_with_account(&r, a)
+        }
+        None => r,
+    })
+}
+
+/// Save `secret` as a new API Credential item in vault `vault` (an ID) of `account`, or the
+/// default one, and return its `op://` reference. The secret reaches `op` on stdin, never in
+/// its arguments.
 pub fn op_save(
     global: &GlobalConfig,
     account: Option<&str>,
@@ -341,6 +574,7 @@ pub fn op_save(
     secret: &str,
     note: &str,
 ) -> Result<String> {
+    let vault = op_id(vault).context("a 1Password vault ID is letters and digits")?;
     let item = serde_json::json!({
         "title": title,
         "category": "API_CREDENTIAL",
@@ -352,7 +586,7 @@ pub fn op_save(
     let out = op_output(
         op(
             global,
-            &["item", "create", "--vault", vault, "--format", "json", "-"],
+            &["item", "create", "--vault", &vault, "--format", "json", "-"],
             account,
         )?,
         "op item create",
@@ -360,21 +594,15 @@ pub fn op_save(
     )?;
     let created: serde_json::Value =
         serde_json::from_slice(&out).context("op item create: unexpected output")?;
-    let id = created["id"]
-        .as_str()
-        .context("op item create: no item id")?;
-    // A vault name with `/` can't be a reference segment; its id can.
-    let vault_ref = match created["vault"]["name"].as_str() {
-        Some(n) if !n.contains('/') => n,
-        _ => created["vault"]["id"]
+    let created = OpItem {
+        id: created["id"]
             .as_str()
-            .context("op item create: no vault")?,
+            .context("op item create: no item id")?
+            .to_string(),
+        title: title.to_string(),
+        category: "API_CREDENTIAL".to_string(),
     };
-    let r = format!("op://{vault_ref}/{id}/credential");
-    Ok(match account {
-        Some(a) => op_with_account(&r, a),
-        None => r,
-    })
+    op_item_ref(account, &vault, &created, "credential")
 }
 
 fn vault_read(global: &GlobalConfig, rest: &str) -> Result<String> {
@@ -454,10 +682,249 @@ mod tests {
             "op://v/k?ssh-format=openssh&account=new.1password.com"
         );
         assert!(check_ref("op://v/i/f?account=https://my.1password.com").is_ok());
-        for bad in ["", "-x", "a b", "a;b", "a$(id)"] {
+        for good in [ACME, "my.1password.com", "acme"] {
+            let r = format!("op://v/i/f?account={good}");
+            assert!(check_ref(&r).is_ok(), "{r}");
+        }
+        for bad in ["", "-x", "a b", "a;b", "a$(id)", "A\u{1b}[2J"] {
             let r = format!("op://v/i/f?account={bad}");
             assert!(check_ref(&r).is_err(), "{r}");
         }
+        let e = check_ref("op://v/i/f?account=A\u{1b}[2J").unwrap_err();
+        assert!(!e.to_string().contains('\u{1b}'), "{e}");
+    }
+
+    const ACME: &str = "ZK4ONHBXKRHVBDDVX4L7QTCSDM";
+    const MINE: &str = "VZ7CWAKJKFHWVHZ3UFZQ5GPNSU";
+    const FAMILY: &str = "Q3RTX2UJWVE2TMXFPN6HVOIB3Y";
+
+    /// `op account list --format json` from op 2.42, with a family account beside a personal
+    /// one at the same address, and entries `--account` couldn't take.
+    const ACCOUNTS: &str = r#"[
+      {"url": "acme.1password.com", "email": "eetu@acme.example",
+       "user_uuid": "BBWGBN7ZFNDRVPRPBXWNXTNC4Q", "account_uuid": "ZK4ONHBXKRHVBDDVX4L7QTCSDM"},
+      {"url": "my.1password.com", "email": "eetu@example.com",
+       "user_uuid": "XUQJRY5W7NC7BHG2QKVZ6JPF2A", "account_uuid": "VZ7CWAKJKFHWVHZ3UFZQ5GPNSU"},
+      {"url": "my.1password.com", "email": "eetu\u001b[31m@example.com",
+       "user_uuid": "M3C6JSF2PBBN5KQ3AIQPPLC6HU", "account_uuid": "Q3RTX2UJWVE2TMXFPN6HVOIB3Y"},
+      {"url": "-evil.1password.com", "email": "x@example.com",
+       "user_uuid": "AAAA", "account_uuid": "AAAAAAAAAAAAAAAAAAAAAAAAAA"},
+      {"url": "ok.1password.com", "email": "x@example.com",
+       "user_uuid": "AAAA", "account_uuid": "not-an-id"}
+    ]"#;
+
+    #[test]
+    fn accounts_parse_from_op_account_list() {
+        let accounts = parse_op_accounts(ACCOUNTS.as_bytes());
+        let ids: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, [ACME, MINE, FAMILY]);
+        assert_eq!(accounts[0].address, "acme.1password.com");
+        assert_eq!(accounts[0].shown(), "acme.1password.com, eetu@acme.example");
+        assert_eq!(
+            accounts[2].shown(),
+            "my.1password.com, eetu\\u{1b}[31m@example.com"
+        );
+        let https = r#"[{"url": "https://acme.1password.com", "email": "",
+                         "account_uuid": "ZK4ONHBXKRHVBDDVX4L7QTCSDM"}]"#;
+        let a = &parse_op_accounts(https.as_bytes())[0];
+        assert_eq!(
+            (a.address.as_str(), a.shown()),
+            ("acme.1password.com", a.address.clone())
+        );
+        assert!(parse_op_accounts(b"not json").is_empty());
+    }
+
+    #[test]
+    fn a_sign_in_address_two_accounts_share_names_neither() {
+        let accounts = parse_op_accounts(ACCOUNTS.as_bytes());
+        for unique in [
+            "acme.1password.com",
+            "https://ACME.1password.com/",
+            "acme",
+            "nowhere.com",
+        ] {
+            assert!(check_unique_address(unique, &accounts).is_ok(), "{unique}");
+        }
+        for shared in ["my.1password.com", "https://my.1password.com"] {
+            let e = check_unique_address(shared, &accounts)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(MINE) && e.contains(FAMILY), "{e}");
+            assert!(
+                e.contains("eetu@example.com") && !e.contains('\u{1b}'),
+                "{e}"
+            );
+            assert!(!e.contains(ACME), "{e}");
+        }
+        assert!(is_op_account_id(MINE));
+        for not_id in ["my.1password.com", "acme", "", "VZ7C-WAKJ"] {
+            assert!(!is_op_account_id(not_id), "{not_id}");
+        }
+    }
+
+    #[test]
+    fn a_ref_shows_the_account_its_id_names() {
+        let accounts = parse_op_accounts(ACCOUNTS.as_bytes());
+        assert_eq!(
+            describe_ref(&format!("op://v/i/f?account={ACME}"), &accounts),
+            format!("op://v/i/f?account={ACME} (acme.1password.com, eetu@acme.example)")
+        );
+        assert_eq!(
+            describe_ref(
+                &format!("op://v/k/private key?ssh-format=openssh&account={FAMILY}"),
+                &accounts
+            ),
+            format!(
+                "op://v/k/private key?ssh-format=openssh&account={FAMILY} \
+                 (my.1password.com, eetu\\u{{1b}}[31m@example.com)"
+            )
+        );
+        for plain in [
+            "op://v/i/f".to_string(),
+            "op://v/i/f?account=acme.1password.com".to_string(),
+            "op://v/i/f?account=AAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+            format!("keyring:luoto/x?account={ACME}"),
+        ] {
+            assert_eq!(describe_ref(&plain, &accounts), plain);
+            assert_eq!(op_account_id(&plain).is_some(), plain.contains("=AAAA"));
+        }
+        assert_eq!(describe_ref("env:A\u{1b}[2J", &accounts), "env:A\\u{1b}[2J");
+        // No `op` call for a ref that names no account.
+        assert_eq!(shown_ref("op://v/i/f"), "op://v/i/f");
+    }
+
+    #[test]
+    fn vaults_and_items_parse_from_their_listings() {
+        let vaults = parse_op_vaults(
+            br#"[
+              {"id": "pqk3bxlnmi2adlfmzdp4syqxuu", "name": "Shared/Team?account=x",
+               "content_version": 41, "created_at": "2024-01-02T10:00:00Z",
+               "updated_at": "2026-10-01T10:00:00Z", "items": 12},
+              {"id": "c6zqyv4ylr5gcz6t3tfjg6mbea", "name": "private", "content_version": 7},
+              {"id": "../x", "name": "Bad id"},
+              {"name": "No id"}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            vaults,
+            [
+                OpVault {
+                    id: "c6zqyv4ylr5gcz6t3tfjg6mbea".into(),
+                    name: "private".into()
+                },
+                OpVault {
+                    id: "pqk3bxlnmi2adlfmzdp4syqxuu".into(),
+                    name: "Shared/Team?account=x".into()
+                },
+            ]
+        );
+        assert!(parse_op_vaults(b"[Error] not signed in").is_err());
+
+        let items = parse_op_items(
+            br#"[
+              {"id": "w4mbq7hcm5b3xdhdajxxlwmj2a", "title": "zeta", "version": 2,
+               "vault": {"id": "pqk3bxlnmi2adlfmzdp4syqxuu", "name": "Shared"},
+               "category": "LOGIN", "last_edited_by": "BBWGBN7ZFNDRVPRPBXWNXTNC4Q",
+               "created_at": "2025-03-04T10:00:00Z", "updated_at": "2026-10-01T10:00:00Z",
+               "additional_information": "eetu", "urls": [{"primary": true, "href": "https://x"}]},
+              {"id": "kqv5r2c6e4gq7ttnb2xmv4gm3q", "title": "Alpha\u001b]0;pwned\u0007/../x?account=EVIL",
+               "category": "API_CREDENTIAL"},
+              {"id": "zx3oyh4ffljsbcmgbxv7gaxnoy", "title": "deploy key", "category": "SSH_KEY"},
+              {"id": "a/b", "title": "bad id", "category": "LOGIN"}
+            ]"#,
+        )
+        .unwrap();
+        let titles: Vec<&str> = items.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Alpha\u{1b}]0;pwned\u{7}/../x?account=EVIL",
+                "deploy key",
+                "zeta"
+            ]
+        );
+        assert_eq!(
+            items[0].shown(),
+            "Alpha\\u{1b}]0;pwned\\u{7}/../x?account=EVIL (API Credential)"
+        );
+        assert_eq!(items[1].shown(), "deploy key (SSH Key)");
+        assert_eq!(items[2].shown(), "zeta (Login)");
+    }
+
+    #[test]
+    fn an_items_kind_names_its_secrets_field() {
+        for (category, field) in [
+            ("LOGIN", Some("password")),
+            ("PASSWORD", Some("password")),
+            ("DATABASE", Some("password")),
+            ("API_CREDENTIAL", Some("credential")),
+            ("SECURE_NOTE", Some("notesPlain")),
+            ("SSH_KEY", Some("private key")),
+            ("CREDIT_CARD", None),
+            ("", None),
+        ] {
+            assert_eq!(op_field(category), field, "{category}");
+        }
+        assert_eq!(op_kind("CREDIT_CARD"), "credit card");
+    }
+
+    #[test]
+    fn a_browsed_ref_names_vault_and_item_by_id() {
+        let vault = "pqk3bxlnmi2adlfmzdp4syqxuu";
+        let item = |category: &str| OpItem {
+            id: "kqv5r2c6e4gq7ttnb2xmv4gm3q".into(),
+            title: "a/b?account=EVIL&x=y".into(),
+            category: category.into(),
+        };
+        assert_eq!(
+            op_item_ref(None, vault, &item("API_CREDENTIAL"), "credential").unwrap(),
+            "op://pqk3bxlnmi2adlfmzdp4syqxuu/kqv5r2c6e4gq7ttnb2xmv4gm3q/credential"
+        );
+        let ssh = op_item_ref(Some(MINE), vault, &item("SSH_KEY"), "private key").unwrap();
+        assert_eq!(
+            ssh,
+            format!(
+                "op://pqk3bxlnmi2adlfmzdp4syqxuu/kqv5r2c6e4gq7ttnb2xmv4gm3q/private key\
+                 ?ssh-format=openssh&account={MINE}"
+            )
+        );
+        assert_eq!(
+            op_parts(&ssh),
+            (
+                "op://pqk3bxlnmi2adlfmzdp4syqxuu/kqv5r2c6e4gq7ttnb2xmv4gm3q/private key\
+                 ?ssh-format=openssh"
+                    .into(),
+                Some(MINE.into())
+            )
+        );
+        assert!(check_ref(&ssh).is_ok());
+        // Another field of an SSH key is read as it is.
+        assert!(
+            op_item_ref(None, vault, &item("SSH_KEY"), "public key")
+                .unwrap()
+                .ends_with("/public key")
+        );
+        for field in [
+            "",
+            "a/b",
+            "f?account=x",
+            "a&b",
+            "a=b",
+            "a\u{1b}b",
+            "a\u{202e}b",
+        ] {
+            assert!(check_op_field(field).is_err(), "{field:?}");
+            assert!(op_item_ref(None, vault, &item("LOGIN"), field).is_err());
+        }
+        assert!(check_op_field("one-time password").is_ok());
+        let hostile = OpItem {
+            id: "x/y".into(),
+            ..item("LOGIN")
+        };
+        assert!(op_item_ref(None, vault, &hostile, "password").is_err());
+        assert!(op_item_ref(None, "../v", &item("LOGIN"), "password").is_err());
+        assert!(op_item_ref(Some("-x"), vault, &item("LOGIN"), "password").is_err());
     }
 
     #[test]
