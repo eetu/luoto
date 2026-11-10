@@ -104,6 +104,9 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   unnamed one by podman's names history, or the build stages' `luoto.build` label), never one
   a container uses or either instance runs, never a volume. Sizes walk every volume: never on
   the UI's polls.
+- A slow step goes through `progress::step` (its line; a spinner on a terminal). What a
+  command in the env prints goes through `progress::tool`: escaped, on the terminal only with
+  `-v` or, its last lines, when it fails.
 - `watch.rs` is the one background process per config dir; port forwarding (`ports.rs`) goes
   through `exec … sandbox relay`, never a network path. Its desktop notifications
   (`notify.rs`) pass sandbox text to the OS notifier cleaned, capped and as arguments, never

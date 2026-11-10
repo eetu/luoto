@@ -15,7 +15,7 @@ use chrono::Utc;
 use crate::env::Ctx;
 use crate::paths::Paths;
 use crate::runtime::Runtime;
-use crate::{machine, names};
+use crate::{machine, names, progress};
 
 /// The size at which an install log becomes `install.log.1`, replacing the older one: what is
 /// kept is the newest output, up to twice this.
@@ -291,8 +291,8 @@ fn older(log: &Path) -> PathBuf {
     log.with_extension("log.1")
 }
 
-/// What an env's installs print, kept in its state dir for `luoto logs installs` while the
-/// terminal gets it as it comes. Newest last; at [`CAP`] the file becomes `install.log.1`,
+/// What an env's installs print, kept in its state dir for `luoto logs installs`; the terminal
+/// gets it with `--verbose`, or its last lines when an install fails ([`progress::tool`]). Newest last; at [`CAP`] the file becomes `install.log.1`,
 /// replacing the older one. Writing it never fails an install.
 pub struct InstallLog {
     path: PathBuf,
@@ -341,23 +341,13 @@ impl InstallLog {
         self.append(format!("== {ts} {what}\n").as_bytes(), true);
     }
 
-    /// Run `args` with their output on this terminal as it comes, and in the log.
+    /// Run `args`, their output in the log ([`progress::tool`] for the terminal).
     pub fn run<I, S>(&self, rt: &Runtime, args: I) -> Result<ExitStatus>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        rt.stream(args, &|is_err, b| {
-            // The terminal may be gone (a closed `luoto ui`); the install goes on.
-            let _ = if is_err {
-                std::io::stderr().write_all(b)
-            } else {
-                let mut o = std::io::stdout();
-                o.write_all(b).and_then(|()| o.flush())
-            };
-            self.append(b, false);
-            true
-        })
+        progress::tool(rt, args, &|b| self.append(b, false))
     }
 
     /// Append `bytes`, on a line of their own when `own_line`.

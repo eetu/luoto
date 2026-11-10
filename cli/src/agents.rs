@@ -75,34 +75,35 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
             a.description,
             a.install_hosts.join(", ")
         );
-        println!("{what}…");
         let log = InstallLog::new(&ctx.paths, env_name);
         log.note(&what);
         let rules: Vec<Rule> = a.install_hosts.iter().map(|h| Rule::read(h)).collect();
         let script = a.install.join(" && ");
-        let status = sync::with_grants(
-            ctx,
-            env_name,
-            &rules,
-            TimeDelta::minutes(15),
-            &format!("installing {agent} (auto-revoked)"),
-            || {
-                log.run(
-                    &ctx.rt,
-                    [
-                        "exec",
-                        "-u",
-                        UID,
-                        "-w",
-                        "/workspace",
-                        &dev,
-                        "sh",
-                        "-lc",
-                        &script,
-                    ],
-                )
-            },
-        )??;
+        let status = crate::progress::step(&what, || {
+            sync::with_grants(
+                ctx,
+                env_name,
+                &rules,
+                TimeDelta::minutes(15),
+                &format!("installing {agent} (auto-revoked)"),
+                || {
+                    log.run(
+                        &ctx.rt,
+                        [
+                            "exec",
+                            "-u",
+                            UID,
+                            "-w",
+                            "/workspace",
+                            &dev,
+                            "sh",
+                            "-lc",
+                            &script,
+                        ],
+                    )
+                },
+            )
+        })??;
         log.note(&if status.success() {
             format!("installed {agent}")
         } else {
@@ -116,7 +117,8 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
         }
         if !status.success() {
             bail!(
-                "installing {agent} failed; see `luoto egress -e {env_name} --denied --since 15m`"
+                "installing {agent} failed; `luoto logs installs -e {env_name}` has what it \
+                 printed, `luoto egress -e {env_name} --denied --since 15m` what the gate blocked"
             );
         }
     }
@@ -205,7 +207,7 @@ pub fn ensure(ctx: &Ctx, env_name: &str, agents: &[String], quiet: bool) -> Resu
         }
         if !quiet {
             println!(
-                "{} is ready ({}): luoto agent run -e {env_name} {name}",
+                "{} is ready: luoto agent run -e {env_name} {name} ({})",
                 a.description,
                 auth_summary(&cfg, a, env_name)
             );
@@ -231,7 +233,7 @@ fn auth_summary(cfg: &crate::config::EnvConfig, a: &profiles::Agent, env_name: &
                 .any(|v| matches!(v, ProviderValue::Flag(true))) =>
         {
             format!(
-                "it logs in inside: `luoto shell -e {env_name}`, then `{}`",
+                "it signs in inside: `{}` in `luoto shell -e {env_name}`",
                 a.command
             )
         }

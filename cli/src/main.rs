@@ -27,6 +27,7 @@ mod notify;
 mod paths;
 mod personal;
 mod ports;
+mod progress;
 mod project;
 mod prompt;
 mod release;
@@ -69,6 +70,10 @@ struct Cli {
     #[arg(short = 'e', long = "env", global = true, value_name = "ENV",
           add = ArgValueCandidates::new(complete::envs))]
     env: Option<String>,
+    /// Also show what tools print while luoto installs and clones (escaped), instead of a
+    /// spinner; a failed one shows its last lines either way.
+    #[arg(short = 'v', long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -445,6 +450,9 @@ fn main() -> ExitCode {
         .completer(names::instance())
         .complete();
     let cli = Cli::parse();
+    if cli.verbose {
+        progress::set_verbose();
+    }
     match run(cli.env, cli.cmd) {
         Ok(code) => code,
         Err(e) => {

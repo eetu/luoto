@@ -410,9 +410,13 @@ fn compile_provider(
                 },
             );
         }
-        b.warnings.push(format!(
-            "{pname}: login_inside keeps the {pname} credential inside the sandbox (reduced assurance)"
-        ));
+        // A provider with no credential the gate could add has no other way; `agent add` said so.
+        if !p.auth.is_empty() {
+            b.warnings.push(format!(
+                "{pname}: login_inside keeps the {pname} credential inside the sandbox (reduced \
+                 assurance)"
+            ));
+        }
         return Ok(());
     }
     let mut configured = 0;

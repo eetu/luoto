@@ -162,8 +162,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   container it checks, so it confirms the configuration rather than proving isolation.
 - **Sandbox output.** Values read back from the sandbox are checked against a strict format
   before the host uses them (the login name in the generated ssh config), and text from it
-  — file names, request paths, event messages — is shown with control and bidi characters
-  escaped.
+  — file names, request paths, event messages, what installers and git print — is shown with
+  control and bidi characters escaped.
 
 ## Residual risks
 

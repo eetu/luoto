@@ -672,30 +672,32 @@ pub fn clone_workspace(
     branch: Option<&str>,
     locked: bool,
 ) -> Result<()> {
-    println!(
-        "cloning {}{} into the env…",
+    let what = format!(
+        "cloning {}{} into the env",
         display(url),
         branch
             .map(|b| format!(" ({})", display(b)))
             .unwrap_or_default()
     );
-    let script = workspace_clone_script(url, branch, std::io::stderr().is_terminal());
+    let script = workspace_clone_script(url, branch, git_progress());
     let dev = names::dev(env);
-    let status = relayed(
-        ctx,
-        &[
-            "exec",
-            "-u",
-            UID,
-            "-w",
-            "/",
-            dev.as_str(),
-            "sh",
-            "-c",
-            connect::LOGIN,
-            &script,
-        ],
-    )?;
+    let status = crate::progress::step(&what, || {
+        quiet_git(
+            ctx,
+            &[
+                "exec",
+                "-u",
+                UID,
+                "-w",
+                "/",
+                dev.as_str(),
+                "sh",
+                "-c",
+                connect::LOGIN,
+                &script,
+            ],
+        )
+    })?;
     if status.code() == Some(3) {
         bail!(
             "/workspace in the env has files, but no clone into it finished (an `up` cut short, \
@@ -720,39 +722,16 @@ pub fn clone_workspace(
     Ok(())
 }
 
-/// Run `args` with what they write escaped on its way out ([`crate::text::Relay`]): git's
-/// output in the env carries the remote's messages and the sandbox's own text, and a review
-/// is asked right after it.
-fn relayed(ctx: &Ctx, args: &[&str]) -> Result<std::process::ExitStatus> {
-    use std::io::Write;
-    use std::sync::Mutex;
-    let relays = [
-        Mutex::new(crate::text::Relay::new(std::io::stdout().is_terminal())),
-        Mutex::new(crate::text::Relay::new(std::io::stderr().is_terminal())),
-    ];
-    let write = |to_err: bool, text: &str| {
-        if to_err {
-            eprint!("{text}");
-        } else {
-            print!("{text}");
-            let _ = std::io::stdout().flush();
-        }
-    };
-    let status = ctx.rt.stream(args, &|to_err, chunk| {
-        if let Ok(mut r) = relays[usize::from(to_err)].lock() {
-            write(to_err, &r.feed(chunk));
-        }
-        true
-    })?;
-    for (to_err, r) in [(false, &relays[0]), (true, &relays[1])] {
-        if let Ok(mut r) = r.lock() {
-            let rest = r.finish();
-            if !rest.is_empty() {
-                write(to_err, &format!("{rest}\n"));
-            }
-        }
-    }
-    Ok(status)
+/// Run git `args` in the env ([`crate::progress::tool`]): its output carries the remote's
+/// messages and the sandbox's own text, so it reaches the terminal escaped, and only with
+/// `--verbose` or, its last lines, when the clone fails.
+fn quiet_git(ctx: &Ctx, args: &[&str]) -> Result<std::process::ExitStatus> {
+    crate::progress::tool(&ctx.rt, args, &|_| {})
+}
+
+/// git's progress lines, only where they are shown as they come.
+fn git_progress() -> bool {
+    crate::progress::verbose() && std::io::stderr().is_terminal()
 }
 
 /// What a repo in the env holds that no remote has.
@@ -890,8 +869,10 @@ pub fn undecline(ctx: &Ctx, env: &str, url: &str) -> Result<bool> {
 fn copy_in(ctx: &Ctx, env: &str, ws: &Workspace, name: &str, dir: &str) -> Result<()> {
     let dir = workspace::canonical(dir)?;
     check_folder(ws.dir.as_deref(), &dir)?;
-    println!("copying {} into /workspace/{name}…", dir.display());
-    let n = workspace::push(ctx, env, &dir, Some(name))?;
+    let n = crate::progress::step(
+        &format!("copying {} into /workspace/{name}", dir.display()),
+        || workspace::push(ctx, env, &dir, Some(name)),
+    )?;
     println!("copied {n} file(s)");
     Ok(())
 }
@@ -904,7 +885,7 @@ fn clone(
     branch: Option<&str>,
     locked: bool,
 ) -> Result<()> {
-    println!("cloning {} into /workspace/{name}…", display(url));
+    let what = format!("cloning {} into /workspace/{name}", display(url));
     // No prompts: a remote that wants a password or an unknown host key fails instead.
     // Into a hidden folder first, moved into place only when the clone is whole: one cut
     // short leaves nothing the next `up` would take as done.
@@ -912,11 +893,7 @@ fn clone(
     let script = format!(
         "export GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes'\n\
          rm -rf {tmp} && git clone{}{} -- {} {tmp} && mv {tmp} {} || {{ rm -rf {tmp}; exit 1; }}",
-        if std::io::stderr().is_terminal() {
-            " --progress"
-        } else {
-            ""
-        },
+        if git_progress() { " --progress" } else { "" },
         branch
             .map(|b| format!(" --branch {}", sh_quote(b)))
             .unwrap_or_default(),
@@ -924,21 +901,23 @@ fn clone(
         sh_quote(&format!("/workspace/{name}")),
     );
     let dev = names::dev(env);
-    let status = relayed(
-        ctx,
-        &[
-            "exec",
-            "-u",
-            UID,
-            "-w",
-            "/workspace",
-            dev.as_str(),
-            "sh",
-            "-c",
-            connect::LOGIN,
-            &script,
-        ],
-    )?;
+    let status = crate::progress::step(&what, || {
+        quiet_git(
+            ctx,
+            &[
+                "exec",
+                "-u",
+                UID,
+                "-w",
+                "/workspace",
+                dev.as_str(),
+                "sh",
+                "-c",
+                connect::LOGIN,
+                &script,
+            ],
+        )
+    })?;
     if !status.success() && locked {
         bail!(
             "git clone failed: some of the env's credentials are locked (see the warning about \

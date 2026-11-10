@@ -500,8 +500,10 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         match (&ws.dir, &ws.url) {
             (Some(dir), _) => {
                 let dir = workspace::canonical(dir)?;
-                println!("copying {} into the env…", dir.display());
-                let n = workspace::push(ctx, env, &dir, None)?;
+                let n = crate::progress::step(
+                    &format!("copying {} into the env", dir.display()),
+                    || workspace::push(ctx, env, &dir, None),
+                )?;
                 println!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
             }
             (None, Some(url)) => {
