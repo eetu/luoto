@@ -2,7 +2,7 @@
 //! credential question `luoto agent run` shares with it. Each starts from the current value,
 //! and Esc keeps that value.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use anyhow::{Context, Result, bail};
@@ -589,75 +589,133 @@ fn typed_reference(global: &GlobalConfig, label: &str) -> Result<Option<String>>
 }
 
 /// A reference found in 1Password: the account (when the app has several), vault, item, and
-/// the field the item's kind keeps its secret in or one typed. It names them by ID, and that
-/// field is the only value read. `None` on Esc, or when `op` fails (its error shown).
+/// the field. It names them by ID, and that field is the only value read. Esc goes back a step,
+/// to the earlier choice; past the first step, back to typing a ref (`None`). Each list comes
+/// from `op` once: going back asks 1Password for nothing, so no new unlock prompt.
 fn browse(global: &GlobalConfig, label: &str) -> Result<Option<String>> {
+    #[derive(Clone, Copy)]
+    enum Step {
+        Account,
+        Vault,
+        Item,
+        Field,
+    }
     let accounts = op_accounts(global);
-    let account = if accounts.is_empty() {
-        None
+    let mut account: Option<String> = None;
+    let mut vaults: HashMap<Option<String>, Vec<OpVault>> = HashMap::new();
+    let mut items: HashMap<(Option<String>, String), Vec<OpItem>> = HashMap::new();
+    // Where each list was left, to reopen it there.
+    let (mut at_account, mut at_vault, mut at_item) = (0usize, 0usize, 0usize);
+    let (mut vault, mut item): (Option<OpVault>, Option<OpItem>) = (None, None);
+    let mut step = if accounts.is_empty() {
+        Step::Vault
     } else {
-        match pick_op_account("1Password account:", &accounts, None)? {
-            Some(a) => Some(a),
-            None => return Ok(None),
-        }
+        Step::Account
     };
-    let account = account.as_deref();
-    let vaults = match secrets::op_vaults(global, account) {
-        Ok(v) => v,
-        Err(e) => {
-            show_error(&e);
-            return Ok(None);
-        }
-    };
-    let (vault, items) = loop {
-        let Some(vault) = pick_vault(&vaults)? else {
-            return Ok(None);
-        };
-        match secrets::op_items(global, account, &vault.id) {
-            Ok(items) if items.is_empty() => {
-                println!("  {} holds no items", display(&vault.name));
-            }
-            Ok(items) => break (vault, items),
-            Err(e) => {
-                show_error(&e);
-                return Ok(None);
-            }
-        }
-    };
-    let options: Vec<Choice<usize>> = items
-        .iter()
-        .enumerate()
-        .map(|(i, item)| {
-            let shown = item.shown();
-            choice(i, shown.clone(), shown)
-        })
-        .collect();
-    let Some(picked) = Select::new("Item:", options)
-        .with_formatter(&short)
-        .with_sorter(KEEP_ORDER)
-        .with_page_size(PAGE)
-        .prompt_skippable()?
-    else {
-        return Ok(None);
-    };
-    let item = &items[picked.value];
     loop {
-        let Some(field) = item_field(item)? else {
-            return Ok(None);
-        };
-        let r = match secrets::op_item_ref(account, &vault.id, item, &field) {
-            Ok(r) => r,
-            Err(e) => {
-                show_error(&e);
-                return Ok(None);
+        match step {
+            Step::Account => {
+                let Some(i) = pick_index(
+                    "1Password account:",
+                    accounts
+                        .iter()
+                        .map(|a| account_label(a, &accounts))
+                        .collect(),
+                    at_account,
+                )?
+                else {
+                    return Ok(None);
+                };
+                at_account = i;
+                account = Some(accounts[i].id.clone());
+                step = Step::Vault;
             }
-        };
-        match readable(global, &r, label) {
-            Ok(()) => {
-                println!("  reference: {r}");
-                return Ok(Some(r));
+            Step::Vault => {
+                let list = match vaults.entry(account.clone()) {
+                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        match secrets::op_vaults(global, account.as_deref()) {
+                            Ok(v) => e.insert(v),
+                            Err(err) => {
+                                show_error(&err);
+                                return Ok(None);
+                            }
+                        }
+                    }
+                };
+                if list.is_empty() {
+                    println!("  no vaults in this account to choose from");
+                    if accounts.is_empty() {
+                        return Ok(None);
+                    }
+                    step = Step::Account;
+                    continue;
+                }
+                let names = list.iter().map(|v| display(&v.name)).collect();
+                match pick_index("1Password vault:", names, at_vault)? {
+                    Some(i) => {
+                        at_vault = i;
+                        vault = Some(list[i].clone());
+                        at_item = 0;
+                        step = Step::Item;
+                    }
+                    None if accounts.is_empty() => return Ok(None),
+                    None => step = Step::Account,
+                }
             }
-            Err(e) => show_error(&e),
+            Step::Item => {
+                let v = vault.clone().context("a vault is picked first")?;
+                let list = match items.entry((account.clone(), v.id.clone())) {
+                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        match secrets::op_items(global, account.as_deref(), &v.id) {
+                            Ok(i) => e.insert(i),
+                            Err(err) => {
+                                show_error(&err);
+                                return Ok(None);
+                            }
+                        }
+                    }
+                };
+                if list.is_empty() {
+                    println!("  {} holds no items", display(&v.name));
+                    step = Step::Vault;
+                    continue;
+                }
+                let shown = list.iter().map(OpItem::shown).collect();
+                match pick_index("Item:", shown, at_item)? {
+                    Some(i) => {
+                        at_item = i;
+                        item = Some(list[i].clone());
+                        step = Step::Field;
+                    }
+                    None => step = Step::Vault,
+                }
+            }
+            Step::Field => {
+                let (v, it) = (
+                    vault.clone().context("a vault is picked first")?,
+                    item.clone().context("an item is picked first")?,
+                );
+                let Some(field) = item_field(&it)? else {
+                    step = Step::Item;
+                    continue;
+                };
+                let r = match secrets::op_item_ref(account.as_deref(), &v.id, &it, &field) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        show_error(&e);
+                        continue;
+                    }
+                };
+                match readable(global, &r, label) {
+                    Ok(()) => {
+                        println!("  reference: {}", secrets::shown_ref(&r));
+                        return Ok(Some(r));
+                    }
+                    Err(e) => show_error(&e),
+                }
+            }
         }
     }
 }
@@ -665,51 +723,67 @@ fn browse(global: &GlobalConfig, label: &str) -> Result<Option<String>> {
 /// Options a filter narrows keep the order they were given in (by name), rather than a score's.
 const KEEP_ORDER: Sorter<'static> = &|o| o.sort_by_key(|&(i, _)| i);
 const PAGE: usize = 12;
+const BROWSE_HELP: &str = "type to filter, Enter to pick, Esc: back";
+
+/// The index of the option picked from `shown` (escaped already), opening on `at`; `None` on
+/// Esc.
+fn pick_index(question: &str, shown: Vec<String>, at: usize) -> Result<Option<usize>> {
+    let at = at.min(shown.len().saturating_sub(1));
+    let options: Vec<Choice<usize>> = shown
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| choice(i, s.clone(), s))
+        .collect();
+    Ok(Select::new(question, options)
+        .with_formatter(&short)
+        .with_sorter(KEEP_ORDER)
+        .with_page_size(PAGE)
+        .with_starting_cursor(at)
+        .with_help_message(BROWSE_HELP)
+        .prompt_skippable()?
+        .map(|c| c.value))
+}
 
 /// A vault of `vaults`, by name; `None` when skipped.
 fn pick_vault(vaults: &[OpVault]) -> Result<Option<&OpVault>> {
     if vaults.is_empty() {
         bail!("no 1Password vaults to choose from: `op vault list` gave none");
     }
-    let options: Vec<Choice<usize>> = vaults
-        .iter()
-        .enumerate()
-        .map(|(i, v)| {
-            let name = display(&v.name);
-            choice(i, name.clone(), name)
-        })
-        .collect();
-    Ok(Select::new("1Password vault:", options)
-        .with_formatter(&short)
-        .with_sorter(KEEP_ORDER)
-        .with_page_size(PAGE)
-        .prompt_skippable()?
-        .map(|c| &vaults[c.value]))
+    let names = vaults.iter().map(|v| display(&v.name)).collect();
+    Ok(pick_index("1Password vault:", names, 0)?.map(|i| &vaults[i]))
 }
 
-/// The field of `item` to read: the one its kind keeps a secret in, offered as the default, or
-/// one typed. `None` when skipped.
+/// The field of `item` to read: one of the fields its kind has (the secret's first), or one
+/// typed. `None` on Esc.
 fn item_field(item: &OpItem) -> Result<Option<String>> {
+    const ANOTHER: &str = "another field (type its name)";
+    let fields = secrets::op_kind_fields(&item.category);
     let default = secrets::op_field(&item.category);
-    let help = match default {
-        Some(_) => format!(
-            "where {} items keep their secret; Enter takes it, or type another field's name",
-            display(&secrets::op_kind(&item.category))
-        ),
-        None => "the name of the field that holds it, as 1Password shows it".to_string(),
+    let mut shown: Vec<String> = fields.iter().map(|f| f.to_string()).collect();
+    shown.push(ANOTHER.into());
+    let at = default
+        .and_then(|d| fields.iter().position(|f| *f == d))
+        .unwrap_or(0);
+    let question = format!(
+        "Field of the {} item:",
+        display(&secrets::op_kind(&item.category))
+    );
+    let Some(i) = pick_index(&question, shown, at)? else {
+        return Ok(None);
     };
-    let mut prompt = Text::new("Field:")
-        .with_help_message(&help)
+    if let Some(f) = fields.get(i) {
+        return Ok(Some(f.to_string()));
+    }
+    let typed = Text::new("Field:")
+        .with_help_message("the field's name as 1Password shows it; Esc: back")
         .with_validator(|s: &str| {
             Ok(match secrets::check_op_field(s.trim()) {
                 Ok(()) => Validation::Valid,
                 Err(e) => Validation::Invalid(format!("{e:#}").into()),
             })
-        });
-    if let Some(d) = default {
-        prompt = prompt.with_default(d);
-    }
-    Ok(prompt.prompt_skippable()?.map(|s| s.trim().to_string()))
+        })
+        .prompt_skippable()?;
+    Ok(typed.map(|s| s.trim().to_string()))
 }
 
 fn show_error(e: &anyhow::Error) {

@@ -507,7 +507,36 @@ pub fn op_kind(category: &str) -> String {
         "API_CREDENTIAL" => "API Credential".into(),
         "SECURE_NOTE" => "Secure Note".into(),
         "SSH_KEY" => "SSH Key".into(),
+        "SERVER" => "Server".into(),
+        "EMAIL_ACCOUNT" => "Email Account".into(),
+        "WIRELESS_ROUTER" => "Wireless Router".into(),
+        "CUSTOM" => "Custom".into(),
         c => c.to_lowercase().replace('_', " "),
+    }
+}
+
+/// The fields of an item of `category` that can hold a secret, as `op item template get`
+/// lists them for that kind (op 2.42), the concealed ones first; taken from the templates once
+/// so that browsing asks 1Password for nothing but the vault and item lists. Fields an item
+/// adds of its own are typed.
+pub fn op_kind_fields(category: &str) -> &'static [&'static str] {
+    match category {
+        "LOGIN" => &["password", "username", "notesPlain"],
+        "PASSWORD" => &["password", "notesPlain"],
+        "API_CREDENTIAL" => &["credential", "username", "hostname", "notesPlain"],
+        "SECURE_NOTE" => &["notesPlain"],
+        "SSH_KEY" => &["private key", "notesPlain"],
+        "DATABASE" => &["password", "username", "server", "database", "notesPlain"],
+        "SERVER" => &["password", "username", "URL", "notesPlain"],
+        "EMAIL_ACCOUNT" => &["password", "username", "server", "notesPlain"],
+        "WIRELESS_ROUTER" => &[
+            "wireless network password",
+            "base station password",
+            "attached storage password",
+            "notesPlain",
+        ],
+        "CUSTOM" => &["password", "recovery phrase", "notesPlain"],
+        _ => &["notesPlain"],
     }
 }
 
@@ -518,6 +547,8 @@ pub fn op_field(category: &str) -> Option<&'static str> {
         "API_CREDENTIAL" => Some("credential"),
         "SECURE_NOTE" => Some("notesPlain"),
         "SSH_KEY" => Some("private key"),
+        "SERVER" | "EMAIL_ACCOUNT" | "CUSTOM" => Some("password"),
+        "WIRELESS_ROUTER" => Some("wireless network password"),
         _ => None,
     }
 }
@@ -655,6 +686,32 @@ fn vault_read(global: &GlobalConfig, rest: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_kind_offers_its_secret_field_first_and_every_field_fits_a_ref() {
+        for kind in [
+            "LOGIN",
+            "PASSWORD",
+            "API_CREDENTIAL",
+            "SECURE_NOTE",
+            "SSH_KEY",
+            "DATABASE",
+            "SERVER",
+            "EMAIL_ACCOUNT",
+            "WIRELESS_ROUTER",
+            "CUSTOM",
+            "IDENTITY",
+        ] {
+            let fields = op_kind_fields(kind);
+            assert!(!fields.is_empty(), "{kind}");
+            if let Some(d) = op_field(kind) {
+                assert_eq!(fields[0], d, "{kind}");
+            }
+            for f in fields {
+                check_op_field(f).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn an_op_ref_can_name_its_account() {
