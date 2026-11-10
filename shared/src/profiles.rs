@@ -22,7 +22,7 @@ pub struct Provider {
     /// Extra hosts needed only when the user logs in inside the sandbox.
     #[serde(default)]
     pub login_hosts: Vec<String>,
-    /// How to log in inside the sandbox, and what that leaves there.
+    /// How to log in inside the sandbox; luoto says that code in the env can read the session.
     #[serde(default)]
     pub login_how: Option<String>,
     #[serde(default)]
@@ -81,7 +81,33 @@ pub struct ProviderHost {
     pub access: Option<crate::policy::AccessLevel>,
 }
 
+/// What a description names, without the note in parentheses after it ("Anthropic API").
+fn title(description: &str) -> &str {
+    description.split(" (").next().unwrap_or(description)
+}
+
 impl Provider {
+    pub fn title(&self) -> &str {
+        title(&self.description)
+    }
+
+    /// Its auth kinds as they are offered: the suggested one first.
+    pub fn kinds(&self) -> Vec<&str> {
+        let suggested = self
+            .suggested
+            .as_deref()
+            .filter(|s| self.auth.contains_key(*s));
+        suggested
+            .into_iter()
+            .chain(
+                self.auth
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|k| Some(*k) != suggested),
+            )
+            .collect()
+    }
+
     /// Every host the credential goes to, with its paths and access: `host` first, then
     /// `also`. `write` is the env's `write = true`.
     pub fn hosts(&self, write: bool) -> Vec<(&str, &[String], crate::policy::AccessLevel)> {
@@ -115,8 +141,14 @@ pub struct ProviderDeny {
 pub struct ProviderAuth {
     /// What the credential is, as the user knows it ("Claude subscription token").
     pub label: String,
-    /// Where to get one, in a sentence or two.
+    /// What sets it apart, beside the label in a menu: a few words, under 60 characters.
+    pub short: String,
+    /// Where to get one, in a sentence or two, shown once it is picked.
     pub how: String,
+    /// What every such credential starts with, as its issuer documents it: a pasted or
+    /// referenced value that doesn't is asked for again.
+    #[serde(default)]
+    pub prefix: Option<String>,
     pub header: String,
     pub format: String,
     /// Also replace this query parameter (clients that pass keys in the URL).
@@ -175,6 +207,13 @@ pub struct Agent {
     /// config: written at `up`, under anything the user chooses in a session.
     #[serde(default)]
     pub settings: BTreeMap<String, AgentSetting>,
+}
+
+impl Agent {
+    /// "Claude Code", "Antigravity CLI".
+    pub fn title(&self) -> &str {
+        title(&self.description)
+    }
 }
 
 /// Where one agent option goes: a key path in a config file of the home (JSON, or TOML for a
@@ -310,6 +349,16 @@ mod tests {
     }
 
     #[test]
+    fn kinds_are_offered_suggested_first_and_named_plainly() {
+        let anthropic = provider("anthropic").unwrap();
+        assert_eq!(anthropic.kinds(), ["oauth_token", "api_key"]);
+        assert_eq!(anthropic.title(), "Anthropic API");
+        assert_eq!(provider("openai").unwrap().kinds(), ["api_key"]);
+        assert_eq!(agent("agy").unwrap().title(), "Antigravity CLI");
+        assert_eq!(agent("claude").unwrap().title(), "Claude Code");
+    }
+
+    #[test]
     fn cloud_apis_read_until_the_env_writes() {
         use crate::policy::AccessLevel::{Read, Write};
         for name in ["hetzner", "upcloud", "digitalocean", "cloudflare"] {
@@ -341,8 +390,16 @@ mod tests {
                 !p.auth.is_empty() || !p.login_hosts.is_empty(),
                 "{name} has auth kinds or a login"
             );
-            for a in p.auth.values() {
+            for (k, a) in &p.auth {
                 assert!(a.format.contains("{secret}"), "{name}");
+                assert!(a.short.chars().count() < 60, "{name}.{k}: short is long");
+                // The placeholder clients see passes the check a real one does.
+                if let Some(prefix) = &a.prefix {
+                    assert!(
+                        a.env.values().any(|v| v.starts_with(prefix.as_str())),
+                        "{name}.{k}: no placeholder starts with {prefix}"
+                    );
+                }
             }
         }
         for name in agent_names() {

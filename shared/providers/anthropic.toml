@@ -1,7 +1,7 @@
 description = "Anthropic API (Claude models; Claude Code)"
 host = "api.anthropic.com"
 login_hosts = ["claude.ai", "claude.com", "platform.claude.com", "console.anthropic.com"]
-login_how = "In `luoto shell`, run `claude` and log in. The session, with full scopes, stays in the env's home, where its code can read it."
+login_how = "run `claude` in `luoto shell` and log in (the session has full scopes)"
 suggested = "oauth_token"
 
 [[deny]]
@@ -9,7 +9,9 @@ paths = ["/v1/files", "/v1/files/**", "/v1/messages/batches", "/v1/messages/batc
 reason = "file storage, batches and admin endpoints of the Anthropic API are not reachable from the sandbox"
 
 [auth.api_key]
-label = "Anthropic API key (billed per use)"
+label = "Anthropic API key"
+short = "billed per use (platform.claude.com)"
+prefix = "sk-ant-api"
 how = "In the Claude Console (https://platform.claude.com): API keys > Create key. It can have its own spend limit."
 header = "x-api-key"
 format = "{secret}"
@@ -17,6 +19,8 @@ env = { ANTHROPIC_API_KEY = "sk-ant-api03-luoto-placeholder-00000000000000000000
 
 [auth.oauth_token]
 label = "Claude subscription token"
+short = "`claude setup-token` on this machine"
+prefix = "sk-ant-oat"
 how = "Run `claude setup-token` on your machine (not in the env): it opens your browser and, once you approve, prints a token valid for a year. Needs Claude Code here and a Pro, Max, Team or Enterprise plan; see https://code.claude.com/docs/en/authentication#generate-a-long-lived-token"
 header = "authorization"
 format = "Bearer {secret}"

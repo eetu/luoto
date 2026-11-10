@@ -536,17 +536,18 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
                 format!(" (temporary access: {})", access.join(", "))
             }
         );
-        println!("{what}…");
         e.log.note(&what);
         let since = Utc::now();
-        let res = sync::with_grants(
-            ctx,
-            env,
-            &rules,
-            TimeDelta::minutes(30),
-            "installing deps (auto-revoked)",
-            || run_job(&e, &d, &mut job),
-        )?;
+        let res = crate::progress::step(&what, || {
+            sync::with_grants(
+                ctx,
+                env,
+                &rules,
+                TimeDelta::minutes(30),
+                "installing deps (auto-revoked)",
+                || run_job(&e, &d, &mut job),
+            )
+        })?;
         let Err(err) = res else { break };
         let denied: Vec<String> = denied_since(ctx, env, since, &mutes)
             .into_iter()

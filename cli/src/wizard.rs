@@ -1,21 +1,26 @@
-//! Questions asked one at a time: the `luoto init` walk-through (`c` at its prompt) and the
-//! credential question `luoto agent run` shares with it. Each starts from the current value,
-//! and Esc keeps that value.
+//! Questions asked one at a time: the `luoto init` walk-through (`c` at its prompt), where each
+//! starts from the current value and Esc keeps it, and the credential questions of `up`,
+//! `agent run`, `agent auth` and `repo auth`, where Esc goes back a question.
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fmt;
 
 use anyhow::{Context, Result, bail};
 use inquire::list_option::ListOption;
+use inquire::type_aliases::Sorter;
 use inquire::validator::Validation;
 use inquire::{MultiSelect, Password, Select, Text};
 use luoto_shared::{presets, profiles};
 
-use crate::config::{EnvConfig, GlobalConfig, Isolation, ProviderValue};
+use crate::agents::Auth;
+use crate::config::{EnvConfig, GlobalConfig, Isolation};
 use crate::detect;
 use crate::init::Proposal;
-use crate::secrets;
+use crate::prompt::{menu_help, menu_rows};
+use crate::secrets::{self, OpAccount, OpItem, OpVault};
+use crate::text::{self, display};
 
+#[derive(Clone)]
 struct Choice<T> {
     value: T,
     /// What the answered prompt echoes.
@@ -37,6 +42,30 @@ fn choice<T>(value: T, short: impl Into<String>, label: impl Into<String>) -> Ch
     }
 }
 
+/// Choices whose labels are a label and a description in two columns ([`menu_rows`]), each
+/// echoed as its label; `width` leaves room for what inquire draws before an entry.
+fn table<T>(rows: Vec<(T, String, String)>, width: usize) -> Vec<Choice<T>> {
+    let shown = menu_rows(
+        &rows
+            .iter()
+            .map(|(_, l, d)| (l.clone(), d.clone()))
+            .collect::<Vec<_>>(),
+        width,
+    );
+    rows.into_iter()
+        .zip(shown)
+        .map(|((value, label, _), shown)| choice(value, plain(&label), shown))
+        .collect()
+}
+
+/// A label as the answered prompt echoes it: without its `(recommended)` or `(current)`.
+fn plain(label: &str) -> String {
+    label
+        .trim_end_matches(" (recommended)")
+        .trim_end_matches(" (current)")
+        .to_string()
+}
+
 fn short<T>(o: ListOption<&Choice<T>>) -> String {
     o.value.short.clone()
 }
@@ -50,20 +79,14 @@ fn shorts<T>(opts: &[ListOption<&Choice<T>>]) -> String {
     }
 }
 
-/// Walk the proposal's settings; a credential question follows each agent that needs one.
-pub fn customize(p: &mut Proposal, global: &GlobalConfig) -> Result<()> {
-    println!();
+/// Walk the proposal's settings. Credentials wait for the env's first `up`, so nothing is
+/// kept in a keychain or 1Password for an env that is never created.
+pub fn customize(p: &mut Proposal) -> Result<()> {
+    println!("\nEsc keeps the current value.");
     isolation(p)?;
     pick_presets(p)?;
     toolchains(p)?;
     pick_agents(&mut p.cfg)?;
-    for name in p.cfg.agents.names().cloned().collect::<Vec<_>>() {
-        if let Some(a) = profiles::agent(&name)
-            && let Some((provider, entries)) = credential(&p.cfg, &a, global)?
-        {
-            p.cfg.credentials.providers.insert(provider, entries);
-        }
-    }
     ports(&mut p.cfg)?;
     Ok(())
 }
@@ -72,22 +95,28 @@ fn isolation(p: &mut Proposal) -> Result<()> {
     if !p.gvisor {
         return Ok(());
     }
-    let options = vec![
-        choice(
-            Isolation::Gvisor,
-            "gVisor",
-            "gVisor     its own user-space kernel: an exploit stays in the env (builds about 1.6× slower)",
-        ),
-        choice(
-            Isolation::Container,
-            "container",
-            "container  shares the VM's kernel: builds about 1.6× faster, weaker",
-        ),
-    ];
+    let options = table(
+        vec![
+            (
+                Isolation::Gvisor,
+                "gVisor (recommended)".into(),
+                "its own kernel: exploits stay in the env, 1.6× slower".into(),
+            ),
+            (
+                Isolation::Container,
+                "container".into(),
+                "shares the VM's kernel: 1.6× faster, weaker".into(),
+            ),
+        ],
+        text::columns(),
+    );
     let current = usize::from(p.cfg.isolation == Some(Isolation::Container));
+    let help = menu_help("keep it");
     if let Some(c) = Select::new("Isolation:", options)
         .with_starting_cursor(current)
         .with_formatter(&short)
+        .with_help_message(&help)
+        .without_filtering()
         .prompt_skippable()?
     {
         // gVisor is the default, so only the opt-out is written.
@@ -96,20 +125,30 @@ fn isolation(p: &mut Proposal) -> Result<()> {
     Ok(())
 }
 
+/// A multi-select's entries: what inquire draws before one (`> [x] `) takes four more columns.
+fn checklist(rows: Vec<(String, String)>) -> Vec<Choice<String>> {
+    table(
+        rows.into_iter().map(|(n, d)| (n.clone(), n, d)).collect(),
+        text::columns() - 4,
+    )
+}
+
 fn pick_presets(p: &mut Proposal) -> Result<()> {
-    let options: Vec<Choice<String>> = presets::names()
-        .map(|n| {
-            let desc = presets::get(n).map(|p| p.description).unwrap_or_default();
-            let found = p
-                .found
-                .presets
-                .iter()
-                .find(|(f, _)| f == n)
-                .map(|(_, file)| format!("  [{file}]"))
-                .unwrap_or_default();
-            choice(n.to_string(), n, format!("{n:<11} {desc}{found}"))
-        })
-        .collect();
+    let options = checklist(
+        presets::names()
+            .map(|n| {
+                let desc = presets::get(n).map(|p| p.description).unwrap_or_default();
+                let found = p
+                    .found
+                    .presets
+                    .iter()
+                    .find(|(f, _)| f == n)
+                    .map(|(_, file)| format!("[{file}] "))
+                    .unwrap_or_default();
+                (n.to_string(), format!("{found}{desc}"))
+            })
+            .collect(),
+    );
     let selected: Vec<usize> = options
         .iter()
         .enumerate()
@@ -119,7 +158,7 @@ fn pick_presets(p: &mut Proposal) -> Result<()> {
     if let Some(chosen) =
         MultiSelect::new("Egress presets (read access to these registries):", options)
             .with_default(&selected)
-            .with_help_message("space toggles, enter confirms; [file] = suggested by the folder")
+            .with_help_message("space toggles, Enter confirms; [file] = suggested by the folder")
             .with_formatter(&shorts)
             .prompt_skippable()?
     {
@@ -180,14 +219,16 @@ fn toolchains(p: &mut Proposal) -> Result<()> {
 }
 
 fn pick_agents(cfg: &mut EnvConfig) -> Result<()> {
-    let options: Vec<Choice<String>> = profiles::agent_names()
-        .map(|n| {
-            let desc = profiles::agent(n)
-                .map(|a| a.description)
-                .unwrap_or_default();
-            choice(n.to_string(), n, format!("{n:<9} {desc}"))
-        })
-        .collect();
+    let options = checklist(
+        profiles::agent_names()
+            .map(|n| {
+                let desc = profiles::agent(n)
+                    .map(|a| a.description)
+                    .unwrap_or_default();
+                (n.to_string(), desc)
+            })
+            .collect(),
+    );
     let selected: Vec<usize> = options
         .iter()
         .enumerate()
@@ -196,9 +237,7 @@ fn pick_agents(cfg: &mut EnvConfig) -> Result<()> {
         .collect();
     if let Some(chosen) = MultiSelect::new("Coding agents:", options)
         .with_default(&selected)
-        .with_help_message(
-            "space toggles, enter confirms; each installs on first `luoto agent run`",
-        )
+        .with_help_message("space toggles, Enter confirms; the first `up` asks how each signs in")
         .with_formatter(&shorts)
         .prompt_skippable()?
     {
@@ -233,275 +272,963 @@ fn ports(cfg: &mut EnvConfig) -> Result<()> {
     Ok(())
 }
 
-/// How an agent's provider is authenticated.
+/// An answer, or Esc: back to the question before.
+pub enum Step<T> {
+    Got(T),
+    Back,
+}
+
+impl<T> From<Option<T>> for Step<T> {
+    fn from(o: Option<T>) -> Self {
+        o.map_or(Step::Back, Step::Got)
+    }
+}
+
+/// Puts a menu to the user: the index picked, opening on the given one, or Esc.
+trait Menu: FnMut(&str, Vec<Choice<usize>>, usize, &str) -> Result<Step<usize>> {}
+
+impl<F: FnMut(&str, Vec<Choice<usize>>, usize, &str) -> Result<Step<usize>>> Menu for F {}
+
+fn terminal_menu(
+    question: &str,
+    options: Vec<Choice<usize>>,
+    at: usize,
+    help: &str,
+) -> Result<Step<usize>> {
+    let page = options.len().max(1);
+    Ok(Select::new(question, options)
+        .with_formatter(&short)
+        .with_starting_cursor(at)
+        .with_help_message(help)
+        .with_page_size(page)
+        .without_filtering()
+        .prompt_skippable()?
+        .map(|c| c.value)
+        .into())
+}
+
+/// `options` put to `menu`, opening on `at`: the index and value picked.
+fn pick<T: Clone>(
+    menu: &mut impl Menu,
+    question: &str,
+    options: &[Choice<T>],
+    at: usize,
+    help: &str,
+) -> Result<Step<(usize, T)>> {
+    let indexed = options
+        .iter()
+        .enumerate()
+        .map(|(i, o)| choice(i, o.short.clone(), o.label.clone()))
+        .collect();
+    let at = at.min(options.len().saturating_sub(1));
+    Ok(match menu(question, indexed, at, help)? {
+        Step::Got(i) => Step::Got((i, options[i].value.clone())),
+        Step::Back => Step::Back,
+    })
+}
+
+/// A question put by [`ask_menu`]: its menu's labels and descriptions, and the one it opens on.
+pub struct Question<T> {
+    pub text: String,
+    pub rows: Vec<(T, String, String)>,
+    pub at: usize,
+    pub help: String,
+}
+
+/// Ask `q` on the terminal: the value picked, or `None` for Esc.
+pub fn ask_menu<T: Clone>(q: Question<T>) -> Result<Option<T>> {
+    let options = table(q.rows, text::columns());
+    Ok(
+        match pick(&mut terminal_menu, &q.text, &options, q.at, &q.help)? {
+            Step::Got((_, v)) => Some(v),
+            Step::Back => None,
+        },
+    )
+}
+
+/// Whether the questions give a credential the env lacks, or another for one it has.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Mode {
+    /// `up`, `agent run`, `agent add`: the first question offers "Later", and Esc there
+    /// writes nothing; the next `up` asks again.
+    Missing,
+    /// `agent auth`, `repo auth`: each question opens on what the env has, marked
+    /// `(current)`, and Esc at the first leaves it unchanged.
+    Change,
+}
+
+impl Mode {
+    /// What Esc does at the first question.
+    pub fn esc(self) -> &'static str {
+        match self {
+            Mode::Missing => "later",
+            Mode::Change => "unchanged",
+        }
+    }
+}
+
+/// What the credential questions settle on.
+#[derive(Debug, PartialEq)]
+pub enum Answer {
+    Set(Auth),
+    /// The config stays as it is: "Later", Esc at the first question, or what it has, picked
+    /// again.
+    Leave,
+}
+
+/// An entry of the kind menu.
 #[derive(Clone, PartialEq)]
-enum Auth {
+enum Pick {
     Kind(String),
     LoginInside,
     Later,
 }
 
-/// Where a credential of a known kind is kept.
-#[derive(Clone, Copy, PartialEq)]
+/// The login inside, as the kind menu offers it.
+const LOGIN: &str = "Log in inside the sandbox";
+const LOGIN_SHORT: &str = "weaker: code in the env can read it";
+const LATER: &str = "Later";
+const LATER_SHORT: &str = "the agent can't connect without one";
+
+/// Ask how agent `a` signs in: the provider (when it has several), the kind, then where it is
+/// kept. `have` is what the env has, one per provider. A pasted secret is in the OS keychain or
+/// 1Password by the time this returns, and only its reference goes in the config.
+pub fn credential(
+    a: &profiles::Agent,
+    global: &GlobalConfig,
+    have: &[Auth],
+    mode: Mode,
+) -> Result<Answer> {
+    credential_with(a, have, mode, &mut terminal_menu, &mut |ask: &SecretAsk| {
+        secret(ask, global)
+    })
+}
+
+/// [`credential`], its menus put through `menu` and where the secret is kept asked by `secret`.
+fn credential_with(
+    a: &profiles::Agent,
+    have: &[Auth],
+    mode: Mode,
+    menu: &mut impl Menu,
+    secret: &mut impl FnMut(&SecretAsk) -> Result<Step<Secret>>,
+) -> Result<Answer> {
+    let providers: Vec<profiles::Provider> = a
+        .providers
+        .iter()
+        .filter_map(|n| profiles::provider(n))
+        .collect();
+    let intro = if providers.iter().any(|p| !p.auth.is_empty()) {
+        format!(
+            "{} needs a credential. The gate adds it to requests; the sandbox only sees a \
+             placeholder.",
+            a.title()
+        )
+    } else {
+        format!(
+            "{} signs in inside the sandbox, with your own account.",
+            a.title()
+        )
+    };
+    println!("{}", text::wrap(&intro, "", text::columns()));
+    let current = |n: &str| have.iter().find(|h| h.provider() == n);
+    let several = providers.len() > 1;
+    let mut rows: Vec<(Option<String>, String, String)> = providers
+        .iter()
+        .map(|p| {
+            let note = p.description[p.title().len()..]
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')');
+            let mark = if current(&p.name).is_some() {
+                " (current)"
+            } else {
+                ""
+            };
+            (
+                Some(p.name.clone()),
+                format!("{}{mark}", p.title()),
+                note.to_string(),
+            )
+        })
+        .collect();
+    if mode == Mode::Missing {
+        rows.push((None, LATER.into(), LATER_SHORT.into()));
+    }
+    let options = table(rows, text::columns());
+    let question = format!("Which provider should {} use?", a.title());
+    let first = menu_help(mode.esc());
+    let mut at = providers
+        .iter()
+        .position(|p| current(&p.name).is_some())
+        .unwrap_or(0);
+    loop {
+        let p = if several {
+            match pick(menu, &question, &options, at, &first)? {
+                Step::Got((i, Some(n))) => {
+                    at = i;
+                    providers
+                        .iter()
+                        .find(|p| p.name == n)
+                        .context("a provider of the agent")?
+                }
+                Step::Got((_, None)) | Step::Back => return Ok(Answer::Leave),
+            }
+        } else if let Some(p) = providers.first() {
+            p
+        } else {
+            return Ok(Answer::Leave);
+        };
+        let how = How {
+            agent: a,
+            provider: p,
+            current: current(&p.name),
+            first: !several,
+            mode,
+        };
+        match provider_auth(&how, menu, secret)? {
+            Step::Got(answer) => return Ok(answer),
+            Step::Back if several => {}
+            Step::Back => return Ok(Answer::Leave),
+        }
+    }
+}
+
+/// What [`provider_auth`] asks about.
+struct How<'a> {
+    agent: &'a profiles::Agent,
+    provider: &'a profiles::Provider,
+    /// What the env has for the provider.
+    current: Option<&'a Auth>,
+    /// Its first question is the step's first.
+    first: bool,
+    mode: Mode,
+}
+
+/// The kind menu's entries: each kind, suggested first, with what sets it apart; a login
+/// inside where the provider allows one; "Later" where this is the first question of a step
+/// that may wait. What the env has is marked `(current)`, else the suggested kind
+/// `(recommended)`.
+fn kind_rows(h: &How) -> Vec<(Pick, String, String)> {
+    let p = h.provider;
+    let is_current = |pick: &Pick| match (h.current, pick) {
+        (Some(Auth::Kind { kind, .. }), Pick::Kind(k)) => kind == k,
+        (Some(Auth::LoginInside { .. }), Pick::LoginInside) => true,
+        _ => false,
+    };
+    let mark = |pick: &Pick| {
+        if is_current(pick) {
+            " (current)"
+        } else if h.current.is_none()
+            && matches!(pick, Pick::Kind(k) if p.suggested.as_ref() == Some(k))
+        {
+            " (recommended)"
+        } else {
+            ""
+        }
+    };
+    let mut rows: Vec<(Pick, String, String)> = p
+        .kinds()
+        .into_iter()
+        .map(|k| {
+            let pick = Pick::Kind(k.to_string());
+            let label = format!("{}{}", p.auth[k].label, mark(&pick));
+            (pick, label, p.auth[k].short.clone())
+        })
+        .collect();
+    if !p.login_hosts.is_empty() {
+        let label = format!("{LOGIN}{}", mark(&Pick::LoginInside));
+        rows.push((Pick::LoginInside, label, LOGIN_SHORT.into()));
+    }
+    if h.first && h.mode == Mode::Missing {
+        rows.push((Pick::Later, LATER.into(), LATER_SHORT.into()));
+    }
+    rows
+}
+
+/// How the agent signs in to one provider: the kind, its how-to, then where it is kept. `Back`
+/// is Esc at the first of these questions.
+fn provider_auth(
+    h: &How,
+    menu: &mut impl Menu,
+    secret: &mut impl FnMut(&SecretAsk) -> Result<Step<Secret>>,
+) -> Result<Step<Answer>> {
+    let p = h.provider;
+    let kinds = p.kinds();
+    let rows = kind_rows(h);
+    let inside = Auth::LoginInside {
+        provider: p.name.clone(),
+    };
+    // Nothing to choose: the env has the provider's only way in.
+    if kinds.is_empty() && rows.len() == 1 && h.current == Some(&inside) {
+        return Ok(Step::Got(Answer::Leave));
+    }
+    // One kind and no login: no question of the kind.
+    let asks = kinds.len() != 1 || !p.login_hosts.is_empty();
+    let first = menu_help(h.mode.esc());
+    let back = menu_help("back");
+    let help: &str = if h.first { &first } else { &back };
+    let question = if h.first {
+        format!("How should {} sign in?", h.agent.title())
+    } else {
+        format!("How should {} sign in to {}?", h.agent.title(), p.title())
+    };
+    let mut at = rows
+        .iter()
+        .position(|(_, l, _)| l.ends_with(" (current)"))
+        .unwrap_or(0);
+    let options = table(rows, text::columns());
+    loop {
+        let kind = if asks {
+            match pick(menu, &question, &options, at, help)? {
+                Step::Back => return Ok(Step::Back),
+                Step::Got((i, pick)) => {
+                    at = i;
+                    match pick {
+                        Pick::Later => return Ok(Step::Got(Answer::Leave)),
+                        Pick::LoginInside => {
+                            return Ok(Step::Got(changed(h.current, inside)));
+                        }
+                        Pick::Kind(k) => k,
+                    }
+                }
+            }
+        } else {
+            kinds[0].to_string()
+        };
+        let auth = &p.auth[&kind];
+        println!("{}", text::wrap(&auth.how, "  ", text::columns()));
+        let kept = match h.current {
+            Some(Auth::Kind {
+                kind: k, reference, ..
+            }) if *k == kind => Some(reference.as_str()),
+            _ => None,
+        };
+        let title = format!("luoto {} {kind}", p.name);
+        let acct = format!("{}.{kind}", p.name);
+        let ask = SecretAsk {
+            label: &auth.label,
+            acct: &acct,
+            title: &title,
+            later: !asks && h.first && h.mode == Mode::Missing,
+            known: &[],
+            current: kept,
+            help: if asks { &back } else { help },
+            kind: Some((&p.name, &kind)),
+        };
+        match secret(&ask)? {
+            Step::Got(Secret::Ref(reference)) => {
+                let auth = Auth::Kind {
+                    provider: p.name.clone(),
+                    kind,
+                    reference,
+                };
+                return Ok(Step::Got(changed(h.current, auth)));
+            }
+            Step::Got(Secret::Later) => return Ok(Step::Got(Answer::Leave)),
+            Step::Back if asks => {}
+            Step::Back => return Ok(Step::Back),
+        }
+    }
+}
+
+/// `auth`, unless the config has it already.
+fn changed(current: Option<&Auth>, auth: Auth) -> Answer {
+    if current == Some(&auth) {
+        Answer::Leave
+    } else {
+        Answer::Set(auth)
+    }
+}
+
+/// What [`secret`] settles on.
+pub enum Secret {
+    Ref(String),
+    Later,
+}
+
+/// What [`secret`] asks for.
+pub struct SecretAsk<'a> {
+    /// What it is, e.g. "GitHub token for acme".
+    pub label: &'a str,
+    /// Its account under luoto's service in the OS keychain.
+    pub acct: &'a str,
+    /// The title of a new 1Password item for it.
+    pub title: &'a str,
+    /// A "Later" entry, last: where this is the first question of a step that may wait.
+    pub later: bool,
+    /// References the config has for other accounts, as (what for, reference), offered first
+    /// so one token can serve several.
+    pub known: &'a [(String, String)],
+    /// The reference the config has for it now: offered first, to keep, and where a typed
+    /// reference starts.
+    pub current: Option<&'a str>,
+    /// The menu's help, which says what Esc does there.
+    pub help: &'a str,
+    /// The provider and auth kind it is: a value is checked against the kind's prefix.
+    pub kind: Option<(&'a str, &'a str)>,
+}
+
+/// Where a secret is kept, as the source menu offers it.
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Source {
+    /// The reference the config has for it now.
+    Current,
     /// A reference the config has already, for another account (index into `known`).
     Known(usize),
     InKeychain,
     PasteKeychain,
     Paste1Password,
+    Browse,
     Reference,
     Later,
 }
 
-/// Ask how agent `a` authenticates when `cfg` has no credential for its providers: the kind,
-/// with where to get one, then where it is kept. Returns the `[credentials.<provider>]` entries
-/// to write; a pasted secret is in the OS keychain or 1Password by then, and only its
-/// reference goes in the config.
-pub fn credential(
-    cfg: &EnvConfig,
-    a: &profiles::Agent,
-    global: &GlobalConfig,
-) -> Result<Option<(String, BTreeMap<String, ProviderValue>)>> {
-    let configured = |p: &String| cfg.credentials.providers.contains_key(p);
-    if a.providers.is_empty() || a.providers.iter().any(configured) {
-        return Ok(None);
-    }
-    let provider_name = if a.providers.len() == 1 {
-        a.providers[0].clone()
-    } else {
-        let options: Vec<Choice<String>> = a
-            .providers
-            .iter()
-            .filter_map(|n| {
-                profiles::provider(n)
-                    .map(|p| choice(n.clone(), n, format!("{n:<11} {}", p.description)))
-            })
-            .collect();
-        match Select::new(&format!("Model provider for {}:", a.description), options)
-            .with_formatter(&short)
-            .prompt_skippable()?
-        {
-            Some(c) => c.value,
-            None => return Ok(None),
-        }
-    };
-    let p = profiles::provider(&provider_name)
-        .with_context(|| format!("unknown provider `{provider_name}`"))?;
-    if p.auth.is_empty() {
-        println!(
-            "{} signs in inside the sandbox, with your own account.",
-            a.description
-        );
-    } else {
-        println!(
-            "{} needs a credential for {provider_name}. The gate adds it to every request; the \
-             sandbox sees only a placeholder.",
-            a.description
-        );
-    }
-    let kinds: Vec<String> = match &p.suggested {
-        // The suggested kind first.
-        Some(s) => std::iter::once(s.clone())
-            .chain(p.auth.keys().filter(|k| *k != s).cloned())
-            .collect(),
-        None => p.auth.keys().cloned().collect(),
-    };
-    let mut options: Vec<Choice<Auth>> = kinds
-        .iter()
-        .map(|k| {
-            let label = &p.auth[k].label;
-            choice(Auth::Kind(k.clone()), label, format!("{label} ({k})"))
-        })
-        .collect();
-    if !p.login_hosts.is_empty() {
-        options.push(choice(
-            Auth::LoginInside,
-            "log in inside the sandbox",
-            "log in inside the sandbox: the session lives in the env, readable by its code",
-        ));
-    }
-    let later = if p.login_hosts.is_empty() {
-        "later: `luoto agent run` asks again"
-    } else {
-        "later: log in inside the sandbox until then"
-    };
-    let menu = options.len() > 1;
-    let auth = if !menu {
-        options.remove(0).value
-    } else {
-        // Where each comes from, before the choice rather than after it.
-        for k in &kinds {
-            let a = &p.auth[k];
-            println!("  {}: {}", a.label, a.how);
-        }
-        if p.login_hosts.is_empty() {
-            options.push(choice(Auth::Later, "later", later));
-        }
-        match Select::new("Authenticate with:", options)
-            .with_formatter(&short)
-            .prompt_skippable()?
-        {
-            Some(c) => c.value,
-            None => return Ok(None),
-        }
-    };
-    let kind = match auth {
-        Auth::Later => return Ok(None),
-        Auth::LoginInside => {
-            if let Some(h) = &p.login_how {
-                println!("  {h}");
-            }
-            let entry = ("login_inside".to_string(), ProviderValue::Flag(true));
-            return Ok(Some((provider_name, BTreeMap::from([entry]))));
-        }
-        Auth::Kind(k) => k,
-    };
-    let how = &p.auth[&kind];
-    if !menu {
-        println!("  {}", how.how);
-    }
-    let title = format!("luoto {provider_name} {kind}");
-    let acct = format!("{provider_name}.{kind}");
-    let Some(reference) = secret(&how.label, &acct, &title, later, &[], global)? else {
-        return Ok(None);
-    };
-    Ok(Some((
-        provider_name,
-        BTreeMap::from([(kind, ProviderValue::Ref(reference))]),
-    )))
+/// What this machine offers to keep a secret in.
+struct Stores {
+    /// luoto's keychain entry for it holds one already.
+    in_keychain: bool,
+    /// `op` works: paste into 1Password.
+    op: bool,
+    /// `op` can list vaults: browse 1Password.
+    browse: bool,
 }
 
-/// Where a secret (`label`, e.g. "GitHub token") is kept, as a reference the host resolves:
-/// one of `known` (references the config has for other accounts, as (what for, reference),
-/// offered first so one token can serve several), the keychain entry `acct` of luoto's
-/// service, pasted into the keychain or into 1Password (item `title`), or a reference to where
-/// it is already. `None` for later (`later` says what happens then) or when skipped.
-pub fn secret(
-    label: &str,
-    acct: &str,
-    title: &str,
-    later: &str,
-    known: &[(String, String)],
-    global: &GlobalConfig,
-) -> Result<Option<String>> {
+/// The OS keychain, as its OS names it.
+pub fn keychain() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "your macOS Keychain"
+    } else if cfg!(windows) {
+        "Windows Credential Manager"
+    } else {
+        "the Secret Service keyring"
+    }
+}
+
+/// The source menu: what the config has first, then the keychain, 1Password where `op`
+/// works, any other reference, and "Later" where it is the step's first question.
+fn sources(ask: &SecretAsk, stores: &Stores) -> Vec<Choice<Source>> {
     let svc = crate::names::instance();
-    let mut options: Vec<Choice<Source>> = known
-        .iter()
-        .enumerate()
-        .map(|(i, (what, r))| {
-            choice(
-                Source::Known(i),
-                format!("the one for {what}"),
-                format!("the same as for {what} ({r})"),
-            )
-        })
-        .collect();
-    if keychain_has(acct) {
+    let kc = keychain();
+    let mut options: Vec<Choice<Source>> = Vec::new();
+    if let Some(r) = ask.current {
+        options.push(choice(
+            Source::Current,
+            "the current one",
+            format!("Keep the current one ({})", secrets::shown_ref(r)),
+        ));
+    }
+    options.extend(
+        ask.known
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, r))| Some(r.as_str()) != ask.current)
+            .map(|(i, (what, r))| {
+                choice(
+                    Source::Known(i),
+                    format!("the one for {what}"),
+                    format!("The same as for {what} ({})", secrets::shown_ref(r)),
+                )
+            }),
+    );
+    if stores.in_keychain {
         options.push(choice(
             Source::InKeychain,
-            "the one in your keychain",
-            format!("the one already in your keychain ({svc}/{acct})"),
+            format!("the one in {kc}"),
+            format!("Already in {kc} ({svc}/{})", ask.acct),
         ));
     }
     options.push(choice(
         Source::PasteKeychain,
-        "paste it into your keychain",
-        "paste it: kept in your OS keychain",
+        format!("pasted into {kc}"),
+        format!("Paste it now (stored in {kc})"),
     ));
-    if secrets::op_available() {
+    if stores.op {
         options.push(choice(
             Source::Paste1Password,
-            "paste it into 1Password",
-            "paste it: saved as a new 1Password item, in a vault you pick",
+            "pasted into 1Password",
+            "Paste it now (stored in 1Password)",
         ));
     }
-    options.extend([
-        choice(
-            Source::Reference,
-            "a secret reference",
-            "a reference to where it already is: op://…, vault://…, keyring:…, env:…, file:…",
-        ),
-        choice(Source::Later, "later", later),
-    ]);
-    let Some(source) = Select::new(&format!("The {label}:"), options)
-        .with_formatter(&short)
-        .prompt_skippable()?
-    else {
-        return Ok(None);
+    if stores.browse {
+        options.push(choice(
+            Source::Browse,
+            "in 1Password",
+            "It's already in 1Password (browse)",
+        ));
+    }
+    options.push(choice(
+        Source::Reference,
+        "somewhere else",
+        "It's somewhere else (op://, env:, file:, keyring:)",
+    ));
+    if ask.later {
+        options.push(choice(Source::Later, "later", LATER));
+    }
+    // A long reference is cut, never the menu's width.
+    let room = text::columns() - 2;
+    for o in &mut options {
+        o.label = text::fit(&o.label, room, true);
+    }
+    options
+}
+
+/// Where a secret is kept, as a reference the host resolves: the one the config has, one of
+/// the `known` ones, the keychain entry `acct` of luoto's service, pasted into the keychain or
+/// into 1Password, found in 1Password, or a reference to where it is. Esc goes back a
+/// question; `Back` is Esc at the first.
+pub fn secret(ask: &SecretAsk, global: &GlobalConfig) -> Result<Step<Secret>> {
+    let svc = crate::names::instance();
+    let in_keychain = format!("keyring:{svc}/{}", ask.acct);
+    let op = secrets::op_available();
+    let stores = Stores {
+        in_keychain: ask.current != Some(in_keychain.as_str()) && keychain_has(ask.acct),
+        op,
+        browse: op
+            && (!secrets::op_service_account(global) || secrets::op_vaults(global, None).is_ok()),
     };
-    Ok(Some(match source.value {
-        Source::Known(i) => known[i].1.clone(),
-        Source::Later => return Ok(None),
-        Source::InKeychain => format!("keyring:{svc}/{acct}"),
-        Source::PasteKeychain => {
-            let Some(secret) = paste(label)? else {
-                return Ok(None);
-            };
-            let free = free_account(acct, keychain_taken)?;
-            keyring::Entry::new(svc, &free)
-                .and_then(|e| e.set_password(&secret))
-                .context("store the secret in the OS keychain")?;
-            if free == acct {
-                println!("stored in your keychain as {svc}/{free}");
-            } else {
-                println!(
-                    "stored in your keychain as {svc}/{free} \
-                     ({svc}/{acct} holds another one, kept as it is)"
-                );
+    let options = sources(ask, &stores);
+    let question = format!("Where is the {} kept?", ask.label);
+    let mut at = 0;
+    loop {
+        let source = match pick(&mut terminal_menu, &question, &options, at, ask.help)? {
+            Step::Back => return Ok(Step::Back),
+            Step::Got((i, s)) => {
+                at = i;
+                s
             }
-            format!("keyring:{svc}/{free}")
+        };
+        let r = match source {
+            Source::Current => ask.current.unwrap_or_default().to_string(),
+            Source::Known(i) => ask.known[i].1.clone(),
+            Source::Later => return Ok(Step::Got(Secret::Later)),
+            Source::InKeychain => in_keychain.clone(),
+            Source::PasteKeychain => {
+                let Step::Got(secret) = paste(ask)? else {
+                    continue;
+                };
+                let free = free_account(ask.acct, keychain_taken)?;
+                keyring::Entry::new(svc, &free)
+                    .and_then(|e| e.set_password(&secret))
+                    .context("store the secret in the OS keychain")?;
+                if free == ask.acct {
+                    println!("stored in {} as {svc}/{free}", keychain());
+                } else {
+                    println!(
+                        "stored in {} as {svc}/{free} ({svc}/{} holds another one, kept as it is)",
+                        keychain(),
+                        ask.acct
+                    );
+                }
+                format!("keyring:{svc}/{free}")
+            }
+            Source::Paste1Password => match op_paste(global, ask)? {
+                Step::Got(r) => r,
+                Step::Back => continue,
+            },
+            Source::Browse => match browse(global, ask)? {
+                Step::Got(r) => r,
+                Step::Back => continue,
+            },
+            Source::Reference => match typed_reference(global, ask)? {
+                Step::Got(r) => r,
+                Step::Back => continue,
+            },
+        };
+        return Ok(Step::Got(Secret::Ref(r)));
+    }
+}
+
+/// A secret pasted into a new 1Password item, in the account (when the app has several) and
+/// vault picked before it: the paste is the last question, so going back never drops one.
+/// Its reference; `Back` is Esc at the first question.
+fn op_paste(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> {
+    let accounts = op_accounts(global);
+    let mut vaults: HashMap<Option<String>, Vec<OpVault>> = HashMap::new();
+    let mut at_vault = 0;
+    loop {
+        let account = if accounts.is_empty() {
+            None
+        } else {
+            match pick_op_account("1Password account to save it in:", &accounts, None)? {
+                Step::Got(a) => a,
+                Step::Back => return Ok(Step::Back),
+            }
+        };
+        let list = match vaults.entry(account.clone()) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                at_vault = 0;
+                e.insert(secrets::op_vaults(global, account.as_deref())?)
+            }
+        };
+        if list.is_empty() {
+            bail!("no 1Password vaults to choose from: `op vault list` gave none");
         }
-        Source::Paste1Password => {
-            let Some(secret) = paste(label)? else {
-                return Ok(None);
+        loop {
+            let names = list.iter().map(|v| display(&v.name)).collect();
+            let Step::Got(i) = pick_index("1Password vault:", names, at_vault)? else {
+                break;
             };
-            let Some(vault) =
-                Select::new("1Password vault:", secrets::op_vaults(global)?).prompt_skippable()?
-            else {
-                return Ok(None);
+            at_vault = i;
+            let Step::Got(secret) = paste(ask)? else {
+                continue;
             };
+            let vault = &list[i];
             let note = format!(
-                "{label}. luoto hands it to its gate, which adds it to requests; the sandbox \
-                 never sees it."
+                "{}. luoto hands it to its gate, which adds it to requests; the sandbox never \
+                 sees it.",
+                ask.label
             );
-            let r = secrets::op_save(global, &vault, title, &secret, &note)?;
-            println!("saved in 1Password ({vault}) as \"{title}\": {r}");
-            r
+            let r = secrets::op_save(
+                global,
+                account.as_deref(),
+                &vault.id,
+                ask.title,
+                &secret,
+                &note,
+            )?;
+            println!(
+                "saved in 1Password ({}) as \"{}\": {}",
+                display(&vault.name),
+                ask.title,
+                secrets::shown_ref(&r)
+            );
+            return Ok(Step::Got(r));
         }
-        Source::Reference => {
-            println!("  {OP_FIELDS}");
-            // Resolved once here (the value is dropped), so a typo shows now rather than as a
-            // locked credential at `up`.
-            let global = global.clone();
-            let label = label.to_string();
-            let Some(r) = Text::new(&format!("Reference to the {label}:"))
-                .with_placeholder("op://<vault>/<item>/<field>")
-                .with_help_message("checked against your secret store; Esc for later")
-                .with_validator(move |s: &str| {
-                    let s = s.trim();
-                    Ok(
-                        match secrets::check_ref(s).and_then(|()| secrets::resolve(&global, s)) {
-                            Ok(v) => match not_alone(&v, &label) {
-                                Some(why) => Validation::Invalid(why.into()),
-                                None => Validation::Valid,
-                            },
-                            Err(e) => Validation::Invalid(format!("{e:#}").into()),
-                        },
-                    )
+        if accounts.is_empty() {
+            return Ok(Step::Back);
+        }
+    }
+}
+
+/// A reference typed, starting from the current one, and read once it is entered: a ref that
+/// doesn't read gives its error on one line and comes back to edit. With several 1Password
+/// accounts, an `op://` one that didn't read is tried in the account picked.
+fn typed_reference(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> {
+    let mut last = ask.current.unwrap_or_default().to_string();
+    loop {
+        // The prompt checks only the form: reading the ref runs `op`, which may ask on the
+        // terminal, so it runs after the prompt has given the terminal back.
+        let Some(r) = Text::new("Reference:")
+            .with_initial_value(&last)
+            .with_placeholder("op://vault/item/field, env:NAME, file:/path")
+            .with_help_message("read from your secret store on Enter; Esc: back")
+            .with_validator(|s: &str| {
+                Ok(match secrets::check_ref(s.trim()) {
+                    Ok(()) => Validation::Valid,
+                    Err(e) => Validation::Invalid(format!("{e:#}").into()),
                 })
-                .prompt_skippable()?
-            else {
-                return Ok(None);
-            };
-            r.trim().to_string()
+            })
+            .prompt_skippable()?
+        else {
+            return Ok(Step::Back);
+        };
+        let r = r.trim().to_string();
+        // Read once here (the value is dropped), so a typo shows now rather than as a
+        // locked credential at `up`.
+        match readable(global, &r, ask) {
+            Ok(()) => return Ok(Step::Got(r)),
+            Err(e) => ref_error(&r, &e),
         }
-    }))
+        last = r;
+        if !last.starts_with("op://") {
+            continue;
+        }
+        println!("{}", text::wrap(OP_FIELDS, "  ", text::columns()));
+        // A ref naming no account is read from op's default; the token may be in another.
+        if secrets::op_parts(&last).1.is_none() {
+            let accounts = op_accounts(global);
+            if !accounts.is_empty()
+                && let Step::Got(Some(a)) = pick_op_account(
+                    "Which 1Password account holds it?",
+                    &accounts,
+                    Some("none of these: edit the reference"),
+                )?
+            {
+                let with = secrets::op_with_account(&last, &a);
+                match readable(global, &with, ask) {
+                    Ok(()) => return Ok(Step::Got(with)),
+                    Err(e) => ref_error(&with, &e),
+                }
+                last = with;
+            }
+        }
+    }
+}
+
+/// A reference found in 1Password: the account (when the app has several), vault, item, and
+/// the field. It names them by ID, and that field is the only value read. Esc goes back a step,
+/// to the earlier choice; past the first step, `Back`. Each list comes from `op` once: going
+/// back asks 1Password for nothing, so no new unlock prompt.
+fn browse(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> {
+    #[derive(Clone, Copy)]
+    enum At {
+        Account,
+        Vault,
+        Item,
+        Field,
+    }
+    let accounts = op_accounts(global);
+    let mut account: Option<String> = None;
+    let mut vaults: HashMap<Option<String>, Vec<OpVault>> = HashMap::new();
+    let mut items: HashMap<(Option<String>, String), Vec<OpItem>> = HashMap::new();
+    // Where each list was left, to reopen it there.
+    let (mut at_account, mut at_vault, mut at_item) = (0usize, 0usize, 0usize);
+    let (mut vault, mut item): (Option<OpVault>, Option<OpItem>) = (None, None);
+    let mut at = if accounts.is_empty() {
+        At::Vault
+    } else {
+        At::Account
+    };
+    loop {
+        match at {
+            At::Account => {
+                let Step::Got(i) = pick_index(
+                    "1Password account:",
+                    accounts
+                        .iter()
+                        .map(|a| account_label(a, &accounts))
+                        .collect(),
+                    at_account,
+                )?
+                else {
+                    return Ok(Step::Back);
+                };
+                at_account = i;
+                account = Some(accounts[i].id.clone());
+                at = At::Vault;
+            }
+            At::Vault => {
+                let list = match vaults.entry(account.clone()) {
+                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        match secrets::op_vaults(global, account.as_deref()) {
+                            Ok(v) => e.insert(v),
+                            Err(err) => {
+                                show_error(&err);
+                                return Ok(Step::Back);
+                            }
+                        }
+                    }
+                };
+                if list.is_empty() {
+                    println!("  no vaults in this account to choose from");
+                    if accounts.is_empty() {
+                        return Ok(Step::Back);
+                    }
+                    at = At::Account;
+                    continue;
+                }
+                let names = list.iter().map(|v| display(&v.name)).collect();
+                match pick_index("1Password vault:", names, at_vault)? {
+                    Step::Got(i) => {
+                        at_vault = i;
+                        vault = Some(list[i].clone());
+                        at_item = 0;
+                        at = At::Item;
+                    }
+                    Step::Back if accounts.is_empty() => return Ok(Step::Back),
+                    Step::Back => at = At::Account,
+                }
+            }
+            At::Item => {
+                let v = vault.clone().context("a vault is picked first")?;
+                let list = match items.entry((account.clone(), v.id.clone())) {
+                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        match secrets::op_items(global, account.as_deref(), &v.id) {
+                            Ok(i) => e.insert(i),
+                            Err(err) => {
+                                show_error(&err);
+                                return Ok(Step::Back);
+                            }
+                        }
+                    }
+                };
+                if list.is_empty() {
+                    println!("  {} holds no items", display(&v.name));
+                    at = At::Vault;
+                    continue;
+                }
+                let shown = list.iter().map(OpItem::shown).collect();
+                match pick_index("Item:", shown, at_item)? {
+                    Step::Got(i) => {
+                        at_item = i;
+                        item = Some(list[i].clone());
+                        at = At::Field;
+                    }
+                    Step::Back => at = At::Vault,
+                }
+            }
+            At::Field => {
+                let (v, it) = (
+                    vault.clone().context("a vault is picked first")?,
+                    item.clone().context("an item is picked first")?,
+                );
+                let Step::Got(field) = item_field(&it)? else {
+                    at = At::Item;
+                    continue;
+                };
+                let r = match secrets::op_item_ref(account.as_deref(), &v.id, &it, &field) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        show_error(&e);
+                        continue;
+                    }
+                };
+                match readable(global, &r, ask) {
+                    Ok(()) => {
+                        println!("  reference: {}", secrets::shown_ref(&r));
+                        return Ok(Step::Got(r));
+                    }
+                    Err(e) => ref_error(&r, &e),
+                }
+            }
+        }
+    }
+}
+
+/// Options a filter narrows keep the order they were given in (by name), rather than a score's.
+const KEEP_ORDER: Sorter<'static> = &|o| o.sort_by_key(|&(i, _)| i);
+const PAGE: usize = 12;
+const BROWSE_HELP: &str = "type to filter, Enter to pick, Esc: back";
+
+/// The index of the option picked from `shown` (escaped already), opening on `at`.
+fn pick_index(question: &str, shown: Vec<String>, at: usize) -> Result<Step<usize>> {
+    let at = at.min(shown.len().saturating_sub(1));
+    let options: Vec<Choice<usize>> = shown
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| choice(i, s.clone(), s))
+        .collect();
+    Ok(Select::new(question, options)
+        .with_formatter(&short)
+        .with_sorter(KEEP_ORDER)
+        .with_page_size(PAGE)
+        .with_starting_cursor(at)
+        .with_help_message(BROWSE_HELP)
+        .prompt_skippable()?
+        .map(|c| c.value)
+        .into())
+}
+
+/// The field of `item` to read: one of the fields its kind has (the secret's first), or one
+/// typed.
+fn item_field(item: &OpItem) -> Result<Step<String>> {
+    const ANOTHER: &str = "another field (type its name)";
+    let fields = secrets::op_kind_fields(&item.category);
+    let default = secrets::op_field(&item.category);
+    let mut shown: Vec<String> = fields.iter().map(|f| f.to_string()).collect();
+    shown.push(ANOTHER.into());
+    let at = default
+        .and_then(|d| fields.iter().position(|f| *f == d))
+        .unwrap_or(0);
+    let question = format!(
+        "Field of the {} item:",
+        display(&secrets::op_kind(&item.category))
+    );
+    let Step::Got(i) = pick_index(&question, shown, at)? else {
+        return Ok(Step::Back);
+    };
+    if let Some(f) = fields.get(i) {
+        return Ok(Step::Got(f.to_string()));
+    }
+    let typed = Text::new("Field:")
+        .with_help_message("the field's name as 1Password shows it; Esc: back")
+        .with_validator(|s: &str| {
+            Ok(match secrets::check_op_field(s.trim()) {
+                Ok(()) => Validation::Valid,
+                Err(e) => Validation::Invalid(format!("{e:#}").into()),
+            })
+        })
+        .prompt_skippable()?;
+    Ok(typed.map(|s| s.trim().to_string()).into())
+}
+
+fn show_error(e: &anyhow::Error) {
+    println!("  {}", crate::text::lines(&format!("{e:#}")));
+}
+
+/// Why reference `r` didn't do, after it: one line, broken only where the terminal is
+/// narrower.
+fn ref_error(r: &str, e: &anyhow::Error) {
+    let why = format!(
+        "{}: {}",
+        secrets::shown_ref(r),
+        display(&format!("{e:#}").replace('\n', " "))
+    );
+    println!("{}", text::wrap(&why, "  ", text::columns()));
+}
+
+/// Whether reference `r` reads, as the secret `ask` is for alone.
+fn readable(global: &GlobalConfig, r: &str, ask: &SecretAsk) -> Result<()> {
+    let value = secrets::resolve(global, r)?;
+    match not_alone(&value, ask.label).or_else(|| mismatch(ask.kind, &value)) {
+        Some(why) => bail!("{why}"),
+        None => Ok(()),
+    }
+}
+
+/// The 1Password accounts to choose from: none when the app has one, or `op` runs as a service
+/// account, which is in one.
+fn op_accounts(global: &GlobalConfig) -> Vec<OpAccount> {
+    if secrets::op_service_account(global) {
+        return Vec::new();
+    }
+    let accounts = secrets::op_accounts();
+    if accounts.len() < 2 {
+        return Vec::new();
+    }
+    accounts
+}
+
+/// The ID of the account picked from `accounts`; `none` names a last choice that picks none.
+fn pick_op_account(
+    question: &str,
+    accounts: &[OpAccount],
+    none: Option<&str>,
+) -> Result<Step<Option<String>>> {
+    let mut options: Vec<Choice<Option<String>>> = accounts
+        .iter()
+        .map(|a| {
+            let shown = account_label(a, accounts);
+            choice(Some(a.id.clone()), shown.clone(), shown)
+        })
+        .collect();
+    if let Some(n) = none {
+        options.push(choice(None, n, n));
+    }
+    Ok(
+        match pick(
+            &mut terminal_menu,
+            question,
+            &options,
+            0,
+            &menu_help("back"),
+        )? {
+            Step::Got((_, id)) => Step::Got(id),
+            Step::Back => Step::Back,
+        },
+    )
+}
+
+/// An account as its address and email, and its ID when another of `all` has the same two
+/// (a personal and a family account, say).
+fn account_label(a: &OpAccount, all: &[OpAccount]) -> String {
+    let twins = all
+        .iter()
+        .filter(|b| b.address == a.address && b.email == a.email)
+        .count();
+    if twins > 1 {
+        format!("{} ({})", a.shown(), a.id)
+    } else {
+        a.shown()
+    }
 }
 
 /// The field a token is in, by 1Password item type.
-const OP_FIELDS: &str = "In 1Password: an API Credential item's field is `credential`, a \
-                         Password's `password`, a Secure Note's text `notesPlain` (the token \
-                         alone in it)";
+const OP_FIELDS: &str = "In 1Password the field is `credential` (API Credential), `password` \
+                         (Password) or `notesPlain` (a Secure Note with the token alone in it).";
 
 /// Why `value`, read from a reference to a token (`label`), isn't the token alone: tokens
 /// carry no spaces or line breaks, a note or a field with more text in it does.
@@ -517,20 +1244,74 @@ fn not_alone(value: &str, label: &str) -> Option<String> {
     })
 }
 
-/// A hidden paste, trimmed; `None` when skipped.
-fn paste(label: &str) -> Result<Option<String>> {
-    Ok(Password::new(&format!("Paste the {label}:"))
+/// Why `value` isn't the credential `kind` (provider, auth kind) names, when the prefixes its
+/// issuers document say so. Never the value itself.
+fn mismatch(kind: Option<(&str, &str)>, value: &str) -> Option<String> {
+    let (provider, kind) = kind?;
+    let want = profiles::provider(provider)?.auth.remove(kind)?;
+    let known: Vec<(String, String)> = profiles::provider_names()
+        .filter_map(profiles::provider)
+        .flat_map(|p| p.auth.into_values())
+        .filter_map(|a| Some((a.label, a.prefix?)))
+        .collect();
+    prefix_mismatch(&want.label, want.prefix.as_deref()?, &known, value)
+}
+
+/// [`mismatch`] against the (label, prefix) of every kind: `value` lacks `prefix`, or has a
+/// longer one of another kind, which it then looks like.
+fn prefix_mismatch(
+    label: &str,
+    prefix: &str,
+    known: &[(String, String)],
+    value: &str,
+) -> Option<String> {
+    let like = known
+        .iter()
+        .filter(|(l, p)| l != label && value.starts_with(p.as_str()))
+        .max_by_key(|(_, p)| p.len());
+    let has = value.starts_with(prefix);
+    match like {
+        Some((other, p)) if !has || p.len() > prefix.len() => Some(format!(
+            "it looks like {} {other}, not {} {label}",
+            article(other),
+            article(label)
+        )),
+        _ if !has => Some(format!(
+            "it doesn't look like {} {label}, which starts with {prefix}",
+            article(label)
+        )),
+        _ => None,
+    }
+}
+
+fn article(word: &str) -> &'static str {
+    match word.chars().next().map(|c| c.to_ascii_lowercase()) {
+        Some('a' | 'e' | 'i' | 'o' | 'u') => "an",
+        _ => "a",
+    }
+}
+
+/// A hidden paste, trimmed, checked against its kind's prefix: one that doesn't fit is asked
+/// for again.
+fn paste(ask: &SecretAsk) -> Result<Step<String>> {
+    let kind = ask.kind.map(|(p, k)| (p.to_string(), k.to_string()));
+    Ok(Password::new(&format!("Paste the {}:", ask.label))
         .without_confirmation()
-        .with_help_message("hidden; never written to a file")
-        .with_validator(|s: &str| {
-            Ok(if s.trim().is_empty() {
+        .with_help_message("hidden, never written to a file; Esc: back")
+        .with_validator(move |s: &str| {
+            let s = s.trim();
+            let kind = kind.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
+            Ok(if s.is_empty() {
                 Validation::Invalid("empty".into())
+            } else if let Some(why) = mismatch(kind, s) {
+                Validation::Invalid(why.into())
             } else {
                 Validation::Valid
             })
         })
         .prompt_skippable()?
-        .map(|s| s.trim().to_string()))
+        .map(|s| s.trim().to_string())
+        .into())
 }
 
 fn keychain_has(account: &str) -> bool {
@@ -569,6 +1350,395 @@ fn free_account(base: &str, taken: impl Fn(&str) -> Result<bool>) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+
+    /// A menu as it was put to the user.
+    struct Asked {
+        question: String,
+        labels: Vec<String>,
+        at: usize,
+        help: String,
+    }
+
+    /// What the question of where a secret is kept was asked with.
+    struct Kept {
+        label: String,
+        later: bool,
+        current: Option<String>,
+        help: String,
+    }
+
+    struct Run {
+        answer: Answer,
+        menus: Vec<Asked>,
+        kept: Vec<Kept>,
+    }
+
+    /// The credential questions for `agent`, answered in turn: a menu by its entry's echo,
+    /// Esc as `None`; where the secret is kept by `secrets`. Every answer is used.
+    fn run(
+        agent: &str,
+        have: &[Auth],
+        mode: Mode,
+        answers: &[Option<&str>],
+        secrets: Vec<Step<Secret>>,
+    ) -> Run {
+        let a = profiles::agent(agent).unwrap();
+        let mut answers: VecDeque<Option<&str>> = answers.iter().copied().collect();
+        let mut secrets: VecDeque<Step<Secret>> = secrets.into();
+        let (mut menus, mut kept) = (Vec::new(), Vec::new());
+        let answer = credential_with(
+            &a,
+            have,
+            mode,
+            &mut |question: &str, options: Vec<Choice<usize>>, at: usize, help: &str| {
+                menus.push(Asked {
+                    question: question.into(),
+                    labels: options.iter().map(|o| o.label.clone()).collect(),
+                    at,
+                    help: help.into(),
+                });
+                Ok(
+                    match answers.pop_front().expect("a menu no answer was left for") {
+                        None => Step::Back,
+                        Some(s) => Step::Got(
+                            options
+                                .iter()
+                                .position(|o| o.short == s)
+                                .unwrap_or_else(|| panic!("no entry {s}")),
+                        ),
+                    },
+                )
+            },
+            &mut |ask: &SecretAsk| {
+                kept.push(Kept {
+                    label: ask.label.into(),
+                    later: ask.later,
+                    current: ask.current.map(str::to_string),
+                    help: ask.help.into(),
+                });
+                Ok(secrets
+                    .pop_front()
+                    .expect("a secret no answer was left for"))
+            },
+        )
+        .unwrap();
+        assert!(
+            answers.is_empty() && secrets.is_empty(),
+            "answers left over"
+        );
+        Run {
+            answer,
+            menus,
+            kept,
+        }
+    }
+
+    fn kind(provider: &str, kind: &str, reference: &str) -> Auth {
+        Auth::Kind {
+            provider: provider.into(),
+            kind: kind.into(),
+            reference: reference.into(),
+        }
+    }
+
+    fn inside(provider: &str) -> Auth {
+        Auth::LoginInside {
+            provider: provider.into(),
+        }
+    }
+
+    const TOKEN: &str = "Claude subscription token";
+    const API_KEY: &str = "Anthropic API key";
+
+    #[test]
+    fn the_kind_menu_names_kinds_plainly_suggested_first_within_80_columns() {
+        let r = run("claude", &[], Mode::Missing, &[None], vec![]);
+        assert_eq!(r.answer, Answer::Leave);
+        let m = &r.menus[0];
+        assert_eq!(m.question, "How should Claude Code sign in?");
+        assert_eq!(m.help, "↑↓ to move, Enter to pick, Esc: later");
+        assert_eq!(
+            m.labels,
+            [
+                "Claude subscription token (recommended)  `claude setup-token` on this machine",
+                "Anthropic API key                        billed per use (platform.claude.com)",
+                "Log in inside the sandbox                weaker: code in the env can read it",
+                "Later                                    the agent can't connect without one",
+            ]
+        );
+        assert!(!m.labels.iter().any(|l| l.contains("oauth_token")));
+        // Every agent's first menu fits, its descriptions cut if need be, never a label.
+        for name in profiles::agent_names() {
+            // Copilot's one kind starts where it is kept.
+            let (answers, secrets) = if name == "copilot" {
+                (vec![], vec![Step::Back])
+            } else {
+                (vec![None], vec![])
+            };
+            let r = run(name, &[], Mode::Missing, &answers, secrets);
+            for l in r.menus.iter().flat_map(|m| &m.labels) {
+                assert!(l.chars().count() + 2 < 80, "{name}: {l}");
+            }
+        }
+    }
+
+    #[test]
+    fn esc_or_later_at_the_first_question_writes_nothing() {
+        for answer in [None, Some("Later")] {
+            let r = run("claude", &[], Mode::Missing, &[answer], vec![]);
+            assert_eq!(r.answer, Answer::Leave);
+        }
+    }
+
+    #[test]
+    fn a_login_inside_only_when_picked() {
+        let r = run(
+            "claude",
+            &[],
+            Mode::Missing,
+            &[Some("Log in inside the sandbox")],
+            vec![],
+        );
+        assert_eq!(r.answer, Answer::Set(inside("anthropic")));
+        // A provider with no other way in still asks.
+        let r = run("agy", &[], Mode::Missing, &[None], vec![]);
+        assert_eq!(r.answer, Answer::Leave);
+        assert_eq!(r.menus[0].labels.len(), 2);
+        // With it set already, there is nothing to choose: no question.
+        let r = run("agy", &[inside("antigravity")], Mode::Change, &[], vec![]);
+        assert_eq!(r.answer, Answer::Leave);
+        assert!(r.menus.is_empty());
+    }
+
+    #[test]
+    fn esc_where_it_is_kept_goes_back_to_the_kind() {
+        let r = run(
+            "claude",
+            &[],
+            Mode::Missing,
+            &[Some(API_KEY), Some(TOKEN)],
+            vec![Step::Back, Step::Got(Secret::Ref("env:T".into()))],
+        );
+        assert_eq!(
+            r.answer,
+            Answer::Set(kind("anthropic", "oauth_token", "env:T"))
+        );
+        // Back, the menu opens where it was left.
+        assert_eq!((r.menus[0].at, r.menus[1].at), (0, 1));
+        // "Later" only at the first question.
+        assert_eq!(r.kept[0].help, menu_help("back"));
+        assert!(!r.kept[0].later);
+        assert_eq!(r.kept[1].label, TOKEN);
+    }
+
+    #[test]
+    fn one_kind_and_no_login_starts_where_it_is_kept() {
+        let r = run("copilot", &[], Mode::Missing, &[], vec![Step::Back]);
+        assert_eq!(r.answer, Answer::Leave);
+        assert!(r.menus.is_empty());
+        assert_eq!(r.kept[0].help, menu_help("later"));
+        assert!(r.kept[0].later, "the first question offers Later");
+        let r = run(
+            "copilot",
+            &[],
+            Mode::Missing,
+            &[],
+            vec![Step::Got(Secret::Later)],
+        );
+        assert_eq!(r.answer, Answer::Leave);
+    }
+
+    #[test]
+    fn several_providers_go_back_to_the_provider() {
+        let r = run(
+            "opencode",
+            &[],
+            Mode::Missing,
+            &[Some("OpenAI API"), None, None],
+            vec![],
+        );
+        assert_eq!(r.answer, Answer::Leave);
+        let asked: Vec<(&str, &str)> = r
+            .menus
+            .iter()
+            .map(|m| (m.question.as_str(), m.help.as_str()))
+            .collect();
+        assert_eq!(
+            asked,
+            [
+                (
+                    "Which provider should OpenCode use?",
+                    "↑↓ to move, Enter to pick, Esc: later"
+                ),
+                (
+                    "How should OpenCode sign in to OpenAI API?",
+                    "↑↓ to move, Enter to pick, Esc: back"
+                ),
+                (
+                    "Which provider should OpenCode use?",
+                    "↑↓ to move, Enter to pick, Esc: later"
+                ),
+            ]
+        );
+        assert_eq!(r.menus[2].at, 1);
+        assert!(r.menus[0].labels.last().unwrap().starts_with("Later"));
+        // The kind menu after the provider's offers no Later of its own.
+        assert!(!r.menus[1].labels.iter().any(|l| l.starts_with("Later")));
+    }
+
+    #[test]
+    fn a_change_opens_on_what_the_env_has() {
+        let now = kind(
+            "anthropic",
+            "oauth_token",
+            "keyring:luoto/anthropic.oauth_token",
+        );
+        let kept = Step::Got(Secret::Ref("keyring:luoto/anthropic.oauth_token".into()));
+        let r = run(
+            "claude",
+            std::slice::from_ref(&now),
+            Mode::Change,
+            &[Some(TOKEN)],
+            vec![kept],
+        );
+        assert_eq!(r.answer, Answer::Leave);
+        let m = &r.menus[0];
+        assert_eq!(m.help, "↑↓ to move, Enter to pick, Esc: unchanged");
+        assert!(m.labels[m.at].starts_with("Claude subscription token (current)  "));
+        assert!(!m.labels.iter().any(|l| l.contains("(recommended)")));
+        assert!(!m.labels.iter().any(|l| l.starts_with("Later")));
+        assert_eq!(
+            r.kept[0].current.as_deref(),
+            Some("keyring:luoto/anthropic.oauth_token")
+        );
+        assert!(!r.kept[0].later);
+
+        let r = run(
+            "claude",
+            std::slice::from_ref(&now),
+            Mode::Change,
+            &[Some(API_KEY)],
+            vec![Step::Got(Secret::Ref("env:KEY".into()))],
+        );
+        assert_eq!(
+            r.answer,
+            Answer::Set(kind("anthropic", "api_key", "env:KEY"))
+        );
+        assert_eq!(r.kept[0].current, None);
+
+        let r = run(
+            "claude",
+            &[inside("anthropic")],
+            Mode::Change,
+            &[None],
+            vec![],
+        );
+        assert_eq!(r.answer, Answer::Leave);
+        let m = &r.menus[0];
+        assert!(m.labels[m.at].starts_with("Log in inside the sandbox (current)"));
+    }
+
+    #[test]
+    fn a_change_offers_every_provider_its_own_marked() {
+        let now = kind("openai", "api_key", "env:KEY");
+        let r = run(
+            "opencode",
+            std::slice::from_ref(&now),
+            Mode::Change,
+            &[Some("Anthropic API"), None, None],
+            vec![],
+        );
+        assert_eq!(r.answer, Answer::Leave);
+        let providers = &r.menus[0];
+        assert_eq!(providers.at, 1);
+        assert!(providers.labels[1].starts_with("OpenAI API (current)"));
+        assert!(!providers.labels.iter().any(|l| l.starts_with("Later")));
+        // A provider it hasn't yet: its suggested kind is recommended.
+        assert!(r.menus[1].labels[0].contains("(recommended)"));
+    }
+
+    #[test]
+    fn the_source_menu_keeps_the_current_first_and_later_last() {
+        let known = [("acme".to_string(), "env:A".to_string())];
+        let ask = SecretAsk {
+            label: "GitHub token for acme",
+            acct: "github.acme",
+            title: "luoto GitHub token for acme",
+            later: true,
+            known: &known,
+            current: Some("env:NOW"),
+            help: "",
+            kind: None,
+        };
+        let all = Stores {
+            in_keychain: true,
+            op: true,
+            browse: true,
+        };
+        let kc = keychain();
+        let labels: Vec<String> = sources(&ask, &all).into_iter().map(|c| c.label).collect();
+        let svc = crate::names::instance();
+        assert_eq!(
+            labels,
+            [
+                "Keep the current one (env:NOW)".to_string(),
+                "The same as for acme (env:A)".into(),
+                format!("Already in {kc} ({svc}/github.acme)"),
+                format!("Paste it now (stored in {kc})"),
+                "Paste it now (stored in 1Password)".into(),
+                "It's already in 1Password (browse)".into(),
+                "It's somewhere else (op://, env:, file:, keyring:)".into(),
+                "Later".into(),
+            ]
+        );
+        let none = Stores {
+            in_keychain: false,
+            op: false,
+            browse: false,
+        };
+        let first = SecretAsk {
+            current: None,
+            known: &[],
+            later: false,
+            ..ask
+        };
+        let values: Vec<Source> = sources(&first, &none)
+            .into_iter()
+            .map(|c| c.value)
+            .collect();
+        assert_eq!(values, [Source::PasteKeychain, Source::Reference]);
+    }
+
+    #[test]
+    fn a_value_with_another_kinds_prefix_is_asked_for_again() {
+        let check = |provider, k, v| mismatch(Some((provider, k)), v);
+        assert_eq!(check("anthropic", "oauth_token", "sk-ant-oat01-abc"), None);
+        assert_eq!(
+            check("anthropic", "oauth_token", "sk-ant-api03-abc").as_deref(),
+            Some("it looks like an Anthropic API key, not a Claude subscription token")
+        );
+        assert_eq!(
+            check("anthropic", "api_key", "hello").as_deref(),
+            Some("it doesn't look like an Anthropic API key, which starts with sk-ant-api")
+        );
+        // OpenAI's `sk-` holds others' longer prefixes: those are told apart.
+        assert_eq!(check("openai", "api_key", "sk-proj-abc"), None);
+        assert_eq!(
+            check("openai", "api_key", "sk-ant-oat01-abc").as_deref(),
+            Some("it looks like a Claude subscription token, not an OpenAI API key")
+        );
+        assert_eq!(
+            check("openai", "api_key", "sk-or-v1-abc").as_deref(),
+            Some("it looks like an OpenRouter API key, not an OpenAI API key")
+        );
+        // No documented prefix, no check.
+        assert_eq!(check("mistral", "api_key", "anything"), None);
+        assert_eq!(mismatch(None, "anything"), None);
+        // The value never shows.
+        let said = check("anthropic", "oauth_token", "secret-value-123").unwrap();
+        assert!(!said.contains("secret-value"));
+    }
 
     #[test]
     fn a_referenced_token_is_alone_in_its_field() {
@@ -580,6 +1750,28 @@ mod tests {
         ] {
             assert!(not_alone(v, "token").is_some(), "{v:?}");
         }
+    }
+
+    #[test]
+    fn accounts_alike_but_for_their_id_show_it() {
+        let account = |id: &str, address: &str| OpAccount {
+            id: id.into(),
+            address: address.into(),
+            email: "eetu@example.com".into(),
+        };
+        let all = [
+            account("VZ7CWAKJKFHWVHZ3UFZQ5GPNSU", "my.1password.com"),
+            account("Q3RTX2UJWVE2TMXFPN6HVOIB3Y", "my.1password.com"),
+            account("ZK4ONHBXKRHVBDDVX4L7QTCSDM", "acme.1password.com"),
+        ];
+        assert_eq!(
+            account_label(&all[1], &all),
+            "my.1password.com, eetu@example.com (Q3RTX2UJWVE2TMXFPN6HVOIB3Y)"
+        );
+        assert_eq!(
+            account_label(&all[2], &all),
+            "acme.1password.com, eetu@example.com"
+        );
     }
 
     #[test]

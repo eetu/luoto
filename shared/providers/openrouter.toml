@@ -4,6 +4,8 @@ paths = ["/api/**"]
 
 [auth.api_key]
 label = "OpenRouter API key"
+short = "from openrouter.ai/keys"
+prefix = "sk-or-"
 how = "openrouter.ai/keys > Create key."
 header = "authorization"
 format = "Bearer {secret}"

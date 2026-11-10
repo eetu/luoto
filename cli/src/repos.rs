@@ -9,14 +9,19 @@ use std::fmt;
 use std::io::IsTerminal;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use crate::config::{Credentials, EnvConfig, EnvFile, GitCred, Repo, Workspace, extend_unique};
+use crate::config::{
+    Credentials, EnvConfig, EnvFile, GitCred, ListAs, Relisted, Repo, Workspace, extend_unique,
+};
 use crate::env::{Ctx, UID};
+use crate::prompt::menu_help;
 use crate::state::EnvState;
-use crate::text::{display, sh_quote};
+use crate::text::{self, display, sh_quote};
+use crate::wizard::{Mode, Question, Step};
 use crate::{connect, env, names, project, workspace};
 
 /// A folder name under `/workspace`: one plain component, not hidden.
@@ -567,6 +572,7 @@ pub fn seed(ctx: &Ctx, env: &str, ws: &Workspace, done: &BTreeSet<String>) -> BT
         }
         let result = match (&r.dir, &r.url) {
             (Some(dir), _) => copy_in(ctx, env, ws, name, dir),
+            (None, Some(url)) if waits(env, url) => continue,
             (None, Some(url)) => clone(ctx, env, name, url, r.branch.as_deref(), locked),
             (None, None) => continue,
         };
@@ -672,30 +678,32 @@ pub fn clone_workspace(
     branch: Option<&str>,
     locked: bool,
 ) -> Result<()> {
-    println!(
-        "cloning {}{} into the env…",
+    let what = format!(
+        "cloning {}{} into the env",
         display(url),
         branch
             .map(|b| format!(" ({})", display(b)))
             .unwrap_or_default()
     );
-    let script = workspace_clone_script(url, branch, std::io::stderr().is_terminal());
+    let script = workspace_clone_script(url, branch, git_progress());
     let dev = names::dev(env);
-    let status = relayed(
-        ctx,
-        &[
-            "exec",
-            "-u",
-            UID,
-            "-w",
-            "/",
-            dev.as_str(),
-            "sh",
-            "-c",
-            connect::LOGIN,
-            &script,
-        ],
-    )?;
+    let status = crate::progress::step(&what, || {
+        quiet_git(
+            ctx,
+            &[
+                "exec",
+                "-u",
+                UID,
+                "-w",
+                "/",
+                dev.as_str(),
+                "sh",
+                "-c",
+                connect::LOGIN,
+                &script,
+            ],
+        )
+    })?;
     if status.code() == Some(3) {
         bail!(
             "/workspace in the env has files, but no clone into it finished (an `up` cut short, \
@@ -704,55 +712,39 @@ pub fn clone_workspace(
              `luoto up -e {env}`"
         );
     }
-    if !status.success() && locked {
+    clone_failed(env, url, status.success(), locked)
+}
+
+/// Why a clone of `url` failed, and what to run next: unlock the env's credentials, or give
+/// the repo access, then `up` again.
+fn clone_failed(env: &str, url: &str, ok: bool, locked: bool) -> Result<()> {
+    if ok {
+        return Ok(());
+    }
+    if locked {
         bail!(
             "git clone failed: some of the env's credentials are locked (see the warning about \
              secrets above); once `luoto vault unlock` loads them, `luoto up -e {env}` clones it"
         );
     }
-    if !status.success() {
-        bail!(
-            "git clone failed. A private repository needs a credential that covers it (`luoto \
-             up` asks for one; read only is enough to clone); `luoto egress -e {env} --denied \
-             --since 10m` shows what the gate blocked; `luoto up -e {env}` tries again"
-        );
-    }
-    Ok(())
+    let repo = forge_repo(url).map_or_else(|| display(url), |(_, r)| display(&r));
+    bail!(
+        "git clone failed\n  if private, a token: `luoto repo auth -e {env} {repo}`\n  what the \
+         gate blocked: `luoto egress -e {env} --denied --since 10m`\n  `luoto up -e {env}` tries \
+         again"
+    )
 }
 
-/// Run `args` with what they write escaped on its way out ([`crate::text::Relay`]): git's
-/// output in the env carries the remote's messages and the sandbox's own text, and a review
-/// is asked right after it.
-fn relayed(ctx: &Ctx, args: &[&str]) -> Result<std::process::ExitStatus> {
-    use std::io::Write;
-    use std::sync::Mutex;
-    let relays = [
-        Mutex::new(crate::text::Relay::new(std::io::stdout().is_terminal())),
-        Mutex::new(crate::text::Relay::new(std::io::stderr().is_terminal())),
-    ];
-    let write = |to_err: bool, text: &str| {
-        if to_err {
-            eprint!("{text}");
-        } else {
-            print!("{text}");
-            let _ = std::io::stdout().flush();
-        }
-    };
-    let status = ctx.rt.stream(args, &|to_err, chunk| {
-        if let Ok(mut r) = relays[usize::from(to_err)].lock() {
-            write(to_err, &r.feed(chunk));
-        }
-        true
-    })?;
-    for (to_err, r) in [(false, &relays[0]), (true, &relays[1])] {
-        if let Ok(mut r) = r.lock() {
-            let rest = r.finish();
-            if !rest.is_empty() {
-                write(to_err, &format!("{rest}\n"));
-            }
-        }
-    }
-    Ok(status)
+/// Run git `args` in the env ([`crate::progress::git`]): its output carries the remote's
+/// messages and the sandbox's own text, so it reaches the terminal escaped, and only with
+/// `--verbose` or, its errors, when the clone fails.
+fn quiet_git(ctx: &Ctx, args: &[&str]) -> Result<std::process::ExitStatus> {
+    crate::progress::git(&ctx.rt, args)
+}
+
+/// git's progress lines, only where they are shown as they come.
+fn git_progress() -> bool {
+    crate::progress::verbose() && std::io::stderr().is_terminal()
 }
 
 /// What a repo in the env holds that no remote has.
@@ -890,8 +882,10 @@ pub fn undecline(ctx: &Ctx, env: &str, url: &str) -> Result<bool> {
 fn copy_in(ctx: &Ctx, env: &str, ws: &Workspace, name: &str, dir: &str) -> Result<()> {
     let dir = workspace::canonical(dir)?;
     check_folder(ws.dir.as_deref(), &dir)?;
-    println!("copying {} into /workspace/{name}…", dir.display());
-    let n = workspace::push(ctx, env, &dir, Some(name))?;
+    let n = crate::progress::step(
+        &format!("copying {} into /workspace/{name}", dir.display()),
+        || workspace::push(ctx, env, &dir, Some(name)),
+    )?;
     println!("copied {n} file(s)");
     Ok(())
 }
@@ -904,7 +898,7 @@ fn clone(
     branch: Option<&str>,
     locked: bool,
 ) -> Result<()> {
-    println!("cloning {} into /workspace/{name}…", display(url));
+    let what = format!("cloning {} into /workspace/{name}", display(url));
     // No prompts: a remote that wants a password or an unknown host key fails instead.
     // Into a hidden folder first, moved into place only when the clone is whole: one cut
     // short leaves nothing the next `up` would take as done.
@@ -912,11 +906,7 @@ fn clone(
     let script = format!(
         "export GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes'\n\
          rm -rf {tmp} && git clone{}{} -- {} {tmp} && mv {tmp} {} || {{ rm -rf {tmp}; exit 1; }}",
-        if std::io::stderr().is_terminal() {
-            " --progress"
-        } else {
-            ""
-        },
+        if git_progress() { " --progress" } else { "" },
         branch
             .map(|b| format!(" --branch {}", sh_quote(b)))
             .unwrap_or_default(),
@@ -924,36 +914,24 @@ fn clone(
         sh_quote(&format!("/workspace/{name}")),
     );
     let dev = names::dev(env);
-    let status = relayed(
-        ctx,
-        &[
-            "exec",
-            "-u",
-            UID,
-            "-w",
-            "/workspace",
-            dev.as_str(),
-            "sh",
-            "-c",
-            connect::LOGIN,
-            &script,
-        ],
-    )?;
-    if !status.success() && locked {
-        bail!(
-            "git clone failed: some of the env's credentials are locked (see the warning about \
-             secrets above); once `luoto vault unlock` loads them, `luoto up -e {env}` clones it"
-        );
-    }
-    if !status.success() {
-        bail!(
-            "git clone failed. A private repository needs a credential that covers it (its \
-             `repos` or `read_repos` of [credentials.github] or [credentials.azure_devops], or \
-             [credentials.ssh]); `luoto egress -e {env} --denied --since 10m` shows what the \
-             gate blocked; `luoto up -e {env}` tries again"
-        );
-    }
-    Ok(())
+    let status = crate::progress::step(&what, || {
+        quiet_git(
+            ctx,
+            &[
+                "exec",
+                "-u",
+                UID,
+                "-w",
+                "/workspace",
+                dev.as_str(),
+                "sh",
+                "-c",
+                connect::LOGIN,
+                &script,
+            ],
+        )
+    })?;
+    clone_failed(env, url, status.success(), locked)
 }
 
 /// Keep the repos out of `git status` in the env's folder when it is a repository itself (a
@@ -1197,8 +1175,8 @@ fn hint(
     };
     Some(format!(
         "Public repos need none of these. For a private one, or to push from the env, give it \
-         HTTPS credentials (`luoto edit -e {env}`, or `luoto up` on a terminal asks); each \
-         reaches only the repos it lists:\n\n{}{ssh_note}",
+         HTTPS credentials (`luoto repo auth -e {env} <repo>` on a terminal, or `luoto edit -e \
+         {env}`); each reaches only the repos it lists:\n\n{}{ssh_note}",
         blocks
             .iter()
             .map(|b| format!("  {}", b.replace('\n', "\n  ")))
@@ -1271,16 +1249,559 @@ fn git_details(host: &str, private: bool, ca: &mut Option<String>) -> Result<Str
         .unwrap_or_else(|| "oauth2".into()))
 }
 
-/// For each forge account whose repos no credential covers: on a terminal, ask for one (push
-/// or read only, and where its token is kept) and write it into the env's config, or note the
-/// repos as public so it isn't asked again; without one, say what to add. Whether the config
+/// Repos whose access was left for later in this command, as [`Forge::key`] writes them: not
+/// asked again, and not cloned, which would only fail.
+static LATER: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+fn left_for_later(key: &str) -> bool {
+    LATER.lock().is_ok_and(|s| s.contains(key))
+}
+
+/// A remote's forge account and its repo as credentials list it (`owner/repo`,
+/// `org/project/repo`, `group/sub/repo`).
+fn forge_repo(url: &str) -> Option<(Forge, String)> {
+    uncovered(&[clone_url(url)], &Credentials::default())
+        .into_iter()
+        .find_map(|(f, r)| Some((f, r.into_iter().next()?)))
+}
+
+/// Whether `url`'s access was left for later in this command; if so, says that it isn't
+/// cloned.
+pub fn waits(env: &str, url: &str) -> bool {
+    let Some((forge, repo)) = forge_repo(url) else {
+        return false;
+    };
+    if !left_for_later(&forge.key(&repo)) {
+        return false;
+    }
+    let repo = display(&repo);
+    let line = crate::prompt::with_command(
+        &format!("not cloned yet: {repo} needs a token or to be public"),
+        &format!("luoto repo auth -e {env} {repo}"),
+        text::columns(),
+    );
+    println!("{line}");
+    true
+}
+
+/// What the env may do with a repo of a forge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Access {
+    /// Fetch it without a token.
+    Public,
+    /// Fetch it with a token.
+    Read,
+    /// Fetch and push with a token, and on GitHub open pull requests.
+    Push,
+}
+
+impl Forge {
+    fn name(&self) -> String {
+        match self {
+            Forge::Github(_) => "GitHub".into(),
+            Forge::Azure(_) => "Azure DevOps".into(),
+            Forge::Git(h) => display(h),
+        }
+    }
+
+    /// Where its credentials are, as `relist_repo` takes them.
+    fn table(&self) -> (&'static str, Option<&str>) {
+        match self {
+            Forge::Github(_) => ("github", None),
+            Forge::Azure(_) => ("azure_devops", None),
+            Forge::Git(h) => ("git", Some(h)),
+        }
+    }
+
+    /// Whether `entry`, as a credential of it lists repos, is `repo`.
+    fn same(&self, entry: &str, repo: &str) -> bool {
+        match self {
+            Forge::Github(_) => entry.eq_ignore_ascii_case(repo),
+            Forge::Azure(_) => {
+                let key = |r: &str| crate::azure::parse_repo(r).ok().map(|r| r.key());
+                key(entry).is_some() && key(entry) == key(repo)
+            }
+            Forge::Git(_) => entry
+                .trim_matches('/')
+                .trim_end_matches(".git")
+                .eq_ignore_ascii_case(repo),
+        }
+    }
+}
+
+/// The access menu's entries for a repo of `forge`, least privilege first, each with what it
+/// needs of a token in the forge's terms.
+fn access_rows(forge: &Forge) -> Vec<(Access, String, String)> {
+    let (push, read, write) = match forge {
+        Forge::Github(_) => (
+            "Read and push, open pull requests",
+            "token with Contents: read",
+            "token with Contents + Pull requests: write",
+        ),
+        Forge::Azure(_) => (
+            "Read and push",
+            "PAT with Code: read",
+            "PAT with Code: read & write",
+        ),
+        Forge::Git(h) if h.contains("gitlab") => (
+            "Read and push",
+            "token with read_repository",
+            "token with write_repository",
+        ),
+        Forge::Git(_) => (
+            "Read and push",
+            "token that reads it",
+            "token that reads and writes it",
+        ),
+    };
+    vec![
+        (
+            Access::Public,
+            "Fetch only, it's public".into(),
+            "no token".into(),
+        ),
+        (Access::Read, "Read it, it's private".into(), read.into()),
+        (Access::Push, push.into(), write.into()),
+    ]
+}
+
+/// The access question for `repo`: what the env has marked `(current)` and opened on, else
+/// the least privilege; "Later" (`None`) when it may wait.
+fn access_question(
+    forge: &Forge,
+    repo: &str,
+    current: Option<Access>,
+    mode: Mode,
+) -> Question<Option<Access>> {
+    let mut rows: Vec<(Option<Access>, String, String)> = access_rows(forge)
+        .into_iter()
+        .map(|(a, label, desc)| {
+            let label = if Some(a) == current {
+                format!("{label} (current)")
+            } else {
+                label
+            };
+            (Some(a), label, desc)
+        })
+        .collect();
+    if mode == Mode::Missing {
+        rows.push((None, "Later".into(), String::new()));
+    }
+    let at = rows
+        .iter()
+        .position(|(a, _, _)| a.is_some() && *a == current)
+        .unwrap_or(0);
+    Question {
+        text: format!("What can the env do with {}?", display(repo)),
+        rows,
+        at,
+        help: menu_help(mode.esc()),
+    }
+}
+
+/// What `creds`, and the repos answered as public (`declined`), let the env do with `repo` of
+/// `forge`, and the token that does it.
+fn access_of(
+    creds: &Credentials,
+    declined: &BTreeSet<String>,
+    forge: &Forge,
+    repo: &str,
+) -> Option<(Access, Option<String>)> {
+    let has = |list: &[String]| list.iter().any(|r| forge.same(r, repo));
+    let lists: Vec<(&[String], &[String], Option<&String>)> = match forge {
+        Forge::Github(_) => creds
+            .github
+            .0
+            .iter()
+            .map(|c| (&c.repos[..], &c.read_repos[..], c.token.as_ref()))
+            .collect(),
+        Forge::Azure(_) => creds
+            .azure_devops
+            .iter()
+            .map(|c| (&c.repos[..], &c.read_repos[..], Some(&c.token)))
+            .collect(),
+        Forge::Git(h) => creds
+            .git
+            .iter()
+            .filter(|c| c.host.eq_ignore_ascii_case(h))
+            .map(|c| (&c.repos[..], &c.read_repos[..], c.token.as_ref()))
+            .collect(),
+    };
+    for (repos, read, token) in lists {
+        if has(repos) {
+            return Some((Access::Push, token.cloned()));
+        }
+        if has(read) {
+            let access = if token.is_some() || !matches!(forge, Forge::Git(_)) {
+                Access::Read
+            } else {
+                Access::Public
+            };
+            return Some((access, token.cloned()));
+        }
+    }
+    declined
+        .contains(&forge.key(repo))
+        .then_some((Access::Public, None))
+}
+
+/// The closing summary of a repo's access step.
+fn access_summary(
+    env: &str,
+    forge: &Forge,
+    repo: &str,
+    now: Option<&(Access, Option<String>)>,
+) -> String {
+    let token = |t: &Option<String>| match (t, forge) {
+        (Some(t), _) => format!("token {}", crate::secrets::shown_ref(t)),
+        (None, Forge::Github(_)) => "with the GitHub App".into(),
+        (None, _) => "no token".into(),
+    };
+    let access = match now {
+        None => "none yet".to_string(),
+        Some((Access::Public, _)) => "fetch only (public)".into(),
+        Some((Access::Read, t)) => format!("read, {}", token(t)),
+        Some((Access::Push, t)) => format!("read and push, {}", token(t)),
+    };
+    let repo = display(repo);
+    crate::prompt::summary(
+        &repo,
+        &[
+            ("access", access),
+            ("change it", format!("luoto repo auth -e {env} {repo}")),
+        ],
+    )
+}
+
+/// Note `key` as answered public, or not.
+fn set_declined(ctx: &Ctx, env: &str, key: &str, public: bool) -> Result<()> {
+    let mut keys = declined(ctx, env);
+    let changed = if public {
+        keys.insert(key.to_string())
+    } else {
+        keys.remove(key)
+    };
+    if changed {
+        let text: String = keys.iter().map(|k| format!("{k}\n")).collect();
+        crate::paths::write_private(&declined_path(ctx, env), text.as_bytes())?;
+    }
+    Ok(())
+}
+
+/// Write `access` for `repo` of `forge` into the env's config: it moves within the credential
+/// that lists it, or joins the forge account's (a new one with `token`, for a repo it can't
+/// reach yet). `token` replaces the credential's own; `git` holds what a new
+/// `[[credentials.git]]` takes. A public repo on GitHub or Azure DevOps is noted by the
+/// caller ([`set_declined`]).
+fn write_access(
+    f: &mut EnvFile,
+    forge: &Forge,
+    repo: &str,
+    access: Access,
+    token: Option<&str>,
+    git: &GitCred,
+) -> Result<()> {
+    let (table, host) = forge.table();
+    let same = |e: &str| forge.same(e, repo);
+    let repos = [repo.to_string()];
+    let to = match access {
+        Access::Public => ListAs::Nowhere,
+        Access::Read => ListAs::Read,
+        Access::Push => ListAs::Write,
+    };
+    let read = access != Access::Push;
+    if let Forge::Git(_) = forge {
+        // Another host's public repos still need a rule to be fetched: they stay in its
+        // credential's `read_repos`, without a token when it has none. Its own settings
+        // (`username`, `private`, `ca`) stay as they are.
+        let new = GitCred {
+            token: token.map(str::to_string),
+            ..git.clone()
+        };
+        f.add_git_repos(&new, &repos, read)?;
+        let to = if read { ListAs::Read } else { ListAs::Write };
+        f.relist_repo(table, host, &same, to, token)?;
+        return Ok(());
+    }
+    match f.relist_repo(table, host, &same, to, token)? {
+        Relisted::Emptied => println!(
+            "  the {} credential had no other repo, so it is removed (not its token)",
+            forge.name()
+        ),
+        Relisted::Moved => {}
+        Relisted::No if access == Access::Public => {}
+        Relisted::No => {
+            match forge {
+                Forge::Github(o) => f.add_github_repos(o, token, &repos, read)?,
+                Forge::Azure(_) => f.add_azure_repos(token, &repos, read)?,
+                Forge::Git(_) => {}
+            }
+            // The account's credential, found by its other repos, takes the token given.
+            if token.is_some() {
+                f.relist_repo(table, host, &same, to, token)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The token the credential of `repo`'s forge account has (the owner's on GitHub, the
+/// organization's on Azure DevOps, the host's), and whether it is a GitHub App instead.
+fn account_token(creds: &Credentials, forge: &Forge) -> (Option<String>, bool) {
+    match forge {
+        Forge::Github(o) => {
+            let owns = |c: &&crate::config::GithubCred| {
+                c.repos.iter().chain(&c.read_repos).any(|r| {
+                    r.split('/')
+                        .next()
+                        .is_some_and(|x| x.eq_ignore_ascii_case(o))
+                })
+            };
+            match creds.github.0.iter().find(owns) {
+                Some(c) => (c.token.clone(), c.token.is_none()),
+                None => (None, false),
+            }
+        }
+        Forge::Azure(_) => (creds.azure_devops.as_ref().map(|c| c.token.clone()), false),
+        Forge::Git(h) => (
+            creds
+                .git
+                .iter()
+                .find(|c| c.host.eq_ignore_ascii_case(h))
+                .and_then(|c| c.token.clone()),
+            false,
+        ),
+    }
+}
+
+/// The other repos the token of `repo`'s forge account reaches: a new token for `repo` is
+/// theirs too.
+fn token_shared_with(creds: &Credentials, forge: &Forge, repo: &str) -> Vec<String> {
+    let lists: Vec<&Vec<String>> = match forge {
+        Forge::Github(o) => creds
+            .github
+            .0
+            .iter()
+            .filter(|c| c.token.is_some())
+            .find(|c| {
+                c.repos.iter().chain(&c.read_repos).any(|r| {
+                    r.split('/')
+                        .next()
+                        .is_some_and(|x| x.eq_ignore_ascii_case(o))
+                })
+            })
+            .map(|c| vec![&c.repos, &c.read_repos])
+            .unwrap_or_default(),
+        Forge::Azure(_) => creds
+            .azure_devops
+            .as_ref()
+            .map(|c| vec![&c.repos, &c.read_repos])
+            .unwrap_or_default(),
+        Forge::Git(h) => creds
+            .git
+            .iter()
+            .filter(|c| c.token.is_some())
+            .find(|c| c.host.eq_ignore_ascii_case(h))
+            .map(|c| vec![&c.repos, &c.read_repos])
+            .unwrap_or_default(),
+    };
+    lists
+        .into_iter()
+        .flatten()
+        .filter(|r| !forge.same(r, repo))
+        .map(|r| display(r))
+        .collect()
+}
+
+/// Where a token for `forge` is kept and fetched, and what it must allow, for `repo`.
+fn token_ask(forge: &Forge, repo: &str, read: bool) -> (String, String, String) {
+    let shown = display(repo);
+    match forge {
+        Forge::Github(o) => (
+            format!("GitHub token for {o}"),
+            format!("github.{o}"),
+            format!(
+                "A fine-grained token (github.com/settings/personal-access-tokens), resource \
+                 owner {o}, for {shown}: Contents{}.",
+                if read {
+                    " read-only"
+                } else {
+                    " and Pull requests, read and write"
+                }
+            ),
+        ),
+        Forge::Azure(o) => (
+            format!("Azure DevOps PAT for {o}"),
+            format!("azure_devops.{o}"),
+            format!(
+                "A PAT (dev.azure.com/{o}/_usersSettings/tokens) with Code ({}).",
+                if read { "Read" } else { "Read & write" }
+            ),
+        ),
+        Forge::Git(h) => (
+            format!("token for {h}"),
+            format!("git.{h}"),
+            format!(
+                "An access token for {h} that {} the repo (GitLab: read_repository{}; Forgejo \
+                 and Gitea: repository {}).",
+                if read { "reads" } else { "reads and writes" },
+                if read { "" } else { " and write_repository" },
+                if read { "read" } else { "read and write" }
+            ),
+        ),
+    }
+}
+
+/// References the config has for `forge`'s other accounts: one token often serves several (a
+/// classic GitHub token, a GitLab group's).
+fn known_tokens(creds: &Credentials, forge: &Forge) -> Vec<(String, String)> {
+    let mut known: Vec<(String, String)> = Vec::new();
+    let mut offer = |what: String, r: &Option<String>| {
+        if let Some(r) = r
+            && !known.iter().any(|(_, k)| k == r)
+        {
+            known.push((what, r.clone()));
+        }
+    };
+    match forge {
+        Forge::Github(_) => {
+            for c in &creds.github.0 {
+                let owners: BTreeSet<&str> = c
+                    .repos
+                    .iter()
+                    .chain(&c.read_repos)
+                    .filter_map(|r| r.split('/').next())
+                    .collect();
+                offer(owners.into_iter().collect::<Vec<_>>().join(", "), &c.token);
+            }
+        }
+        // Another host's token would go to this host's server.
+        Forge::Git(h) => {
+            let name = |x: &str| x.split(':').next().unwrap_or(x).to_ascii_lowercase();
+            for c in &creds.git {
+                if name(&c.host) == name(h) {
+                    offer(c.host.clone(), &c.token);
+                }
+            }
+        }
+        Forge::Azure(_) => {}
+    }
+    known
+}
+
+/// Ask what the env may do with `repo` (`Missing`: it has no access; `Change`: `repo auth`),
+/// then, for a private one, its token, and write the answer. Ends with the repo's summary, or
+/// `unchanged`. Whether the config changed.
+fn ask_repo(ctx: &Ctx, env: &str, forge: &Forge, repo: &str, mode: Mode) -> Result<bool> {
+    let f = EnvFile::load(&ctx.paths, env)?;
+    let now = access_of(&f.cfg.credentials, &declined(ctx, env), forge, repo);
+    let later = || -> Result<bool> {
+        if let Ok(mut s) = LATER.lock() {
+            s.insert(forge.key(repo));
+        }
+        println!("{}", access_summary(env, forge, repo, None));
+        Ok(false)
+    };
+    // Back from where its token is kept, the menu opens on what was picked.
+    let mut picked: Option<Access> = None;
+    loop {
+        let mut q = access_question(forge, repo, now.as_ref().map(|n| n.0), mode);
+        if let Some(i) = q
+            .rows
+            .iter()
+            .position(|(a, _, _)| picked.is_some() && *a == picked)
+        {
+            q.at = i;
+        }
+        let access = match crate::wizard::ask_menu(q)? {
+            Some(Some(a)) => {
+                picked = Some(a);
+                a
+            }
+            Some(None) => return later(),
+            None if mode == Mode::Missing => return later(),
+            None => {
+                println!("unchanged");
+                return Ok(false);
+            }
+        };
+        let mut f = EnvFile::load(&ctx.paths, env)?;
+        let mut git = GitCred::default();
+        if let Forge::Git(h) = forge {
+            git.host = h.clone();
+            git.private = ask_private(h);
+        }
+        let (have, app) = account_token(&f.cfg.credentials, forge);
+        let token = if access == Access::Public || app {
+            None
+        } else if mode == Mode::Missing && have.is_some() {
+            println!(
+                "  the {} credential you have now reaches {} too, with its token",
+                forge.name(),
+                display(repo)
+            );
+            None
+        } else {
+            let read = access == Access::Read;
+            let (label, acct, how) = token_ask(forge, repo, read);
+            println!("{}", text::wrap(&display(&how), "  ", text::columns()));
+            let shared = token_shared_with(&f.cfg.credentials, forge, repo);
+            if !shared.is_empty() {
+                let note = format!(
+                    "The {} credential's token also reaches {}: another token replaces it for \
+                     them too, so it must cover them.",
+                    forge.name(),
+                    shared.join(", ")
+                );
+                println!("{}", text::wrap(&note, "  ", text::columns()));
+            }
+            let title = format!("luoto {label}");
+            let known = known_tokens(&f.cfg.credentials, forge);
+            let help = menu_help("back");
+            let ask = crate::wizard::SecretAsk {
+                label: &label,
+                acct: &acct,
+                title: &title,
+                later: false,
+                known: &known,
+                current: have.as_deref(),
+                help: &help,
+                kind: None,
+            };
+            match crate::wizard::secret(&ask, &ctx.global)? {
+                Step::Got(crate::wizard::Secret::Ref(r)) => Some(r),
+                _ => continue,
+            }
+        };
+        if token.is_some() && have.is_none() && matches!(forge, Forge::Git(_)) {
+            git.username = git_details(&git.host, git.private, &mut git.ca)?;
+        }
+        if now
+            .as_ref()
+            .is_some_and(|(a, t)| *a == access && (token.is_none() || *t == token))
+        {
+            println!("{}", access_summary(env, forge, repo, now.as_ref()));
+            return Ok(false);
+        }
+        let public = access == Access::Public && !matches!(forge, Forge::Git(_));
+        set_declined(ctx, env, &forge.key(repo), public)?;
+        write_access(&mut f, forge, repo, access, token.as_deref(), &git)?;
+        let after = access_of(&f.cfg.credentials, &declined(ctx, env), forge, repo);
+        println!("{}", access_summary(env, forge, repo, after.as_ref()));
+        return Ok(true);
+    }
+}
+
+/// For each repo no credential covers: on a terminal, ask what the env may do with it (and
+/// for a private one, where its token is kept) and write it into the env's config, or note it
+/// as public so it isn't asked again; without one, say what to add. Whether the config
 /// changed.
 pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
     let all = remotes(&cfg.workspace);
     let skip = declined(ctx, env);
     let mut needs = uncovered(&all, &cfg.credentials);
     for (forge, repos) in needs.iter_mut() {
-        repos.retain(|r| !skip.contains(&forge.key(r)));
+        repos.retain(|r| !skip.contains(&forge.key(r)) && !left_for_later(&forge.key(r)));
     }
     needs.retain(|_, r| !r.is_empty());
     if needs.is_empty() {
@@ -1293,207 +1814,31 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
         return Ok(false);
     }
     // Repos a repository's luoto.toml named, not the env's own config: whoever writes that
-    // repository chose them, so nothing is granted for them on a bare Enter.
+    // repository chose them.
     let own_ws = EnvFile::load(&ctx.paths, env)?.cfg.workspace;
     let own = uncovered(&remotes(&own_ws), &cfg.credentials);
-    // The remote a folder-less env is cloned from: a bare Enter answers that it is public.
     let cloned_from = uncovered(
         &own_ws.url.iter().map(|u| clone_url(u)).collect::<Vec<_>>(),
         &cfg.credentials,
     );
     let mut changed = false;
     for (forge, repos) in needs {
-        let from_project = repos
-            .iter()
-            .any(|r| !own.get(&forge).is_some_and(|o| o.contains(r)));
-        let workspace = cloned_from
-            .get(&forge)
-            .is_some_and(|w| repos.iter().any(|r| w.contains(r)));
-        let mut f = EnvFile::load(&ctx.paths, env)?;
-        let shown = repos
-            .iter()
-            .map(|r| display(r))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let (forge_name, account) = match &forge {
-            Forge::Github(o) => ("GitHub", o.clone()),
-            Forge::Azure(o) => ("Azure DevOps", o.clone()),
-            Forge::Git(h) => ("git", h.clone()),
-        };
-        println!(
-            "\n{shown} on {forge_name} ({}){}: no credential covers it, so the env can fetch it \
-             only if it is public, and push to none.",
-            display(&account),
-            if from_project {
+        for repo in repos {
+            let note = if !own.get(&forge).is_some_and(|o| o.contains(&repo)) {
                 ", named by the project's luoto.toml"
-            } else if workspace {
-                ", the env's workspace is cloned from it"
+            } else if cloned_from.get(&forge).is_some_and(|w| w.contains(&repo)) {
+                ", the env is cloned from it"
             } else {
                 ""
-            }
-        );
-        const PUSH: &str = "push and pull requests";
-        const READ: &str = "read only (a private repo)";
-        const PUBLIC: &str = "none: it is public, read only";
-        const LATER: &str = "later: `luoto up` asks again";
-        let start = if from_project {
-            3
-        } else if workspace {
-            2
-        } else {
-            0
-        };
-        let Some(pick) = inquire::Select::new("Access:", vec![PUSH, READ, PUBLIC, LATER])
-            .with_starting_cursor(start)
-            .prompt_skippable()?
-        else {
-            continue;
-        };
-        let read = match pick {
-            PUSH => false,
-            READ => true,
-            // Another host's public repos still need a rule to be fetched: a credential
-            // without a token, listing them.
-            PUBLIC if matches!(forge, Forge::Git(_)) => {
-                let Forge::Git(h) = &forge else { continue };
-                let new = GitCred {
-                    host: h.clone(),
-                    private: ask_private(h),
-                    ..Default::default()
-                };
-                f.add_git_repos(&new, &repos, true)?;
-                println!("  written to {}", f.path.display());
-                changed = true;
-                continue;
-            }
-            PUBLIC => {
-                let mut keys = declined(ctx, env);
-                keys.extend(repos.iter().map(|r| forge.key(r)));
-                let text: String = keys.iter().map(|k| format!("{k}\n")).collect();
-                crate::paths::write_private(&declined_path(ctx, env), text.as_bytes())?;
-                continue;
-            }
-            _ => continue,
-        };
-        let existing = match &forge {
-            Forge::Github(o) => f.cfg.credentials.github.0.iter().any(|c| {
-                c.repos.iter().chain(&c.read_repos).any(|r| {
-                    r.split('/')
-                        .next()
-                        .is_some_and(|x| x.eq_ignore_ascii_case(o))
-                })
-            }),
-            Forge::Azure(_) => f.cfg.credentials.azure_devops.is_some(),
-            Forge::Git(h) => f
-                .cfg
-                .credentials
-                .git
-                .iter()
-                .any(|c| c.host.eq_ignore_ascii_case(h) && c.token.is_some()),
-        };
-        let token = if existing {
-            println!(
-                "  the {forge_name} credential you have now {} {shown} too, with its token",
-                if read { "reads" } else { "pushes to" }
+            };
+            let line = format!(
+                "{} ({}{note}) has no credential, so the env can only fetch it if it is public.",
+                display(&repo),
+                forge.name()
             );
-            None
-        } else {
-            let (label, how) = match (&forge, read) {
-                (Forge::Github(o), _) => (
-                    format!("GitHub token for {o}"),
-                    format!(
-                        "A fine-grained token (github.com/settings/personal-access-tokens), \
-                         resource owner {o}, for {shown}: Contents{}.",
-                        if read {
-                            " read-only"
-                        } else {
-                            " and Pull requests, read and write"
-                        }
-                    ),
-                ),
-                (Forge::Azure(o), _) => (
-                    format!("Azure DevOps PAT for {o}"),
-                    format!(
-                        "A PAT (dev.azure.com/{o}/_usersSettings/tokens) with Code ({}).",
-                        if read { "Read" } else { "Read & write" }
-                    ),
-                ),
-                (Forge::Git(h), _) => (
-                    format!("token for {h}"),
-                    format!(
-                        "An access token for {h} that {} the repos (GitLab: read_repository{}; \
-                         Forgejo and Gitea: repository {}).",
-                        if read { "reads" } else { "reads and writes" },
-                        if read { "" } else { " and write_repository" },
-                        if read { "read" } else { "read and write" }
-                    ),
-                ),
-            };
-            println!("  {}", display(&how));
-            let acct = match &forge {
-                Forge::Github(o) => format!("github.{o}"),
-                Forge::Azure(o) => format!("azure_devops.{o}"),
-                Forge::Git(h) => format!("git.{h}"),
-            };
-            let title = format!("luoto {label}");
-            // References the config has for the same forge: one token often serves several
-            // accounts (a classic GitHub token, a GitLab group's).
-            let mut known: Vec<(String, String)> = Vec::new();
-            let mut offer = |what: String, r: &Option<String>| {
-                if let Some(r) = r
-                    && !known.iter().any(|(_, k)| k == r)
-                {
-                    known.push((what, r.clone()));
-                }
-            };
-            match &forge {
-                Forge::Github(_) => {
-                    for c in &f.cfg.credentials.github.0 {
-                        let owners: Vec<&str> = c
-                            .repos
-                            .iter()
-                            .chain(&c.read_repos)
-                            .filter_map(|r| r.split('/').next())
-                            .collect::<BTreeSet<_>>()
-                            .into_iter()
-                            .collect();
-                        offer(owners.join(", "), &c.token);
-                    }
-                }
-                // Another host's token would go to this host's server.
-                Forge::Git(h) => {
-                    let name = |x: &str| x.split(':').next().unwrap_or(x).to_ascii_lowercase();
-                    for c in &f.cfg.credentials.git {
-                        if name(&c.host) == name(h) {
-                            offer(c.host.clone(), &c.token);
-                        }
-                    }
-                }
-                Forge::Azure(_) => {}
-            }
-            match crate::wizard::secret(&label, &acct, &title, LATER, &known, &ctx.global)? {
-                Some(r) => Some(r),
-                None => continue,
-            }
-        };
-        match &forge {
-            Forge::Github(o) => f.add_github_repos(o, token.as_deref(), &repos, read)?,
-            Forge::Azure(_) => f.add_azure_repos(token.as_deref(), &repos, read)?,
-            Forge::Git(h) => {
-                let mut new = GitCred {
-                    host: h.clone(),
-                    token: token.clone(),
-                    private: ask_private(h),
-                    ..Default::default()
-                };
-                if token.is_some() {
-                    new.username = git_details(h, new.private, &mut new.ca)?;
-                }
-                f.add_git_repos(&new, &repos, read)?
-            }
+            println!("\n{}", text::wrap(&line, "", text::columns()));
+            changed |= ask_repo(ctx, env, &forge, &repo, Mode::Missing)?;
         }
-        println!("  written to {}", f.path.display());
-        changed = true;
     }
     Ok(changed)
 }
@@ -1613,6 +1958,88 @@ pub fn rm(env_name: &str, name: &str) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The forge account and repo `which` names among the env's remotes: a repo by its name in
+/// the workspace, or a remote by its path on the forge (`acme/api`) or its URL.
+fn find(ws: &Workspace, which: &str) -> Option<(Forge, String, String)> {
+    let by_name = ws
+        .repos
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(which))
+        .and_then(|(_, r)| {
+            r.url
+                .as_deref()
+                .map(clone_url)
+                .or_else(|| crate::init::origin_url(Path::new(r.dir.as_deref()?)))
+        });
+    let key = |u: &str| forge_repo(u).map(|(f, r)| f.key(&r));
+    let want = key(which);
+    by_name
+        .into_iter()
+        .chain(remotes(ws).into_iter().filter(|u| {
+            (want.is_some() && key(u) == want)
+                || forge_repo(u).is_some_and(|(f, r)| f.same(&r, which))
+        }))
+        .find_map(|u| forge_repo(&u).map(|(f, r)| (f, r, u)))
+}
+
+/// `luoto repo auth`: the access question again for one of the env's repos, opening on what
+/// the env has. A running env takes the answer at once, and clones a repo that waited for it.
+pub fn auth(env_name: &str, which: &str) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    let cfg = env::layered(&ctx, env_name)?;
+    let Some((forge, repo, url)) = find(&cfg.workspace, which) else {
+        let which = display(which);
+        bail!(
+            "env `{env_name}` has no repo `{which}`; `luoto repo add -e {env_name} {which}` adds it"
+        );
+    };
+    let ssh_host = match &forge {
+        Forge::Github(_) => "github.com".to_string(),
+        Forge::Azure(_) => crate::azure::SSH_HOST.to_string(),
+        Forge::Git(h) => h.split(':').next().unwrap_or(h).to_string(),
+    };
+    if is_ssh(&url)
+        && cfg
+            .credentials
+            .ssh
+            .as_ref()
+            .is_some_and(|s| s.hosts.iter().any(|h| h.eq_ignore_ascii_case(&ssh_host)))
+    {
+        println!(
+            "{} goes over SSH with the env's key ([credentials.ssh]), which reaches every repo \
+             the key can: there is no access to choose",
+            display(&repo)
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    if !crate::prompt::interactive() {
+        bail!(
+            "repo auth needs a terminal; without one, `luoto edit -e {env_name}` sets a repo's \
+             access in its [credentials]"
+        );
+    }
+    if !ask_repo(&ctx, env_name, &forge, &repo, Mode::Change)? {
+        return Ok(ExitCode::SUCCESS);
+    }
+    let state = EnvState::load(&ctx.paths, env_name)?;
+    // The env's own remote is cloned by `up` alone, which this one waits for.
+    let own = cfg.workspace.url.as_deref().map(clone_url) == Some(url);
+    if own && !state.as_ref().is_some_and(|s| s.seeded) {
+        println!("`luoto up -e {env_name}` clones it");
+    }
+    if !ctx.rt.is_running(&names::dev(env_name)) {
+        return Ok(ExitCode::SUCCESS);
+    }
+    crate::sync::reapply(&ctx, env_name)?;
+    let cfg = env::layered(&ctx, env_name)?;
+    let done = state.map(|s| s.repos).unwrap_or_default();
+    let now = seed(&ctx, env_name, &cfg.workspace, &done);
+    if now != done {
+        EnvState::update(&ctx.paths, env_name, |s| s.repos = now)?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 /// `luoto repo list`.
 pub fn list(env_name: &str) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
@@ -1653,6 +2080,30 @@ pub fn list(env_name: &str) -> Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_token_names_the_other_repos_it_replaces_the_token_for() {
+        let cfg: crate::config::EnvConfig = toml::from_str(
+            r#"
+[workspace]
+dir = "/w"
+[[credentials.github]]
+token = "op://Dev/acme/token"
+repos = ["acme/api", "acme/web"]
+read_repos = ["acme/docs"]
+[[credentials.github]]
+repos = ["other/app"]
+"#,
+        )
+        .unwrap();
+        let acme = Forge::Github("acme".into());
+        assert_eq!(
+            token_shared_with(&cfg.credentials, &acme, "ACME/api"),
+            ["acme/web", "acme/docs"]
+        );
+        let other = Forge::Github("other".into());
+        assert!(token_shared_with(&cfg.credentials, &other, "other/app").is_empty());
+    }
 
     #[test]
     fn an_env_file_from_before_keeps_its_https_user_name() {
@@ -2144,5 +2595,160 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
         // An SSH remote of the host is covered by its HTTPS credential.
         let ssh = ["git@gitlab.com:group/api.git".to_string()];
         assert!(uncovered(&ssh, &have).is_empty());
+    }
+
+    #[test]
+    fn the_access_question_starts_at_the_least_privilege_in_the_forges_terms() {
+        let gh = Forge::Github("acme".into());
+        let q = access_question(&gh, "acme/api", None, Mode::Missing);
+        assert_eq!(q.text, "What can the env do with acme/api?");
+        assert_eq!(q.help, "↑↓ to move, Enter to pick, Esc: later");
+        assert_eq!(q.at, 0);
+        let rows: Vec<(Option<Access>, &str, &str)> = q
+            .rows
+            .iter()
+            .map(|(a, l, d)| (*a, l.as_str(), d.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some(Access::Public), "Fetch only, it's public", "no token"),
+                (
+                    Some(Access::Read),
+                    "Read it, it's private",
+                    "token with Contents: read"
+                ),
+                (
+                    Some(Access::Push),
+                    "Read and push, open pull requests",
+                    "token with Contents + Pull requests: write"
+                ),
+                (None, "Later", ""),
+            ]
+        );
+        let shown = crate::prompt::menu_rows(
+            &q.rows
+                .iter()
+                .map(|(_, l, d)| (l.clone(), d.clone()))
+                .collect::<Vec<_>>(),
+            79,
+        );
+        assert!(
+            shown.iter().all(|l| l.chars().count() + 2 <= 79),
+            "{shown:?}"
+        );
+        let azure = access_rows(&Forge::Azure("o".into()));
+        assert_eq!(
+            (azure[1].2.as_str(), azure[2].2.as_str()),
+            ("PAT with Code: read", "PAT with Code: read & write")
+        );
+        let gitlab = access_rows(&Forge::Git("gitlab.com".into()));
+        assert_eq!(
+            (gitlab[1].2.as_str(), gitlab[2].2.as_str()),
+            ("token with read_repository", "token with write_repository")
+        );
+        // Changing it: what the env has, marked and opened on; Esc keeps it, no Later.
+        let q = access_question(&gh, "acme/api", Some(Access::Read), Mode::Change);
+        assert_eq!(q.at, 1);
+        assert_eq!(q.rows[1].1, "Read it, it's private (current)");
+        assert_eq!(q.rows.len(), 3);
+        assert_eq!(q.help, "↑↓ to move, Enter to pick, Esc: unchanged");
+    }
+
+    #[test]
+    fn a_repos_access_is_read_from_the_list_that_names_it() {
+        let creds: Credentials = toml::from_str(
+            "[[github]]\ntoken = \"env:A\"\nrepos = [\"acme/web\"]\nread_repos = [\"Acme/API\"]\n\
+             [[github]]\napp_id = \"1\"\ninstallation_id = 2\nprivate_key = \"env:K\"\n\
+             repos = [\"other/x\"]\n\
+             [azure_devops]\ntoken = \"env:P\"\nread_repos = [\"org/Data Platform/infra\"]\n\
+             [[git]]\nhost = \"gitlab.com\"\nread_repos = [\"group/pub\"]\n\
+             [[git]]\nhost = \"forge.example\"\ntoken = \"env:F\"\nread_repos = [\"t/priv.git\"]\n",
+        )
+        .unwrap();
+        let gh = Forge::Github("acme".into());
+        let none = BTreeSet::new();
+        let of = |f: &Forge, r: &str| access_of(&creds, &none, f, r);
+        assert_eq!(
+            of(&gh, "acme/api"),
+            Some((Access::Read, Some("env:A".into())))
+        );
+        assert_eq!(
+            of(&gh, "acme/web"),
+            Some((Access::Push, Some("env:A".into())))
+        );
+        assert_eq!(
+            of(&Forge::Github("other".into()), "other/x"),
+            Some((Access::Push, None))
+        );
+        assert_eq!(of(&gh, "acme/new"), None);
+        let public = BTreeSet::from([gh.key("acme/new")]);
+        assert_eq!(
+            access_of(&creds, &public, &gh, "acme/new"),
+            Some((Access::Public, None))
+        );
+        assert_eq!(
+            of(&Forge::Azure("org".into()), "org/Data%20Platform/infra"),
+            Some((Access::Read, Some("env:P".into())))
+        );
+        // Another host's repos without a token are public; with one, private.
+        assert_eq!(
+            of(&Forge::Git("gitlab.com".into()), "group/pub"),
+            Some((Access::Public, None))
+        );
+        assert_eq!(
+            of(&Forge::Git("forge.example".into()), "t/priv"),
+            Some((Access::Read, Some("env:F".into())))
+        );
+        assert_eq!(account_token(&creds, &gh), (Some("env:A".into()), false));
+        assert_eq!(
+            account_token(&creds, &Forge::Github("other".into())),
+            (None, true)
+        );
+    }
+
+    #[test]
+    fn a_repo_step_ends_with_its_summary() {
+        let gh = Forge::Github("acme".into());
+        let token = Some("keyring:luoto/github.acme".to_string());
+        assert_eq!(
+            access_summary("web", &gh, "acme/api", Some(&(Access::Read, token.clone()))),
+            "acme/api\n  access       read, token keyring:luoto/github.acme\n  \
+             change it    luoto repo auth -e web acme/api"
+        );
+        assert_eq!(
+            access_summary("web", &gh, "acme/api", Some(&(Access::Push, token))),
+            "acme/api\n  access       read and push, token keyring:luoto/github.acme\n  \
+             change it    luoto repo auth -e web acme/api"
+        );
+        assert!(
+            access_summary("web", &gh, "acme/api", Some(&(Access::Public, None)))
+                .contains("access       fetch only (public)\n")
+        );
+        assert!(access_summary("web", &gh, "acme/api", None).contains("access       none yet\n"));
+    }
+
+    #[test]
+    fn repo_auth_finds_a_repo_by_name_path_or_url() {
+        let ws = Workspace {
+            url: Some("acme/web".into()),
+            repos: BTreeMap::from([(
+                "api".to_string(),
+                Repo {
+                    url: Some("https://gitlab.com/group/api.git".into()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let found = |w: &str| find(&ws, w).map(|(f, r, _)| (f, r));
+        let gitlab = Some((Forge::Git("gitlab.com".into()), "group/api".to_string()));
+        assert_eq!(found("api"), gitlab);
+        assert_eq!(found("group/api"), gitlab);
+        assert_eq!(found("https://gitlab.com/group/api.git"), gitlab);
+        let web = Some((Forge::Github("acme".into()), "acme/web".to_string()));
+        assert_eq!(found("ACME/web"), web);
+        assert_eq!(found("https://github.com/acme/web"), web);
+        assert_eq!(found("acme/other"), None);
     }
 }

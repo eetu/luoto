@@ -55,7 +55,7 @@ pub fn load_secrets(ctx: &Ctx, refs: &BTreeSet<String>, whose: &str, renew: bool
                 Ok(v) => {
                     values.insert(r.clone(), v);
                 }
-                Err(e) => failed.push(format!("{r}: {e:#}")),
+                Err(e) => failed.push(format!("{}: {e:#}", secrets::shown_ref(r))),
             }
         }
         if !values.is_empty() {
@@ -182,7 +182,7 @@ pub fn reload(ctx: &Ctx, refs: &BTreeSet<String>, held_only: bool) -> Result<Rel
                     expires.insert(r.clone(), exp);
                 }
             }
-            Err(e) => failed.push(format!("{r}: {e:#}")),
+            Err(e) => failed.push(format!("{}: {e:#}", secrets::shown_ref(r))),
         }
     }
     let read = values.len();

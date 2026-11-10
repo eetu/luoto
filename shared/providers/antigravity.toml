@@ -4,4 +4,4 @@ host = "cloudcode-pa.googleapis.com"
 also = [{ host = "daily-cloudcode-pa.googleapis.com" }]
 # The sign-in page opens in your own browser; the env exchanges and refreshes the token.
 login_hosts = ["oauth2.googleapis.com"]
-login_how = "In `luoto shell`, run `agy`: it prints a sign-in URL; open it in your browser and paste the code back. The session stays in the env's home, where its code can read it."
+login_how = "run `agy` in `luoto shell`, open its URL, paste the code back"

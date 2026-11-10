@@ -482,6 +482,17 @@ pub enum ProviderValue {
     Flag(bool),
 }
 
+/// The keys of `[credentials.<provider>]` that say how it authenticates, one at a time: its
+/// auth kinds and `login_inside`.
+fn auth_keys(provider: &str) -> Result<Vec<String>> {
+    let p = luoto_shared::profiles::provider(provider)
+        .with_context(|| format!("unknown provider `{provider}`"))?;
+    Ok(p.auth
+        .into_keys()
+        .chain(std::iter::once("login_inside".to_string()))
+        .collect())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EnvConfig {
@@ -918,28 +929,40 @@ impl EnvFile {
         Ok(removed)
     }
 
-    /// Write `[credentials.<provider>]`, replacing any entries it had.
-    pub fn set_provider_credential(
+    /// Set `key` (an auth kind of `provider`, or `login_inside`) under
+    /// `[credentials.<provider>]`, in place of whichever of those it had. The table's other
+    /// keys (`server_tools`, `write`) stay.
+    pub fn set_provider_kind(
         &mut self,
         provider: &str,
-        entries: &BTreeMap<String, ProviderValue>,
+        key: &str,
+        value: &ProviderValue,
     ) -> Result<()> {
-        let mut table = toml_edit::Table::new();
-        for (k, v) in entries {
-            table[k] = match v {
-                ProviderValue::Ref(r) => toml_edit::value(r.as_str()),
-                ProviderValue::Flag(b) => toml_edit::value(*b),
-            };
-        }
+        let drop = auth_keys(provider)?;
+        let path = self.path.display().to_string();
         let creds = self.doc.entry("credentials").or_insert_with(|| {
             let mut t = toml_edit::Table::new();
             t.set_implicit(true);
             toml_edit::Item::Table(t)
         });
-        let Some(creds) = creds.as_table_like_mut() else {
-            bail!("`credentials` in {} is not a table", self.path.display());
-        };
-        creds.insert(provider, toml_edit::Item::Table(table));
+        let creds = creds
+            .as_table_like_mut()
+            .with_context(|| format!("`credentials` in {path} is not a table"))?;
+        let table = creds
+            .entry(provider)
+            .or_insert_with(toml_edit::table)
+            .as_table_like_mut()
+            .with_context(|| format!("`credentials.{provider}` in {path} is not a table"))?;
+        for k in drop.iter().filter(|k| *k != key) {
+            table.remove(k);
+        }
+        table.insert(
+            key,
+            match value {
+                ProviderValue::Ref(r) => toml_edit::value(r.as_str()),
+                ProviderValue::Flag(b) => toml_edit::value(*b),
+            },
+        );
         self.save()
     }
 
@@ -1160,6 +1183,119 @@ impl EnvFile {
         self.save()
     }
 
+    /// Move a repo within the `[credentials.<key>]` table (`github`, `azure_devops`, or `git`
+    /// of `host`) that lists it, `same` telling its entries: into `repos` or `read_repos`, or
+    /// out of both, and out of every other table of `key`. `token` replaces that table's. Its
+    /// other keys stay; a table it leaves listing no repo, which no credential may, goes.
+    pub fn relist_repo(
+        &mut self,
+        key: &str,
+        host: Option<&str>,
+        same: &dyn Fn(&str) -> bool,
+        to: ListAs,
+        token: Option<&str>,
+    ) -> Result<Relisted> {
+        let path = self.path.display().to_string();
+        let Some(creds) = self
+            .doc
+            .get_mut("credentials")
+            .and_then(|c| c.as_table_like_mut())
+        else {
+            return Ok(Relisted::No);
+        };
+        let Some(item) = creds.get_mut(key) else {
+            return Ok(Relisted::No);
+        };
+        let tables: Vec<&mut toml_edit::Table> = match item {
+            toml_edit::Item::Table(t) => vec![t],
+            toml_edit::Item::ArrayOfTables(list) => list.iter_mut().collect(),
+            _ => bail!("`credentials.{key}` in {path} is written inline; change it by hand"),
+        };
+        let mut found = false;
+        let mut touched = Vec::new();
+        for (i, t) in tables.into_iter().enumerate() {
+            let of_host = host.is_none_or(|h| {
+                t.get("host")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|x| x.eq_ignore_ascii_case(h))
+            });
+            if !of_host {
+                continue;
+            }
+            let mut entry = None;
+            for list in ["repos", "read_repos"] {
+                let Some(arr) = t.get_mut(list).and_then(|i| i.as_array_mut()) else {
+                    continue;
+                };
+                if let Some(v) = arr.iter().find_map(|v| v.as_str().filter(|s| same(s))) {
+                    entry.get_or_insert_with(|| v.to_string());
+                }
+                arr.retain(|v| !v.as_str().is_some_and(same));
+                if list == "read_repos" && arr.is_empty() {
+                    t.remove(list);
+                }
+            }
+            if entry.is_some() {
+                touched.push(i);
+            }
+            let Some(entry) = entry.filter(|_| !found) else {
+                continue;
+            };
+            found = true;
+            match to {
+                ListAs::Write => push_unique(t, "repos", &[entry]),
+                ListAs::Read => push_unique(t, "read_repos", &[entry]),
+                ListAs::Nowhere => {}
+            }
+            if let Some(token) = token {
+                // The line's comment stays with the new value.
+                match t.get_mut("token").and_then(|i| i.as_value_mut()) {
+                    Some(v) => {
+                        let decor = v.decor().clone();
+                        *v = token.into();
+                        *v.decor_mut() = decor;
+                    }
+                    None => t["token"] = toml_edit::value(token),
+                }
+            }
+        }
+        if !found {
+            return Ok(Relisted::No);
+        }
+        let lists_none = |t: &toml_edit::Table| {
+            ["repos", "read_repos"].iter().all(|k| {
+                t.get(k)
+                    .and_then(|i| i.as_array())
+                    .is_none_or(|a| a.is_empty())
+            })
+        };
+        let mut emptied = false;
+        match creds.get_mut(key) {
+            Some(toml_edit::Item::Table(t)) if lists_none(t) => {
+                creds.remove(key);
+                emptied = true;
+            }
+            Some(toml_edit::Item::ArrayOfTables(list)) => {
+                for i in touched.into_iter().rev() {
+                    if list.get(i).is_some_and(lists_none) {
+                        list.remove(i);
+                        emptied = true;
+                    }
+                }
+                if list.is_empty() {
+                    creds.remove(key);
+                }
+            }
+            _ => {}
+        }
+        self.save()?;
+        Ok(if emptied {
+            Relisted::Emptied
+        } else {
+            Relisted::Moved
+        })
+    }
+
     /// Drop `name` from the env's agents, in whichever form the file writes them.
     pub fn remove_agent(&mut self, name: &str) -> Result<()> {
         if let Some(item) = self.doc.get_mut("agents") {
@@ -1284,6 +1420,24 @@ impl EnvFile {
 }
 
 /// Append `values` missing from the string array `key` of `table`, creating it.
+/// Where [`EnvFile::relist_repo`] lists a repo in its credential.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ListAs {
+    Write,
+    Read,
+    Nowhere,
+}
+
+/// What [`EnvFile::relist_repo`] did.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Relisted {
+    /// No credential listed the repo.
+    No,
+    Moved,
+    /// It was the last repo of its credential, which is gone.
+    Emptied,
+}
+
 fn push_unique(table: &mut toml_edit::Table, key: &str, values: &[String]) {
     if table.get(key).and_then(|i| i.as_array()).is_none() {
         table[key] = toml_edit::value(toml_edit::Array::new());
@@ -1377,6 +1531,112 @@ oauth_token = "op://Private/claude/token"
         assert_eq!(f.cfg.allow.len(), 2);
         assert_eq!(f.remove_rules("r1").unwrap(), 1);
         assert_eq!(f.cfg.allow.len(), 1);
+    }
+
+    #[test]
+    fn a_credential_kind_replaces_only_the_providers_auth_keys() {
+        let text = "[credentials.anthropic]\noauth_token = \"op://Private/claude/token\"\n\
+                    # kept\nserver_tools = true\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        std::fs::write(&path, text).unwrap();
+        let mut f = EnvFile::parse(path.clone(), text).unwrap();
+        let entries = |f: &EnvFile| f.cfg.credentials.providers["anthropic"].clone();
+
+        let key = ProviderValue::Ref("keyring:luoto/anthropic.api_key".into());
+        f.set_provider_kind("anthropic", "api_key", &key).unwrap();
+        assert_eq!(
+            entries(&f),
+            BTreeMap::from([
+                ("api_key".to_string(), key.clone()),
+                ("server_tools".to_string(), ProviderValue::Flag(true)),
+            ])
+        );
+        f.set_provider_kind("anthropic", "login_inside", &ProviderValue::Flag(true))
+            .unwrap();
+        assert_eq!(
+            entries(&f),
+            BTreeMap::from([
+                ("login_inside".to_string(), ProviderValue::Flag(true)),
+                ("server_tools".to_string(), ProviderValue::Flag(true)),
+            ])
+        );
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("# kept"), "{on_disk}");
+
+        f.set_provider_kind("openai", "api_key", &key).unwrap();
+        assert_eq!(f.cfg.credentials.providers["openai"]["api_key"], key);
+        assert!(f.set_provider_kind("nobody", "api_key", &key).is_err());
+    }
+
+    #[test]
+    fn a_repo_moves_within_its_credential_keeping_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("web.toml");
+        let text = "presets = []\n\n\
+                    [[credentials.github]]\n\
+                    token = \"env:A\"   # acme's\n\
+                    repos = [\"acme/web\"]\n\
+                    read_repos = [\"Acme/API\"]\n\
+                    protected_branches = [\"main\", \"release\"]\n\n\
+                    [[credentials.github]]\n\
+                    app_id = \"1\"\n\
+                    installation_id = 2\n\
+                    private_key = \"env:K\"\n\
+                    repos = [\"other/x\"]\n\n\
+                    [[credentials.git]]\n\
+                    host = \"gitlab.com\"\n\
+                    read_repos = [\"group/api\"]\n";
+        std::fs::write(&path, text).unwrap();
+        let mut f = EnvFile::parse(path.clone(), text).unwrap();
+        let mut relist = |key: &str, host: Option<&str>, repo: &str, to, token| {
+            let repo = repo.to_string();
+            f.relist_repo(key, host, &|e| e.eq_ignore_ascii_case(&repo), to, token)
+                .unwrap()
+        };
+        assert_eq!(
+            relist("github", None, "acme/api", ListAs::Write, Some("env:B")),
+            Relisted::Moved
+        );
+        assert_eq!(
+            relist("github", None, "acme/new", ListAs::Read, None),
+            Relisted::No
+        );
+        assert_eq!(
+            relist("azure_devops", None, "acme/api", ListAs::Read, None),
+            Relisted::No
+        );
+        // Another host's credential stays as it is.
+        assert_eq!(
+            relist(
+                "git",
+                Some("forge.example"),
+                "group/api",
+                ListAs::Write,
+                None
+            ),
+            Relisted::No
+        );
+        assert_eq!(
+            relist("git", Some("GitLab.com"), "group/api", ListAs::Write, None),
+            Relisted::Moved
+        );
+        // The App's only repo out: a credential that lists none goes, the other stays.
+        assert_eq!(
+            relist("github", None, "other/x", ListAs::Nowhere, None),
+            Relisted::Emptied
+        );
+        let gh = &f.cfg.credentials.github.0;
+        assert_eq!(gh.len(), 1);
+        assert_eq!(gh[0].repos, ["acme/web", "Acme/API"]);
+        assert!(gh[0].read_repos.is_empty());
+        assert_eq!(gh[0].token.as_deref(), Some("env:B"));
+        assert_eq!(gh[0].protected_branches, ["main", "release"]);
+        assert_eq!(f.cfg.credentials.git[0].repos, ["group/api"]);
+        assert!(f.cfg.credentials.git[0].read_repos.is_empty());
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("# acme's"), "{on_disk}");
+        assert!(!on_disk.contains("app_id"), "{on_disk}");
     }
 
     #[test]

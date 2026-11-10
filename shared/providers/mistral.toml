@@ -3,6 +3,7 @@ host = "api.mistral.ai"
 
 [auth.api_key]
 label = "Mistral API key"
+short = "from console.mistral.ai/api-keys"
 how = "console.mistral.ai/api-keys > Create new key."
 header = "authorization"
 format = "Bearer {secret}"

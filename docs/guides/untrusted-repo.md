@@ -29,14 +29,19 @@ it took.
 1. **Access to the remote**, before the gate starts:
 
    ```console
-   acme/web on GitHub (acme), the env's workspace is cloned from it: no credential covers
-   it, so the env can fetch it only if it is public, and push to none.
-   > none: it is public, read only
+   acme/web (GitHub, the env is cloned from it) has no credential, so the env can only fetch
+   it if it is public.
+   ? What can the env do with acme/web?
+   > Fetch only, it's public            no token
+     Read it, it's private              token with Contents: read
+     Read and push, open pull requests  token with Contents + Pull requests: write
+     Later
    ```
 
-   Enter keeps it public. A private repository needs `read only` (a token that reads it);
-   `push and pull requests` lets the env push branches, never to protected ones. Other hosts
-   take `[[credentials.git]]` the same way.
+   Enter keeps it public. A private repository needs `Read it` (a token that reads it);
+   `Read and push` lets the env push branches, never to protected ones. Other hosts take
+   `[[credentials.git]]` the same way. `Later` clones nothing yet; `luoto repo auth -e web
+   acme/web` asks again, as it does to change the answer.
 2. **The clone**, once the self-test has passed: into `/workspace`, as the env's user. Git
    brings no hooks, submodules aren't fetched, and LFS files stay pointers. A clone that fails
    leaves nothing behind; `luoto up -e web` tries again, and asks for access again if you had

@@ -5,6 +5,8 @@ access = "read"
 
 [auth.token]
 label = "DigitalOcean personal access token"
+short = "Read Only scope unless the env writes"
+prefix = "dop_v1_"
 how = "cloud.digitalocean.com/account/api/tokens > Generate New Token. Read Only, or custom scopes, is enough unless the env sets `write = true`."
 header = "authorization"
 format = "Bearer {secret}"

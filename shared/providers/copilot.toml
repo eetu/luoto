@@ -12,6 +12,8 @@ suggested = "token"
 
 [auth.token]
 label = "GitHub fine-grained personal access token"
+short = "Copilot Requests permission, no repository access"
+prefix = "github_pat_"
 how = "github.com/settings/personal-access-tokens > Generate new token, with the Copilot Requests account permission and no repository access."
 header = "authorization"
 format = "Bearer {secret}"

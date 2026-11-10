@@ -36,17 +36,33 @@ sandbox is the boundary, so the prompts guard nothing luoto doesn't.
 
 A provider credential lives outside the sandbox. luoto reads it on your machine, the vault
 keeps it in memory, and the gate adds it to the agent's requests to that provider. The agent
-sees a placeholder of the right format. Without one, `init`, `agent add` and `agent run` ask
-which kind you have, say where to get it, and keep it where you choose: your
-OS keychain (`keyring:luoto/<provider>.<kind>`, reused by later envs), a new 1Password item
-(the secret reaches `op` on stdin), or a reference to where it already is (`op://`,
-`vault://`, `keyring:`, `env:`, `file:`).
+sees a placeholder of the right format. Without one, the env's first `up` (also after `init`),
+`agent add` and `agent run` ask how the agent signs in, the provider's usual kind first and
+marked (recommended), then say where to get the one you pick and ask where it is kept: pasted
+into your OS keychain (`keyring:luoto/<provider>.<kind>`, reused by later envs) or into a new
+1Password item (the secret reaches `op` on stdin), found by browsing 1Password, or somewhere
+else (`op://`, `vault://`, `keyring:`, `env:`, `file:`), read once you press enter. A pasted
+or referenced value that doesn't start as its kind does (`sk-ant-oat` for a Claude
+subscription token, `sk-ant-api` for an Anthropic API key) is asked for again. Browsing goes
+account, vault and item, filtered as you type, then the field the item's kind keeps a secret
+in (or one you type); with several 1Password accounts it asks which one, and the ref names it
+by ID (`?account=<account ID>`). `agent add` asks only about the agent it adds.
+
+Esc goes back a question. At the first, Esc or "Later" writes nothing, and the next `up` or
+`agent run` asks again. The questions end with a summary: the credential the env has now
+(its reference, never its value) and `luoto agent auth -e <env> <agent>`, which asks them
+again for an agent the env has, each opening on what it has, marked (current); Esc at the
+first leaves it unchanged. For OpenCode it first asks which provider, so it can have a
+credential for several. Without a terminal, `agent add --credential` sets it
+([guides/agent-settings.md](guides/agent-settings.md#credentials-without-the-prompt)). Either
+replaces only the provider's kind or `login_inside`: its `server_tools` and `write` stay.
 
 `login_inside = true` is the exception: the agent signs in itself and keeps the session in
 the env's home, where any code in the sandbox can read it. Providers that allow it open their
-sign-in hosts for it; luoto warns about it at `up`. It is also the default when you choose no
-credential (no terminal, "later", or a new env from the UI), so an agent you add can work at
-once; replacing it with a credential kind moves the credential outside.
+sign-in hosts for it; luoto warns about it at `up`. On a terminal it is set only when you pick
+it. Without one (`init --yes`, `agent add` in a script, a new env from the UI) it is what an
+agent with no credential gets, so an agent you add can work at once; `luoto agent auth`
+replaces it with a credential kind, which moves the credential outside.
 
 Server tools have the provider reach the network for a request: fetch a URL, call an MCP
 server. Code in the sandbox could use them to send data anywhere, so the gate reads requests
@@ -133,7 +149,8 @@ use prompts to improve its products, until its Google Cloud project has billing.
   `config.fish` (luoto already has `~/.local/bin` on `PATH`), and logs
   `ERROR: logging before google.Init` lines that are only its own logging.
 - Signs in with your Google account inside the env (`[credentials.antigravity] login_inside
-  = true`, which `agent add` sets): run `agy` in `luoto shell`, open the URL it prints in your
+  = true`, which you pick when `agent add` asks, and which it sets without a terminal): run
+  `agy` in `luoto shell`, open the URL it prints in your
   browser and paste the code back. Its backend is `cloudcode-pa.googleapis.com` and
   `daily-cloudcode-pa.googleapis.com`; the token comes from `oauth2.googleapis.com`.
 - Also reads the signed-in profile (`www.googleapis.com` `/oauth2/v2/userinfo` and

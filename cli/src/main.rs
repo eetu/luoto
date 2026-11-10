@@ -27,6 +27,7 @@ mod notify;
 mod paths;
 mod personal;
 mod ports;
+mod progress;
 mod project;
 mod prompt;
 mod release;
@@ -69,6 +70,9 @@ struct Cli {
     #[arg(short = 'e', long = "env", global = true, value_name = "ENV",
           add = ArgValueCandidates::new(complete::envs))]
     env: Option<String>,
+    /// Show what tools print as they run, instead of a spinner.
+    #[arg(short = 'v', long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -238,12 +242,13 @@ enum Cmd {
         #[arg(long)]
         down: bool,
     },
-    /// Run, add or list coding agents.
+    /// Run, add, authenticate or list coding agents.
     Agent {
         #[command(subcommand)]
         action: AgentCmd,
     },
-    /// Repositories beside the env's folder, each at /workspace/<name>: list, add, remove.
+    /// Repositories beside the env's folder, each at /workspace/<name>: list, add, remove, and
+    /// what the env may do with a repo.
     Repo {
         #[command(subcommand)]
         action: Option<RepoCmd>,
@@ -375,6 +380,11 @@ enum AgentCmd {
         #[arg(long, value_name = "KIND=REF")]
         credential: Option<String>,
     },
+    /// Change how an agent the env has authenticates: its credential, or a login inside.
+    Auth {
+        #[arg(add = ArgValueCandidates::new(complete::agents))]
+        agent: String,
+    },
     /// List known agents and providers.
     #[command(visible_alias = "ls")]
     List,
@@ -400,6 +410,11 @@ enum RepoCmd {
     },
     /// Remove a repo from the env's config; its copy in the env stays.
     Rm { name: String },
+    /// Change what the env may do with a repo: fetch it public, read it or push, with a token.
+    Auth {
+        /// The repo's name in the workspace, or its path on the forge (`acme/api`).
+        repo: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -445,6 +460,10 @@ fn main() -> ExitCode {
         .completer(names::instance())
         .complete();
     let cli = Cli::parse();
+    if cli.verbose {
+        progress::set_verbose();
+    }
+    prompt::theme();
     match run(cli.env, cli.cmd) {
         Ok(code) => code,
         Err(e) => {
@@ -555,6 +574,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             AgentCmd::Add { agent, credential } => {
                 agents::add(&env()?, &agent, credential.as_deref())
             }
+            AgentCmd::Auth { agent } => agents::auth(&env()?, &agent),
             AgentCmd::List => agents::list(),
         },
         Cmd::Repo { action } => match action.unwrap_or(RepoCmd::List) {
@@ -565,6 +585,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
                 branch,
             } => repos::add(&env()?, &source, name.as_deref(), branch.as_deref()),
             RepoCmd::Rm { name } => repos::rm(&env()?, &name),
+            RepoCmd::Auth { repo } => repos::auth(&env()?, &repo),
         },
         Cmd::Pull {
             to,

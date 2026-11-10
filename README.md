@@ -98,7 +98,7 @@ Saving applies it. luoto reads the secrets on your machine and hands them to the
 lives outside the sandbox. Inside, `GH_TOKEN` and Claude's token are placeholders; the gate
 puts the real ones on requests to GitHub and Anthropic, for `you/my-app` only, and refuses
 pushes to `main`. No secret store? `luoto agent add claude` asks for the token and keeps it in
-your OS keychain.
+your OS keychain; `luoto agent auth claude` asks again to change it.
 
 `luoto ui` shows which credentials an env has, never their values:
 
@@ -170,6 +170,8 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | to see or remove rules                                                                               | `luoto status`<br>`luoto revoke <id-or-host>`                                                                                      |
 | to answer access requests from inside                                                                | `luoto requests` (`--watch` waits)<br>`luoto approve 3 --ttl 1h`<br>`luoto approve 3 --read --path '/v1/**'`<br>`luoto reject 3`   |
 | an agent (installed on first run)                                                                    | `luoto agent run claude --yolo`<br>`luoto agent list`                                                                              |
+| another credential for an agent, or a login inside instead                                           | `luoto agent auth claude`                                                                                                          |
+| what the env may do with a repo: fetch it if public, read it, or push                                | `luoto repo auth acme/api`                                                                                                         |
 | a dev server in your browser                                                                         | run it: its port is forwarded to localhost here (`luoto status` lists it)<br>`luoto forward 8080:5173` (to another local port)     |
 | your work out: push from the env (with a GitHub, Azure DevOps or SSH credential), or copy files back | `git push`<br>`luoto pull`                                                                                                         |
 | image or config changes applied (volumes are kept)                                                   | `luoto up --recreate`                                                                                                              |
@@ -179,6 +181,7 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | the env back after a reboot or an idle stop (unlocks the vault if needed)                            | `luoto up` (`--all`: every env)<br>`luoto vault unlock`                                                                            |
 | a secret you rotated in your secret store, in use                                                    | `luoto vault reload` (`-e <env>` for one env's)                                                                                    |
 | the gate's log, the background watcher's, or what the env's installs printed                         | `luoto logs`<br>`luoto logs watcher`<br>`luoto logs installs -f`                                                                   |
+| what installs and clones print as they come, instead of a spinner                                   | `o` while one runs<br>`-v` on any command (`luoto up -v`)                                                                          |
 | what each env takes on disk, and how full luoto's VM is                                              | `luoto status --size`<br>`luoto ls --size`<br>`luoto doctor`                                                                             |
 | the space luoto's superseded images take, back on this machine (volumes stay)                        | `luoto prune`                                                                                                                      |
 | to check isolation, or a bug report with secrets and what identifies you taken out                   | `luoto doctor`<br>`luoto doctor --report`                                                                                          |
@@ -200,7 +203,8 @@ env's `agents` or its `luoto.toml`), applies the env's current config and starts
 flag for it), since the sandbox is the boundary. After that first run the command (`claude`,
 `codex`, …) also works in any env terminal, including an editor's. Each agent needs a credential
 for one of its providers under `[credentials.<provider>]`; the gate adds it to every request and
-the sandbox sees only a placeholder. [docs/agents.md](docs/agents.md#credentials) covers where
+the sandbox sees only a placeholder. `luoto agent auth <agent>` changes it, its questions
+opening on what the env has. [docs/agents.md](docs/agents.md#credentials) covers where
 to get one, how the prompt keeps it, and logins inside the sandbox, with the hosts and
 verification status of each agent. `luoto agent list` shows agents and providers. Model,
 effort, your own agent settings and commits without AI attribution:
@@ -348,8 +352,15 @@ the UI and the offers to allow them; `luoto egress --all` shows them.
 Secret refs: `op://…` (1Password CLI, desktop or service account), `vault://mount/path#field`
 (OpenBao / HashiCorp Vault), `keyring:service/account` (OS keychain), `env:NAME`, `file:path`.
 In 1Password, a token is an API Credential's `credential` field, a Password's `password`, or a
-Secure Note's `notesPlain` holding the token alone. Sources are configured in
-`~/.config/luoto/config.toml`. `[credentials.azure]` reads your `az` login itself, with no ref.
+Secure Note's `notesPlain` holding the token alone. With several accounts in the app,
+`?account=<account ID>` on a ref reads it from that one (`op account list` shows the IDs;
+`[sources.op] account` sets the default). A sign-in address works where only one account has
+it; every personal and family account signs in at `my.1password.com`. When you give a
+reference, the wizard can browse 1Password for it: account, vault and item, the field from the
+item's kind, or one you type: it lists names only, and 1Password lists custom fields only
+with their values. The refs it writes name the vault and item by ID, so a rename doesn't
+break them. Sources are configured in `~/.config/luoto/config.toml`. `[credentials.azure]`
+reads your `az` login itself, with no ref.
 
 `[sandbox_secrets]` are resolved on your machine at `up` and written to a memory-only file in
 the dev container that every shell loads; they leave with the container. Anything that only
@@ -514,7 +525,7 @@ repository it copies what git doesn't ignore, so ignored files such as `.env`, `
 state files stay on your machine. Development happens inside, in Zed or VS Code attached to
 the env, and work leaves as git pushes (with a `[credentials.github]`,
 `[credentials.azure_devops]` or `[[credentials.git]]` for the repo, or `[credentials.ssh]` for
-an SSH remote; `up` asks for the ones the env's remotes need). `luoto pull` brings files back when you need them on the host: it lists changed
+an SSH remote; `up` asks for the ones the env's remotes need, `luoto repo auth` changes one). `luoto pull` brings files back when you need them on the host: it lists changed
 files, skips risky ones (in the folder or any folder within it, such as a repository's own
 `.git` or `.envrc`) unless you pass `--include-risky`, refuses paths or symlinks that leave
 the folder, and never writes through host symlinks. `.git` and heavy directories

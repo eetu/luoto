@@ -6,6 +6,8 @@ access = "read"
 
 [auth.token]
 label = "UpCloud API token"
+short = "a subaccount's token, only what the env needs"
+prefix = "ucat_"
 how = "UpCloud Control Panel > Account > API tokens (it starts with ucat_), under a subaccount with only the permissions the env needs."
 header = "authorization"
 format = "Bearer {secret}"
