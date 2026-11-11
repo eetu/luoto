@@ -972,6 +972,7 @@ pub fn headless(
     env_name: &str,
     agent: &str,
     prompt: &str,
+    args: &[String],
     output: Option<&str>,
     timeout: Option<&str>,
     down: bool,
@@ -1009,11 +1010,12 @@ pub fn headless(
             a.description
         );
     }
-    let opts = env::layered(&ctx, env_name)?
+    let mut opts = env::layered(&ctx, env_name)?
         .agents
         .get(agent)
         .cloned()
         .unwrap_or_default();
+    opts.headless_args.extend(args.iter().cloned());
     let argv = headless_argv(&a, &opts, prompt);
     let script = format!("exec {}", argv.join(" "));
     let dev = names::dev(env_name);

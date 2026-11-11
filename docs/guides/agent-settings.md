@@ -32,7 +32,7 @@ headless_args = ["--bare"]             # `luoto run` only, after `args`
 ```
 
 They go where the agent's command line takes options (after `run` for OpenCode, `exec` for
-Codex), and `luoto agent run -- …` adds more for one start. `claude` typed in a shell starts
+Codex), and `luoto agent run -- …` or `luoto run … -- …` adds more for one start. `claude` typed in a shell starts
 without them. A team's `luoto.toml` may set them, shown in its review; it can't set the
 agent's own prompt-skipping flags, which only `--yolo` gives.
 

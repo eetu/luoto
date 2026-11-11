@@ -243,6 +243,10 @@ enum Cmd {
         /// Stop the env when the run ends.
         #[arg(long)]
         down: bool,
+        /// Arguments for the agent, after the env's `args` and `headless_args`
+        /// (`luoto run --agent claude --prompt … -- --bare`).
+        #[arg(last = true)]
+        args: Vec<String>,
     },
     /// Run, add, authenticate or list coding agents.
     Agent {
@@ -581,6 +585,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             output,
             timeout,
             down,
+            args,
         } => {
             let prompt = match (prompt, prompt_file) {
                 (Some(p), _) => p,
@@ -595,6 +600,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
                 &env()?,
                 &agent,
                 &prompt,
+                &args,
                 output.as_deref(),
                 timeout.as_deref(),
                 down,
@@ -797,6 +803,28 @@ mod tests {
             (o.open.as_deref(), o.dir.as_deref()),
             (Some("1h"), Some("acme/web"))
         );
+    }
+
+    #[test]
+    fn a_run_passes_what_follows_the_double_dash_to_the_agent() {
+        let cli = Cli::try_parse_from([
+            "luoto",
+            "run",
+            "--agent",
+            "claude",
+            "--prompt",
+            "hi",
+            "--",
+            "--bare",
+            "--tools",
+            "Bash,Read",
+        ])
+        .unwrap();
+        let Cmd::Run { prompt, args, .. } = cli.cmd else {
+            panic!("not run")
+        };
+        assert_eq!(prompt.as_deref(), Some("hi"));
+        assert_eq!(args, ["--bare", "--tools", "Bash,Read"]);
     }
 
     #[test]

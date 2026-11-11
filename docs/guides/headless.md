@@ -72,7 +72,11 @@ headless_args = ["--bare", "--tools", "Bash,Read,Edit"]
 
 `--bare` leaves out hooks, skills, plugins, MCP servers, memory and CLAUDE.md; `--tools` the
 tools a job doesn't use. Claude Code's `hello` is then 4 KB. Its answer can only use what you
-left it.
+left it. For one run, give them after `--`:
+
+```sh
+luoto run --agent claude --prompt "Summarize this repo in 5 bullets" -- --bare --tools Bash,Read
+```
 
 ## Examples
 
