@@ -1798,7 +1798,16 @@ fn ask_repo(ctx: &Ctx, env: &str, forge: &Forge, repo: &str, mode: Mode) -> Resu
 /// as public so it isn't asked again; without one, say what to add. Whether the config
 /// changed.
 pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
-    let all = remotes(&cfg.workspace);
+    let mut all = remotes(&cfg.workspace);
+    // The repositories the project's luoto.toml needs to push to, cloned here or not.
+    if let Some((_, p)) = crate::project::accepted(ctx, env) {
+        all.extend(
+            p.needs
+                .github
+                .iter()
+                .map(|r| format!("https://github.com/{r}.git")),
+        );
+    }
     let skip = declined(ctx, env);
     let mut needs = uncovered(&all, &cfg.credentials);
     for (forge, repos) in needs.iter_mut() {

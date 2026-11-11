@@ -34,6 +34,11 @@
   only the server's port and model endpoints and adds its token; OpenCode switches in its
   model picker, Codex per start (`codex --profile <server>`). A config that can't work is
   refused at `up` and `luoto edit`.
+- **Team needs asked:** what a project's `[needs]` names and the env lacks is asked at the
+  first `up` after accepting it, as an agent's credential is: a provider's kind and where it
+  is kept, a custom credential's host and secret, an Azure subscription, where a sandbox
+  secret is kept, and access to the repos to push to. `luoto project needs` asks again,
+  opening on what the env has; without a terminal, what to add is printed as before.
 - **Agent arguments:** `args` (every start through luoto) and `headless_args` (`luoto run`
   only) under `[agents.<agent>]`, in the env, `config.toml` or a team's `luoto.toml`, where
   the agent's command line takes options, and more for one run after `--` (`luoto run …

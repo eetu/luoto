@@ -1540,6 +1540,34 @@ impl EnvFile {
     }
 
     /// Set `key = value` in the top-level table `table`, creating the table if needed.
+    /// Set `values` in the table at `path` (`["credentials", "custom", "stripe"]`), made where
+    /// missing, its other keys kept.
+    pub fn set_in_tables(
+        &mut self,
+        path: &[&str],
+        values: Vec<(&str, toml_edit::Value)>,
+    ) -> Result<()> {
+        let file = self.path.display().to_string();
+        let mut table: &mut dyn toml_edit::TableLike = self.doc.as_table_mut();
+        for (i, k) in path.iter().enumerate() {
+            let at = path[..=i].join(".");
+            table = table
+                .entry(k)
+                .or_insert_with(|| {
+                    let mut t = toml_edit::Table::new();
+                    // A parent table shows only as its children's headings.
+                    t.set_implicit(i + 1 < path.len());
+                    toml_edit::Item::Table(t)
+                })
+                .as_table_like_mut()
+                .with_context(|| format!("`{at}` in {file} is not a table"))?;
+        }
+        for (k, v) in values {
+            table.insert(k, toml_edit::Item::Value(v));
+        }
+        self.save()
+    }
+
     pub fn set_in_table(&mut self, table: &str, key: &str, value: &str) -> Result<()> {
         if !self.doc.contains_key(table) {
             self.doc[table] = toml_edit::table();
@@ -1789,6 +1817,52 @@ oauth_token = "op://Private/claude/token"
         f.set_provider_kind("openai", "api_key", &key).unwrap();
         assert_eq!(f.cfg.credentials.providers["openai"]["api_key"], key);
         assert!(f.set_provider_kind("nobody", "api_key", &key).is_err());
+    }
+
+    #[test]
+    fn a_need_writes_its_table_keeping_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        let text = "[workspace]\ndir = \"/w\"\n\n[credentials.custom.stripe]\nhost = \"old.example\"\nsecret = \"env:OLD\"\nheader = \"x-key\" # kept\n";
+        std::fs::write(&path, text).unwrap();
+        let mut f = EnvFile::parse(path.clone(), text).unwrap();
+        f.set_in_tables(
+            &["credentials", "custom", "stripe"],
+            vec![
+                ("host", "api.stripe.com".into()),
+                ("secret", "env:S".into()),
+            ],
+        )
+        .unwrap();
+        let c = &f.cfg.credentials.custom["stripe"];
+        assert_eq!(
+            (c.host.as_str(), c.secret.as_str(), c.header.as_str()),
+            ("api.stripe.com", "env:S", "x-key")
+        );
+        let mut subs = toml_edit::Array::new();
+        subs.push("00000000-0000-0000-0000-000000000001");
+        f.set_in_tables(
+            &["credentials", "azure"],
+            vec![("subscriptions", subs.into())],
+        )
+        .unwrap();
+        assert_eq!(
+            f.cfg
+                .credentials
+                .azure
+                .as_ref()
+                .unwrap()
+                .subscriptions
+                .len(),
+            1
+        );
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        // A parent shows only as its children's headings.
+        assert!(!on_disk.contains("[credentials]\n"), "{on_disk}");
+        assert!(
+            on_disk.contains("# kept") && on_disk.contains("[credentials.azure]"),
+            "{on_disk}"
+        );
     }
 
     #[test]

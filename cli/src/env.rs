@@ -431,6 +431,7 @@ fn ask_credentials(ctx: &Ctx, env: &str) -> Result<()> {
     let cfg = layered(ctx, env)?;
     crate::agents::ask_missing(ctx, env, &cfg)?;
     repos::ask_missing(ctx, env, &cfg)?;
+    crate::project::ask_needs(ctx, env, crate::wizard::Mode::Missing)?;
     Ok(())
 }
 

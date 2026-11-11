@@ -463,6 +463,9 @@ enum ProjectCmd {
     },
     /// Stop applying it (this version is not offered again).
     Ignore,
+    /// Ask again for what the accepted luoto.toml needs only you add (`[needs]`): credentials
+    /// and sandbox secrets, each opening on what the env has.
+    Needs,
     /// Print a luoto.toml for the team from the env's settings, leaving out your credentials,
     /// secrets, folders and temporary grants.
     Suggest {
@@ -573,6 +576,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             None => c::project(&env()?, false, false, false),
             Some(ProjectCmd::Apply { yes }) => c::project(&env()?, true, false, yes),
             Some(ProjectCmd::Ignore) => c::project(&env()?, false, true, false),
+            Some(ProjectCmd::Needs) => c::project_needs(&env()?),
             Some(ProjectCmd::Suggest { write, force }) => c::project_suggest(&env()?, write, force),
         },
         Cmd::Shell { cmd } => connect::shell(&env()?, &cmd),

@@ -64,7 +64,10 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
             }
         }
     }
-    crate::init::print_needs(name, &st.needs);
+    // Applying asks for them on a terminal (below); otherwise they are what to add.
+    if !(accept && crate::prompt::interactive()) {
+        crate::init::print_needs(name, &st.needs);
+    }
     let pending = st.pending();
     if !accept {
         if pending {
@@ -82,10 +85,14 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
         println!("nothing changed (non-interactive: add --yes)");
         return Ok(ExitCode::FAILURE);
     }
-    if project::apply(&ctx, name, &text)? {
+    let running = project::apply(&ctx, name, &text)?;
+    if running {
         println!("applied to `{name}`");
     } else {
         println!("accepted; applies on `luoto up -e {name}`");
+    }
+    if crate::project::ask_needs(&ctx, name, crate::wizard::Mode::Missing)? && running {
+        sync::reapply(&ctx, name)?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -1300,6 +1307,15 @@ fn open_editor(path: &std::path::Path) -> Result<()> {
         bail!("editor exited with {status}");
     }
     Ok(())
+}
+
+/// `luoto project needs`: the `[needs]` questions again, and a running env takes the answers.
+pub fn project_needs(name: &str) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    if crate::project::ask_needs(&ctx, name, crate::wizard::Mode::Change)? {
+        sync::reapply(&ctx, name)?;
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 pub fn edit(name: &str) -> Result<ExitCode> {

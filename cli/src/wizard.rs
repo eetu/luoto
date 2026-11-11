@@ -531,7 +531,10 @@ fn credential_with(
             return Ok(Answer::Leave);
         };
         let how = How {
-            agent: a,
+            who: a.title(),
+            servers: a.model_server.is_some(),
+            login: true,
+            names_provider: false,
             provider: p,
             current: current(&p.name),
             stored: have.iter().find(|h| h.provider() == p.name),
@@ -547,9 +550,46 @@ fn credential_with(
     }
 }
 
+/// How the env signs in to provider `p` for a project's `[needs]`, no agent's: the kind, then
+/// where it is kept. `have`: what the env has for it now.
+pub fn provider_credential(
+    p: &profiles::Provider,
+    global: &GlobalConfig,
+    have: Option<&Auth>,
+    mode: Mode,
+) -> Result<Answer> {
+    let how = How {
+        who: "the env",
+        servers: false,
+        login: false,
+        names_provider: true,
+        provider: p,
+        current: have,
+        stored: have,
+        first: true,
+        on_server: false,
+        mode,
+    };
+    Ok(
+        match provider_auth(&how, &mut terminal_menu, &mut |ask: &SecretAsk| {
+            secret(ask, global)
+        })? {
+            Step::Got(answer) => answer,
+            Step::Back => Answer::Leave,
+        },
+    )
+}
+
 /// What [`provider_auth`] asks about.
 struct How<'a> {
-    agent: &'a profiles::Agent,
+    /// Who signs in: an agent's name, or "the env".
+    who: &'a str,
+    /// "A model server" is offered beside the kinds (an agent that can use one).
+    servers: bool,
+    /// A login inside is offered where the provider allows one (an agent logs in).
+    login: bool,
+    /// The first question names the provider (no agent to name).
+    names_provider: bool,
     provider: &'a profiles::Provider,
     /// What the env has for the provider, where the agent starts on it.
     current: Option<&'a Auth>,
@@ -593,7 +633,7 @@ fn kind_rows(h: &How) -> Vec<(Pick, String, String)> {
             (pick, label, p.auth[k].short.clone())
         })
         .collect();
-    if h.first && h.agent.model_server.is_some() {
+    if h.first && h.servers {
         let mark = if h.on_server { " (current)" } else { "" };
         rows.push((
             Pick::ModelServer,
@@ -601,7 +641,7 @@ fn kind_rows(h: &How) -> Vec<(Pick, String, String)> {
             SERVER_SHORT.into(),
         ));
     }
-    if !p.login_hosts.is_empty() {
+    if h.login && !p.login_hosts.is_empty() {
         let label = format!("{LOGIN}{}", mark(&Pick::LoginInside));
         rows.push((Pick::LoginInside, label, LOGIN_SHORT.into()));
     }
@@ -629,14 +669,14 @@ fn provider_auth(
         return Ok(Step::Got(Answer::Leave));
     }
     // One kind and no login: no question of the kind.
-    let asks = kinds.len() != 1 || !p.login_hosts.is_empty();
+    let asks = kinds.len() != 1 || (h.login && !p.login_hosts.is_empty());
     let first = menu_help(h.mode.esc());
     let back = menu_help("back");
     let help: &str = if h.first { &first } else { &back };
-    let question = if h.first {
-        format!("How should {} sign in?", h.agent.title())
+    let question = if h.first && !h.names_provider {
+        format!("How should {} sign in?", h.who)
     } else {
-        format!("How should {} sign in to {}?", h.agent.title(), p.title())
+        format!("How should {} sign in to {}?", h.who, p.title())
     };
     let mut at = rows
         .iter()

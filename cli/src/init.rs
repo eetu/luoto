@@ -737,7 +737,17 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
     // The luoto.toml accepted by now: the folder's, or the clone's if `up` asked about it.
     if let Some((_, pc)) = project::accepted(&ctx, &name) {
         let cfg = EnvFile::load(&ctx.paths, &name)?.cfg;
-        print_needs(&name, &project::missing_needs(&pc, &cfg));
+        let missing = project::missing_needs(&pc, &cfg);
+        if crate::prompt::interactive() {
+            if !missing.is_empty() {
+                println!(
+                    "\nThe project still needs credentials only you add: `luoto project needs -e \
+                     {name}` asks for them."
+                );
+            }
+        } else {
+            print_needs(&name, &missing);
+        }
     }
     println!(
         "\nYour settings for every env (shell rc files, .gitconfig, .claude/settings.json, …) go in \

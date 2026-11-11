@@ -9,7 +9,8 @@ its own guide: [azure.md](azure.md).
 ## Set it up
 
 In the env's own config (`luoto edit`). Neither `config.toml` nor a repository's `luoto.toml`
-can carry it; a `luoto.toml` can name `hetzner` (or another) under `[needs] credentials`.
+can carry it; a `luoto.toml` can name `hetzner` (or another) under `[needs] credentials`, and
+`up` then asks each developer for it.
 
 ```toml
 [credentials.hetzner]
