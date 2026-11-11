@@ -74,6 +74,14 @@ pub struct GlobalConfig {
         deserialize_with = "env_only"
     )]
     _credentials: (),
+    /// Refused: egress opens per env ([`open_per_env`]).
+    #[serde(
+        rename = "egress",
+        default,
+        skip_serializing,
+        deserialize_with = "open_per_env"
+    )]
+    _egress: (),
     #[serde(default)]
     pub sources: Sources,
 }
@@ -84,6 +92,13 @@ fn env_only<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
     Err(serde::de::Error::custom(
         "credentials go in each env's own file (envs/<env>.toml, `luoto edit -e <env>`), not \
          in config.toml",
+    ))
+}
+
+/// `[egress]` in config.toml: open egress is one env's, for a while.
+fn open_per_env<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
+    Err(serde::de::Error::custom(
+        "egress opens for one env at a time (`luoto egress open -e <env>`), not in config.toml",
     ))
 }
 
@@ -525,6 +540,9 @@ pub struct EnvConfig {
     pub auto_forward: Option<bool>,
     #[serde(default, rename = "allow", skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<Rule>,
+    /// Open egress (`luoto egress open`); only this file sets it.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub egress: Egress,
     /// Requests refused whatever allows them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<Deny>,
@@ -548,6 +566,36 @@ pub struct EnvConfig {
     pub tools: BTreeMap<String, toml::Value>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub deps: Deps,
+}
+
+/// `[egress]`: what the env reaches beyond its rules.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Egress {
+    /// Any HTTP(S) host no rule allows, until `luoto egress close`: written by hand only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open: bool,
+    /// The same until then (`luoto egress open --for 1h`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl Egress {
+    /// Open at `now`: `Some(None)` with no end, `Some(Some(t))` until `t`.
+    pub fn open_at(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<Option<chrono::DateTime<chrono::Utc>>>> {
+        match (self.open, self.open_until) {
+            (true, Some(_)) => bail!(
+                "[egress]: `open = true` keeps it open with no end and `open_until` until a \
+                 time; keep one (`luoto egress open --for 1h` writes `open_until`)"
+            ),
+            (true, None) => Ok(Some(None)),
+            (false, Some(t)) if t > now => Ok(Some(Some(t))),
+            _ => Ok(None),
+        }
+    }
 }
 
 /// What can be chosen for an agent (its profile's `settings` say where each goes in its own
@@ -1412,10 +1460,43 @@ impl EnvFile {
         self.retain_rules(|r| r.id.as_deref() != Some(id_or_host) && r.host != id_or_host)
     }
 
-    /// Drop expired rules (keeps the file from accumulating stale grants).
+    /// Drop expired rules (keeps the file from accumulating stale grants), and an
+    /// `open_until` that has passed.
     pub fn prune_expired(&mut self) -> Result<usize> {
         let now = chrono::Utc::now();
+        if self.cfg.egress.open_until.is_some_and(|t| t <= now) {
+            self.set_open(None)?;
+        }
         self.retain_rules(|r| !r.expired(now))
+    }
+
+    /// `[egress]`: open until `until`, or closed with `None` (`open = true` goes too). The
+    /// table goes when nothing is left in it.
+    pub fn set_open(&mut self, until: Option<chrono::DateTime<chrono::Utc>>) -> Result<()> {
+        let path = self.path.display().to_string();
+        if until.is_none() && self.doc.get("egress").is_none() {
+            return Ok(());
+        }
+        let table = self
+            .doc
+            .entry("egress")
+            .or_insert_with(toml_edit::table)
+            .as_table_like_mut()
+            .with_context(|| format!("`egress` in {path} is not a table"))?;
+        table.remove("open");
+        match until {
+            Some(t) => {
+                let t = t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                table.insert("open_until", toml_edit::value(t));
+            }
+            None => {
+                table.remove("open_until");
+            }
+        }
+        if table.is_empty() {
+            self.doc.remove("egress");
+        }
+        self.save()
     }
 }
 
@@ -1678,6 +1759,56 @@ host = "telemetry.example"
         assert_eq!(cfg.deny[0].note.as_deref(), Some("config.toml"));
         let muted: Vec<&str> = cfg.mute.iter().map(|m| m.host.as_str()).collect();
         assert_eq!(muted, ["stats.example", "telemetry.example"]);
+    }
+
+    #[test]
+    fn open_egress_is_written_as_a_window_and_closed_in_place() {
+        let text = "# my env\npresets = []\n\n[egress]\nopen = true\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        std::fs::write(&path, text).unwrap();
+        let mut f = EnvFile::parse(path.clone(), text).unwrap();
+        let now = chrono::Utc::now();
+        assert_eq!(f.cfg.egress.open_at(now).unwrap(), Some(None));
+        let until: chrono::DateTime<chrono::Utc> = "2099-01-01T12:00:00Z".parse().unwrap();
+        f.set_open(Some(until)).unwrap();
+        assert_eq!(
+            f.cfg.egress,
+            Egress {
+                open: false,
+                open_until: Some(until)
+            }
+        );
+        assert_eq!(f.cfg.egress.open_at(now).unwrap(), Some(Some(until)));
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            saved.contains("open_until = \"2099-01-01T12:00:00Z\"") && !saved.contains("open ="),
+            "{saved}"
+        );
+        f.set_open(None).unwrap();
+        assert_eq!(f.cfg.egress, Egress::default());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            saved.starts_with("# my env") && !saved.contains("egress"),
+            "{saved}"
+        );
+
+        // A window that has passed is closed, and `up` drops it from the file.
+        let past = "[egress]\nopen_until = \"2000-01-01T00:00:00Z\"\n";
+        std::fs::write(&path, past).unwrap();
+        let mut f = EnvFile::parse(path.clone(), past).unwrap();
+        assert_eq!(f.cfg.egress.open_at(now).unwrap(), None);
+        f.prune_expired().unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("egress"));
+
+        let both = "[egress]\nopen = true\nopen_until = \"2099-01-01T00:00:00Z\"\n";
+        let f = EnvFile::parse(path.clone(), both).unwrap();
+        assert!(f.cfg.egress.open_at(now).is_err());
+        assert!(EnvFile::parse(path.clone(), "[egress]\nopen = \"yes\"\n").is_err());
+        assert!(EnvFile::parse(path, "[egress]\nopen_for = \"1h\"\n").is_err());
+
+        let e = parse_global("[egress]\nopen = true\n").unwrap_err();
+        assert!(format!("{e:#}").contains("luoto egress open -e"), "{e:#}");
     }
 
     #[test]

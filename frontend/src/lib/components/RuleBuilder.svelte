@@ -8,14 +8,17 @@
 
   // A scoped "allow" built from what the sandbox actually tried. Defaults are the narrowest
   // thing that would have worked: the exact host, read unless a write was refused, an hour.
+  // `keep`: a host reached through open egress, kept past its window (until revoked).
   let {
     host,
+    keep = false,
     wantsWrite = false,
     paths = [],
     privateHost = false,
     tlsRejected = false,
   }: {
     host: string;
+    keep?: boolean;
     wantsWrite?: boolean;
     paths?: string[];
     privateHost?: boolean;
@@ -36,7 +39,7 @@
     target = host;
     access = wantsWrite ? "write" : "read";
     scope = "";
-    ttl = 60;
+    ttl = keep ? 0 : 60;
     tunnel = false;
     allowPrivate = false;
     risks = [];
@@ -67,7 +70,7 @@
       expires: expiresIn(ttl),
       mode: tunnel ? "tunnel" : undefined,
       allow_private: allowPrivate || undefined,
-      note: "added in luoto ui",
+      note: keep ? "kept from open egress" : "added in luoto ui",
     };
   }
 
@@ -77,9 +80,9 @@
     const r = rule();
     const ttlLabel = TTLS.find((t) => t.minutes === ttl)?.label;
     const added = await act(
-      "allowing…",
+      keep ? "keeping…" : "allowing…",
       () => api.addRule(env, r, force),
-      `allowed ${r.host}${ttl ? ` for ${ttlLabel}` : ""}`,
+      `${keep ? "kept" : "allowed"} ${r.host}${ttl ? ` for ${ttlLabel}` : ""}`,
       (found) => (risks = found),
     );
     if (added) risks = [];
@@ -87,7 +90,7 @@
 </script>
 
 <form class="builder" onsubmit={(e) => (e.preventDefault(), void attempt(false))}>
-  <p class="label">allow</p>
+  <p class="label">{keep ? "keep" : "allow"}</p>
   <label class="field">
     <span>host</span>
     <input type="text" bind:value={target} />
@@ -147,7 +150,9 @@
   {#if risks.length > 0}
     <Risks {risks} confirm="allow anyway" onconfirm={() => void attempt(true)} />
   {:else}
-    <button type="submit" class="btn primary" disabled={!target.trim() || !!app.busy}>allow</button>
+    <button type="submit" class="btn primary" disabled={!target.trim() || !!app.busy}
+      >{keep ? "keep" : "allow"}</button
+    >
   {/if}
 </form>
 

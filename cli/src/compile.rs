@@ -15,7 +15,7 @@ use luoto_shared::creds::{
 };
 use luoto_shared::policy::{
     Access, AccessLevel, AzureGuard, BodyDeny, CompiledRule, DenyRule, GitGuard, GithubGuard,
-    InternalName, Mode, Policy, READ_METHODS, Rule, RuleOrigin, rule_error,
+    InternalName, Mode, Open, Policy, READ_METHODS, Rule, RuleOrigin, rule_error,
 };
 use luoto_shared::{forges, presets, profiles};
 
@@ -198,12 +198,19 @@ pub fn compile(
             .map_err(|e| anyhow!("deny for `{}`: {e}", crate::text::display(&d.host)))?;
         b.denies.push(rule);
     }
-    // Mutes only filter what egress views show; checked here so a bad one is reported.
+    // Mutes filter what egress views show, and open egress leaves what they cover denied;
+    // checked here so a bad one is reported.
+    let mut mutes = Vec::new();
     for m in &cfg.mute {
-        if let Err(e) = m.checked() {
-            bail!("mute for `{}`: {e}", crate::text::display(&m.host));
+        match m.checked() {
+            Ok(m) => mutes.push(m),
+            Err(e) => bail!("mute for `{}`: {e}", crate::text::display(&m.host)),
         }
     }
+    let open = cfg.egress.open_at(Utc::now())?.map(|until| Open {
+        until,
+        except: mutes,
+    });
     b.dev_env.extend(cfg.env.clone());
 
     // An `azcli:` ref is a token from your own az login, good for all of your Azure: only the
@@ -246,6 +253,7 @@ pub fn compile(
             .into_iter()
             .collect(),
         azure: azure_identity,
+        open,
     };
     // A tunnel passes bytes unread: one you or a repository wrote can't cover a host whose
     // credentials, forge guards or denies the gate applies (`luoto allow` refuses it too).
@@ -1547,6 +1555,52 @@ mod tests {
             },
             Utc::now(),
         )
+    }
+
+    #[test]
+    fn open_egress_compiles_with_the_mutes_and_never_widens_a_credentialed_host() {
+        let text = r#"
+[egress]
+open_until = "2099-01-01T00:00:00Z"
+
+[[mute]]
+host = "Telemetry.Example"
+
+[credentials.custom.api]
+host = "api.example.com"
+secret = "env:T"
+"#;
+        let mut c = cfg(text);
+        let mut global = crate::config::GlobalConfig::default();
+        global.mute.push(luoto_shared::policy::Mute {
+            host: "stats.example".into(),
+            ..Default::default()
+        });
+        global.layer_under(&mut c);
+        let p = compile("t", &c, GATE, &[]).unwrap().policy;
+        let open = p.open.as_ref().unwrap();
+        assert_eq!(open.until, "2099-01-01T00:00:00Z".parse().ok());
+        let except: Vec<&str> = open.except.iter().map(|m| m.host.as_str()).collect();
+        assert_eq!(except, ["stats.example", "telemetry.example"]);
+        let rule = |host: &str, method: &str| match decide(&p, host, method, "/x") {
+            Decision::Allow { rule, .. } => Some(rule),
+            Decision::Deny(_) => None,
+        };
+        assert_eq!(rule("upload.example", "PUT").as_deref(), Some("open"));
+        assert_eq!(rule("telemetry.example", "GET"), None);
+        assert_eq!(rule("stats.example", "GET"), None);
+        assert_eq!(rule("api.example.com", "PUT"), None);
+
+        for closed in ["", "[egress]\nopen_until = \"2000-01-01T00:00:00Z\"\n"] {
+            assert_eq!(
+                compile("t", &cfg(closed), GATE, &[]).unwrap().policy.open,
+                None
+            );
+        }
+        let forever = compile("t", &cfg("[egress]\nopen = true\n"), GATE, &[]).unwrap();
+        assert_eq!(forever.policy.open.map(|o| o.until), Some(None));
+        let both = "[egress]\nopen = true\nopen_until = \"2099-01-01T00:00:00Z\"\n";
+        assert!(compile("t", &cfg(both), GATE, &[]).is_err());
     }
 
     #[test]

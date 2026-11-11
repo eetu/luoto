@@ -95,6 +95,12 @@ pub fn parse(text: &str) -> Result<ProjectConfig> {
              config mutes"
         );
     }
+    if table.contains_key("egress") {
+        bail!(
+            "luoto.toml can't hold `egress`: only you open an env's egress, for a while \
+             (`luoto egress open`)"
+        );
+    }
     if table.contains_key("tools") {
         bail!("luoto.toml doesn't take [tools]: pin toolchains in mise.toml or .tool-versions");
     }
@@ -524,6 +530,9 @@ pub fn suggest(env: &str, own: &EnvConfig, accepted: Option<&ProjectConfig>) -> 
             own.mute.len(),
             plural(own.mute.len())
         ));
+    }
+    if own.egress != crate::config::Egress::default() {
+        left_out.push("open egress (only you open an env's)".into());
     }
 
     let text = format!(
@@ -1089,6 +1098,16 @@ mod tests {
     fn denies_only_tighten_but_mutes_would_hide() {
         let err = parse("[[mute]]\nhost = \"telemetry.example\"").unwrap_err();
         assert!(format!("{err:#}").contains("can't hold `mute`"), "{err:#}");
+        for open in [
+            "[egress]\nopen = true",
+            "[egress]\nopen_until = \"2099-01-01T00:00:00Z\"",
+        ] {
+            let err = parse(open).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("can't hold `egress`"),
+                "{err:#}"
+            );
+        }
         assert!(parse("[[deny]]\nhost = \"x.example\"\npaths = [\"v1\"]").is_err());
         let p = parse(
             "[[deny]]\nhost = \"registry.npmjs.org\"\nmethods = [\"POST\"]\nnote = \"no audits\"",
@@ -1261,6 +1280,9 @@ presets = ["debian", "npm"]
 ports = [5173]
 idle_stop = "2h"
 
+[egress]
+open = true
+
 [agents.claude]
 model = "opus"
 
@@ -1398,6 +1420,7 @@ hosts = ["dl.k8s.io", "*"]
             "credentials (github, azure_devops, anthropic, custom.stripe)",
             "sandbox secrets (DATABASE_URL)",
             "1 mute ",
+            "open egress",
         ] {
             assert!(out.contains(said), "`{said}` not in:\n{out}");
         }

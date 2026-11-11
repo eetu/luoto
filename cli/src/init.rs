@@ -57,6 +57,16 @@ pub struct InitOpts {
     /// kernel. `container`: it shares the VM's kernel, with builds about 1.6× faster.
     #[arg(long, value_enum)]
     pub isolation: Option<config::Isolation>,
+    /// Let the env reach any HTTP(S) host for a while (`--open=2h`; default 1h) to see what
+    /// it needs; `luoto egress keep` keeps that, `luoto egress close` ends it sooner.
+    #[arg(
+        long,
+        value_name = "DURATION",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = crate::egress::WINDOW
+    )]
+    pub open: Option<String>,
     /// Only write the config.
     #[arg(long)]
     pub no_up: bool,
@@ -162,6 +172,8 @@ pub struct Proposal {
     pub gvisor: bool,
     /// The folder is missing (`make_folder` creates it) or empty: nothing to detect.
     pub new_folder: bool,
+    /// How long the env's egress is open from its creation (`--open`).
+    pub open: Option<String>,
 }
 
 /// Defaults plus what the folder says about itself; explicit options replace both. Touches
@@ -276,6 +288,15 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
         project_error,
         gvisor: global.gvisor.is_some(),
         new_folder,
+        open: o
+            .open
+            .as_deref()
+            .map(|w| {
+                crate::egress::parse_window(w)
+                    .map(|_| w.trim().to_string())
+                    .context("--open")
+            })
+            .transpose()?,
     };
     check(&p)?;
     Ok(p)
@@ -471,6 +492,12 @@ fn print_proposal(p: &Proposal, specs: &[String], asks: bool) {
     if let Some(i) = &p.cfg.image {
         println!("  image      {i}");
     }
+    if let Some(w) = &p.open {
+        println!(
+            "  egress     open for {w} to any HTTP(S) host no rule allows\n{INDENT}`luoto egress keep -e {}` keeps what it reaches",
+            p.name
+        );
+    }
     if let Some((_, pc)) = &p.project {
         println!("  luoto.toml settings written in the repository, so review them:");
         project::print_entries(&project::summary(pc), "               ");
@@ -573,6 +600,10 @@ pub fn make_folder(p: &mut Proposal) -> Result<()> {
 pub fn create(ctx: &Ctx, p: &mut Proposal, accept_project: bool, quiet: bool) -> Result<()> {
     if p.cfg.workspace.url.is_none() {
         make_folder(p)?;
+    }
+    // The window starts now, not when it was proposed.
+    if let Some(w) = &p.open {
+        p.cfg.egress.open_until = Some(crate::egress::until(crate::egress::parse_window(w)?));
     }
     let name = &p.name;
     let f = EnvFile::create(&ctx.paths, name, &p.cfg)?;
@@ -720,6 +751,14 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
 /// own copy while it runs (work happens there), else the folder; an env cloned from a remote
 /// (`dir` is `None`) has only the copy, so it is started first.
 fn redetect(ctx: &Ctx, name: &str, dir: Option<&Path>, o: &InitOpts) -> Result<ExitCode> {
+    if let Some(w) = &o.open {
+        let until = crate::egress::until(crate::egress::parse_window(w).context("--open")?);
+        crate::egress::open(ctx, name, until)?;
+        println!(
+            "egress of `{name}` is open {}",
+            crate::egress::until_text(Some(until))
+        );
+    }
     let up = UpOptions {
         accept_installs: o.yes,
         ..Default::default()

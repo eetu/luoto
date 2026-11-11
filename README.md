@@ -145,6 +145,12 @@ toolchain the env should keep (`sandbox request --package postgresql-client`,
 `--tool node@24`): approving installs it and writes it into the env's `[deps] system` or
 `[tools]`, so a recreated container has it too.
 
+Trying luoto on a project whose needs you don't know yet: `luoto init --open` (or `luoto
+egress open` later) lets the env reach any HTTP(S) host for an hour (`--open=2h`, `--for 2h`
+for longer), every request still logged. `luoto egress keep` then offers presets that cover
+what it reached, else a rule per host, and when the hour ends the env is default-deny again.
+Hosts that get your credentials keep to their rules throughout, and muted hosts stay denied.
+
 ### 6. Bring files back and stop
 
 `luoto pull` brings files back to your folder when you need them there; it holds back git
@@ -166,6 +172,7 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | to review, apply or ignore the team's `luoto.toml`, or draft one from your env                       | `luoto project`<br>`luoto project apply`<br>`luoto project ignore`<br>`luoto project suggest`                                      |
 | your editor, or a shell                                                                              | `luoto open`<br>`luoto open --with code`<br>`luoto shell`                                                                          |
 | to see what the sandbox tried to reach                                                               | `luoto egress --since 10m`<br>`luoto egress --denied`<br>`luoto egress --follow`                                                   |
+| to find what a project needs: any HTTP(S) host for a while (default 1h), then keep what it reached   | `luoto egress open --for 2h`<br>`luoto egress --open`<br>`luoto egress keep`<br>`luoto egress close`                               |
 | to allow a host (read-only unless `--write`)                                                         | `luoto allow docs.rs --ttl 1h`<br>`luoto allow api.example.com --write --path '/v1/**'`<br>`luoto allow grpc.example.com --tunnel` |
 | to see or remove rules                                                                               | `luoto status`<br>`luoto revoke <id-or-host>`                                                                                      |
 | to answer access requests from inside                                                                | `luoto requests` (`--watch` waits)<br>`luoto approve 3 --ttl 1h`<br>`luoto approve 3 --read --path '/v1/**'`<br>`luoto reject 3`   |
@@ -255,6 +262,9 @@ host = "docs.rs"
 paths = ["/serde/**"]         # /serde and below; `*` stays within one path segment
 expires = "2026-12-01T00:00:00Z"
 # idle = "2h"                 # how long it may sit silent before the gate closes it (see Limits)
+
+[egress]                      # open: any HTTP(S) host no rule allows (`luoto egress open`)
+open_until = "2026-12-01T15:00:00Z"   # or `open = true`: until you remove it
 
 [[deny]]                      # refused whatever allows it, a preset included
 host = "registry.npmjs.org"
@@ -706,7 +716,8 @@ you use luoto: `luoto up` asks before switching.
 ## Limits
 
 - Outside HTTP(S), only tunnel rules (`luoto allow --tunnel`) and git over SSH to
-  `[credentials.ssh]` hosts leave an env. Run databases inside the dev container.
+  `[credentials.ssh]` hosts leave an env. Run databases inside the dev container. Open egress
+  covers HTTP(S) only.
 - No Docker-in-docker inside envs.
 - The gate speaks HTTP/1.1 to the sandbox, so gRPC needs a tunnel rule.
 - The gate holds up to 1024 connections per env. It closes a request whose response hasn't

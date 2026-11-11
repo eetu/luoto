@@ -645,6 +645,20 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
 
     crate::watch::spawn(ctx);
 
+    let open = p
+        .compiled
+        .policy
+        .open_at(chrono::Utc::now())
+        .map(|o| o.until);
+    if let Some(until) = open
+        && (opts.quiet || opts.brief)
+    {
+        let width = crate::text::columns().saturating_sub(10);
+        eprintln!(
+            "egress of `{env}` is {}",
+            crate::egress::state_line(env, until, width)
+        );
+    }
     if !opts.quiet && !opts.brief {
         println!(
             "env `{env}` is up{}",
@@ -670,6 +684,13 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             editors.join("|")
         );
         println!("  egress:  luoto egress -e {env}");
+        if let Some(until) = open {
+            let width = crate::text::columns().saturating_sub(11);
+            println!(
+                "           {}",
+                crate::egress::state_line(env, until, width)
+            );
+        }
         println!("  web UI:  luoto ui");
         // Now that the gate and vault run on the new images, the old ones are unused.
         if ids.pulled {

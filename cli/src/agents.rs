@@ -988,6 +988,7 @@ pub fn headless(
                 mutes.hide(&mut evs);
             }
             eprint!("{}", events::fmt_denials(env_name, &events::denials(&evs)));
+            eprint!("{}", events::fmt_opened(env_name, &events::opened(&evs)));
         }
         Err(e) => eprintln!("warning: no summary of the gate's denials ({e:#})"),
     }

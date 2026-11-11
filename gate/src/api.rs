@@ -8,7 +8,7 @@ use http::{Method, Request, Response, StatusCode};
 use hyper::body::Incoming;
 use luoto_shared::api::{
     API_PREFIX, AgentMessage, CheckQuery, CheckResult, MAX_AGENT_MESSAGE, NewAccessRequest,
-    RuleSummary, SSH_AGENT_PATH, SandboxStatus,
+    OpenEgress, RuleSummary, SSH_AGENT_PATH, SandboxStatus,
 };
 use luoto_shared::creds::{CredentialError, SSH_BINDING};
 use luoto_shared::events::{Event, EventKind};
@@ -157,6 +157,7 @@ fn status(state: &State) -> SandboxStatus {
         credentialed_hosts,
         recent_denials: state.events.recent_denials(),
         requests: state.requests().list(),
+        open: policy.open_at(now).map(|o| OpenEgress { until: o.until }),
     }
 }
 

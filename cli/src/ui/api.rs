@@ -12,7 +12,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures_util::Stream;
-use luoto_shared::api::{AccessRequest, Narrowing, RequestStatus};
+use luoto_shared::api::{AccessRequest, Narrowing, OpenEgress, RequestStatus};
 use luoto_shared::ctl::{GateStatus, VaultStatus};
 use luoto_shared::policy::{CompiledRule, Rule};
 use luoto_shared::{presets, profiles};
@@ -23,7 +23,8 @@ use super::Ui;
 use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx, UpOptions};
 use crate::{
-    commands, ctl, detect, disk, events, init, names, ports, project, rules, setup, sync, workspace,
+    commands, ctl, detect, disk, egress, events, init, names, ports, project, rules, setup, sync,
+    workspace,
 };
 
 pub struct ApiError(StatusCode, Value);
@@ -105,6 +106,8 @@ struct EnvRow {
     repos: Vec<crate::repos::Listed>,
     pending: usize,
     denied_recent: usize,
+    /// Its egress is open (`luoto egress open`).
+    open: Option<OpenEgress>,
     error: Option<String>,
 }
 
@@ -132,11 +135,17 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
                     .filter(|r| r.status == RequestStatus::Pending)
                     .count()
             });
-            let (ws, mutes, error) = match EnvFile::load(&ctx.paths, &name) {
-                Ok(f) => (f.cfg.workspace.clone(), ctx.global.mutes_for(&f.cfg), None),
+            let (ws, mutes, open, error) = match EnvFile::load(&ctx.paths, &name) {
+                Ok(f) => (
+                    f.cfg.workspace.clone(),
+                    ctx.global.mutes_for(&f.cfg),
+                    f.cfg.egress.open_at(Utc::now()).ok().flatten(),
+                    None,
+                ),
                 Err(e) => (
                     config::Workspace::default(),
                     ctx.global.mute.clone(),
+                    None,
                     Some(format!("{e:#}")),
                 ),
             };
@@ -155,6 +164,7 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
                 repos,
                 pending,
                 denied_recent,
+                open: open.map(|until| OpenEgress { until }),
                 error,
             });
         }
@@ -736,6 +746,13 @@ async fn env_action(Path((name, action)): Path<(String, String)>) -> ApiResult<V
             "selftest" => {
                 let r = env::selftest(&ctx, &name, None)?;
                 return Ok(serde_json::to_value(r)?);
+            }
+            "open" => {
+                let until = egress::until(egress::parse_window(egress::WINDOW)?);
+                egress::open(&ctx, &name, until)?;
+            }
+            "close" => {
+                egress::close(&ctx, &name)?;
             }
             other => anyhow::bail!("unknown action `{other}`"),
         }

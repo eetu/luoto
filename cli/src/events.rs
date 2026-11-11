@@ -7,7 +7,7 @@ use std::process::Stdio;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use luoto_shared::events::{Event, EventKind, Intake, Verdict};
-use luoto_shared::policy::Mute;
+use luoto_shared::policy::{Mute, OPEN_RULE};
 use serde::Serialize;
 
 use crate::names;
@@ -138,6 +138,8 @@ impl Mutes {
 pub struct HostSummary {
     pub host: String,
     pub allowed: u64,
+    /// Of `allowed`, those open egress let out: no rule allowed them.
+    pub opened: u64,
     pub denied: u64,
     /// Of `denied`, those a mute hides when they are not left out.
     pub muted: u64,
@@ -216,6 +218,7 @@ pub fn summarize(events: &[Event], mutes: &Mutes) -> Vec<HostSummary> {
         match e.verdict {
             Some(Verdict::Allow) => {
                 s.allowed += 1;
+                s.opened += u64::from(e.rule.as_deref() == Some(OPEN_RULE));
                 s.last_rule = e.rule.clone().or(s.last_rule.take());
             }
             Some(Verdict::Deny) => {
@@ -388,6 +391,80 @@ pub fn fmt_denials(env: &str, denied: &[Denied]) -> String {
     out
 }
 
+/// A request as [`Opened`] keeps it: method, path and port.
+pub type Request = (String, String, u16);
+
+/// A host open egress let requests out to, which no rule allowed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Opened {
+    pub host: String,
+    /// Each request once.
+    pub requests: Vec<Request>,
+    pub count: u64,
+}
+
+impl Opened {
+    /// The methods it took, in order.
+    pub fn methods(&self) -> Vec<&str> {
+        let set: BTreeSet<&str> = self.requests.iter().map(|(m, _, _)| m.as_str()).collect();
+        set.into_iter().collect()
+    }
+}
+
+/// The hosts open egress let out to in `events`, most requests first.
+pub fn opened(events: &[Event]) -> Vec<Opened> {
+    let mut by: BTreeMap<&str, (u64, BTreeSet<Request>)> = BTreeMap::new();
+    for e in events {
+        if e.verdict != Some(Verdict::Allow) || e.rule.as_deref() != Some(OPEN_RULE) {
+            continue;
+        }
+        let Some(host) = e.host.as_deref() else {
+            continue;
+        };
+        let (n, reqs) = by.entry(host).or_default();
+        *n += 1;
+        reqs.insert((
+            e.method.clone().unwrap_or_default(),
+            e.path.clone().unwrap_or_default(),
+            e.port.unwrap_or(443),
+        ));
+    }
+    let mut out: Vec<Opened> = by
+        .into_iter()
+        .map(|(host, (count, requests))| Opened {
+            host: host.to_string(),
+            requests: requests.into_iter().collect(),
+            count,
+        })
+        .collect();
+    out.sort_by_key(|o| std::cmp::Reverse(o.count));
+    out
+}
+
+/// After a run: the hosts reached only because egress is open, and the command that keeps
+/// them; empty when there is none.
+pub fn fmt_opened(env: &str, opened: &[Opened]) -> String {
+    const SHOWN: usize = 5;
+    if opened.is_empty() {
+        return String::new();
+    }
+    let mut hosts: Vec<String> = opened
+        .iter()
+        .take(SHOWN)
+        .map(|o| crate::text::display(&o.host))
+        .collect();
+    if opened.len() > SHOWN {
+        hosts.push(format!("{} more", opened.len() - SHOWN));
+    }
+    format!(
+        "{} host{} reached only because egress is open: {}\n\
+         `luoto egress keep -e {env}` keeps them.\n",
+        opened.len(),
+        if opened.len() == 1 { "" } else { "s" },
+        hosts.join(", ")
+    )
+}
+
 pub fn fmt_event(e: &Event) -> String {
     let ts =
         e.ts.map(|t| t.format("%H:%M:%S").to_string())
@@ -445,6 +522,44 @@ mod tests {
         let docs = s.iter().find(|h| h.host == "docs.rs").unwrap();
         assert_eq!(docs.last_denied_path.as_deref(), Some("/serde"));
         assert_eq!(npm.last_denied_path.as_deref(), Some("/react"));
+    }
+
+    #[test]
+    fn what_open_egress_let_out_is_counted_per_host() {
+        let text = r#"{"seq":1,"run":"r","env":"e","kind":"http","verdict":"allow","method":"GET","host":"registry.npmjs.org","path":"/react","rule":"npm-0"}
+{"seq":2,"run":"r","env":"e","kind":"http","verdict":"allow","method":"GET","host":"docs.example","path":"/a","rule":"open"}
+{"seq":3,"run":"r","env":"e","kind":"http","verdict":"allow","method":"GET","host":"docs.example","path":"/a","rule":"open"}
+{"seq":4,"run":"r","env":"e","kind":"http","verdict":"allow","method":"PUT","host":"upload.example","port":8080,"path":"/f","rule":"open"}
+{"seq":5,"run":"r","env":"e","kind":"http","verdict":"deny","method":"GET","host":"telemetry.example","path":"/","reason":"no_rule"}"#;
+        let evs = parse_lines(text);
+        let o = opened(&evs);
+        assert_eq!(
+            o,
+            [
+                Opened {
+                    host: "docs.example".into(),
+                    requests: vec![("GET".into(), "/a".into(), 443)],
+                    count: 2,
+                },
+                Opened {
+                    host: "upload.example".into(),
+                    requests: vec![("PUT".into(), "/f".into(), 8080)],
+                    count: 1,
+                },
+            ]
+        );
+        assert_eq!(o[1].methods(), ["PUT"]);
+        let s = summarize(&evs, &Mutes::default());
+        let docs = s.iter().find(|h| h.host == "docs.example").unwrap();
+        assert_eq!((docs.allowed, docs.opened), (2, 2));
+        let npm = s.iter().find(|h| h.host == "registry.npmjs.org").unwrap();
+        assert_eq!((npm.allowed, npm.opened), (1, 0));
+        assert_eq!(
+            fmt_opened("web", &o),
+            "2 hosts reached only because egress is open: docs.example, upload.example\n\
+             `luoto egress keep -e web` keeps them.\n"
+        );
+        assert_eq!(fmt_opened("web", &[]), "");
     }
 
     #[test]

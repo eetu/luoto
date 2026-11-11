@@ -167,6 +167,30 @@ fn pick_presets(p: &mut Proposal) -> Result<()> {
     Ok(())
 }
 
+/// What `luoto egress keep` keeps of `rows` (label, description, checked at first): the
+/// indexes picked, or `None` for Esc, which keeps nothing.
+pub fn pick_kept(rows: &[(String, String, bool)]) -> Result<Option<Vec<usize>>> {
+    let selected: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.2)
+        .map(|(i, _)| i)
+        .collect();
+    let options = table(
+        rows.iter()
+            .enumerate()
+            .map(|(i, (label, desc, _))| (i, label.clone(), desc.clone()))
+            .collect(),
+        text::columns() - 4,
+    );
+    Ok(MultiSelect::new("Keep in the env's config:", options)
+        .with_default(&selected)
+        .with_help_message("space toggles, Enter keeps what is checked, Esc: nothing")
+        .with_formatter(&shorts)
+        .ask()?
+        .map(|chosen| chosen.into_iter().map(|c| c.value).collect()))
+}
+
 fn toolchains(p: &mut Proposal) -> Result<()> {
     let found: Vec<String> = p
         .found

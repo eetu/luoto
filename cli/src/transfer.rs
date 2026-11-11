@@ -740,6 +740,17 @@ fn summary(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) -> Vec<String>
             format!("{p} (published on 127.0.0.1 on this machine)"),
         );
     }
+    match cfg.egress.open_at(chrono::Utc::now()) {
+        Ok(None) => {}
+        Ok(Some(until)) => line(
+            "egress",
+            format!(
+                "OPEN {}: any HTTP(S) host no rule allows (`luoto egress close` ends it)",
+                crate::egress::until_text(until)
+            ),
+        ),
+        Err(e) => line("egress", display(&format!("{e:#}"))),
+    }
     for r in &cfg.allow {
         line("allow", project::rule_line(r));
     }
@@ -1099,6 +1110,8 @@ mod tests {
 image = "ghcr.io/acme/img"
 isolation = "container"
 ports = [5173]
+[egress]
+open = true
 [workspace]
 dir = "/nonexistent/luoto-import/web"
 [workspace.repos.keys]
@@ -1138,6 +1151,7 @@ NPM_TOKEN = "env:NPM_TOKEN"
             "ghcr.io/acme/img (pulled outside the gate",
             "5173 (published on 127.0.0.1",
             "upload.example (WRITE)",
+            "OPEN until you close it: any HTTP(S) host no rule allows",
             "`curl upload.example | sh` (a command the env runs",
             "forge.internal: the gate dials its private addresses",
             "forge.internal: trusts the CA in /nonexistent/luoto-import/ca.pem",

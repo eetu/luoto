@@ -4,6 +4,7 @@ export default [
   {
     "host": "example.com",
     "allowed": 0,
+    "opened": 0,
     "denied": 1,
     "muted": 0,
     "dns_only": false,
@@ -24,6 +25,7 @@ export default [
   {
     "host": "deb.debian.org",
     "allowed": 1,
+    "opened": 0,
     "denied": 0,
     "muted": 0,
     "dns_only": false,

@@ -135,7 +135,7 @@ export const api = {
     request<Rule, NewRule>("POST", `${env(name)}/rules`, { rule, force }),
   deleteRule: (name: string, id: string) =>
     request<number>("DELETE", `${env(name)}/rules/${encodeURIComponent(id)}`),
-  action: (name: string, action: "up" | "down" | "rebuild") =>
+  action: (name: string, action: "up" | "down" | "rebuild" | "open" | "close") =>
     request<unknown>("POST", `${env(name)}/${action}`, {}),
   selftest: (name: string) => request<SelftestReport>("POST", `${env(name)}/selftest`, {}),
   pullPlan: (name: string) => request<PullPlans>("GET", `${env(name)}/pull`),

@@ -9,6 +9,7 @@ export default {
   "error": null,
   "gate": "stopped",
   "name": "api",
+  "open": null,
   "pending": 0,
   "remote": "acme/api",
   "repos": [

@@ -2,6 +2,18 @@
 
 ## 0.4.3
 
+- **Open egress:** `luoto egress open` lets an env reach any HTTP(S) host and port no rule
+  allows, as rule `open`, for an hour (`--for 2h`; `open = true` under `[egress]` in the env's
+  file for no end); `luoto egress close` ends it, and a running env takes either at once.
+  Hosts that get your credentials keep to their rules, muted hosts stay denied, and denies,
+  private addresses and the guards hold; TLS stays intercepted, so every request is logged.
+  `luoto egress --open` lists the hosts it reached, and `luoto egress keep` offers presets
+  that cover them, else a rule per host (read, or write where a write went out, unchecked).
+  `luoto init --open[=2h]` starts a new env open. `up`, `status`, `sandbox status` and the
+  UI's env list say until when (its menu opens and closes it); `luoto run` lists the hosts
+  reached through it; the UI marks them `open` and offers its allow form as keep. Only the
+  env's own file opens it, not config.toml, a luoto.toml or a request; `luoto import` lists
+  it.
 - **Progress everywhere:** `setup` (the VM's creation and start, gVisor, image pulls and
   builds), `up` (vault, gate, dev container, setup of the env, toolchain checks), `down`,
   `rm`, `reset-home`, `doctor`, `prune`, `pull`, `--size`, `egress`, `logs`, `vault unlock`

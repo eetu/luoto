@@ -169,8 +169,18 @@ pub fn render_status(s: &SandboxStatus) -> String {
     if s.credentials_locked {
         out.push_str("credentials: LOCKED — the user must run `luoto vault unlock` on the host\n");
     }
+    if let Some(open) = &s.open {
+        let until = open
+            .until
+            .map(|u| format!("until {}", u.format("%Y-%m-%d %H:%M UTC")))
+            .unwrap_or_else(|| "until the user closes it".into());
+        out.push_str(&format!(
+            "egress: OPEN {until}: any HTTP(S) host no rule allows goes out too (rule \
+             `open`),\n  except hosts that get credentials; every request is still logged\n"
+        ));
+    }
     out.push_str("\nallowed egress:\n");
-    if s.rules.is_empty() {
+    if s.rules.is_empty() && s.open.is_none() {
         out.push_str("  (nothing — every destination is blocked)\n");
     }
     for r in &s.rules {
@@ -575,5 +585,30 @@ mod tests {
             waited: None,
         });
         assert!(said.contains("db.example.com:5432 is open now"), "{said}");
+    }
+
+    #[test]
+    fn status_says_when_egress_is_open() {
+        let mut s = SandboxStatus {
+            env: "web".into(),
+            gate_version: "0".into(),
+            credentials_locked: false,
+            rules: vec![],
+            credentialed_hosts: vec![],
+            recent_denials: vec![],
+            requests: vec![],
+            open: None,
+        };
+        let closed = render_status(&s);
+        assert!(closed.contains("every destination is blocked") && !closed.contains("OPEN"));
+        s.open = Some(luoto_shared::api::OpenEgress {
+            until: "2026-11-11T14:05:00Z".parse().ok(),
+        });
+        let open = render_status(&s);
+        assert!(
+            open.contains("egress: OPEN until 2026-11-11 14:05 UTC: any HTTP(S) host"),
+            "{open}"
+        );
+        assert!(!open.contains("every destination is blocked"));
     }
 }

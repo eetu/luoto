@@ -15,6 +15,7 @@ mod ctl;
 mod deps;
 mod detect;
 mod disk;
+mod egress;
 mod env;
 mod events;
 mod format;
@@ -310,10 +311,17 @@ enum Cmd {
         #[arg(long)]
         note: Option<String>,
     },
-    /// What the env tried to reach, per host; `--follow` streams each attempt.
+    /// What the env tried to reach, per host; `--follow` streams each attempt. `open` lets it
+    /// reach any HTTP(S) host for a while, `keep` keeps what that reached.
+    #[command(args_conflicts_with_subcommands = true)]
     Egress {
+        #[command(subcommand)]
+        action: Option<EgressCmd>,
         #[arg(long)]
         denied: bool,
+        /// Only the hosts open egress let through: no rule allows them.
+        #[arg(long, conflicts_with_all = ["denied", "follow", "raw"])]
+        open: bool,
         /// Only attempts newer than this (e.g. 10m, 2h).
         #[arg(long)]
         since: Option<String>,
@@ -388,6 +396,29 @@ enum AgentCmd {
     /// List known agents and providers.
     #[command(visible_alias = "ls")]
     List,
+}
+
+#[derive(Subcommand)]
+enum EgressCmd {
+    /// Let the env reach any HTTP(S) host no rule allows, for an hour or `--for`; hosts that
+    /// get your credentials, muted hosts and denies stay as they are.
+    Open {
+        /// How long: 30m, 2h, 1d (default 1h). With no end: `open = true` under [egress] in
+        /// the env's file.
+        #[arg(long = "for", value_name = "DURATION")]
+        window: Option<String>,
+    },
+    /// Close open egress: only the rules allow again.
+    Close,
+    /// Keep what open egress reached: presets that cover its hosts, else a rule per host.
+    Keep {
+        /// Only what it reached this recently (e.g. 2h).
+        #[arg(long)]
+        since: Option<String>,
+        /// Keep what is offered checked (presets and read rules) without asking.
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -629,7 +660,17 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         }
         Cmd::Reject { id, note } => c::reject(&env()?, id, note),
         Cmd::Egress {
+            action: Some(action),
+            ..
+        } => match action {
+            EgressCmd::Open { window } => c::egress_open(&env()?, window.as_deref()),
+            EgressCmd::Close => c::egress_close(&env()?),
+            EgressCmd::Keep { since, yes } => c::egress_keep(&env()?, since.as_deref(), yes),
+        },
+        Cmd::Egress {
+            action: None,
             denied,
+            open,
             since,
             follow,
             raw,
@@ -639,7 +680,14 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             if follow || raw {
                 c::logs(&env()?, follow, denied, all, since.as_deref())
             } else {
-                c::egress(&env()?, denied, all, since.as_deref(), json)
+                let only = if open {
+                    c::Only::Opened
+                } else if denied {
+                    c::Only::Denied
+                } else {
+                    c::Only::All
+                };
+                c::egress(&env()?, only, all, since.as_deref(), json)
             }
         }
         Cmd::Logs {
@@ -689,6 +737,65 @@ mod tests {
         assert!(methods.is_empty());
         assert_eq!(paths, ["/v1/**", "/v2"]);
         assert!(parse(&["approve", "3", "--read", "--method", "GET"]).is_err());
+    }
+
+    #[test]
+    fn egress_opens_closes_and_keeps_beside_its_views() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat());
+        let action = |args: &[&str]| match parse(args).unwrap().cmd {
+            Cmd::Egress { action, .. } => action,
+            _ => panic!("not egress"),
+        };
+        assert!(matches!(
+            action(&["egress", "open"]),
+            Some(EgressCmd::Open { window: None })
+        ));
+        assert!(matches!(
+            action(&["-e", "web", "egress", "open", "--for", "2h"]),
+            Some(EgressCmd::Open { window: Some(w) }) if w == "2h"
+        ));
+        assert!(matches!(
+            action(&["egress", "close"]),
+            Some(EgressCmd::Close)
+        ));
+        assert!(matches!(
+            action(&["egress", "keep", "--since", "2h", "-y"]),
+            Some(EgressCmd::Keep { since: Some(s), yes: true }) if s == "2h"
+        ));
+        assert!(matches!(
+            parse(&["egress", "--open"]).unwrap().cmd,
+            Cmd::Egress {
+                action: None,
+                open: true,
+                ..
+            }
+        ));
+        assert!(action(&["egress", "--denied"]).is_none());
+        for bad in [
+            &["egress", "--denied", "open"][..],
+            &["egress", "--open", "--denied"],
+            &["egress", "--open", "--follow"],
+            &["egress", "open", "--for"],
+        ] {
+            assert!(parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn init_opens_egress_only_with_an_equals_sign() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat()).unwrap();
+        let init = |args: &[&str]| match parse(args).cmd {
+            Cmd::Init(o) => o,
+            _ => panic!("not init"),
+        };
+        assert_eq!(init(&["init"]).open, None);
+        assert_eq!(init(&["init", "--open"]).open.as_deref(), Some("1h"));
+        assert_eq!(init(&["init", "--open=2h"]).open.as_deref(), Some("2h"));
+        let o = init(&["init", "--open", "acme/web"]);
+        assert_eq!(
+            (o.open.as_deref(), o.dir.as_deref()),
+            (Some("1h"), Some("acme/web"))
+        );
     }
 
     #[test]
