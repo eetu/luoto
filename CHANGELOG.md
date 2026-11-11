@@ -27,7 +27,9 @@
   hosted one), on this machine, your network or the internet, beside their cloud provider:
   `[model_servers.<name>]` with `url`, `api` and an optional `token`, and `model_server` under
   `[agents.<agent>]` for the one it starts on. "A model server" in the credential questions
-  finds those answering on this machine's usual ports and lists their models. The gate opens
+  finds those answering on this machine's usual ports, lists their models and keeps the
+  context window a server gives (`context`, which Claude Code can't tell for a model it
+  doesn't know). The gate opens
   only the server's port and model endpoints and adds its token; OpenCode switches in its
   model picker, Codex per start (`codex --profile <server>`). A config that can't work is
   refused at `up` and `luoto edit`.

@@ -36,6 +36,7 @@ each = [
   { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "options", "baseURL"], value = "{url}/v1" },
   { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "options", "apiKey"], value = "{token}" },
   { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "models", "{model}"], value = {} },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "models", "{model}", "limit", "context"], value = "{context:n}" },
 ]
 default = [
   { file = "~/.config/opencode/opencode.json", path = ["model"], value = "{name}/{model}" },

@@ -174,7 +174,8 @@ How each agent uses a `[model_servers]` entry
 ([guides/model-servers.md](guides/model-servers.md)):
 
 - **Claude Code:** the one it starts on goes in `~/.claude/settings.json` (`ANTHROPIC_BASE_URL`,
-  a placeholder token, every model alias set to the server's model); one endpoint a session.
+  a placeholder token, every model alias set to the server's model, the server's `context` as
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS`); one endpoint a session.
   Verified with a server on this machine (MTPLX, and a stand-in): reached through the gate,
   its token added over plain HTTP, `claude -p` sending its requests there.
 - **Codex:** a provider and a profile per server in `~/.codex/config.toml` (Responses API,

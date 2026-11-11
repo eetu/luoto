@@ -11,8 +11,11 @@ to know which program it is.
 offers "A model server" beside the cloud's ways in. It looks for servers answering on this
 machine's usual ports (Ollama 11434, LM Studio 1234, MTPLX and vLLM 8000, llama.cpp 8080,
 LiteLLM 4000) and lists them with what they serve; "Another address" takes any other, one not
-running yet included. A server that answers lists its models to pick from; one that doesn't
-gets the model typed. Your network is never scanned.
+running yet included. A server that answers lists its models to pick from, and the context
+window it gives for the one picked is kept as `context`; one that doesn't answer gets the model
+typed. Your network is never scanned. Claude Code knows the window of Claude models only and
+assumes 200k for any other ("isn't recognized"), so a server that gives none needs `context`
+written by hand where its model's window is another.
 
 What it writes, in the env's own file:
 
@@ -21,6 +24,7 @@ What it writes, in the env's own file:
 url = "http://localhost:8000"   # as this machine reaches it; a trailing /v1 is fine
 api = ["anthropic", "openai"]   # what it serves
 # model = "qwen3-coder"         # the model agents use there unless their own `model` says
+# context = 204800              # its context window in tokens, for agents that can't tell
 # token = "keyring:luoto/model_server.mtplx"   # any secret reference; none for a keyless one
 # header = "x-api-key"          # where the token goes; default `authorization: Bearer`
 # private = true                # its host name is on a private network

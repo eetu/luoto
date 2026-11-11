@@ -56,5 +56,7 @@ default = [
   { file = "~/.claude/settings.json", path = ["env", "ANTHROPIC_DEFAULT_OPUS_MODEL"], value = "{model}" },
   { file = "~/.claude/settings.json", path = ["env", "ANTHROPIC_DEFAULT_SONNET_MODEL"], value = "{model}" },
   { file = "~/.claude/settings.json", path = ["env", "ANTHROPIC_DEFAULT_HAIKU_MODEL"], value = "{model}" },
+  # It knows the window of Claude models only.
+  { file = "~/.claude/settings.json", path = ["env", "CLAUDE_CODE_MAX_CONTEXT_TOKENS"], value = "{context}" },
   { file = "~/.claude/settings.json", path = ["model"], value = "{model}" },
 ]

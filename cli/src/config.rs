@@ -651,6 +651,10 @@ pub struct ModelServer {
     /// The model agents use there unless their own `model` names another.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The context window of the model agents use there, in tokens, for agents that can't
+    /// tell it from the model's name (Claude Code assumes 200k).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
     /// Its token, a secret reference; none for a server that takes none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
@@ -1470,6 +1474,9 @@ impl EnvFile {
             if let Some(v) = v {
                 t.insert(k, toml_edit::value(v.as_str()));
             }
+        }
+        if let Some(c) = server.context.and_then(|c| i64::try_from(c).ok()) {
+            t.insert("context", toml_edit::value(c));
         }
         if server.private {
             t.insert("private", toml_edit::value(true));

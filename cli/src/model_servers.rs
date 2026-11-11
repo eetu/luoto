@@ -250,6 +250,7 @@ pub fn sets(
             name,
             url: ep.sandbox_url(),
             model: model_for(opts, name, s),
+            context: s.context,
         };
         adds.extend(m.each.iter().filter_map(|set| fill(set, &vars)));
         now.each.insert(name.clone());
@@ -288,19 +289,38 @@ struct Vars<'a> {
     name: &'a str,
     url: String,
     model: Option<&'a str>,
+    context: Option<u64>,
 }
 
-/// `set` with its placeholders filled in; none when it names `{model}` and no model is known.
+/// `set` with its placeholders filled in; none when it names `{model}` or `{context}` and
+/// that isn't known. A value that is `{context:n}` alone becomes a number.
 fn fill(set: &JsonSet, v: &Vars) -> Option<JsonSet> {
-    let names_model = set.path.iter().any(|p| p.contains("{model}"))
-        || serde_json::to_string(&set.value).is_ok_and(|t| t.contains("{model}"));
-    if names_model && v.model.is_none() {
+    let names = |p: &str| {
+        set.path.iter().any(|x| x.contains(p))
+            || serde_json::to_string(&set.value).is_ok_and(|t| t.contains(p))
+    };
+    if (names("{model}") && v.model.is_none()) || (names("{context") && v.context.is_none()) {
         return None;
+    }
+    if set.value == Value::String("{context:n}".into()) {
+        return Some(JsonSet {
+            file: set.file.clone(),
+            path: set
+                .path
+                .iter()
+                .map(|p| p.replace("{name}", v.name))
+                .collect(),
+            value: Value::from(v.context?),
+        });
     }
     let text = |t: &str| {
         t.replace("{name}", v.name)
             .replace("{url}", &v.url)
             .replace("{model}", v.model.unwrap_or_default())
+            .replace(
+                "{context}",
+                &v.context.map(|c| c.to_string()).unwrap_or_default(),
+            )
             .replace("{token}", PLACEHOLDER)
     };
     fn value(v: &Value, text: &dyn Fn(&str) -> String) -> Value {
@@ -349,6 +369,8 @@ pub struct Probe {
     pub answered: bool,
     pub needs_token: bool,
     pub models: Vec<String>,
+    /// The context windows the server gives for its models, by model.
+    pub contexts: BTreeMap<String, u64>,
     /// Who its models say they are from, when that names the server (`mtplx`).
     pub owner: Option<String>,
     pub anthropic: Option<bool>,
@@ -406,6 +428,7 @@ pub fn probe(ep: &Endpoint, token: Option<&str>, header: &str) -> Probe {
     }
     if code == 200 {
         p.models = model_ids(&body);
+        p.contexts = contexts(&body);
         p.owner = owner(&body);
     }
     p.anthropic = has_endpoint(ep, token, header, "/v1/messages");
@@ -440,6 +463,30 @@ fn model_ids(body: &str) -> Vec<String> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+/// The context window a `/v1/models` answer gives for each model, under the names servers use
+/// for it (`context_length`, vLLM's `max_model_len`, `max_context_length`).
+fn contexts(body: &str) -> BTreeMap<String, u64> {
+    let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    v["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let id = m["id"].as_str()?;
+            let n = [
+                "context_length",
+                "max_model_len",
+                "max_context_length",
+                "context_window",
+            ]
+            .iter()
+            .find_map(|k| m[*k].as_u64())
+            .filter(|n| *n > 0)?;
+            Some((id.to_string(), n))
+        })
+        .collect()
 }
 
 /// The `owned_by` all of a `/v1/models` answer's models share, when it names a server rather
@@ -632,11 +679,14 @@ pub fn ask(global: &GlobalConfig, a: &profiles::Agent, cfg: &EnvConfig) -> Resul
                 });
                 let now = cfg.agents.get(&a.name).and_then(|o| o.model.clone());
                 match ask_model(a, &p.models, now.as_deref().or(s.model.as_deref()))? {
-                    Step::Got(model) => Some(Picked {
-                        name,
-                        server: s,
-                        model,
-                    }),
+                    Step::Got(model) => {
+                        let context = p.contexts.get(&model).copied().or(s.context);
+                        Some(Picked {
+                            name,
+                            server: ModelServer { context, ..s },
+                            model,
+                        })
+                    }
                     Step::Back => None,
                 }
             }
@@ -797,12 +847,14 @@ fn new_server(
         Step::Back => return Ok(None),
     };
     let private = !ep.this_machine() && !ep.private_address() && private_host(&ep.host);
+    let context = p.contexts.get(&model).copied();
     Ok(Some(Picked {
         name,
         server: ModelServer {
             url: ep.url(),
             api,
             model: None,
+            context,
             token,
             header: None,
             private,
@@ -974,6 +1026,7 @@ mod tests {
             url: url.into(),
             api: api.iter().map(|a| a.to_string()).collect(),
             model: model.map(str::to_string),
+            context: None,
             token: None,
             header: None,
             private: false,
@@ -1007,6 +1060,51 @@ mod tests {
         ] {
             assert!(Endpoint::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_window_a_server_gives_reaches_the_agents_that_cant_tell_it() {
+        let body = r#"{"data":[{"id":"q","context_length":204800},{"id":"v","max_model_len":32768},{"id":"n"}]}"#;
+        assert_eq!(
+            contexts(body),
+            [("q".to_string(), 204800), ("v".to_string(), 32768)].into()
+        );
+        let claude = luoto_shared::profiles::agent("claude").unwrap();
+        let mut s = server("http://localhost:8000", &["anthropic", "openai"], Some("q"));
+        let opts = AgentOpts {
+            model_server: Some("m".into()),
+            ..Default::default()
+        };
+        let window = |s: &ModelServer| {
+            let servers = [("m".to_string(), s.clone())].into();
+            super::sets(
+                claude.model_server.as_ref().unwrap(),
+                &opts,
+                &servers,
+                &Written::default(),
+            )
+            .adds
+            .into_iter()
+            .find(|x| x.path.last().map(String::as_str) == Some("CLAUDE_CODE_MAX_CONTEXT_TOKENS"))
+            .map(|x| x.value)
+        };
+        assert_eq!(window(&s), None);
+        s.context = Some(204800);
+        assert_eq!(window(&s), Some(Value::String("204800".into())));
+        let codex = luoto_shared::profiles::agent("codex").unwrap();
+        let servers = [("m".to_string(), s)].into();
+        let adds = super::sets(
+            codex.model_server.as_ref().unwrap(),
+            &opts,
+            &servers,
+            &Written::default(),
+        )
+        .adds;
+        let at = adds
+            .iter()
+            .find(|x| x.path == ["profiles", "m", "model_context_window"])
+            .map(|x| x.value.clone());
+        assert_eq!(at, Some(Value::from(204800)));
     }
 
     #[test]

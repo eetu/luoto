@@ -214,8 +214,9 @@ pub struct Agent {
 
 /// How an agent uses a model server: the API it speaks there, and what luoto writes in its
 /// config with `{name}` (the server's), `{url}` (the server as the sandbox reaches it),
-/// `{model}` and `{token}` (a placeholder the gate replaces) filled in. An entry that names
-/// `{model}` is left out where no model is known.
+/// `{model}`, `{context}` (its context window; `{context:n}` alone, as a number) and `{token}`
+/// (a placeholder the gate replaces) filled in. An entry that names `{model}` or `{context}`
+/// is left out where that isn't known.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentModelServer {

@@ -31,6 +31,7 @@ each = [
   { file = "~/.codex/config.toml", path = ["model_providers", "{name}", "env_key"], value = "LUOTO_MODEL_TOKEN" },
   { file = "~/.codex/config.toml", path = ["profiles", "{name}", "model_provider"], value = "{name}" },
   { file = "~/.codex/config.toml", path = ["profiles", "{name}", "model"], value = "{model}" },
+  { file = "~/.codex/config.toml", path = ["profiles", "{name}", "model_context_window"], value = "{context:n}" },
 ]
 default = [
   { file = "~/.codex/config.toml", path = ["profile"], value = "{name}" },

@@ -245,7 +245,13 @@ fn summary(env_name: &str, name: &str, a: &profiles::Agent, cfg: &EnvConfig) -> 
             .and_then(|o| model_servers::model_for(o, server, s))
             .unwrap_or("?");
         rows.push(("starts on", format!("model server `{server}` ({})", s.url)));
-        rows.push(("model", model.to_string()));
+        rows.push((
+            "model",
+            match s.context {
+                Some(c) => format!("{model}, a {}k context", c / 1000),
+                None => model.to_string(),
+            },
+        ));
     } else if have.is_empty() {
         rows.push(("credential", "none yet".into()));
     }
