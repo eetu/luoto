@@ -897,8 +897,8 @@ fn start_gate(
     {
         crate::progress::say(|| {
             eprintln!(
-                "warning: {e:#}\n         their hosts return 403 until the reference is fixed \
-             (`luoto edit -e {env}`) and `luoto vault unlock` loads it"
+                "warning: {e:#}\n         their hosts return 403 until then; once it is fixed, \
+             `luoto up -e {env}` loads them"
             )
         });
     }

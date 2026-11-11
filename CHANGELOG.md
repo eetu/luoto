@@ -26,6 +26,10 @@
   `[credentials.custom]`, go only on the methods and paths their own rules allow. A wider rule
   (`luoto allow '*' --write`, an approved request) no longer carries them further, to a merge
   or a file or ref write past the push guard: those requests go without the token.
+- **Azure login:** an `az` login on this machine that has expired (a refresh token unused for
+  90 days) or wants you again (MFA, consent) is one line with its AADSTS reason and the fix,
+  `az login --tenant …`, then `luoto up`; secrets that failed the same way are named once,
+  and `az` in the env isn't logged in with what would only fail again.
 - **Subnets:** a release's envs take 10.213.1–127 and a source build's (`luoto-dev`)
   10.213.128–254, with the user ID ranges that go with them, so an env imported from one into
   the other never shares either. When another network holds an env's subnet, `up` names it

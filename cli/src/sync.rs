@@ -57,7 +57,7 @@ pub fn load_secrets(ctx: &Ctx, refs: &BTreeSet<String>, whose: &str, renew: bool
                         Ok(v) => {
                             values.insert(r.clone(), v);
                         }
-                        Err(e) => failed.push(format!("{}: {e:#}", secrets::shown_ref(r))),
+                        Err(e) => failed.push((secrets::shown_ref(r), format!("{e:#}"))),
                     }
                 }
                 (values, failed)
@@ -75,11 +75,28 @@ pub fn load_secrets(ctx: &Ctx, refs: &BTreeSet<String>, whose: &str, renew: bool
                 "{} of {} secret(s) not loaded, so the credentials using them stay locked: {}",
                 failed.len(),
                 missing.len(),
-                failed.join("; ")
+                grouped(&failed)
             );
         }
     }
     Ok(())
+}
+
+/// `(ref, error)` pairs as a line each error says once, with every ref it hit:
+/// `ref1, ref2: error`.
+fn grouped(failed: &[(String, String)]) -> String {
+    let mut by_error: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (r, e) in failed {
+        match by_error.iter_mut().find(|(err, _)| err == e) {
+            Some((_, refs)) => refs.push(r),
+            None => by_error.push((e, vec![r])),
+        }
+    }
+    by_error
+        .iter()
+        .map(|(e, refs)| format!("{}: {e}", refs.join(", ")))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 pub fn apply_policy(ctx: &Ctx, env: &str, compiled: &Compiled) -> Result<()> {
