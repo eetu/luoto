@@ -58,6 +58,22 @@ the gate denied 4 attempts to reach 2 hosts during the run:
 - **A login inside, done once.** An agent that logs in inside the env (`login_inside`) needs
   that login done by hand first: `luoto shell`, then the agent.
 
+## Smaller requests
+
+An agent sends its system prompt and tool definitions with every request: about 54 KB for
+Claude Code's `hello`, 42 KB for OpenCode's. A cloud model reads that in a moment; a model
+of yours (a [model server](model-servers.md)) can take a minute. Arguments that trim it, for
+`luoto run` only:
+
+```toml
+[agents.claude]
+headless_args = ["--bare", "--tools", "Bash,Read,Edit"]
+```
+
+`--bare` leaves out hooks, skills, plugins, MCP servers, memory and CLAUDE.md; `--tools` the
+tools a job doesn't use. Claude Code's `hello` is then 4 KB. Its answer can only use what you
+left it.
+
 ## Examples
 
 **A report.** The env reads the code; the answer lands on your machine.

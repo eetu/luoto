@@ -1009,13 +1009,12 @@ pub fn headless(
             a.description
         );
     }
-    let argv: Vec<String> = std::iter::once(sh_quote(&a.command))
-        .chain(
-            a.headless
-                .iter()
-                .map(|x| sh_quote(&x.replace("{prompt}", prompt))),
-        )
-        .collect();
+    let opts = env::layered(&ctx, env_name)?
+        .agents
+        .get(agent)
+        .cloned()
+        .unwrap_or_default();
+    let argv = headless_argv(&a, &opts, prompt);
     let script = format!("exec {}", argv.join(" "));
     let dev = names::dev(env_name);
     let mark = format!("{RUN_MARK}={}", hex::encode(rand::random::<[u8; 8]>()));
@@ -1295,8 +1294,36 @@ pub fn run(env_name: &str, agent: &str, yolo: bool, args: &[String]) -> Result<E
     if yolo {
         argv.extend(a.yolo.iter().map(|s| sh_quote(s)));
     }
-    argv.extend(args.iter().map(|s| sh_quote(s)));
+    let own = env::layered(&ctx, env_name)?
+        .agents
+        .get(agent)
+        .map(|o| o.args.clone())
+        .unwrap_or_default();
+    argv.extend(own.iter().chain(args).map(|s| sh_quote(s)));
     exec_login(&ctx, env_name, &format!("exec {}", argv.join(" ")))
+}
+
+/// Agent `a`'s command line for one prompt (`luoto run`), quoted: its headless arguments, the
+/// env's `args` and `headless_args` where `{args}` says.
+fn headless_argv(
+    a: &profiles::Agent,
+    opts: &crate::config::AgentOpts,
+    prompt: &str,
+) -> Vec<String> {
+    let mut argv = vec![sh_quote(&a.command)];
+    for x in &a.headless {
+        if x == "{args}" {
+            argv.extend(
+                opts.args
+                    .iter()
+                    .chain(&opts.headless_args)
+                    .map(|s| sh_quote(s)),
+            );
+        } else {
+            argv.push(sh_quote(&x.replace("{prompt}", prompt)));
+        }
+    }
+    argv
 }
 
 #[cfg(test)]
@@ -1391,6 +1418,29 @@ mod tests {
             let s = summary("a-long-env-name", name, &agent(name), &cfg(have));
             assert!(s.lines().all(|l| l.chars().count() < 80), "{s}");
         }
+    }
+
+    #[test]
+    fn configured_arguments_go_before_the_prompt_of_a_headless_run() {
+        let opts = crate::config::AgentOpts {
+            args: vec!["--tools".into(), "Bash,Read,Edit".into()],
+            headless_args: vec!["--bare".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            headless_argv(&agent("claude"), &opts, "say hi").join(" "),
+            "claude --tools Bash,Read,Edit --bare -p --dangerously-skip-permissions \
+             --output-format text 'say hi'"
+        );
+        // After the subcommand, where OpenCode takes its flags.
+        let lean = crate::config::AgentOpts {
+            headless_args: vec!["--agent".into(), "lean".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            headless_argv(&agent("opencode"), &lean, "x").join(" "),
+            "opencode run --agent lean x"
+        );
     }
 
     #[test]

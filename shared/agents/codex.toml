@@ -1,7 +1,7 @@
 description = "OpenAI Codex CLI"
 command = "codex"
 yolo = ["--dangerously-bypass-approvals-and-sandbox"]
-headless = ["exec", "--dangerously-bypass-approvals-and-sandbox", "{prompt}"]
+headless = ["exec", "{args}", "--dangerously-bypass-approvals-and-sandbox", "{prompt}"]
 providers = ["openai"]
 install = ["mkdir -p ~/.local && npm install -g --prefix ~/.local @openai/codex"]
 install_hosts = ["registry.npmjs.org"]

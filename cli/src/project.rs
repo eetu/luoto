@@ -138,6 +138,20 @@ fn validate(p: &ProjectConfig) -> Result<()> {
                 display(name)
             );
         }
+        // The agent's own prompts are each developer's to turn off (`--yolo`).
+        if let Some(y) = opts
+            .args
+            .iter()
+            .chain(&opts.headless_args)
+            .find(|x| a.yolo.contains(x))
+        {
+            bail!(
+                "luoto.toml: agents.{}: `{}` turns off the agent's own prompts, which only \
+                 `luoto agent run --yolo` does",
+                display(name),
+                display(y)
+            );
+        }
         crate::compile::check_agent_opts(&a, name, opts).context("luoto.toml")?;
     }
     for r in &p.allow {
@@ -631,11 +645,23 @@ fn items(p: &ProjectConfig) -> Vec<(&'static str, String)> {
             .0
             .iter()
             .map(|(n, o)| {
-                let opts: Vec<String> = o
+                let quoted = |args: &[String]| {
+                    args.iter()
+                        .map(|x| format!("`{}`", display(x)))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                let mut opts: Vec<String> = o
                     .values()
                     .iter()
                     .map(|(k, v)| format!("{k} {}", display(v)))
                     .collect();
+                if !o.args.is_empty() {
+                    opts.push(format!("started with {}", quoted(&o.args)));
+                }
+                if !o.headless_args.is_empty() {
+                    opts.push(format!("headless with {}", quoted(&o.headless_args)));
+                }
                 if opts.is_empty() {
                     display(n)
                 } else {
@@ -1108,6 +1134,12 @@ mod tests {
             format!("{err:#}").contains("each developer's own"),
             "{err:#}"
         );
+        // A team may set arguments, not the ones that turn the agent's prompts off.
+        assert!(parse("[agents.claude]\nheadless_args = [\"--bare\"]").is_ok());
+        let err =
+            parse("[agents.claude]\nargs = [\"--dangerously-skip-permissions\"]").unwrap_err();
+        assert!(format!("{err:#}").contains("--yolo"), "{err:#}");
+        assert!(parse("[agents.claude]\nargs = [\"a\\u0007b\"]").is_err());
     }
 
     #[test]

@@ -172,7 +172,8 @@ pub struct Agent {
     #[serde(default)]
     pub yolo: Vec<String>,
     /// Its command line for one prompt without a terminal (`luoto run`), `{prompt}` where the
-    /// prompt goes; it answers on stdout and asks for no permission.
+    /// prompt goes and `{args}` where the env's `args` and `headless_args` go (where its CLI
+    /// takes options); it answers on stdout and asks for no permission.
     #[serde(default)]
     pub headless: Vec<String>,
     /// Providers this agent can use; suggested when adding the agent.

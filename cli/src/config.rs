@@ -614,6 +614,12 @@ pub struct AgentOpts {
     /// its provider. Each developer's own: a luoto.toml can't set it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_server: Option<String>,
+    /// Arguments for every start through luoto (`agent run`, `luoto run`), after its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Arguments for `luoto run` only, after `args`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headless_args: Vec<String>,
 }
 
 impl AgentOpts {
@@ -635,6 +641,12 @@ impl AgentOpts {
         }
         if self.effort.is_none() {
             self.effort = lower.effort.clone();
+        }
+        if self.args.is_empty() {
+            self.args = lower.args.clone();
+        }
+        if self.headless_args.is_empty() {
+            self.headless_args = lower.headless_args.clone();
         }
     }
 }

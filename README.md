@@ -158,6 +158,24 @@ hooks and other files your own tools would run. `luoto down` stops the env, and 
 itself after 30 minutes with nothing running in it (`idle_stop`); luoto's VM stops once no
 env has run for as long. `luoto up` brings it back in about 10 s and unlocks the vault anew.
 
+## Guides
+
+Step by step, for a task:
+
+| guide | when you want to |
+| --- | --- |
+| [A repository you don't trust](docs/guides/untrusted-repo.md) | clone and try one with nothing of it on your machine |
+| [Several repositories](docs/guides/multi-repo.md) | work on more than one repo in an env, or give a team a launchpad |
+| [Headless runs](docs/guides/headless.md) | run an agent from a script or a schedule, and let it open pull requests |
+| [Agent settings](docs/guides/agent-settings.md) | set an agent's model, effort and arguments, or your own settings in every env |
+| [Model servers](docs/guides/model-servers.md) | use Ollama, LM Studio, MTPLX or another server of yours beside the cloud |
+| [Azure](docs/guides/azure.md) | run `az`, terraform and the SDKs on your subscriptions |
+| [Cloud APIs](docs/guides/cloud-apis.md) | use Hetzner, UpCloud, DigitalOcean or Cloudflare from an env |
+| [Moving an env](docs/guides/moving-envs.md) | take an env to the release, or to another machine |
+
+What luoto knows of each agent (hosts, credentials, what is verified):
+[docs/agents.md](docs/agents.md).
+
 ## Day to day
 
 Commands act on the env of the current folder; `-e NAME` picks another (`luoto status -e web`).

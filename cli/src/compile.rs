@@ -289,6 +289,20 @@ pub fn check_agent_opts(
     name: &str,
     opts: &crate::config::AgentOpts,
 ) -> Result<()> {
+    for (key, args) in [("args", &opts.args), ("headless_args", &opts.headless_args)] {
+        if args.len() > 64 {
+            bail!("agents.{name}.{key}: at most 64 arguments");
+        }
+        if let Some(bad) = args
+            .iter()
+            .find(|x| x.len() > 4096 || x.contains(char::is_control))
+        {
+            bail!(
+                "agents.{name}.{key}: `{}` is not a plain argument",
+                crate::text::display(bad)
+            );
+        }
+    }
     for (key, value) in opts.values() {
         let Some(s) = a.settings.get(key) else {
             let takes: Vec<&str> = a.settings.keys().map(String::as_str).collect();

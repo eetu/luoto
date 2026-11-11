@@ -1,7 +1,8 @@
 # Agent settings
 
-How to set up the agents in your envs: their model and effort, their credentials without the
-prompt, your own settings in every env, and commits without AI attribution. What luoto knows
+How to set up the agents in your envs: their model and effort, the arguments they start with,
+their credentials without the prompt, your own settings in every env, and commits without AI
+attribution. What luoto knows
 about each agent (hosts, credentials, what is verified) is in [agents.md](../agents.md).
 
 ## Model and effort
@@ -19,6 +20,21 @@ luoto writes them into the agent's own user settings on `up`, so they are the de
 `/model` or `/effort` in a session still changes them until the next `up`. Claude Code and
 Codex take both, OpenCode takes `model`. `config.toml` gives options only: it adds no agent to
 an env.
+
+## Arguments
+
+Arguments for the agent's own command line, in the same places as `model`:
+
+```toml
+[agents.claude]
+args = ["--tools", "Bash,Read,Edit"]   # every start through luoto: `agent run`, `luoto run`
+headless_args = ["--bare"]             # `luoto run` only, after `args`
+```
+
+They go where the agent's command line takes options (after `run` for OpenCode, `exec` for
+Codex), and `luoto agent run -- …` adds more for one start. `claude` typed in a shell starts
+without them. A team's `luoto.toml` may set them, shown in its review; it can't set the
+agent's own prompt-skipping flags, which only `--yolo` gives.
 
 ## Credentials without the prompt
 

@@ -67,6 +67,15 @@ minutes while a model loads, so the gate waits up to 30 minutes on the server.
 server the env lacks, a server without the API the agent speaks, no model, a token over plain
 HTTP off this machine, two servers on this machine with a token.
 
+## Speed
+
+Every request carries the agent's system prompt and tools, 10–15k tokens before your first
+word, which a local model reads before it answers: on a Mac with a 27B model, about 1.5
+minutes for OpenCode's first turn. A server that reuses what it read of an unchanged prompt
+start (prefix caching: MLX servers, vLLM, llama.cpp) answers later turns in seconds, 7 s in
+the same run. OpenCode sends less than Claude Code and asks for no thinking; for headless runs,
+[smaller requests](headless.md#smaller-requests) cut Claude Code's to about 1k tokens.
+
 ## What it costs
 
 A server on this machine runs with your privileges, outside luoto's VM: code in the env can

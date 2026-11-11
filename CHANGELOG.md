@@ -33,6 +33,11 @@
   only the server's port and model endpoints and adds its token; OpenCode switches in its
   model picker, Codex per start (`codex --profile <server>`). A config that can't work is
   refused at `up` and `luoto edit`.
+- **Agent arguments:** `args` (every start through luoto) and `headless_args` (`luoto run`
+  only) under `[agents.<agent>]`, in the env, `config.toml` or a team's `luoto.toml`, where
+  the agent's command line takes options; `["--bare", "--tools", "Bash,Read,Edit"]` cuts
+  Claude Code's request from 54 KB to 4 KB for a model of yours. A `luoto.toml` can't set the
+  agent's prompt-skipping flags.
 - **Agent installs:** an installer piped from a download (`curl … | bash`) fails the install
   when the download does, instead of the agent passing as installed with nothing there.
   OpenCode installs again: its installer moved to raw.githubusercontent.com and asks the npm
