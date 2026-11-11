@@ -42,7 +42,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   (GitHub installation tokens restricted to the env's repositories and permissions). On a
   credentialed host the gate removes any credential the client sent before injecting its own,
   so a dependency carrying an attacker's token cannot use it, and it injects only over TLS:
-  plain HTTP to a credentialed host is refused.
+  plain HTTP to a credentialed host is refused. A credential goes only on the methods and
+  paths its own rules allow: a wider rule (one you add, an approved request) lets more
+  requests through, but they go without it.
 - **GitHub writes.** Pushes only to the granted repositories, never to protected branches
   (default `main`, `master`), tags or branch deletions. REST writes are an allowlist — pull
   requests, reviews, issues and comments — so the contents, git-data, ref, merge, release and

@@ -10,6 +10,10 @@
   podman prints while it pulls, builds or starts the VM is kept off the terminal as
   installers' is (`o`, `-v`, or its last lines on a failure). Questions and `op` sign-ins
   pause it.
+- **Credentials stay on their rules:** the GitHub, Azure DevOps and git tokens, and a read-only
+  `[credentials.custom]`, go only on the methods and paths their own rules allow. A wider rule
+  (`luoto allow '*' --write`, an approved request) no longer carries them further, to a merge
+  or a file or ref write past the push guard: those requests go without the token.
 - **Subnets:** a release's envs take 10.213.1–127 and a source build's (`luoto-dev`)
   10.213.128–254, with the user ID ranges that go with them, so an env imported from one into
   the other never shares either. When another network holds an env's subnet, `up` names it

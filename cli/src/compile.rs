@@ -497,7 +497,11 @@ fn compile_custom(b: &mut Builder, cname: &str, c: &CustomCred) -> Result<()> {
         binding,
         host: host.clone(),
         paths: c.paths.clone(),
-        methods: Vec::new(),
+        methods: if c.write {
+            Vec::new()
+        } else {
+            methods(READ_METHODS)
+        },
         place: Placement::Header {
             name: c.header.to_ascii_lowercase(),
             format: c.format.clone(),
@@ -897,33 +901,45 @@ fn compile_github_one(
             .iter()
             .flat_map(|(o, r)| github_git_paths(o, r, write))
             .collect();
-        let mut api_paths: Vec<String> = list
+        let api_paths: Vec<String> = list
             .iter()
             .flat_map(|(o, r)| [format!("/repos/{o}/{r}"), format!("/repos/{o}/{r}/**")])
             .collect();
-        if graphql && (write || repos.is_empty()) {
-            api_paths.insert(0, "/graphql".to_string());
-        }
         // GitHub reads owner and repo in any case, and a remote keeps the case it was cloned
-        // with.
+        // with. Each injection goes only on what the rules below allow, so a wider rule (one
+        // the user adds, an approved request) never carries the token further: to a merge, a
+        // ref or file write that would pass the push guard by.
+        let api = |paths: Vec<String>, ms: &[&str]| Injection {
+            binding: binding.clone(),
+            host: forges::GITHUB_API.into(),
+            paths,
+            methods: methods(ms),
+            place: Placement::Header {
+                name: "authorization".into(),
+                format: "Bearer {secret}".into(),
+            },
+            ignore_case: true,
+        };
+        b.injections.push(api(api_paths, READ_METHODS));
+        if write {
+            let writes = list
+                .iter()
+                .flat_map(|(o, r)| github_rest_writes(o, r))
+                .collect();
+            b.injections.push(api(writes, &["POST", "PATCH"]));
+        }
+        // GraphQL reads are POSTs too; the guard decides which mutations pass.
+        if graphql && (write || repos.is_empty()) {
+            b.injections
+                .push(api(vec!["/graphql".into()], &["GET", "POST"]));
+        }
         b.injections.push(Injection {
             binding: binding.clone(),
             host: forges::GITHUB.into(),
             paths: paths.clone(),
-            methods: Vec::new(),
+            methods: methods(&["GET", "POST"]),
             place: Placement::Basic {
                 username: "x-access-token".into(),
-            },
-            ignore_case: true,
-        });
-        b.injections.push(Injection {
-            binding,
-            host: forges::GITHUB_API.into(),
-            paths: api_paths,
-            methods: Vec::new(),
-            place: Placement::Header {
-                name: "authorization".into(),
-                format: "Bearer {secret}".into(),
             },
             ignore_case: true,
         });
@@ -950,22 +966,7 @@ fn compile_github_one(
         Vec::new()
     };
     for (o, r) in &repos {
-        for path in [
-            "pulls",
-            "pulls/*",
-            "pulls/*/comments",
-            "pulls/*/comments/*/replies",
-            "pulls/*/reviews",
-            "pulls/*/requested_reviewers",
-            "pulls/comments/*",
-            "issues",
-            "issues/*",
-            "issues/*/comments",
-            "issues/*/labels",
-            "issues/comments/*",
-        ] {
-            write_paths.push(format!("/repos/{o}/{r}/{path}"));
-        }
+        write_paths.extend(github_rest_writes(o, r));
     }
     if !write_paths.is_empty() {
         b.rule(
@@ -981,6 +982,31 @@ fn compile_github_one(
         );
     }
     Ok(repos.iter().map(|(o, r)| format!("{o}/{r}")).collect())
+}
+
+/// The REST paths of `o/r` the env may write: pull requests, reviews and issues.
+fn github_rest_writes(o: &str, r: &str) -> Vec<String> {
+    [
+        "pulls",
+        "pulls/*",
+        "pulls/*/comments",
+        "pulls/*/comments/*/replies",
+        "pulls/*/reviews",
+        "pulls/*/requested_reviewers",
+        "pulls/comments/*",
+        "issues",
+        "issues/*",
+        "issues/*/comments",
+        "issues/*/labels",
+        "issues/comments/*",
+    ]
+    .iter()
+    .map(|path| format!("/repos/{o}/{r}/{path}"))
+    .collect()
+}
+
+fn methods(ms: &[&str]) -> Vec<String> {
+    ms.iter().map(|m| m.to_string()).collect()
 }
 
 /// `[[credentials.git]]`, git over HTTPS on any other host: its token as basic auth on the
@@ -1083,7 +1109,7 @@ fn compile_git(
                 binding: id.clone(),
                 host: host.clone(),
                 paths: paths.clone(),
-                methods: Vec::new(),
+                methods: methods(&["GET", "POST"]),
                 place: Placement::Basic {
                     username: c.username.clone(),
                 },
@@ -1371,7 +1397,7 @@ fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Ve
         binding: "azure_devops".into(),
         host: azure::HOST.into(),
         paths: paths.clone(),
-        methods: Vec::new(),
+        methods: methods(&["GET", "POST"]),
         place: Placement::Basic {
             username: String::new(),
         },
@@ -1410,27 +1436,28 @@ fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Ve
         patches.push(format!("{base}/pullrequests/*"));
     }
     if !writable.is_empty() {
-        b.injections.push(Injection {
-            binding: "azure_devops".into(),
-            host: azure::HOST.into(),
-            paths: reads.iter().chain(&posts).cloned().collect(),
-            methods: Vec::new(),
-            place: Placement::Basic {
-                username: String::new(),
-            },
-            ignore_case: true,
-        });
-        for (id, methods, paths) in [
+        // Each method's token on its rule's paths alone (see compile_github_one).
+        for (id, ms, paths) in [
             ("azure-api-read", vec!["GET"], &reads),
             ("azure-api-post", vec!["POST"], &posts),
             ("azure-api-patch", vec!["PATCH"], &patches),
         ] {
+            b.injections.push(Injection {
+                binding: "azure_devops".into(),
+                host: azure::HOST.into(),
+                paths: paths.clone(),
+                methods: methods(&ms),
+                place: Placement::Basic {
+                    username: String::new(),
+                },
+                ignore_case: true,
+            });
             b.rule(
                 id.into(),
                 "azure_devops",
                 Rule {
                     host: azure::HOST.into(),
-                    access: Access::Methods(methods.iter().map(|m| m.to_string()).collect()),
+                    access: Access::Methods(methods(&ms)),
                     paths: paths.clone(),
                     ignore_case: true,
                     ..Default::default()
@@ -1802,6 +1829,94 @@ github_port = 443
         ] {
             assert!(compile("t", &cfg(bad), GATE, &[]).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_wider_rule_never_carries_a_token_further() {
+        let c = compile(
+            "t",
+            &cfg(r#"
+presets = ["github"]
+[credentials.github]
+token = "op://v/gh/token"
+repos = ["acme/api"]
+[credentials.azure_devops]
+token = "op://v/ado/token"
+repos = ["org/proj/repo"]
+[credentials.custom.svc]
+host = "svc.example.com"
+secret = "op://v/svc/key"
+"#),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        let p = &c.policy;
+        let carries = |m: &str, h: &str, path: &str| !p.injections_for(m, h, path).is_empty();
+        // What the env's rules allow carries it...
+        assert!(carries(
+            "GET",
+            "api.github.com",
+            "/repos/acme/api/contents/a"
+        ));
+        assert!(carries("POST", "api.github.com", "/repos/acme/api/pulls"));
+        assert!(carries(
+            "PATCH",
+            "api.github.com",
+            "/repos/acme/api/issues/3"
+        ));
+        assert!(carries("POST", "api.github.com", "/graphql"));
+        assert!(carries(
+            "POST",
+            "github.com",
+            "/acme/api.git/git-receive-pack"
+        ));
+        // ...what a `*` write rule would add goes without it.
+        assert!(!carries(
+            "PUT",
+            "api.github.com",
+            "/repos/acme/api/contents/a"
+        ));
+        assert!(!carries(
+            "PUT",
+            "api.github.com",
+            "/repos/acme/api/pulls/1/merge"
+        ));
+        assert!(!carries(
+            "PATCH",
+            "api.github.com",
+            "/repos/acme/api/git/refs/heads/main"
+        ));
+        assert!(!carries("DELETE", "api.github.com", "/repos/acme/api"));
+        assert!(!carries(
+            "PUT",
+            "github.com",
+            "/acme/api.git/info/lfs/objects/x"
+        ));
+        let ado = "/org/proj/_apis/git/repositories/repo";
+        assert!(carries(
+            "GET",
+            "dev.azure.com",
+            &format!("{ado}/pullrequests/1")
+        ));
+        assert!(carries(
+            "PATCH",
+            "dev.azure.com",
+            &format!("{ado}/pullrequests/1")
+        ));
+        assert!(carries(
+            "POST",
+            "dev.azure.com",
+            &format!("{ado}/pullrequests/1/threads")
+        ));
+        assert!(!carries("DELETE", "dev.azure.com", ado));
+        assert!(!carries(
+            "PATCH",
+            "dev.azure.com",
+            &format!("{ado}/pullrequests/1/threads")
+        ));
+        assert!(carries("GET", "svc.example.com", "/v1/items"));
+        assert!(!carries("POST", "svc.example.com", "/v1/items"));
     }
 
     #[test]
