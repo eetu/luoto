@@ -551,6 +551,9 @@ pub struct EnvConfig {
     pub mute: Vec<Mute>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub credentials: Credentials,
+    /// Model servers agents can use beside their providers (`model_servers.rs`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_servers: BTreeMap<String, ModelServer>,
     /// Secrets deliberately exposed to code in the sandbox as env vars.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sandbox_secrets: BTreeMap<String, String>,
@@ -607,6 +610,10 @@ pub struct AgentOpts {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The `[model_servers]` entry it starts on, `model` naming the model there; without it,
+    /// its provider. Each developer's own: a luoto.toml can't set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_server: Option<String>,
 }
 
 impl AgentOpts {
@@ -630,6 +637,31 @@ impl AgentOpts {
             self.effort = lower.effort.clone();
         }
     }
+}
+
+/// `[model_servers.<name>]`: a server with an OpenAI- and/or Anthropic-compatible API, on this
+/// machine, your network or the internet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelServer {
+    /// As this machine reaches it: `http://localhost:11434`, `https://models.example.com`.
+    pub url: String,
+    /// What it serves: `anthropic`, `openai`.
+    pub api: Vec<String>,
+    /// The model agents use there unless their own `model` names another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Its token, a secret reference; none for a server that takes none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// The header the token goes in: `authorization` (as `Bearer`, the default), or another
+    /// as it is (`x-api-key`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// Its host name is on a private network, as a self-hosted one is (an address of one
+    /// says so itself).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private: bool,
 }
 
 /// The agents of an env: `agents = ["claude"]`, or `[agents.claude]` tables with options
@@ -1364,6 +1396,88 @@ impl EnvFile {
     }
 
     /// Add `name` to the env's agents, in the form the file writes them.
+    /// Set (or, for `None`, remove) options of agent `name` under `[agents.<name>]`, the
+    /// agent listed if it wasn't; an `agents = [...]` list becomes tables for it.
+    pub fn set_agent_opts(&mut self, name: &str, opts: &[(&str, Option<&str>)]) -> Result<()> {
+        let path = self.path.display().to_string();
+        let listed: Option<Vec<String>> =
+            self.doc.get("agents").and_then(|i| i.as_array()).map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
+        if let Some(names) = listed {
+            let mut t = toml_edit::Table::new();
+            t.set_implicit(true);
+            for n in names {
+                t.insert(&n, toml_edit::table());
+            }
+            self.doc["agents"] = toml_edit::Item::Table(t);
+        }
+        let agents = self
+            .doc
+            .entry("agents")
+            .or_insert_with(|| {
+                let mut t = toml_edit::Table::new();
+                t.set_implicit(true);
+                toml_edit::Item::Table(t)
+            })
+            .as_table_like_mut()
+            .with_context(|| format!("`agents` in {path} is not a table"))?;
+        let table = agents
+            .entry(name)
+            .or_insert_with(toml_edit::table)
+            .as_table_like_mut()
+            .with_context(|| format!("`agents.{name}` in {path} is not a table"))?;
+        for (k, v) in opts {
+            match v {
+                Some(v) => {
+                    table.insert(k, toml_edit::value(*v));
+                }
+                None => {
+                    table.remove(k);
+                }
+            }
+        }
+        self.save()
+    }
+
+    /// `[model_servers.<name>]` as `server` has it, in place of what it had.
+    pub fn set_model_server(&mut self, name: &str, server: &ModelServer) -> Result<()> {
+        let path = self.path.display().to_string();
+        let servers = self
+            .doc
+            .entry("model_servers")
+            .or_insert_with(|| {
+                let mut t = toml_edit::Table::new();
+                t.set_implicit(true);
+                toml_edit::Item::Table(t)
+            })
+            .as_table_like_mut()
+            .with_context(|| format!("`model_servers` in {path} is not a table"))?;
+        let mut t = toml_edit::Table::new();
+        t.insert("url", toml_edit::value(server.url.as_str()));
+        let mut api = toml_edit::Array::new();
+        for a in &server.api {
+            api.push(a.as_str());
+        }
+        t.insert("api", toml_edit::value(api));
+        for (k, v) in [
+            ("model", &server.model),
+            ("token", &server.token),
+            ("header", &server.header),
+        ] {
+            if let Some(v) = v {
+                t.insert(k, toml_edit::value(v.as_str()));
+            }
+        }
+        if server.private {
+            t.insert("private", toml_edit::value(true));
+        }
+        servers.insert(name, toml_edit::Item::Table(t));
+        self.save()
+    }
+
     pub fn add_agent(&mut self, name: &str) -> Result<()> {
         let path = self.path.display().to_string();
         match self.doc.get_mut("agents") {
@@ -2000,6 +2114,7 @@ host = "telemetry.example"
             AgentOpts {
                 model: Some("sonnet".into()),
                 effort: Some("high".into()),
+                ..Default::default()
             },
         )]));
         own.layer_under(&Agents::from_names(["opencode".to_string()]));

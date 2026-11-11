@@ -44,3 +44,17 @@ values = ["low", "medium", "high", "xhigh"]
 [[rule]]
 host = "platform.claude.com"
 paths = ["/v1/oauth/hello"]
+
+# A model server it starts on (`[agents.claude] model_server`): one endpoint per session, so
+# its model aliases all name the server's model.
+[model_server]
+api = "anthropic"
+endpoint = "/v1/messages"
+default = [
+  { file = "~/.claude/settings.json", path = ["env", "ANTHROPIC_BASE_URL"], value = "{url}" },
+  { file = "~/.claude/settings.json", path = ["env", "ANTHROPIC_AUTH_TOKEN"], value = "{token}" },
+  { file = "~/.claude/settings.json", path = ["env", "ANTHROPIC_DEFAULT_OPUS_MODEL"], value = "{model}" },
+  { file = "~/.claude/settings.json", path = ["env", "ANTHROPIC_DEFAULT_SONNET_MODEL"], value = "{model}" },
+  { file = "~/.claude/settings.json", path = ["env", "ANTHROPIC_DEFAULT_HAIKU_MODEL"], value = "{model}" },
+  { file = "~/.claude/settings.json", path = ["model"], value = "{model}" },
+]

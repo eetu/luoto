@@ -189,6 +189,11 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   spent by anything in the sandbox. Anthropic's, OpenAI's and Gemini's file and batch
   endpoints are denied, and so are requests asking them to fetch a URL or call an MCP server
   (unless `server_tools = true`); the other providers' are not.
+- **Model servers on this machine** (`[model_servers]`). The gate lets the sandbox reach only
+  the server's port and model endpoints, but the server runs with your privileges outside the
+  VM, so its request parsing is in reach of code in the env; its token may go there over
+  plain HTTP, which never leaves the machine. A server that forwards to a cloud service sends
+  the prompts there.
 - **Azure write access.** With `access = "write"`, code in the sandbox can do on the listed
   subscriptions whatever the identity's roles allow: create resources that reach the internet,
   read keys that `listKeys` returns. The gate refuses, at every scope, the writes that give

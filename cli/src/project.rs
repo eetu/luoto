@@ -131,6 +131,13 @@ fn validate(p: &ProjectConfig) -> Result<()> {
         let Some(a) = profiles::agent(name) else {
             bail!("luoto.toml: unknown agent `{}`", display(name));
         };
+        if opts.model_server.is_some() {
+            bail!(
+                "luoto.toml: agents.{}: `model_server` is each developer's own choice, in their \
+                 env's file",
+                display(name)
+            );
+        }
         crate::compile::check_agent_opts(&a, name, opts).context("luoto.toml")?;
     }
     for r in &p.allow {
@@ -1092,6 +1099,15 @@ mod tests {
         assert!(parse("presets = [\"nope\"]").is_err());
         assert!(parse("image = \"x; rm\"").is_err());
         assert!(parse("[needs]\ngithub = [\"no-slash\"]").is_err());
+        // Which server an agent uses is each developer's own.
+        assert!(
+            parse("[model_servers.x]\nurl = \"http://localhost:1\"\napi = [\"openai\"]").is_err()
+        );
+        let err = parse("[agents.claude]\nmodel_server = \"x\"").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("each developer's own"),
+            "{err:#}"
+        );
     }
 
     #[test]

@@ -1071,18 +1071,7 @@ fn after_start(
     // Home files may have replaced an agent's config, and with it luoto's entries there; an
     // agent with options gets them on every start.
     let copied = personal::apply(ctx, env, &p.cfg, state.home(), quiet) > 0;
-    for (name, opts) in &p.cfg.agents.0 {
-        let Some(a) = luoto_shared::profiles::agent(name) else {
-            continue;
-        };
-        if (copied || !opts.is_empty())
-            && let Err(e) = crate::agents::register(ctx, env, &a, opts)
-        {
-            crate::progress::say(|| {
-                eprintln!("warning: {} not set up for luoto ({e:#})", a.description)
-            });
-        }
-    }
+    crate::agents::configure(ctx, env, &p.cfg, None, copied)?;
     if let Err(e) = ssh::authorize(ctx, env) {
         crate::progress::say(|| eprintln!("warning: SSH access not set up ({e:#})"));
     }

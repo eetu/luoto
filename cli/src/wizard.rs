@@ -395,6 +395,8 @@ impl Mode {
 #[derive(Debug, PartialEq)]
 pub enum Answer {
     Set(Auth),
+    /// A model server: its own questions follow (`model_servers::ask`).
+    ModelServer,
     /// The config stays as it is: "Later", Esc at the first question, or what it has, picked
     /// again.
     Leave,
@@ -404,9 +406,14 @@ pub enum Answer {
 #[derive(Clone, PartialEq)]
 enum Pick {
     Kind(String),
+    ModelServer,
     LoginInside,
     Later,
 }
+
+/// A model server, as the first menu offers it beside the cloud's ways in.
+const SERVER: &str = "A model server";
+const SERVER_SHORT: &str = "yours, on this or another machine";
 
 /// The login inside, as the kind menu offers it.
 const LOGIN: &str = "Log in inside the sandbox";
@@ -421,17 +428,24 @@ pub fn credential(
     a: &profiles::Agent,
     global: &GlobalConfig,
     have: &[Auth],
+    on_server: bool,
     mode: Mode,
 ) -> Result<Answer> {
-    credential_with(a, have, mode, &mut terminal_menu, &mut |ask: &SecretAsk| {
-        secret(ask, global)
-    })
+    credential_with(
+        a,
+        have,
+        on_server,
+        mode,
+        &mut terminal_menu,
+        &mut |ask: &SecretAsk| secret(ask, global),
+    )
 }
 
 /// [`credential`], its menus put through `menu` and where the secret is kept asked by `secret`.
 fn credential_with(
     a: &profiles::Agent,
     have: &[Auth],
+    on_server: bool,
     mode: Mode,
     menu: &mut impl Menu,
     secret: &mut impl FnMut(&SecretAsk) -> Result<Step<Secret>>,
@@ -454,9 +468,14 @@ fn credential_with(
         )
     };
     println!("{}", text::wrap(&intro, "", text::columns()));
-    let current = |n: &str| have.iter().find(|h| h.provider() == n);
+    // What the agent starts on is current: a model server, else the cloud's.
+    let current = |n: &str| {
+        have.iter()
+            .find(|h| h.provider() == n)
+            .filter(|_| !on_server)
+    };
     let several = providers.len() > 1;
-    let mut rows: Vec<(Option<String>, String, String)> = providers
+    let mut rows: Vec<(Option<Pick>, String, String)> = providers
         .iter()
         .map(|p| {
             let note = p.description[p.title().len()..]
@@ -469,33 +488,42 @@ fn credential_with(
                 ""
             };
             (
-                Some(p.name.clone()),
+                Some(Pick::Kind(p.name.clone())),
                 format!("{}{mark}", p.title()),
                 note.to_string(),
             )
         })
         .collect();
+    if a.model_server.is_some() {
+        let mark = if on_server { " (current)" } else { "" };
+        rows.push((
+            Some(Pick::ModelServer),
+            format!("{SERVER}{mark}"),
+            SERVER_SHORT.into(),
+        ));
+    }
     if mode == Mode::Missing {
         rows.push((None, LATER.into(), LATER_SHORT.into()));
     }
+    let mut at = rows
+        .iter()
+        .position(|(_, l, _)| l.ends_with(" (current)"))
+        .unwrap_or(0);
     let options = table(rows, text::columns());
     let question = format!("Which provider should {} use?", a.title());
     let first = menu_help(mode.esc());
-    let mut at = providers
-        .iter()
-        .position(|p| current(&p.name).is_some())
-        .unwrap_or(0);
     loop {
         let p = if several {
             match pick(menu, &question, &options, at, &first)? {
-                Step::Got((i, Some(n))) => {
+                Step::Got((i, Some(Pick::Kind(n)))) => {
                     at = i;
                     providers
                         .iter()
                         .find(|p| p.name == n)
                         .context("a provider of the agent")?
                 }
-                Step::Got((_, None)) | Step::Back => return Ok(Answer::Leave),
+                Step::Got((_, Some(Pick::ModelServer))) => return Ok(Answer::ModelServer),
+                Step::Got(_) | Step::Back => return Ok(Answer::Leave),
             }
         } else if let Some(p) = providers.first() {
             p
@@ -507,6 +535,7 @@ fn credential_with(
             provider: p,
             current: current(&p.name),
             first: !several,
+            on_server,
             mode,
         };
         match provider_auth(&how, menu, secret)? {
@@ -525,6 +554,8 @@ struct How<'a> {
     current: Option<&'a Auth>,
     /// Its first question is the step's first.
     first: bool,
+    /// The agent starts on a model server.
+    on_server: bool,
     mode: Mode,
 }
 
@@ -559,6 +590,14 @@ fn kind_rows(h: &How) -> Vec<(Pick, String, String)> {
             (pick, label, p.auth[k].short.clone())
         })
         .collect();
+    if h.first && h.agent.model_server.is_some() {
+        let mark = if h.on_server { " (current)" } else { "" };
+        rows.push((
+            Pick::ModelServer,
+            format!("{SERVER}{mark}"),
+            SERVER_SHORT.into(),
+        ));
+    }
     if !p.login_hosts.is_empty() {
         let label = format!("{LOGIN}{}", mark(&Pick::LoginInside));
         rows.push((Pick::LoginInside, label, LOGIN_SHORT.into()));
@@ -609,6 +648,7 @@ fn provider_auth(
                     at = i;
                     match pick {
                         Pick::Later => return Ok(Step::Got(Answer::Leave)),
+                        Pick::ModelServer => return Ok(Step::Got(Answer::ModelServer)),
                         Pick::LoginInside => {
                             return Ok(Step::Got(changed(h.current, inside)));
                         }
@@ -1414,6 +1454,7 @@ mod tests {
         let answer = credential_with(
             &a,
             have,
+            false,
             mode,
             &mut |question: &str, options: Vec<Choice<usize>>, at: usize, help: &str| {
                 menus.push(Asked {
@@ -1487,6 +1528,7 @@ mod tests {
             [
                 "Claude subscription token (recommended)  `claude setup-token` on this machine",
                 "Anthropic API key                        billed per use (platform.claude.com)",
+                "A model server                           yours, on this or another machine",
                 "Log in inside the sandbox                weaker: code in the env can read it",
                 "Later                                    the agent can't connect without one",
             ]

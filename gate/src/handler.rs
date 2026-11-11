@@ -381,8 +381,13 @@ async fn handle_inner(
             };
             return deny(ev, reason);
         }
-        // Over plain HTTP the credential would cross the network readable.
-        if !target.tls && test_server(&state, &target.host).is_none() {
+        // Over plain HTTP the credential would cross the network readable; to this machine it
+        // goes nowhere.
+        let this_machine = policy
+            .plain_http_credentials
+            .iter()
+            .any(|h| luoto_shared::host::host_matches(h, &target.host));
+        if !target.tls && !this_machine && test_server(&state, &target.host).is_none() {
             let reason = DenyReason::Guard {
                 reason: format!("{} gets credentials only over HTTPS", target.host),
             };

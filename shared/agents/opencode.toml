@@ -23,3 +23,20 @@ host = "models.dev"
 
 [[rule]]
 host = "models.opencode.ai"
+
+# Model servers: a provider each beside the cloud ones, all in its model picker (OpenCode
+# bundles the OpenAI-compatible SDK); the one it starts on gives the default model.
+[model_server]
+api = "openai"
+endpoint = "/v1/chat/completions"
+switch = "its model picker (`/models`), the cloud's models beside them"
+each = [
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "npm"], value = "@ai-sdk/openai-compatible" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "name"], value = "{name}" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "options", "baseURL"], value = "{url}/v1" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "options", "apiKey"], value = "{token}" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "models", "{model}"], value = {} },
+]
+default = [
+  { file = "~/.config/opencode/opencode.json", path = ["model"], value = "{name}/{model}" },
+]

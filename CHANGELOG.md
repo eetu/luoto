@@ -22,6 +22,15 @@
   podman prints while it pulls, builds or starts the VM is kept off the terminal as
   installers' is (`o`, `-v`, or its last lines on a failure). Questions and `op` sign-ins
   pause it.
+- **Model servers:** Claude Code, Codex and OpenCode can use a server of yours with an
+  OpenAI- or Anthropic-compatible API (Ollama, LM Studio, MTPLX, llama.cpp, vLLM, LiteLLM, a
+  hosted one), on this machine, your network or the internet, beside their cloud provider:
+  `[model_servers.<name>]` with `url`, `api` and an optional `token`, and `model_server` under
+  `[agents.<agent>]` for the one it starts on. "A model server" in the credential questions
+  finds those answering on this machine's usual ports and lists their models. The gate opens
+  only the server's port and model endpoints and adds its token; OpenCode switches in its
+  model picker, Codex per start (`codex --profile <server>`). A config that can't work is
+  refused at `up` and `luoto edit`.
 - **Credentials stay on their rules:** the GitHub, Azure DevOps and git tokens, and a read-only
   `[credentials.custom]`, go only on the methods and paths their own rules allow. A wider rule
   (`luoto allow '*' --write`, an approved request) no longer carries them further, to a merge

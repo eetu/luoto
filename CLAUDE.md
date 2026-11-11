@@ -87,6 +87,10 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   a file in the old format. With the first step, `luoto doctor` reports files in an older
   format and `--fix` rewrites them (a copy kept); a `luoto.toml` is only shown as a diff for
   the team to commit. Unknown keys stay errors.
+- `model_servers.rs` owns `[model_servers]`: a server's exact host and port, only the model
+  endpoints of its APIs, its token added by the gate (over plain HTTP only to this machine,
+  `Policy.plain_http_credentials`). How an agent uses one is data (`[model_server]` in
+  `shared/agents`); `agents::configure` writes it, and removes what a gone server had.
 - `personal.rs` data only flows host → sandbox, on every `up`.
 - `archive.rs` is the file `luoto export` writes and `luoto import` reads (`transfer.rs`):
   untrusted input, so every entry is decoded, checked and written anew. Volume contents move

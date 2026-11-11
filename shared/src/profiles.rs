@@ -207,6 +207,32 @@ pub struct Agent {
     /// config: written at `up`, under anything the user chooses in a session.
     #[serde(default)]
     pub settings: BTreeMap<String, AgentSetting>,
+    /// How it uses a model server (`[model_servers]`), if it can.
+    #[serde(default)]
+    pub model_server: Option<AgentModelServer>,
+}
+
+/// How an agent uses a model server: the API it speaks there, and what luoto writes in its
+/// config with `{name}` (the server's), `{url}` (the server as the sandbox reaches it),
+/// `{model}` and `{token}` (a placeholder the gate replaces) filled in. An entry that names
+/// `{model}` is left out where no model is known.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentModelServer {
+    /// `anthropic` or `openai`.
+    pub api: String,
+    /// The endpoint it calls (`/v1/responses`): a server must have it.
+    pub endpoint: String,
+    /// For every server of the env that serves `api`: what the agent can pick in a session.
+    #[serde(default)]
+    pub each: Vec<JsonSet>,
+    /// For the server the agent starts on (`[agents.<agent>] model_server`).
+    #[serde(default)]
+    pub default: Vec<JsonSet>,
+    /// How a session gets another of the env's models, `{name}` a server's: `codex --profile
+    /// {name}`. None: one per session, the one it starts on.
+    #[serde(default)]
+    pub switch: Option<String>,
 }
 
 impl Agent {

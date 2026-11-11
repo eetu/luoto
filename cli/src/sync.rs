@@ -139,6 +139,8 @@ pub fn reapply(ctx: &Ctx, env: &str) -> Result<Option<Plan>> {
     if applied.trim() != runtime_env_sum(&p.compiled) {
         write_runtime_env(ctx, env, &p.compiled)?;
     }
+    // The agents' options and model servers, as the config has them now.
+    crate::agents::configure(ctx, env, &p.cfg, None, false)?;
     Ok(Some(p))
 }
 

@@ -13,13 +13,14 @@ use chrono::TimeDelta;
 use luoto_shared::policy::Rule;
 use luoto_shared::profiles;
 
-use crate::config::{EnvConfig, EnvFile, ProviderValue};
+use crate::config::{EnvConfig, EnvFile, ModelServer, ProviderValue};
 use crate::connect::exec_login;
 use crate::env::{self, Ctx, UID};
 use crate::logs::InstallLog;
+use crate::state::EnvState;
 use crate::text::sh_quote;
 use crate::wizard::{Answer, Mode};
-use crate::{events, names, secrets, sync};
+use crate::{events, model_servers, names, secrets, sync};
 
 pub fn list() -> Result<ExitCode> {
     println!("agents:");
@@ -122,13 +123,13 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
             );
         }
     }
-    let opts = env::layered(ctx, env_name)?
-        .agents
-        .get(agent)
-        .cloned()
-        .unwrap_or_default();
-    register(ctx, env_name, &a, &opts)?;
-    Ok(())
+    configure(
+        ctx,
+        env_name,
+        &env::layered(ctx, env_name)?,
+        Some(agent),
+        true,
+    )
 }
 
 /// How an agent's model API authenticates in an env.
@@ -195,10 +196,10 @@ pub fn current(cfg: &EnvConfig, a: &profiles::Agent) -> Option<Auth> {
     configured(cfg, a).into_iter().next()
 }
 
-/// Whether the env says how agent `a` authenticates. Agents without providers (local models)
-/// need nothing.
+/// Whether agent `a` has a way to a model in the env: a credential, a model server it can
+/// use, or no provider to need one.
 pub fn has_credential(cfg: &EnvConfig, a: &profiles::Agent) -> bool {
-    a.providers.is_empty() || current(cfg, a).is_some()
+    a.providers.is_empty() || current(cfg, a).is_some() || !usable_servers(cfg, a).is_empty()
 }
 
 /// Whether every way agent `a` has in is a login inside: nothing for the gate to add.
@@ -227,18 +228,28 @@ fn mark_settled(env_name: &str, name: &str) {
 
 /// End a credential step for agent `name` with its summary: what the env has now (`have`,
 /// [`configured`]) and the command that changes it.
-pub fn settle(env_name: &str, name: &str, a: &profiles::Agent, have: &[Auth]) {
-    println!("{}", summary(env_name, name, a, have));
+pub fn settle(env_name: &str, name: &str, a: &profiles::Agent, cfg: &EnvConfig) {
+    println!("{}", summary(env_name, name, a, cfg));
     mark_settled(env_name, name);
 }
 
 /// What [`settle`] prints.
-fn summary(env_name: &str, name: &str, a: &profiles::Agent, have: &[Auth]) -> String {
+fn summary(env_name: &str, name: &str, a: &profiles::Agent, cfg: &EnvConfig) -> String {
+    let have = configured(cfg, a);
+    let start = starts_on(cfg, a);
     let mut rows: Vec<(&str, String)> = Vec::new();
-    if have.is_empty() {
+    if let Some((server, s)) = start {
+        let model = cfg
+            .agents
+            .get(name)
+            .and_then(|o| model_servers::model_for(o, server, s))
+            .unwrap_or("?");
+        rows.push(("starts on", format!("model server `{server}` ({})", s.url)));
+        rows.push(("model", model.to_string()));
+    } else if have.is_empty() {
         rows.push(("credential", "none yet".into()));
     }
-    for auth in have {
+    for auth in &have {
         let p = profiles::provider(auth.provider());
         match auth {
             Auth::Kind {
@@ -263,6 +274,19 @@ fn summary(env_name: &str, name: &str, a: &profiles::Agent, have: &[Auth]) -> St
                 }
             }
         }
+    }
+    // Where a session can switch: the cloud and the servers, more than one of them.
+    let usable = usable_servers(cfg, a);
+    if let Some(switch) = a.model_server.as_ref().and_then(|m| m.switch.as_ref())
+        && usable.len() + usize::from(!have.is_empty()) > 1
+    {
+        let other = usable
+            .iter()
+            .find(|n| Some(**n) != start.map(|(n, _)| n))
+            .or(usable.first())
+            .copied()
+            .unwrap_or_default();
+        rows.push(("switch", switch.replace("{name}", other)));
     }
     let change = format!("luoto agent auth -e {env_name} {name}");
     if !login_only(a) {
@@ -412,23 +436,50 @@ fn credentials(ctx: &Ctx, env_name: &str, agents: &[String], interactive: bool) 
 /// Ask how agent `name` authenticates and write the answer into the env's config; in `Change`
 /// mode (`agent auth`) each question starts from what the config has, and Esc at the first
 /// keeps it. Whether anything was written.
+///
+/// The first menu says what the agent starts on: a cloud credential (a model server it had
+/// stays, for a session to switch to), or a model server (the credential stays).
 fn ask(ctx: &Ctx, env_name: &str, name: &str, a: &profiles::Agent, mode: Mode) -> Result<bool> {
-    let mut f = EnvFile::load(&ctx.paths, env_name)?;
-    let have = configured(&f.cfg, a);
-    match crate::wizard::credential(a, &ctx.global, &have, mode)? {
-        Answer::Set(auth) => {
-            let (key, value) = auth.entry();
-            f.set_provider_kind(auth.provider(), key, &value)?;
-            settle(env_name, name, a, &configured(&f.cfg, a));
-            Ok(true)
-        }
-        Answer::Leave if mode == Mode::Change => {
-            println!("unchanged");
-            Ok(false)
-        }
-        Answer::Leave => {
-            settle(env_name, name, a, &have);
-            Ok(false)
+    loop {
+        let mut f = EnvFile::load(&ctx.paths, env_name)?;
+        let have = configured(&f.cfg, a);
+        let on_server = starts_on(&f.cfg, a).is_some();
+        match crate::wizard::credential(a, &ctx.global, &have, on_server, mode)? {
+            Answer::Set(auth) => {
+                let (key, value) = auth.entry();
+                f.set_provider_kind(auth.provider(), key, &value)?;
+                // Its model named one on the server.
+                if on_server {
+                    f.set_agent_opts(name, &[("model_server", None), ("model", None)])?;
+                }
+                settle(env_name, name, a, &f.cfg);
+                return Ok(true);
+            }
+            Answer::ModelServer => match model_servers::ask(&ctx.global, a, &f.cfg)? {
+                crate::wizard::Step::Got(p) => {
+                    if f.cfg.model_servers.get(&p.name) != Some(&p.server) {
+                        f.set_model_server(&p.name, &p.server)?;
+                    }
+                    f.set_agent_opts(
+                        name,
+                        &[
+                            ("model_server", Some(p.name.as_str())),
+                            ("model", Some(p.model.as_str())),
+                        ],
+                    )?;
+                    settle(env_name, name, a, &f.cfg);
+                    return Ok(true);
+                }
+                crate::wizard::Step::Back => {}
+            },
+            Answer::Leave if mode == Mode::Change => {
+                println!("unchanged");
+                return Ok(false);
+            }
+            Answer::Leave => {
+                settle(env_name, name, a, &f.cfg);
+                return Ok(false);
+            }
         }
     }
 }
@@ -450,7 +501,7 @@ fn login_inside(ctx: &Ctx, env_name: &str, name: &str, a: &profiles::Agent) -> R
     let (key, value) = auth.entry();
     let mut f = EnvFile::load(&ctx.paths, env_name)?;
     f.set_provider_kind(provider, key, &value)?;
-    settle(env_name, name, a, &configured(&f.cfg, a));
+    settle(env_name, name, a, &f.cfg);
     Ok(true)
 }
 
@@ -546,11 +597,13 @@ fn ready(ctx: &Ctx, env_name: &str) -> Result<()> {
 /// Link the luoto briefing into the agent's instructions and register the sandbox MCP server.
 /// A merge into the agent's own config files, so `up` repeats it after copying home files
 /// that may have replaced those files.
-pub fn register(
+/// Set agent `a` up in the env: its MCP server, briefing and first-run answers, and `sets`
+/// ([`settings`]).
+fn register(
     ctx: &Ctx,
     env_name: &str,
     a: &profiles::Agent,
-    opts: &crate::config::AgentOpts,
+    sets: &[profiles::JsonSet],
 ) -> Result<()> {
     let mut args = vec![
         "exec".to_string(),
@@ -572,19 +625,106 @@ pub fn register(
         args.push("--set".into());
         args.push(serde_json::to_string(set)?);
     }
-    for (key, value) in opts.values() {
-        if let Some(s) = a.settings.get(key) {
-            let set = profiles::JsonSet {
-                file: s.file.clone(),
-                path: s.path.clone(),
-                value: serde_json::Value::String(value.to_string()),
-            };
-            args.push("--set".into());
-            args.push(serde_json::to_string(&set)?);
-        }
+    for set in sets {
+        args.push("--set".into());
+        args.push(serde_json::to_string(set)?);
     }
     ctx.rt.run(&args)?;
     Ok(())
+}
+
+/// What luoto writes in agent `a`'s config for the env `cfg`: the removals of what it wrote
+/// `before` for model servers it has no more, its options (`model`, `effort`), then its model
+/// servers' entries; with what it has written of those then.
+pub fn settings(
+    a: &profiles::Agent,
+    opts: &crate::config::AgentOpts,
+    cfg: &EnvConfig,
+    before: &model_servers::Written,
+) -> (Vec<profiles::JsonSet>, model_servers::Written) {
+    let s = match &a.model_server {
+        Some(m) => model_servers::sets(m, opts, &cfg.model_servers, before),
+        None => model_servers::Sets {
+            removes: Vec::new(),
+            adds: Vec::new(),
+            now: model_servers::Written::default(),
+        },
+    };
+    let options = opts.values().into_iter().filter_map(|(key, value)| {
+        let s = a.settings.get(key)?;
+        Some(profiles::JsonSet {
+            file: s.file.clone(),
+            path: s.path.clone(),
+            value: serde_json::Value::String(value.to_string()),
+        })
+    });
+    let sets = s.removes.into_iter().chain(options).chain(s.adds).collect();
+    (sets, s.now)
+}
+
+/// Write [`settings`] into the config of each agent `cfg` lists (`only` that one) in the
+/// running env; `all` sets up those with nothing to write too (home files may have replaced
+/// their config). An agent that fails is a warning.
+pub fn configure(
+    ctx: &Ctx,
+    env_name: &str,
+    cfg: &EnvConfig,
+    only: Option<&str>,
+    all: bool,
+) -> Result<()> {
+    let mut written = EnvState::load(&ctx.paths, env_name)?
+        .map(|s| s.agent_servers)
+        .unwrap_or_default();
+    for (name, opts) in &cfg.agents.0 {
+        if only.is_some_and(|o| o != name) {
+            continue;
+        }
+        let Some(a) = profiles::agent(name) else {
+            continue;
+        };
+        let before = written.get(name).cloned().unwrap_or_default();
+        let (sets, now) = settings(&a, opts, cfg, &before);
+        if sets.is_empty() && !all {
+            continue;
+        }
+        if let Err(e) = register(ctx, env_name, &a, &sets) {
+            crate::progress::say(|| {
+                eprintln!("warning: {} not set up for luoto ({e:#})", a.description)
+            });
+            continue;
+        }
+        if now.is_empty() {
+            written.remove(name);
+        } else {
+            written.insert(name.clone(), now);
+        }
+    }
+    EnvState::update(&ctx.paths, env_name, |s| s.agent_servers = written)
+}
+
+/// The model server agent `a` starts on in `cfg`, by name.
+pub fn starts_on<'a>(
+    cfg: &'a EnvConfig,
+    a: &profiles::Agent,
+) -> Option<(&'a str, &'a ModelServer)> {
+    let name = cfg.agents.get(&a.name)?.model_server.as_deref()?;
+    Some((name, cfg.model_servers.get(name)?))
+}
+
+/// The env's model servers agent `a` can use: the one it starts on, or one a session can
+/// switch to.
+pub fn usable_servers<'a>(cfg: &'a EnvConfig, a: &profiles::Agent) -> Vec<&'a str> {
+    let Some(m) = &a.model_server else {
+        return Vec::new();
+    };
+    let start = starts_on(cfg, a).map(|(n, _)| n);
+    cfg.model_servers
+        .iter()
+        .filter(|(n, s)| {
+            s.api.contains(&m.api) && (Some(n.as_str()) == start || m.switch.is_some())
+        })
+        .map(|(n, _)| n.as_str())
+        .collect()
 }
 
 /// List `agent` in the env's config, unless the config (or the accepted luoto.toml) does.
@@ -722,9 +862,10 @@ pub fn auth(env_name: &str, agent: &str) -> Result<ExitCode> {
         println!("{} needs no credential", a.title());
         return Ok(ExitCode::SUCCESS);
     }
-    let have = configured(&EnvFile::load(&ctx.paths, env_name)?.cfg, &a);
+    let own = EnvFile::load(&ctx.paths, env_name)?.cfg;
+    let have = configured(&own, &a);
     if login_only(&a) && !have.is_empty() {
-        println!("{}", summary(env_name, agent, &a, &have));
+        println!("{}", summary(env_name, agent, &a, &own));
         println!(
             "nothing else to choose: {} signs in inside the env",
             a.title()
@@ -1201,53 +1342,92 @@ mod tests {
     #[test]
     fn a_credential_step_ends_with_its_summary() {
         let claude = agent("claude");
-        let kind = Auth::Kind {
-            provider: "anthropic".into(),
-            kind: "oauth_token".into(),
-            reference: "keyring:luoto/anthropic.oauth_token".into(),
-        };
+        let kind = "[credentials.anthropic]\noauth_token = \"keyring:luoto/anthropic.oauth_token\"";
         assert_eq!(
-            summary("web", "claude", &claude, std::slice::from_ref(&kind)),
+            summary("web", "claude", &claude, &cfg(kind)),
             "Claude Code\n  \
              credential   Claude subscription token = keyring:luoto/anthropic.oauth_token\n  \
              change it    luoto agent auth -e web claude"
         );
-        let inside = Auth::LoginInside {
-            provider: "anthropic".into(),
-        };
         assert_eq!(
-            summary("web", "claude", &claude, &[inside]),
+            summary(
+                "web",
+                "claude",
+                &claude,
+                &cfg("[credentials.anthropic]\nlogin_inside = true")
+            ),
             "Claude Code\n  \
              credential   log in inside the sandbox (code in the env can read the session)\n  \
              sign in      run `claude` in `luoto shell` and log in (the session has full scopes)\n  \
              change it    luoto agent auth -e web claude"
         );
         assert_eq!(
-            summary("web", "claude", &claude, &[]),
+            summary("web", "claude", &claude, &cfg("")),
             "Claude Code\n  credential   none yet\n  change it    luoto agent auth -e web claude"
         );
         // Antigravity has no credential the gate could add: nothing to change it to.
-        let agy = Auth::LoginInside {
-            provider: "antigravity".into(),
-        };
-        assert!(!summary("web", "agy", &agent("agy"), &[agy]).contains("change it"));
+        let agy = cfg("[credentials.antigravity]\nlogin_inside = true");
+        assert!(!summary("web", "agy", &agent("agy"), &agy).contains("change it"));
         // An agent with several providers can have one more.
-        let key = Auth::Kind {
-            provider: "openai".into(),
-            kind: "api_key".into(),
-            reference: "env:KEY".into(),
-        };
+        let key = cfg("[credentials.openai]\napi_key = \"env:KEY\"");
         assert_eq!(
-            summary("web", "opencode", &agent("opencode"), &[key]),
+            summary("web", "opencode", &agent("opencode"), &key),
             "OpenCode\n  \
              credential    OpenAI API key = env:KEY\n  \
              change it     luoto agent auth -e web opencode\n  \
              add another   luoto agent auth -e web opencode"
         );
-        for (name, have) in [("claude", vec![kind]), ("agy", vec![])] {
-            let s = summary("a-long-env-name", name, &agent(name), &have);
+        for (name, have) in [("claude", kind), ("agy", "")] {
+            let s = summary("a-long-env-name", name, &agent(name), &cfg(have));
             assert!(s.lines().all(|l| l.chars().count() < 80), "{s}");
         }
+    }
+
+    #[test]
+    fn a_model_server_beside_the_cloud_is_where_it_starts_and_a_switch() {
+        let both = cfg(r#"
+[credentials.openai]
+api_key = "env:KEY"
+[model_servers.mtplx]
+url = "http://localhost:8000"
+api = ["openai", "anthropic"]
+[agents.codex]
+model_server = "mtplx"
+model = "qwen3"
+"#);
+        let codex = agent("codex");
+        assert!(has_credential(&both, &codex));
+        let s = summary("web", "codex", &codex, &both);
+        let row = |key: &str| {
+            s.lines()
+                .find_map(|l| l.trim().strip_prefix(key).map(str::trim))
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(
+            row("starts on"),
+            "model server `mtplx` (http://localhost:8000)"
+        );
+        assert_eq!(row("model"), "qwen3");
+        assert_eq!(row("credential"), "OpenAI API key = env:KEY");
+        assert_eq!(
+            row("switch"),
+            "`codex --profile mtplx`; the cloud: `codex --profile cloud`"
+        );
+        assert!(s.lines().all(|l| l.chars().count() < 80), "{s}");
+        // Claude Code has one endpoint a session: a server it doesn't start on is no way in.
+        let claude = agent("claude");
+        assert!(!has_credential(&both, &claude));
+        let only = cfg(r#"
+[model_servers.box]
+url = "https://box.lan"
+api = ["anthropic"]
+model = "q"
+[agents.claude]
+model_server = "box"
+"#);
+        assert!(has_credential(&only, &claude));
+        assert!(!summary("web", "claude", &claude, &only).contains("none yet"));
     }
 
     #[test]

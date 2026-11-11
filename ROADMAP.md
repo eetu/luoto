@@ -56,7 +56,7 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   toolchain.
 - **Containers in an env** (testcontainers, compose), after checking what gVisor allows.
 - **`devcontainer.json` read at `init`:** image, features, `postCreateCommand`, `forwardPorts`.
-- **Model gateways:** Bedrock, Vertex, Azure OpenAI, a base URL (LiteLLM), a local Ollama.
+- **Model gateways:** Bedrock, Vertex, Azure OpenAI.
 - **Your MCP servers** with their tokens in the vault (`[mcp.<name>]`).
 - **Agents verified end to end:** GitHub Copilot CLI (hosts, paths, briefing file), Antigravity
   with a Gemini API key the gate holds.

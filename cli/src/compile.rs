@@ -24,7 +24,7 @@ use crate::config::{
     AzureCred, AzureDevopsCred, CustomCred, EnvConfig, GitCred, GithubCred, ProviderValue, SshCred,
     extend_unique,
 };
-use crate::{azure, azure_identity};
+use crate::{azure, azure_identity, model_servers};
 
 pub struct Compiled {
     pub policy: Policy,
@@ -73,6 +73,8 @@ struct Builder {
     /// The bindings `[credentials.azure]` reads from `az`, and their refs.
     azcli: BTreeMap<String, String>,
     tenant_from: Option<String>,
+    /// Hosts on this machine that take credentials over plain HTTP (model servers).
+    plain_http_credentials: Vec<String>,
 }
 
 impl Builder {
@@ -133,6 +135,7 @@ pub fn compile(
     for (pname, entries) in &cfg.credentials.providers {
         compile_provider(&mut b, pname, entries)?;
     }
+    compile_model_servers(&mut b, cfg)?;
     for (cname, c) in &cfg.credentials.custom {
         compile_custom(&mut b, cname, c)?;
     }
@@ -254,6 +257,7 @@ pub fn compile(
             .collect(),
         azure: azure_identity,
         open,
+        plain_http_credentials: b.plain_http_credentials,
     };
     // A tunnel passes bytes unread: one you or a repository wrote can't cover a host whose
     // credentials, forge guards or denies the gate applies (`luoto allow` refuses it too).
@@ -990,6 +994,103 @@ fn compile_github_one(
         );
     }
     Ok(repos.iter().map(|(o, r)| format!("{o}/{r}")).collect())
+}
+
+/// `[model_servers]`: each one's model endpoints on its exact host and port (private
+/// addresses for one on this machine or a private network), its token added by the gate; and
+/// the agents that start on one, checked against it.
+fn compile_model_servers(b: &mut Builder, cfg: &EnvConfig) -> Result<()> {
+    let mut tokened_here: Vec<&str> = Vec::new();
+    for (name, s) in &cfg.model_servers {
+        let ep = model_servers::check(name, s)?;
+        let host = ep.sandbox_host().to_string();
+        let paths = model_servers::endpoints(&s.api, &ep.base);
+        b.rule(
+            format!("model-server-{name}"),
+            &format!("model_server:{name}"),
+            Rule {
+                host: host.clone(),
+                port: Some(ep.port),
+                access: Access::Methods(methods(&["GET", "POST"])),
+                paths: paths.clone(),
+                allow_private: ep.this_machine() || s.private || ep.private_address(),
+                // A model that loads cold can take minutes to its first token.
+                idle: Some("30m".into()),
+                ..Default::default()
+            },
+        );
+        b.dev_env.insert(
+            model_servers::TOKEN_ENV.into(),
+            model_servers::PLACEHOLDER.into(),
+        );
+        let Some(token) = &s.token else { continue };
+        if ep.this_machine() {
+            // The gate tells servers apart by host and path, not port.
+            if let Some(other) = tokened_here.first() {
+                bail!(
+                    "model_servers.{name} and model_servers.{other}: two servers on this machine \
+                     with a token; the gate can add only one there"
+                );
+            }
+            tokened_here.push(name);
+            b.plain_http_credentials.push(host.clone());
+        }
+        let binding = format!("model_server.{name}");
+        b.bindings.insert(
+            binding.clone(),
+            BindingSpec::Static {
+                secret_ref: token.clone(),
+            },
+        );
+        let header = s
+            .header
+            .as_deref()
+            .unwrap_or("authorization")
+            .to_ascii_lowercase();
+        let format = if header == "authorization" {
+            "Bearer {secret}"
+        } else {
+            "{secret}"
+        };
+        b.injections.push(Injection {
+            binding,
+            host,
+            paths,
+            methods: methods(&["GET", "POST"]),
+            place: Placement::Header {
+                name: header,
+                format: format.into(),
+            },
+            ignore_case: false,
+        });
+    }
+    for (agent, opts) in &cfg.agents.0 {
+        let Some(name) = &opts.model_server else {
+            continue;
+        };
+        let at = format!("agents.{agent}");
+        let Some(a) = profiles::agent(agent) else {
+            continue;
+        };
+        let Some(m) = &a.model_server else {
+            bail!("{at}: {} can't use a model server", a.title());
+        };
+        let Some(s) = cfg.model_servers.get(name) else {
+            bail!("{at}: model_server `{name}` has no [model_servers.{name}]");
+        };
+        if !s.api.contains(&m.api) {
+            bail!(
+                "{at}: {} needs the {} API, and model_servers.{name} serves {}",
+                a.title(),
+                m.api,
+                s.api.join(" and ")
+            );
+        }
+        if model_servers::model_for(opts, name, s).is_none() {
+            bail!("{at}: name the model on `{name}`: `model` here or in [model_servers.{name}]");
+        }
+    }
+    Ok(())
 }
 
 /// The REST paths of `o/r` the env may write: pull requests, reviews and issues.
@@ -1882,6 +1983,96 @@ github_port = 443
             "[credentials.ssh]\nkey = \"op://k\"\nhosts = [\"github.com\"]\ngithub_port = 2222\n",
         ] {
             assert!(compile("t", &cfg(bad), GATE, &[]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_model_server_opens_its_model_endpoints_alone() {
+        let c = compile(
+            "t",
+            &cfg(r#"
+agents = ["claude"]
+[model_servers.mtplx]
+url = "http://localhost:8000"
+api = ["anthropic"]
+model = "qwen3"
+token = "env:MTPLX_TOKEN"
+[model_servers.gpu]
+url = "http://192.168.1.50:11434/v1"
+api = ["openai"]
+"#),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        let p = &c.policy;
+        let allows = |h: &str, port: u16, m: &str, path: &str| {
+            let req = RequestInfo {
+                host: h,
+                port,
+                method: m,
+                path,
+                websocket: false,
+                content_length: None,
+            };
+            matches!(p.decide(&req, Utc::now()), Decision::Allow { .. })
+        };
+        let here = "host.docker.internal";
+        assert!(allows(here, 8000, "POST", "/v1/messages"));
+        assert!(allows(here, 8000, "GET", "/v1/models"));
+        assert!(
+            !allows(here, 8000, "POST", "/v1/chat/completions"),
+            "not its API"
+        );
+        assert!(!allows(here, 8001, "POST", "/v1/messages"), "another port");
+        assert!(!allows("192.168.1.50", 11434, "POST", "/api/pull"));
+        assert!(allows(
+            "192.168.1.50",
+            11434,
+            "POST",
+            "/v1/chat/completions"
+        ));
+        let rule = |id: &str| &p.rules.iter().find(|r| r.id == id).unwrap().rule;
+        assert!(rule("model-server-mtplx").allow_private && rule("model-server-gpu").allow_private);
+        assert_eq!(p.plain_http_credentials, [here]);
+        assert_eq!(p.injections_for("POST", here, "/v1/messages").len(), 1);
+        assert!(c.vault_refs().contains("env:MTPLX_TOKEN"));
+    }
+
+    #[test]
+    fn a_model_server_config_that_cant_work_is_refused() {
+        let server = "[model_servers.box]\nurl = \"http://localhost:8000\"\napi = [\"openai\"]\n";
+        for (text, why) in [
+            (
+                "[agents.claude]\nmodel_server = \"none\"\nmodel = \"m\"",
+                "has no [model_servers.none]",
+            ),
+            (
+                &*format!("{server}[agents.claude]\nmodel_server = \"box\"\nmodel = \"m\""),
+                "needs the anthropic API",
+            ),
+            (
+                &*format!("{server}[agents.codex]\nmodel_server = \"box\""),
+                "name the model",
+            ),
+            (
+                &*format!("{server}[agents.copilot]\nmodel_server = \"box\""),
+                "can't use a model server",
+            ),
+            (
+                "[model_servers.lan]\nurl = \"http://192.168.1.5:8080\"\napi = [\"openai\"]\ntoken = \"env:T\"",
+                "only over HTTPS",
+            ),
+            (
+                "[model_servers.a]\nurl = \"http://localhost:1\"\napi = [\"openai\"]\ntoken = \"env:A\"\n\
+                 [model_servers.b]\nurl = \"http://127.0.0.1:2\"\napi = [\"openai\"]\ntoken = \"env:B\"",
+                "two servers on this machine",
+            ),
+        ] {
+            let Err(e) = compile("t", &cfg(text), GATE, &[]) else {
+                panic!("{text}: compiled");
+            };
+            assert!(format!("{e:#}").contains(why), "{text}: {e:#}");
         }
     }
 

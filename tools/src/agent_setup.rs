@@ -49,13 +49,32 @@ fn link_briefing(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Set `value` at `keys` in the JSON file at `path`, keeping the rest; `null` removes the key,
+/// and a file or table without it stays as it is.
 fn merge_json(path: &Path, keys: &[&str], value: Value) -> Result<()> {
     let mut doc: Value = match std::fs::read_to_string(path) {
         Ok(t) if !t.trim().is_empty() => {
             serde_json::from_str(&t).with_context(|| format!("{} is not JSON", path.display()))?
         }
+        _ if value.is_null() => return Ok(()),
         _ => json!({}),
     };
+    if value.is_null() {
+        let Some((last, parents)) = keys.split_last() else {
+            bail!("no key to remove in {}", path.display());
+        };
+        let mut cur = &mut doc;
+        for k in parents {
+            match cur.get_mut(*k) {
+                Some(next) => cur = next,
+                None => return Ok(()),
+            }
+        }
+        if cur.as_object_mut().and_then(|o| o.remove(*last)).is_some() {
+            std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+        }
+        return Ok(());
+    }
     let mut cur = &mut doc;
     for k in keys {
         if !cur.is_object() {
@@ -81,6 +100,22 @@ fn merge_toml(path: &Path, keys: &[&str], value: Value) -> Result<()> {
     let mut doc: toml_edit::DocumentMut = text
         .parse()
         .with_context(|| format!("{} is not TOML", path.display()))?;
+    if value.is_null() {
+        let Some((last, parents)) = keys.split_last() else {
+            bail!("no key to remove in {}", path.display());
+        };
+        let mut table = doc.as_table_mut();
+        for k in parents {
+            match table.get_mut(k).and_then(|i| i.as_table_mut()) {
+                Some(t) => table = t,
+                None => return Ok(()),
+            }
+        }
+        if table.remove(last).is_some() {
+            std::fs::write(path, doc.to_string())?;
+        }
+        return Ok(());
+    }
     let value: toml_edit::Value = match value {
         Value::String(s) => s.into(),
         Value::Bool(b) => b.into(),
@@ -150,7 +185,8 @@ fn register_mcp(kind: &str) -> Result<()> {
     }
 }
 
-/// One `--set`: a value at a path of keys in a JSON file of the dev user's home.
+/// One `--set`: a value at a path of keys in a JSON or TOML file of the dev user's home;
+/// `null` removes the key.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct JsonSet {
@@ -202,5 +238,35 @@ mod tests {
         assert_eq!(doc["model"].as_str(), Some("gpt-5.5"));
         assert_eq!(doc["model_reasoning_effort"].as_str(), Some("high"));
         assert!(text.starts_with("# mine") && text.contains("[mcp_servers.luoto-sandbox]"));
+    }
+
+    #[test]
+    fn null_removes_a_key_and_only_it() {
+        let dir = std::env::temp_dir().join(format!("luoto-null-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = dir.join("config.toml");
+        std::fs::write(
+            &toml,
+            "# mine
+profile = \"local\"\n[profiles.local]\nmodel = \"q\"\n",
+        )
+        .unwrap();
+        merge_toml(&toml, &["profile"], Value::Null).unwrap();
+        merge_toml(&toml, &["absent", "key"], Value::Null).unwrap();
+        let text = std::fs::read_to_string(&toml).unwrap();
+        assert!(
+            !text.contains("profile = ") && text.contains("[profiles.local]"),
+            "{text}"
+        );
+        let json = dir.join("settings.json");
+        std::fs::write(&json, r#"{"env":{"A":"1","B":"2"},"theme":"dark"}"#).unwrap();
+        merge_json(&json, &["env", "A"], Value::Null).unwrap();
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+        assert_eq!(doc, json!({"env": {"B": "2"}, "theme": "dark"}));
+        // Nothing to remove: no file is made.
+        let none = dir.join("none.json");
+        merge_json(&none, &["x"], Value::Null).unwrap();
+        assert!(!none.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

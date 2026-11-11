@@ -2,7 +2,7 @@
 //! dev user's home and login name, and whether its workspace and repositories have been
 //! filled. The env's first `up` makes it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -40,6 +40,10 @@ pub struct EnvState {
     /// the container's trust stores at each start.
     #[serde(default)]
     pub dev_ca: Option<String>,
+    /// What luoto has written of the model servers into each agent's config, by agent: what it
+    /// removes when a server goes (`agents::configure`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_servers: BTreeMap<String, crate::model_servers::Written>,
 }
 
 impl EnvState {
@@ -122,6 +126,7 @@ impl EnvState {
             user: None,
             tools: None,
             dev_ca: None,
+            agent_servers: BTreeMap::new(),
         }
     }
 }

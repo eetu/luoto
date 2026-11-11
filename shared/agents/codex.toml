@@ -17,3 +17,22 @@ path = ["model"]
 file = "~/.codex/config.toml"
 path = ["model_reasoning_effort"]
 values = ["minimal", "low", "medium", "high", "xhigh"]
+
+# Model servers: a provider and a profile each (`codex --profile <name>`), the Responses API
+# (Codex has no other); the one it starts on is the default profile.
+[model_server]
+api = "openai"
+endpoint = "/v1/responses"
+switch = "`codex --profile {name}`; the cloud: `codex --profile cloud`"
+each = [
+  { file = "~/.codex/config.toml", path = ["model_providers", "{name}", "name"], value = "{name}" },
+  { file = "~/.codex/config.toml", path = ["model_providers", "{name}", "base_url"], value = "{url}/v1" },
+  { file = "~/.codex/config.toml", path = ["model_providers", "{name}", "wire_api"], value = "responses" },
+  { file = "~/.codex/config.toml", path = ["model_providers", "{name}", "env_key"], value = "LUOTO_MODEL_TOKEN" },
+  { file = "~/.codex/config.toml", path = ["profiles", "{name}", "model_provider"], value = "{name}" },
+  { file = "~/.codex/config.toml", path = ["profiles", "{name}", "model"], value = "{model}" },
+]
+default = [
+  { file = "~/.codex/config.toml", path = ["profile"], value = "{name}" },
+  { file = "~/.codex/config.toml", path = ["profiles", "cloud", "model_provider"], value = "openai" },
+]

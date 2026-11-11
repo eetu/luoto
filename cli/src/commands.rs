@@ -1305,15 +1305,22 @@ pub fn edit(name: &str) -> Result<ExitCode> {
         bail!("no env `{name}`");
     }
     open_editor(&path)?;
-    match sync::reapply(&ctx, name)? {
-        Some(p) => println!(
-            "applied ({} rules). Image, port, isolation and resource changes need `luoto up -e {name} --recreate`.",
-            p.compiled.policy.rules.len()
-        ),
-        None => println!(
-            "config is valid ({} rules)",
-            env::plan(&ctx, name)?.compiled.policy.rules.len()
-        ),
+    let p = match sync::reapply(&ctx, name)? {
+        Some(p) => {
+            println!(
+                "applied ({} rules). Image, port, isolation and resource changes need `luoto up -e {name} --recreate`.",
+                p.compiled.policy.rules.len()
+            );
+            p
+        }
+        None => {
+            let p = env::plan(&ctx, name)?;
+            println!("config is valid ({} rules)", p.compiled.policy.rules.len());
+            p
+        }
+    };
+    for w in &p.compiled.warnings {
+        eprintln!("warning: {w}");
     }
     Ok(ExitCode::SUCCESS)
 }

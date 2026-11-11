@@ -453,6 +453,10 @@ pub struct Policy {
     pub azure: Option<AzureIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open: Option<Open>,
+    /// Hosts on the user's own machine (a model server there): credentials go to them over
+    /// plain HTTP too, as a request to them never leaves it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plain_http_credentials: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

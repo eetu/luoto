@@ -23,6 +23,7 @@ mod idle;
 mod init;
 mod logs;
 mod machine;
+mod model_servers;
 mod names;
 mod notify;
 mod paths;

@@ -215,7 +215,10 @@ opening on what the env has. [docs/agents.md](docs/agents.md#credentials) covers
 to get one, how the prompt keeps it, and logins inside the sandbox, with the hosts and
 verification status of each agent. `luoto agent list` shows agents and providers. Model,
 effort, your own agent settings and commits without AI attribution:
-[docs/guides/agent-settings.md](docs/guides/agent-settings.md).
+[docs/guides/agent-settings.md](docs/guides/agent-settings.md). Claude Code, Codex and OpenCode
+can also use a model server of yours, on this machine (Ollama, LM Studio, MTPLX, …), your
+network or the internet, beside the cloud:
+[docs/guides/model-servers.md](docs/guides/model-servers.md).
 
 Without a terminal, `luoto run --agent claude --prompt "…"` runs one prompt: it brings the env
 up (asking nothing), runs the agent in its non-interactive mode and prints its answer (or
