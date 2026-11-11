@@ -182,8 +182,8 @@ How each agent uses a `[model_servers]` entry
   `env_key = "LUOTO_MODEL_TOKEN"`), the one it starts on as the default profile and `cloud`
   for OpenAI. Written as unit tests expect; not run against a server yet.
 - **OpenCode:** an `@ai-sdk/openai-compatible` provider per server (bundled with OpenCode, no
-  download) beside the cloud's in its model picker, the one it starts on as `model`. Not run
-  against a server yet.
+  download) beside the cloud's in its model picker, the one it starts on as `model`. Verified
+  with a stand-in server: `opencode run` sends its chat completions there through the gate.
 
 ## Not built in
 

@@ -7,7 +7,9 @@ install = [
   "curl -fsSL https://opencode.ai/install | bash",
   "mkdir -p ~/.local/bin && ln -sf ~/.opencode/bin/opencode ~/.local/bin/opencode",
 ]
-install_hosts = ["opencode.ai", "github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]
+# opencode.ai/install redirects to the script on raw.githubusercontent.com, which asks the npm
+# registry for the latest version before GitHub.
+install_hosts = ["opencode.ai", "raw.githubusercontent.com", "registry.npmjs.org", "github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]
 env = { OPENCODE_DISABLE_AUTOUPDATE = "1", OPENCODE_DISABLE_SHARE = "1" }
 briefing = ["~/.config/opencode/AGENTS.md"]
 mcp = "opencode"

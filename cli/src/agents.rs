@@ -79,7 +79,11 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
         let log = InstallLog::new(&ctx.paths, env_name);
         log.note(&what);
         let rules: Vec<Rule> = a.install_hosts.iter().map(|h| Rule::read(h)).collect();
-        let script = a.install.join(" && ");
+        // `curl … | bash` fails with its download where the shell can say so.
+        let script = format!(
+            "(set -o pipefail) 2>/dev/null && set -o pipefail; {}",
+            a.install.join(" && ")
+        );
         let status = crate::progress::step(&what, || {
             sync::with_grants(
                 ctx,

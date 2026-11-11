@@ -33,6 +33,10 @@
   only the server's port and model endpoints and adds its token; OpenCode switches in its
   model picker, Codex per start (`codex --profile <server>`). A config that can't work is
   refused at `up` and `luoto edit`.
+- **Agent installs:** an installer piped from a download (`curl … | bash`) fails the install
+  when the download does, instead of the agent passing as installed with nothing there.
+  OpenCode installs again: its installer moved to raw.githubusercontent.com and asks the npm
+  registry for the latest version.
 - **Credentials stay on their rules:** the GitHub, Azure DevOps and git tokens, and a read-only
   `[credentials.custom]`, go only on the methods and paths their own rules allow. A wider rule
   (`luoto allow '*' --write`, an approved request) no longer carries them further, to a merge
