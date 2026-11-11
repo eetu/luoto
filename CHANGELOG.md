@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.3
+
+- **Progress everywhere:** `setup` (the VM's creation and start, gVisor, image pulls and
+  builds), `up` (vault, gate, dev container, setup of the env, toolchain checks), `down`,
+  `rm`, `reset-home`, `doctor`, `prune`, `pull`, `--size`, `egress`, `logs`, `vault unlock`
+  and `reload`, `upgrade` and `uninstall` show the spinner; what is quick when all is well
+  shows nothing then, and names itself on the spinner's line once it takes a while. What
+  podman prints while it pulls, builds or starts the VM is kept off the terminal as
+  installers' is (`o`, `-v`, or its last lines on a failure). Questions and `op` sign-ins
+  pause it.
+- **Subnets:** a release's envs take 10.213.1–127 and a source build's (`luoto-dev`)
+  10.213.128–254, with the user ID ranges that go with them, so an env imported from one into
+  the other never shares either. When another network holds an env's subnet, `up` names it
+  and the commands that move the env.
+
 ## 0.4.2 (2026-11-10)
 
 - **1Password accounts:** an `op://` ref can name the account it is in

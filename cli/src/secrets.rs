@@ -263,24 +263,31 @@ fn op(global: &GlobalConfig, args: &[&str], account: Option<&str>) -> Result<Com
 /// Elsewhere they become the error.
 fn op_output(mut cmd: Command, what: &str, input: Option<&[u8]>) -> Result<Vec<u8>> {
     let interactive = std::io::stdin().is_terminal();
-    let mut child = cmd
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::inherit()
-        })
-        .stdout(Stdio::piped())
-        .stderr(if interactive {
-            Stdio::inherit()
-        } else {
-            Stdio::piped()
-        })
-        .spawn()
-        .context("run the 1Password CLI (`op`); install it or use keyring:/env: refs")?;
-    if let Some(bytes) = input {
-        child.stdin.take().context("op's stdin")?.write_all(bytes)?;
-    }
-    let out = child.wait_with_output()?;
+    let mut run = || -> Result<std::process::Output> {
+        let mut child = cmd
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
+            .stdout(Stdio::piped())
+            .stderr(if interactive {
+                Stdio::inherit()
+            } else {
+                Stdio::piped()
+            })
+            .spawn()
+            .context("run the 1Password CLI (`op`); install it or use keyring:/env: refs")?;
+        if let Some(bytes) = input {
+            child.stdin.take().context("op's stdin")?.write_all(bytes)?;
+        }
+        Ok(child.wait_with_output()?)
+    };
+    let out = if interactive {
+        crate::progress::pause(run)?
+    } else {
+        run()?
+    };
     if !out.status.success() {
         bail!(
             "{what} failed{}",

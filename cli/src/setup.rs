@@ -282,30 +282,41 @@ pub fn build_images(rt: &Runtime, tag: &str) -> Result<()> {
     let root = source_root()
         .context("luoto's source tree is not available; build images from a checkout")?;
     for (target, comp) in [("gate", "gate"), ("vault", "vault"), ("tools", "tools")] {
-        println!("building {} …", names::image(comp, tag));
-        let status = rt.interactive([
-            "build",
-            "-f",
-            &root.join("Containerfile").to_string_lossy(),
-            "--target",
-            target,
-            "-t",
-            &names::image(comp, tag),
-            &root.to_string_lossy(),
-        ])?;
+        let status =
+            crate::progress::step(&format!("building {}", names::image(comp, tag)), || {
+                crate::progress::tool(
+                    rt,
+                    [
+                        "build",
+                        "-f",
+                        &root.join("Containerfile").to_string_lossy(),
+                        "--target",
+                        target,
+                        "-t",
+                        &names::image(comp, tag),
+                        &root.to_string_lossy(),
+                    ],
+                    &|_| {},
+                )
+            })?;
         if !status.success() {
             bail!("building {comp} failed");
         }
     }
-    println!("building {} …", names::image("base", tag));
-    let status = rt.interactive([
-        "build",
-        "-f",
-        &root.join("image").join("Containerfile").to_string_lossy(),
-        "-t",
-        &names::image("base", tag),
-        &root.join("image").to_string_lossy(),
-    ])?;
+    let status = crate::progress::step(&format!("building {}", names::image("base", tag)), || {
+        crate::progress::tool(
+            rt,
+            [
+                "build",
+                "-f",
+                &root.join("image").join("Containerfile").to_string_lossy(),
+                "-t",
+                &names::image("base", tag),
+                &root.join("image").to_string_lossy(),
+            ],
+            &|_| {},
+        )
+    })?;
     if !status.success() {
         bail!("building the base image failed");
     }
@@ -315,7 +326,7 @@ pub fn build_images(rt: &Runtime, tag: &str) -> Result<()> {
 pub fn setup(o: SetupOpts) -> Result<ExitCode> {
     let paths = Paths::get()?;
     let mut global = config::load_global(&paths)?;
-    let d = detect();
+    let d = crate::progress::wait("looking at this machine's container runtimes", detect);
     println!(
         "host: {} {}{}",
         d.os,
@@ -373,8 +384,10 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
             machine::create(&rt.bin, cpus, memory)?;
         }
         machine::start(&rt.bin, o.yes)?;
-        machine::prepare(&rt.bin)?;
-        let mounts = machine::host_mounts(&rt.bin)?;
+        let mounts = crate::progress::wait("checking luoto's VM", || {
+            machine::prepare(&rt.bin)?;
+            machine::host_mounts(&rt.bin)
+        })?;
         if !mounts.is_empty() {
             bail!(
                 "luoto's VM mounts host folders ({}); remove it with `podman machine rm {}` and run `luoto setup` again",
@@ -427,7 +440,9 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
             .iter()
             .map(|c| release::image(global.images.as_deref(), c))
             .collect();
-        let missing: Vec<&String> = refs.iter().filter(|r| !rt.image_exists(r)).collect();
+        let missing: Vec<&String> = crate::progress::wait("checking luoto's images", || {
+            refs.iter().filter(|r| !rt.image_exists(r)).collect()
+        });
         if missing.is_empty() {
             new_images = false;
             println!("\nimages present; `luoto setup --build` rebuilds them from source");
@@ -445,7 +460,9 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
     let ctx = Ctx { paths, global, rt };
     env::ensure_vault(&ctx)?;
     if new_images {
-        crate::disk::note_superseded(&ctx);
+        crate::progress::wait("looking for older images", || {
+            crate::disk::note_superseded(&ctx)
+        });
     }
     let home = ctx.paths.home_files();
     if crate::personal::seed_home(&home)? {
@@ -517,7 +534,7 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
             out.say("VM: luoto's VM is stopped; `luoto up` starts it".into());
             return Ok(true);
         }
-        match machine::host_mounts(&ctx.rt.bin) {
+        match crate::progress::wait("checking luoto's VM", || machine::host_mounts(&ctx.rt.bin)) {
             Ok(m) if m.is_empty() => {
                 out.say("VM: luoto's own, none of your folders mounted".into())
             }
@@ -553,7 +570,7 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
             if present { "ok" } else { "missing" }
         ));
     }
-    for line in crate::disk::doctor_lines(ctx) {
+    for line in crate::progress::wait("measuring disk use", || crate::disk::doctor_lines(ctx)) {
         out.say(line);
     }
     out.say(match crate::ctl::vault_status(&ctx.rt) {
@@ -565,19 +582,21 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
     });
     let probe_port = 47_000 + (rand::random::<u16>() % 1000);
     let probe_name = format!("luoto-probe-{probe_port}");
-    let probe = ctx.rt.run([
-        "run",
-        "-d",
-        "--rm",
-        "--name",
-        &probe_name,
-        "--network",
-        "host",
-        &ctx.image("tools"),
-        "sh",
-        "-c",
-        &format!("while true; do echo luoto-probe | nc -l -p {probe_port}; done"),
-    ]);
+    let probe = crate::progress::wait("starting a probe for the self-tests", || {
+        ctx.rt.run([
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            &probe_name,
+            "--network",
+            "host",
+            &ctx.image("tools"),
+            "sh",
+            "-c",
+            &format!("while true; do echo luoto-probe | nc -l -p {probe_port}; done"),
+        ])
+    });
     for env_name in config::list_envs(&ctx.paths)? {
         if let Some(n) = crate::ca::notice(&ctx.paths.env_state(&env_name), &env_name) {
             out.say(format!("env {env_name}: CA {n}"));
@@ -591,7 +610,10 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
         };
         let gw = names::addrs(st.octet).gateway;
         let probe_addr = probe.is_ok().then(|| format!("{gw}:{probe_port}"));
-        match env::selftest(ctx, &env_name, probe_addr.as_deref()) {
+        let tested = crate::progress::wait(&format!("testing `{env_name}`'s isolation"), || {
+            env::selftest(ctx, &env_name, probe_addr.as_deref())
+        });
+        match tested {
             Ok(r) => {
                 ok &= r.ok;
                 let isolation = config::EnvFile::load(&ctx.paths, &env_name)

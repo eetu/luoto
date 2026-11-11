@@ -104,6 +104,18 @@ pub fn addrs(octet: u8) -> Addrs {
     }
 }
 
+/// The octets this instance's envs take, and so their subnets and ID ranges
+/// (`machine::dev_id_start`): each instance its own half. An env's octet is saved before its
+/// networks exist (an import, before its first `up`), and the other instance sees only
+/// networks.
+pub fn env_octets() -> std::ops::RangeInclusive<u8> {
+    octets_of(crate::release::pinned())
+}
+
+fn octets_of(release: bool) -> std::ops::RangeInclusive<u8> {
+    if release { 1..=127 } else { 128..=254 }
+}
+
 pub fn image(component: &str, tag: &str) -> String {
     format!("localhost/luoto-{component}:{tag}")
 }
@@ -129,6 +141,13 @@ pub fn named_by(inst: &str, name: &str, env: &str, role: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_instance_takes_its_own_half_of_the_subnets() {
+        let (release, dev) = (octets_of(true), octets_of(false));
+        assert!(release.end() < dev.start());
+        assert!(!release.contains(&0) && !dev.contains(&255));
+    }
 
     #[test]
     fn names_say_which_instance_made_an_object() {

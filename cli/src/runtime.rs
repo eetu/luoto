@@ -110,6 +110,51 @@ impl States {
 
 /// `LUOTO_TRACE=1` prints every runtime call: when it started (since the first call) and how
 /// long it took. Arguments are safe to show: secrets travel on stdin, never argv.
+/// Run `cmd` with its stdin closed, giving `each` what it prints as it comes (`true` for
+/// stderr); `each` returning false kills it.
+pub fn stream_command(
+    mut cmd: Command,
+    each: &(dyn Fn(bool, &[u8]) -> bool + Sync),
+) -> Result<ExitStatus> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("run {}", cmd.get_program().to_string_lossy()))?;
+    let out = child.stdout.take().context("stdout")?;
+    let err = child.stderr.take().context("stderr")?;
+    let child = std::sync::Mutex::new(child);
+    fn pump(
+        mut r: impl std::io::Read,
+        is_err: bool,
+        each: &(dyn Fn(bool, &[u8]) -> bool + Sync),
+        child: &std::sync::Mutex<std::process::Child>,
+    ) {
+        let mut buf = [0u8; 8192];
+        loop {
+            match r.read(&mut buf) {
+                Ok(0) => return,
+                Ok(n) if !each(is_err, &buf[..n]) => {
+                    let _ = child.lock().map(|mut c| c.kill());
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
+    }
+    std::thread::scope(|s| {
+        s.spawn(|| pump(err, true, each, &child));
+        pump(out, false, each, &child);
+    });
+    let mut child = child
+        .into_inner()
+        .map_err(|_| anyhow::anyhow!("child lock"))?;
+    Ok(child.wait()?)
+}
+
 fn traced<T>(args: &[std::ffi::OsString], f: impl FnOnce() -> T) -> T {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     if std::env::var_os("LUOTO_TRACE").is_none() {
@@ -392,54 +437,20 @@ impl Runtime {
     {
         let args: Vec<std::ffi::OsString> =
             args.into_iter().map(|a| a.as_ref().to_owned()).collect();
-        traced(&args, || -> Result<ExitStatus> {
-            let mut child = self
-                .command()
-                .args(&args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .with_context(|| format!("run {}", self.bin))?;
-            let out = child.stdout.take().context("stdout")?;
-            let err = child.stderr.take().context("stderr")?;
-            let child = std::sync::Mutex::new(child);
-            fn pump(
-                mut r: impl std::io::Read,
-                is_err: bool,
-                each: &(dyn Fn(bool, &[u8]) -> bool + Sync),
-                child: &std::sync::Mutex<std::process::Child>,
-            ) {
-                let mut buf = [0u8; 8192];
-                loop {
-                    match r.read(&mut buf) {
-                        Ok(0) => return,
-                        Ok(n) if !each(is_err, &buf[..n]) => {
-                            let _ = child.lock().map(|mut c| c.kill());
-                            return;
-                        }
-                        Ok(_) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                        Err(_) => return,
-                    }
-                }
-            }
-            std::thread::scope(|s| {
-                s.spawn(|| pump(err, true, each, &child));
-                pump(out, false, each, &child);
-            });
-            let mut child = child
-                .into_inner()
-                .map_err(|_| anyhow::anyhow!("child lock"))?;
-            Ok(child.wait()?)
+        traced(&args, || {
+            let mut cmd = self.command();
+            cmd.args(&args);
+            stream_command(cmd, each)
         })
     }
 
-    /// Pull `image` with the runtime's own progress on the terminal: a first pull can take
-    /// minutes on a slow network, and a silent one looks hung.
+    /// Pull `image` as a step: a first pull can take minutes on a slow network, and the
+    /// spinner's line shows the runtime's latest.
     pub fn pull(&self, image: &str) -> Result<()> {
-        eprintln!("pulling {image} …");
-        if !self.interactive(["pull", image])?.success() {
+        let status = crate::progress::step(&format!("pulling {image}"), || {
+            crate::progress::tool(self, ["pull", image], &|_| {})
+        })?;
+        if !status.success() {
             bail!("pulling {image} failed");
         }
         Ok(())
@@ -526,8 +537,8 @@ impl Runtime {
         self.run(args).map(|_| true)
     }
 
-    /// Every subnet in use by any network (to pick a free one).
-    pub fn used_subnets(&self) -> Result<Vec<String>> {
+    /// Every network's subnets, as (network, subnet).
+    pub fn subnets(&self) -> Result<Vec<(String, String)>> {
         let names = self.run(["network", "ls", "--format", "{{.Name}}"])?;
         let names: Vec<&str> = names
             .lines()
@@ -542,14 +553,15 @@ impl Runtime {
         let v: Value = serde_json::from_str(&self.run(args)?).context("network inspect JSON")?;
         let mut out = Vec::new();
         for net in v.as_array().into_iter().flatten() {
+            let name = net["name"].as_str().or(net["Name"].as_str()).unwrap_or("");
             for s in net["subnets"].as_array().into_iter().flatten() {
                 if let Some(sub) = s["subnet"].as_str() {
-                    out.push(sub.to_string());
+                    out.push((name.to_string(), sub.to_string()));
                 }
             }
             for s in net["IPAM"]["Config"].as_array().into_iter().flatten() {
                 if let Some(sub) = s["Subnet"].as_str() {
-                    out.push(sub.to_string());
+                    out.push((name.to_string(), sub.to_string()));
                 }
             }
         }

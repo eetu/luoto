@@ -14,6 +14,7 @@ const REPO: &str = "eetu/luoto";
 /// The latest release's version, from GitHub's redirect to its tag; None before the first
 /// release. An error means GitHub couldn't be asked.
 pub fn latest() -> Result<Option<String>> {
+    let _waiting = crate::progress::waiting("checking for a newer release");
     let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let out = Command::new("curl")
         .args([

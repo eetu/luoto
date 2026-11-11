@@ -35,6 +35,7 @@ fn logs_args<'a>(container: &'a str, since: Option<&'a str>, follow: bool) -> Ve
 }
 
 pub fn read(rt: &Runtime, container: &str, since: Option<&str>) -> Result<Vec<Event>> {
+    let _waiting = crate::progress::waiting("reading the gate's log");
     let out = rt
         .command()
         .args(logs_args(container, since, false))

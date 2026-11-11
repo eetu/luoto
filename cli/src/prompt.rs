@@ -10,7 +10,6 @@ pub fn never_ask() {
     NEVER_ASK.store(true, Ordering::Relaxed);
 }
 
-/// Whether a question can be asked: a terminal, in a process that isn't the UI's server.
 /// The prompts' markers in the UI's accent, as the spinner's dot. Their text keeps the
 /// terminal's colors: the accent is too light to read on a light background.
 pub fn theme() {
@@ -34,6 +33,7 @@ pub fn theme() {
     inquire::set_global_render_config(r);
 }
 
+/// Whether a question can be asked: a terminal, in a process that isn't the UI's server.
 pub fn interactive() -> bool {
     !NEVER_ASK.load(Ordering::Relaxed) && std::io::stdin().is_terminal()
 }
@@ -43,11 +43,53 @@ pub fn confirm(question: &str) -> bool {
     if !interactive() {
         return false;
     }
-    print!("{question} [y/N] ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    let _ = std::io::stdin().read_line(&mut line);
+    let line = read_answer(&format!("{question} [y/N] "));
     matches!(line.trim(), "y" | "Y" | "yes")
+}
+
+/// `question`, then the line typed after it, with the spinner paused.
+fn read_answer(question: &str) -> String {
+    crate::progress::pause(|| {
+        print!("{question}");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        line
+    })
+}
+
+/// A menu or text question, asked with the spinner paused (it reads the keys meanwhile).
+pub trait Ask {
+    type Answer;
+    fn ask(self) -> inquire::error::InquireResult<Option<Self::Answer>>;
+}
+
+impl<T: std::fmt::Display> Ask for inquire::Select<'_, T> {
+    type Answer = T;
+    fn ask(self) -> inquire::error::InquireResult<Option<T>> {
+        crate::progress::pause(|| self.prompt_skippable())
+    }
+}
+
+impl<T: std::fmt::Display> Ask for inquire::MultiSelect<'_, T> {
+    type Answer = Vec<T>;
+    fn ask(self) -> inquire::error::InquireResult<Option<Vec<T>>> {
+        crate::progress::pause(|| self.prompt_skippable())
+    }
+}
+
+impl Ask for inquire::Text<'_, '_> {
+    type Answer = String;
+    fn ask(self) -> inquire::error::InquireResult<Option<String>> {
+        crate::progress::pause(|| self.prompt_skippable())
+    }
+}
+
+impl Ask for inquire::Password<'_> {
+    type Answer = String;
+    fn ask(self) -> inquire::error::InquireResult<Option<String>> {
+        crate::progress::pause(|| self.prompt_skippable())
+    }
 }
 
 /// The help line under every menu: its keys, and what Esc does there (`back` past the first
@@ -104,11 +146,8 @@ pub fn with_command(what: &str, command: &str, width: usize) -> String {
 
 /// One-letter answer to `question`; Enter picks `default`.
 pub fn ask(question: &str, default: char) -> char {
-    print!("{question} ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    let _ = std::io::stdin().read_line(&mut line);
-    line.trim()
+    read_answer(&format!("{question} "))
+        .trim()
         .chars()
         .next()
         .map_or(default, |c| c.to_ascii_lowercase())

@@ -44,20 +44,25 @@ pub fn load_secrets(ctx: &Ctx, refs: &BTreeSet<String>, whose: &str, renew: bool
         .cloned()
         .collect();
     if !missing.is_empty() {
-        eprintln!(
-            "unlocking {} secret(s) for {whose} from your secret store…",
-            missing.len()
-        );
-        let mut values = BTreeMap::new();
-        let mut failed = Vec::new();
-        for r in &missing {
-            match secrets::resolve(&ctx.global, r) {
-                Ok(v) => {
-                    values.insert(r.clone(), v);
+        let (values, failed) = crate::progress::step(
+            &format!(
+                "unlocking {} secret(s) for {whose} from your secret store",
+                missing.len()
+            ),
+            || {
+                let mut values = BTreeMap::new();
+                let mut failed = Vec::new();
+                for r in &missing {
+                    match secrets::resolve(&ctx.global, r) {
+                        Ok(v) => {
+                            values.insert(r.clone(), v);
+                        }
+                        Err(e) => failed.push(format!("{}: {e:#}", secrets::shown_ref(r))),
+                    }
                 }
-                Err(e) => failed.push(format!("{}: {e:#}", secrets::shown_ref(r))),
-            }
-        }
+                (values, failed)
+            },
+        );
         if !values.is_empty() {
             let load = VaultCtl::Load {
                 secrets: values,

@@ -275,16 +275,18 @@ pub fn login_in_env(ctx: &Ctx, env: &str, c: &AzureCred) {
          az account set --subscription {sub} --only-show-errors"
     );
     let dev = names::dev(env);
-    let run = ctx.rt.run([
-        "exec",
-        "-u",
-        UID,
-        dev.as_str(),
-        "sh",
-        "-c",
-        connect::LOGIN,
-        &script,
-    ]);
+    let run = crate::progress::wait("signing in to Azure in the env", || {
+        ctx.rt.run([
+            "exec",
+            "-u",
+            UID,
+            dev.as_str(),
+            "sh",
+            "-c",
+            connect::LOGIN,
+            &script,
+        ])
+    });
     if let Err(e) = run {
         eprintln!(
             "note: `az login --identity` failed in `{env}`, so az there is not logged in: {}\n      \

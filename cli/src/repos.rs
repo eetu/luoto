@@ -18,7 +18,7 @@ use crate::config::{
     Credentials, EnvConfig, EnvFile, GitCred, ListAs, Relisted, Repo, Workspace, extend_unique,
 };
 use crate::env::{Ctx, UID};
-use crate::prompt::menu_help;
+use crate::prompt::{Ask, menu_help};
 use crate::state::EnvState;
 use crate::text::{self, display, sh_quote};
 use crate::wizard::{Mode, Question, Step};
@@ -807,6 +807,7 @@ done; true"#;
 /// configured runs) and what the script prints, so both are bounded and only lines naming a
 /// folder asked about are read.
 pub fn unpushed(ctx: &Ctx, env: &str, repos: &BTreeSet<String>) -> Result<Vec<Unpushed>> {
+    let _waiting = crate::progress::waiting("checking the env's repos for work not pushed");
     let dev = names::dev(env);
     let dirs: Vec<String> = std::iter::once("/workspace".to_string())
         .chain(repos.iter().map(|r| format!("/workspace/{r}")))
@@ -1235,7 +1236,7 @@ fn git_details(host: &str, private: bool, ca: &mut Option<String>) -> Result<Str
         );
         let path = inquire::Text::new(&question)
             .with_help_message("empty when its certificate is public")
-            .prompt_skippable()?
+            .ask()?
             .unwrap_or_default();
         let path = path.trim();
         if !path.is_empty() {
@@ -1245,7 +1246,7 @@ fn git_details(host: &str, private: bool, ca: &mut Option<String>) -> Result<Str
     Ok(inquire::Text::new("User name sent with the token:")
         .with_default("oauth2")
         .with_help_message("GitLab takes oauth2; Forgejo and Gitea, the token's owner")
-        .prompt_skippable()?
+        .ask()?
         .unwrap_or_else(|| "oauth2".into()))
 }
 

@@ -4,11 +4,12 @@
 //! there on. Otherwise what tools print (installers, git) reaches the terminal only with
 //! `--verbose`, or its last lines when one fails. The sandbox wrote much of it, so it comes
 //! escaped ([`text::Relay`]). A line luoto prints during a step goes through [`say`], which
-//! clears the spinner's line first.
+//! clears the spinner's line first. A [`wait`] is a step without a line: the spinner names it
+//! only once it takes a while. A question or `op` runs in a [`pause`].
 
 use std::io::{IsTerminal, Write};
 use std::process::ExitStatus;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -22,9 +23,11 @@ use crate::text::{self, Relay};
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 static OFF: AtomicBool = AtomicBool::new(false);
-/// When each running step began, innermost last.
-static STARTS: Mutex<Vec<Instant>> = Mutex::new(Vec::new());
+/// The running steps and waits, innermost last.
+static STARTS: Mutex<Vec<Start>> = Mutex::new(Vec::new());
 static SPINNER: Mutex<Option<Spinner>> = Mutex::new(None);
+/// [`pause`]s under way: no spinner until they end.
+static PAUSED: AtomicUsize = AtomicUsize::new(0);
 /// What the spinner has on the terminal; held while it draws.
 static SCREEN: Mutex<Screen> = Mutex::new(Screen {
     line: false,
@@ -216,8 +219,56 @@ pub fn step<T>(label: &str, f: impl FnOnce() -> T) -> T {
     if !spins() {
         return f();
     }
-    let _running = Running::start();
+    let _running = Running::start(None);
     f()
+}
+
+/// Run `f` without a line of its own: on a terminal, once it takes a while, the spinner says
+/// what it waits on (`label`), and its line goes when `f` ends. For what is quick when all is
+/// well (a container starting, a status read), so it says nothing then.
+pub fn wait<T>(label: &str, f: impl FnOnce() -> T) -> T {
+    let _waiting = waiting(label);
+    f()
+}
+
+/// A [`wait`] that lasts until the guard drops, for a stretch of a function.
+pub fn waiting(label: &str) -> Waiting {
+    Waiting(spins().then(|| Running::start(Some(label.to_string()))))
+}
+
+pub struct Waiting(#[allow(dead_code)] Option<Running>);
+
+/// Run `f` with the terminal as it was, for a question or a tool that may ask there (`op`):
+/// the spinner stops, and with it the reading of keys, then goes on, its time without the
+/// pause.
+pub fn pause<T>(f: impl FnOnce() -> T) -> T {
+    PAUSED.fetch_add(1, Ordering::SeqCst);
+    let spinner = lock(&SPINNER).take();
+    if let Some(s) = spinner {
+        s.halt();
+    }
+    let began = Instant::now();
+    let out = f();
+    if PAUSED.fetch_sub(1, Ordering::SeqCst) == 1 {
+        let paused = began.elapsed();
+        let running = {
+            let mut starts = lock(&STARTS);
+            for s in starts.iter_mut() {
+                s.at += paused;
+            }
+            !starts.is_empty()
+        };
+        if running {
+            start_spinner();
+        }
+    }
+    out
+}
+
+struct Start {
+    at: Instant,
+    /// What a [`wait`] waits on; none for a step, whose line says it.
+    waits_on: Option<String>,
 }
 
 struct Spinner {
@@ -225,19 +276,37 @@ struct Spinner {
     thread: JoinHandle<()>,
 }
 
+impl Spinner {
+    /// Its line erased, the cursor and the terminal as they were.
+    fn halt(self) {
+        let _ = self.stop.send(());
+        let _ = self.thread.join();
+    }
+}
+
+fn start_spinner() {
+    if PAUSED.load(Ordering::SeqCst) > 0 {
+        return;
+    }
+    let mut s = lock(&SPINNER);
+    if s.is_none() {
+        let look = Look::detect();
+        let term = term::Term::take();
+        let (stop, stopped) = mpsc::channel();
+        let thread = std::thread::spawn(move || spin(&stopped, look, &term));
+        *s = Some(Spinner { stop, thread });
+    }
+}
+
 struct Running;
 
 impl Running {
-    fn start() -> Self {
-        lock(&STARTS).push(Instant::now());
-        let mut s = lock(&SPINNER);
-        if s.is_none() {
-            let look = Look::detect();
-            let term = term::Term::take();
-            let (stop, stopped) = mpsc::channel();
-            let thread = std::thread::spawn(move || spin(&stopped, look, &term));
-            *s = Some(Spinner { stop, thread });
-        }
+    fn start(waits_on: Option<String>) -> Self {
+        lock(&STARTS).push(Start {
+            at: Instant::now(),
+            waits_on,
+        });
+        start_spinner();
         Running
     }
 }
@@ -249,12 +318,27 @@ impl Drop for Running {
             starts.pop();
             starts.is_empty()
         };
-        if done && let Some(s) = lock(&SPINNER).take() {
-            let _ = s.stop.send(());
-            let _ = s.thread.join();
+        if done {
+            let spinner = lock(&SPINNER).take();
+            if let Some(s) = spinner {
+                s.halt();
+            }
             SHOWN.store(false, Ordering::Relaxed);
         }
     }
+}
+
+/// When the spinner's time counts from: the innermost step's, which printed a line; under
+/// waits alone, the outermost's. Then what the innermost waits on, if it is a wait.
+fn timed(starts: &[Start]) -> Option<(Instant, Option<String>)> {
+    let first = starts.first()?;
+    let began = starts
+        .iter()
+        .rev()
+        .find(|s| s.waits_on.is_none())
+        .unwrap_or(first)
+        .at;
+    Some((began, starts.last()?.waits_on.clone()))
 }
 
 fn spin(stopped: &mpsc::Receiver<()>, look: Look, term: &term::Term) {
@@ -266,13 +350,17 @@ fn spin(stopped: &mpsc::Receiver<()>, look: Look, term: &term::Term) {
         if SHOWN.load(Ordering::Relaxed) {
             continue;
         }
-        let Some(began) = lock(&STARTS).last().copied() else {
+        let (first, timed) = {
+            let starts = lock(&STARTS);
+            (starts.first().map(|s| s.at), timed(&starts))
+        };
+        let (Some(first), Some((began, waits_on))) = (first, timed) else {
             break;
         };
-        let took = began.elapsed();
-        if took < DELAY {
+        if first.elapsed() < DELAY {
             continue;
         }
+        let took = began.elapsed();
         let tool = lock(&TOOL).clone();
         let latest = tool.as_ref().and_then(|o| lock(o).latest.clone());
         let width = crossterm::terminal::size()
@@ -282,7 +370,10 @@ fn spin(stopped: &mpsc::Receiver<()>, look: Look, term: &term::Term) {
         let rest = rest(
             look,
             took,
-            latest.as_deref(),
+            latest.as_deref().map_or_else(
+                || waits_on.as_deref().map(|w| (w, None)),
+                |l| Some((l, look.grey())),
+            ),
             tool.is_some() && term.keys(),
             width,
         );
@@ -325,19 +416,26 @@ fn frame(dot: (char, Option<Color>), rest: Option<&[u8]>, hide: bool) -> Vec<u8>
     out
 }
 
-/// The spinner's line after the dot: the time so far, the tool's latest line cut to the
-/// terminal's `width`, and the key that shows the rest.
-fn rest(look: Look, took: Duration, latest: Option<&str>, key: bool, width: usize) -> Vec<u8> {
+/// The spinner's line after the dot: the time so far, its `line` (the tool's latest line, or
+/// what a wait waits on) in its color, cut to the terminal's `width`, and the key that shows
+/// the rest.
+fn rest(
+    look: Look,
+    took: Duration,
+    line: Option<(&str, Option<Color>)>,
+    key: bool,
+    width: usize,
+) -> Vec<u8> {
     let mut out = Vec::new();
     let time = elapsed(took);
     out.extend_from_slice(format!(" {time}").as_bytes());
     let hint = if key { HINT.len() + 2 } else { 0 };
     // One column to spare, so the line never wraps.
     let room = width.saturating_sub(2 + time.len() + 2 + hint + 1);
-    if let Some(l) = latest.filter(|_| room >= 8) {
+    if let Some((l, color)) = line.filter(|_| room >= 8) {
         let _ = paint(
             &mut out,
-            look.grey(),
+            color,
             &format!("  {}", text::fit(l, room, look.unicode)),
         );
     }
@@ -452,7 +550,18 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    tool_with(rt, args, also, &|out| last_lines(out, TAIL_LINES))
+    tool_with(|each| rt.stream(args, each), also, &|out| {
+        last_lines(out, TAIL_LINES)
+    })
+}
+
+/// [`tool`] for a command on this machine (`podman machine`).
+pub fn host(cmd: std::process::Command) -> Result<ExitStatus> {
+    tool_with(
+        |each| crate::runtime::stream_command(cmd, each),
+        &|_| {},
+        &|out| last_lines(out, TAIL_LINES),
+    )
 }
 
 /// [`tool`] for git in the env: a failure shows [`git_tail`].
@@ -461,7 +570,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    tool_with(rt, args, &|_| {}, &git_tail)
+    tool_with(|each| rt.stream(args, each), &|_| {}, &git_tail)
 }
 
 /// What a failed git shows of its output: its `fatal:` and `error:` lines, and the reason the
@@ -486,16 +595,12 @@ fn git_tail(out: &[u8]) -> Vec<String> {
     }
 }
 
-fn tool_with<I, S>(
-    rt: &Runtime,
-    args: I,
+/// Run what `run` starts, given each chunk it prints (`true` for stderr).
+fn tool_with(
+    run: impl FnOnce(&(dyn Fn(bool, &[u8]) -> bool + Sync)) -> Result<ExitStatus>,
     also: &(dyn Fn(&[u8]) + Sync),
     tail: &dyn Fn(&[u8]) -> Vec<String>,
-) -> Result<ExitStatus>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<std::ffi::OsStr>,
-{
+) -> Result<ExitStatus> {
     let out = Arc::new(Mutex::new(Output::new(
         verbose() || SHOWN.load(Ordering::Relaxed),
     )));
@@ -504,7 +609,7 @@ where
     if watched {
         *lock(&TOOL) = Some(out.clone());
     }
-    let status = rt.stream(args, &|to_err, chunk| {
+    let status = run(&|to_err, chunk| {
         also(chunk);
         lock(&out).feed(to_err, chunk);
         true
@@ -853,13 +958,46 @@ mod tests {
             ..TRUE
         };
         let latest = "x".repeat(200);
-        let rest = rest(plain, Duration::from_secs(5), Some(&latest), true, 60);
+        let rest = rest(
+            plain,
+            Duration::from_secs(5),
+            Some((&latest, None)),
+            true,
+            60,
+        );
         let line = visible(&frame(plain.dot(Duration::ZERO), Some(&rest), true));
         assert!(line.width() < 60, "{line:?}");
         assert!(
             line.ends_with(HINT) && line.starts_with("• 5s  xxx"),
             "{line:?}"
         );
+    }
+
+    #[test]
+    fn a_wait_counts_from_the_outermost_and_names_the_innermost() {
+        let at = Instant::now();
+        let later = at + Duration::from_secs(3);
+        let s = |at, w: Option<&str>| Start {
+            at,
+            waits_on: w.map(str::to_string),
+        };
+        let waits = [
+            s(at, Some("starting `web`")),
+            s(later, Some("starting the gate")),
+        ];
+        assert_eq!(
+            timed(&waits),
+            Some((at, Some("starting the gate".to_string())))
+        );
+        // A step has a line: its own time, and nothing to name.
+        let step_in_wait = [s(at, Some("starting `web`")), s(later, None)];
+        assert_eq!(timed(&step_in_wait), Some((later, None)));
+        let wait_in_step = [s(at, None), s(later, Some("reading"))];
+        assert_eq!(
+            timed(&wait_in_step),
+            Some((at, Some("reading".to_string())))
+        );
+        assert_eq!(timed(&[]), None);
     }
 
     #[test]

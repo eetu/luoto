@@ -233,7 +233,9 @@ pub fn pull(
         );
     }
     for t in targets {
-        let plan = workspace::plan_pull(&ctx, name, &t, include_git)?;
+        let plan = crate::progress::wait("comparing the env's files with yours", || {
+            workspace::plan_pull(&ctx, name, &t, include_git)
+        })?;
         if let Some(r) = &plan.repo {
             println!("\nrepo {r}:");
         }
@@ -495,7 +497,7 @@ pub fn ls(size: bool) -> Result<ExitCode> {
         println!("luoto's VM is stopped; `luoto up` starts it with the env\n");
     }
     let sizes = if size && !states.vm_stopped {
-        disk::sizes(&ctx.rt)
+        crate::progress::wait("measuring every volume", || disk::sizes(&ctx.rt))
             .map_err(|e| eprintln!("warning: sizes not read: {e:#}"))
             .ok()
     } else {
@@ -669,7 +671,7 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
     }
     // Last of the lines: the runtime walks every volume for it.
     if size && !states.vm_stopped {
-        match disk::sizes(&ctx.rt) {
+        match crate::progress::wait("measuring every volume", || disk::sizes(&ctx.rt)) {
             Ok(s) => println!("  disk:   {}", s.env(name).describe()),
             Err(e) => println!("  disk:   not read ({e:#})"),
         }
@@ -1160,8 +1162,10 @@ pub fn reload(env: Option<&str>) -> Result<ExitCode> {
         println!("the vault holds no secrets to read again (`luoto vault unlock` loads them)");
         return Ok(ExitCode::SUCCESS);
     }
-    eprintln!("reading {} secret(s) from your secret store…", refs.len());
-    let r = sync::reload(&ctx, &refs, held_only)?;
+    let r = crate::progress::step(
+        &format!("reading {} secret(s) from your secret store", refs.len()),
+        || sync::reload(&ctx, &refs, held_only),
+    )?;
     println!(
         "read {}: {} changed{}",
         r.read,

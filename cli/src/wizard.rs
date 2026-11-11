@@ -16,7 +16,7 @@ use crate::agents::Auth;
 use crate::config::{EnvConfig, GlobalConfig, Isolation};
 use crate::detect;
 use crate::init::Proposal;
-use crate::prompt::{menu_help, menu_rows};
+use crate::prompt::{Ask, menu_help, menu_rows};
 use crate::secrets::{self, OpAccount, OpItem, OpVault};
 use crate::text::{self, display};
 
@@ -117,7 +117,7 @@ fn isolation(p: &mut Proposal) -> Result<()> {
         .with_formatter(&short)
         .with_help_message(&help)
         .without_filtering()
-        .prompt_skippable()?
+        .ask()?
     {
         // gVisor is the default, so only the opt-out is written.
         p.cfg.isolation = (c.value == Isolation::Container).then_some(Isolation::Container);
@@ -160,7 +160,7 @@ fn pick_presets(p: &mut Proposal) -> Result<()> {
             .with_default(&selected)
             .with_help_message("space toggles, Enter confirms; [file] = suggested by the folder")
             .with_formatter(&shorts)
-            .prompt_skippable()?
+            .ask()?
     {
         p.cfg.presets = chosen.into_iter().map(|c| c.value).collect();
     }
@@ -197,7 +197,7 @@ fn toolchains(p: &mut Proposal) -> Result<()> {
                 None => Validation::Valid,
             })
         })
-        .prompt_skippable()?
+        .ask()?
     else {
         return Ok(());
     };
@@ -239,7 +239,7 @@ fn pick_agents(cfg: &mut EnvConfig) -> Result<()> {
         .with_default(&selected)
         .with_help_message("space toggles, Enter confirms; the first `up` asks how each signs in")
         .with_formatter(&shorts)
-        .prompt_skippable()?
+        .ask()?
     {
         cfg.agents = crate::config::Agents::from_names(chosen.into_iter().map(|c| c.value));
     }
@@ -261,7 +261,7 @@ fn ports(cfg: &mut EnvConfig) -> Result<()> {
                 },
             )
         })
-        .prompt_skippable()?
+        .ask()?
     else {
         return Ok(());
     };
@@ -302,7 +302,7 @@ fn terminal_menu(
         .with_help_message(help)
         .with_page_size(page)
         .without_filtering()
-        .prompt_skippable()?
+        .ask()?
         .map(|c| c.value)
         .into())
 }
@@ -919,7 +919,7 @@ fn typed_reference(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String
                     Err(e) => Validation::Invalid(format!("{e:#}").into()),
                 })
             })
-            .prompt_skippable()?
+            .ask()?
         else {
             return Ok(Step::Back);
         };
@@ -1107,7 +1107,7 @@ fn pick_index(question: &str, shown: Vec<String>, at: usize) -> Result<Step<usiz
         .with_page_size(PAGE)
         .with_starting_cursor(at)
         .with_help_message(BROWSE_HELP)
-        .prompt_skippable()?
+        .ask()?
         .map(|c| c.value)
         .into())
 }
@@ -1141,7 +1141,7 @@ fn item_field(item: &OpItem) -> Result<Step<String>> {
                 Err(e) => Validation::Invalid(format!("{e:#}").into()),
             })
         })
-        .prompt_skippable()?;
+        .ask()?;
     Ok(typed.map(|s| s.trim().to_string()).into())
 }
 
@@ -1309,7 +1309,7 @@ fn paste(ask: &SecretAsk) -> Result<Step<String>> {
                 Validation::Valid
             })
         })
-        .prompt_skippable()?
+        .ask()?
         .map(|s| s.trim().to_string())
         .into())
 }

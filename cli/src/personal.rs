@@ -18,28 +18,32 @@ pub fn apply(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str, quiet: bool) -> 
     if let Some(shell) = preferred_shell(ctx, cfg) {
         match set_shell(ctx, env, &shell) {
             Ok(Some(path)) if !quiet => {
-                println!("login shell: {}", crate::text::display(&path))
+                crate::progress::say(|| println!("login shell: {}", crate::text::display(&path)))
             }
             Ok(_) => {}
-            Err(e) => eprintln!("warning: login shell not changed ({e:#})"),
+            Err(e) => {
+                crate::progress::say(|| eprintln!("warning: login shell not changed ({e:#})"))
+            }
         }
     }
     if let Err(e) = git_identity(ctx, env) {
-        eprintln!("warning: git identity not set in the env ({e:#})");
+        crate::progress::say(|| eprintln!("warning: git identity not set in the env ({e:#})"));
     }
     match copy_home(ctx, env, home) {
         Ok(0) => 0,
         Ok(n) => {
             if !quiet {
-                println!(
-                    "copied {n} file(s) from {} into the env's home",
-                    ctx.paths.home_files().display()
-                );
+                crate::progress::say(|| {
+                    println!(
+                        "copied {n} file(s) from {} into the env's home",
+                        ctx.paths.home_files().display()
+                    )
+                });
             }
             n
         }
         Err(e) => {
-            eprintln!("warning: home files not copied ({e:#})");
+            crate::progress::say(|| eprintln!("warning: home files not copied ({e:#})"));
             0
         }
     }

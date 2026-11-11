@@ -101,9 +101,9 @@ pub fn reserve(ctx: &Ctx, env: &str, make: impl FnOnce(u8) -> EnvState) -> Resul
     std::fs::create_dir_all(&ctx.paths.data)?;
     let lock = std::fs::File::create(ctx.paths.data.join("octets.lock"))?;
     lock.lock().context("lock the subnets")?;
-    let used = ctx.rt.used_subnets()?;
-    let octet = free_octet(&taken(&ctx.paths)?, &used)
-        .context("no free 10.213.x.0/24 subnet left for a new env")?;
+    let used: Vec<String> = ctx.rt.subnets()?.into_iter().map(|(_, s)| s).collect();
+    let octet = free_octet(names::env_octets(), &taken(&ctx.paths)?, &used)
+        .context("no free subnet left for a new env")?;
     let s = make(octet);
     s.save(&ctx.paths, env)?;
     Ok(s)
@@ -148,8 +148,14 @@ fn taken(paths: &Paths) -> Result<BTreeSet<u8>> {
 }
 
 /// The first octet no env here has (`taken`) and no network's subnet (`used`) holds.
-fn free_octet(taken: &BTreeSet<u8>, used: &[String]) -> Option<u8> {
-    (1..=254u8).find(|o| !taken.contains(o) && !used.iter().any(|s| s == &names::addrs(*o).subnet))
+fn free_octet(
+    octets: std::ops::RangeInclusive<u8>,
+    taken: &BTreeSet<u8>,
+    used: &[String],
+) -> Option<u8> {
+    octets
+        .into_iter()
+        .find(|o| !taken.contains(o) && !used.iter().any(|s| s == &names::addrs(*o).subnet))
 }
 
 /// Home of uid 1000 in the image, or None.
@@ -179,11 +185,15 @@ mod tests {
     fn a_new_env_gets_an_octet_no_env_here_or_network_has() {
         let taken: BTreeSet<u8> = [1, 2, 4].into();
         let used = vec!["10.213.3.0/24".to_string(), "10.88.0.0/16".to_string()];
-        assert_eq!(free_octet(&taken, &used), Some(5));
-        assert_eq!(free_octet(&BTreeSet::new(), &[]), Some(1));
+        assert_eq!(free_octet(1..=254, &taken, &used), Some(5));
+        assert_eq!(free_octet(1..=254, &BTreeSet::new(), &[]), Some(1));
+        assert_eq!(free_octet(128..=254, &BTreeSet::new(), &[]), Some(128));
         let all: BTreeSet<u8> = (1..=253).collect();
-        assert_eq!(free_octet(&all, &[]), Some(254));
-        assert_eq!(free_octet(&all, &["10.213.254.0/24".to_string()]), None);
+        assert_eq!(free_octet(1..=254, &all, &[]), Some(254));
+        assert_eq!(
+            free_octet(1..=254, &all, &["10.213.254.0/24".to_string()]),
+            None
+        );
     }
 
     #[test]
