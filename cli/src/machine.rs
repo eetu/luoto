@@ -123,9 +123,10 @@ pub fn running(bin: &str) -> bool {
     machines(bin).iter().any(|(n, r)| n == NAME && *r)
 }
 
-fn run(mut c: Command, what: &str) -> Result<()> {
-    let status = c.status().with_context(|| format!("run {what}"))?;
-    if !status.success() {
+/// Run `c`, a `podman machine` command: what it prints stays off the terminal, but for its
+/// last lines when it fails (`o` and `--verbose` show it as it comes).
+fn run(c: Command, what: &str) -> Result<()> {
+    if !crate::progress::host(c)?.success() {
         bail!("{what} failed");
     }
     Ok(())
@@ -133,7 +134,6 @@ fn run(mut c: Command, what: &str) -> Result<()> {
 
 /// Create the machine with no host folders mounted.
 pub fn create(bin: &str, cpus: u32, memory_mib: u64) -> Result<()> {
-    eprintln!("creating luoto's VM `{NAME}` ({cpus} CPUs, {memory_mib} MiB, no host folders)…");
     let mut c = Command::new(bin);
     c.args(["machine", "init", NAME, "--volume", ""]).args([
         "--cpus",
@@ -141,7 +141,10 @@ pub fn create(bin: &str, cpus: u32, memory_mib: u64) -> Result<()> {
         "--memory",
         &memory_mib.to_string(),
     ]);
-    run(c, "podman machine init")
+    crate::progress::step(
+        &format!("creating luoto's VM `{NAME}` ({cpus} CPUs, {memory_mib} MiB, no host folders)"),
+        || run(c, "podman machine init"),
+    )
 }
 
 /// Start luoto's machine. Podman runs one machine at a time, so another running one is
@@ -162,29 +165,27 @@ pub fn start(bin: &str, yes: bool) -> Result<()> {
             );
         }
         let mut c = Command::new(bin);
-        c.args(["machine", "stop", &other]).stdout(Stdio::null());
-        run(c, "podman machine stop")?;
+        c.args(["machine", "stop", &other]);
+        crate::progress::step(&format!("stopping `{other}`"), || {
+            run(c, "podman machine stop")
+        })?;
     }
-    eprintln!("starting luoto's VM…");
-    let t = std::time::Instant::now();
     let mut c = Command::new(bin);
-    c.args(["machine", "start", NAME]).stdout(Stdio::null());
-    run(c, "podman machine start")?;
-    eprintln!("luoto's VM is up ({} s)", t.elapsed().as_secs());
-    Ok(())
+    c.args(["machine", "start", NAME]);
+    crate::progress::step("starting luoto's VM", || run(c, "podman machine start"))
 }
 
 pub fn stop(bin: &str) -> Result<()> {
     let mut c = Command::new(bin);
-    c.args(["machine", "stop", NAME]).stdout(Stdio::null());
-    run(c, "podman machine stop")
+    c.args(["machine", "stop", NAME]);
+    crate::progress::wait("stopping luoto's VM", || run(c, "podman machine stop"))
 }
 
 /// Delete the machine with everything in it, and its podman connections.
 pub fn remove(bin: &str) -> Result<()> {
     let mut c = Command::new(bin);
-    c.args(["machine", "rm", "-f", NAME]).stdout(Stdio::null());
-    run(c, "podman machine rm")
+    c.args(["machine", "rm", "-f", NAME]);
+    crate::progress::wait("removing luoto's VM", || run(c, "podman machine rm"))
 }
 
 /// The machine's state and size in a line, from `podman machine inspect`.
@@ -293,17 +294,21 @@ pub fn prepare(bin: &str) -> Result<()> {
     if have.contains(&format!("release-{GVISOR_RELEASE}")) {
         return write_wrapper(bin);
     }
-    eprintln!("installing gVisor {GVISOR_RELEASE} in luoto's VM…");
-    ssh(
-        bin,
-        &format!(
-            "set -e; d=$(mktemp -d); cd \"$d\"; \
-             u=https://storage.googleapis.com/gvisor/releases/release/{GVISOR_RELEASE}/$(uname -m); \
-             curl -fsSLO \"$u/gvisor.tar.bz2\"; curl -fsSLO \"$u/gvisor.tar.bz2.sha512\"; \
-             sha512sum -c gvisor.tar.bz2.sha512 >/dev/null; \
-             sudo rm -rf {GVISOR_DIR}; sudo mkdir -p {GVISOR_DIR}; \
-             sudo tar xjf gvisor.tar.bz2 -C {GVISOR_DIR}; cd /; rm -rf \"$d\""
-        ),
+    crate::progress::step(
+        &format!("installing gVisor {GVISOR_RELEASE} in luoto's VM"),
+        || {
+            ssh(
+                bin,
+                &format!(
+                    "set -e; d=$(mktemp -d); cd \"$d\"; \
+                     u=https://storage.googleapis.com/gvisor/releases/release/{GVISOR_RELEASE}/$(uname -m); \
+                     curl -fsSLO \"$u/gvisor.tar.bz2\"; curl -fsSLO \"$u/gvisor.tar.bz2.sha512\"; \
+                     sha512sum -c gvisor.tar.bz2.sha512 >/dev/null; \
+                     sudo rm -rf {GVISOR_DIR}; sudo mkdir -p {GVISOR_DIR}; \
+                     sudo tar xjf gvisor.tar.bz2 -C {GVISOR_DIR}; cd /; rm -rf \"$d\""
+                ),
+            )
+        },
     )
     .context("install gVisor")?;
     write_wrapper(bin)

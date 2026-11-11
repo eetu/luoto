@@ -26,7 +26,7 @@ pub fn uninstall(yes: bool) -> Result<ExitCode> {
         );
     }
     let paths = Paths::get()?;
-    let plan = Plan::gather(&paths);
+    let plan = crate::progress::wait("listing what it made", || Plan::gather(&paths));
     let binary = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map_or_else(
@@ -228,13 +228,14 @@ impl Plan {
     fn carry_out(&self, paths: &Paths) -> usize {
         let mut failed = 0;
         let mut report = |what: &str, r: Result<String>| match r {
-            Ok(done) => println!("  {what:<11} {done}"),
+            Ok(done) => crate::progress::say(|| println!("  {what:<11} {done}")),
             Err(e) => {
                 failed += 1;
-                println!("  {what:<11} FAILED: {e:#}");
+                crate::progress::say(|| println!("  {what:<11} FAILED: {e:#}"));
             }
         };
         println!();
+        let _waiting = crate::progress::waiting("removing it");
         match watch::stop(paths) {
             Ok(true) => report("watcher", Ok("stopped".into())),
             Ok(false) => {}

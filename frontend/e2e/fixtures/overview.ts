@@ -11,6 +11,7 @@ export default {
       "error": null,
       "gate": "running",
       "name": "web",
+      "open": null,
       "pending": 0,
       "repos": []
     }

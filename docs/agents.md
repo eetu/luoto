@@ -113,7 +113,9 @@ use prompts to improve its products, until its Google Cloud project has billing.
 
 ## OpenCode
 
-- Installs with OpenCode's installer from its GitHub releases, and runs with auto-update and
+- Installs with OpenCode's installer (`opencode.ai`, which redirects to the script on
+  `raw.githubusercontent.com`; it asks `registry.npmjs.org` for the latest version, else
+  `api.github.com`, and downloads from its GitHub releases), and runs with auto-update and
   session sharing off (`OPENCODE_DISABLE_AUTOUPDATE`, `OPENCODE_DISABLE_SHARE`).
 - Takes any of `anthropic`, `openai`, `openrouter` or `gemini`.
 - Reads its model catalogue from `models.dev` and `models.opencode.ai`.
@@ -167,6 +169,23 @@ use prompts to improve its products, until its Google Cloud project has billing.
   | `lh3.googleusercontent.com` | your profile picture | it also serves files people upload to Google Photos, Blogger and Sites: a download route for anything |
   | `www.gstatic.com` | static images and fonts | nothing a terminal needs |
   | the updater manifest | an update check it makes even with auto-update off | the binary stays the version luoto installed |
+
+## Model servers
+
+How each agent uses a `[model_servers]` entry
+([guides/model-servers.md](guides/model-servers.md)):
+
+- **Claude Code:** the one it starts on goes in `~/.claude/settings.json` (`ANTHROPIC_BASE_URL`,
+  a placeholder token, every model alias set to the server's model, the server's `context` as
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS`); one endpoint a session.
+  Verified with a server on this machine (MTPLX, and a stand-in): reached through the gate,
+  its token added over plain HTTP, `claude -p` sending its requests there.
+- **Codex:** a provider and a profile per server in `~/.codex/config.toml` (Responses API,
+  `env_key = "LUOTO_MODEL_TOKEN"`), the one it starts on as the default profile and `cloud`
+  for OpenAI. Written as unit tests expect; not run against a server yet.
+- **OpenCode:** an `@ai-sdk/openai-compatible` provider per server (bundled with OpenCode, no
+  download) beside the cloud's in its model picker, the one it starts on as `model`. Verified
+  with a stand-in server: `opencode run` sends its chat completions there through the gate.
 
 ## Not built in
 

@@ -11,7 +11,9 @@ env's name and its current rules.
   user enabled). Anything else gets HTTP 403 with the header `x-proxy-error: blocked-by-luoto`
   and a plain-text explanation. Built-in web search tools usually run on the model provider's
   side and keep working; fetching a page or calling an API from here only works for allowed
-  hosts. The gate ends a request whose response hasn't started within 10 minutes (HTTP 504),
+  hosts. While the user has opened the env's egress for a while (`sandbox status` says until
+  when), other HTTP(S) hosts work too, as rule `open`; hosts with credentials keep to their
+  rules. The gate ends a request whose response hasn't started within 10 minutes (HTTP 504),
   a response silent for 5 minutes, and a tunnel or websocket silent for an hour; a long poll
   such as `kubectl logs -f` needs the user to give its host longer, on the host:
   `luoto allow -e <env> <host> --idle 2h`.

@@ -398,6 +398,30 @@ pub struct GitGuard {
     pub allow_tags: bool,
 }
 
+/// The rule name of what open egress lets out.
+pub const OPEN_RULE: &str = "open";
+
+/// Open egress (`luoto egress open`): a request no rule allows goes out anyway, as rule
+/// [`OPEN_RULE`], over HTTP(S) to any host and port, until `until`. It never reaches what the
+/// policy keeps from a rule: an explicit deny, private addresses, a host that gets a
+/// credential (its rules stay its only access), the self-test's name, and what `except`
+/// covers.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct Open {
+    /// When it closes; `None`: when the user closes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<DateTime<Utc>>,
+    /// The env's mutes: denials the user keeps, so they stay denials.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub except: Vec<Mute>,
+}
+
+impl Open {
+    pub fn live(&self, now: DateTime<Utc>) -> bool {
+        self.until.is_none_or(|u| u > now)
+    }
+}
+
 /// Name the gate answers itself in DNS (the gate, env services).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct InternalName {
@@ -427,6 +451,12 @@ pub struct Policy {
     /// The managed identity the gate's IMDS answers for (`[credentials.azure]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure: Option<AzureIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<Open>,
+    /// Hosts on the user's own machine (a model server there): credentials go to them over
+    /// plain HTTP too, as a request to them never leaves it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plain_http_credentials: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -553,7 +583,33 @@ impl Policy {
                 });
             }
         }
+        match self.by_rules(req, now) {
+            Decision::Deny(_) if self.opens(req, now) => Decision::Allow {
+                rule: OPEN_RULE.into(),
+                max_body: None,
+                allow_private: false,
+                idle: None,
+            },
+            d => d,
+        }
+    }
 
+    /// Open egress, while it is open.
+    pub fn open_at(&self, now: DateTime<Utc>) -> Option<&Open> {
+        self.open.as_ref().filter(|o| o.live(now))
+    }
+
+    /// Whether open egress lets out `req`, which no rule allows.
+    fn opens(&self, req: &RequestInfo<'_>, now: DateTime<Utc>) -> bool {
+        self.open_at(now).is_some_and(|o| {
+            !self.is_credentialed_host(req.host)
+                && !crate::events::is_selftest(req.host)
+                && !o.except.iter().any(|m| m.covers(req.host, Some(req.path)))
+        })
+    }
+
+    /// The decision of the rules alone.
+    fn by_rules(&self, req: &RequestInfo<'_>, now: DateTime<Utc>) -> Decision {
         let mut live = false;
         let mut path_ok_method_bad: Vec<&CompiledRule> = Vec::new();
         let mut ws_bad = false;
@@ -1151,6 +1207,140 @@ mod tests {
         assert!(some.covers("a.example", Some("/Telemetry/1")));
         assert!(!some.covers("a.example", Some("/api")));
         assert!(!some.covers("a.example", None));
+    }
+
+    fn opened(mut p: Policy, until: Option<DateTime<Utc>>, except: Vec<Mute>) -> Policy {
+        p.open = Some(Open { until, except });
+        p
+    }
+
+    fn allowed_by(d: Decision) -> Option<String> {
+        match d {
+            Decision::Allow { rule, .. } => Some(rule),
+            Decision::Deny(_) => None,
+        }
+    }
+
+    #[test]
+    fn open_egress_lets_out_what_no_rule_allows() {
+        let now = Utc::now();
+        let p = opened(policy(), Some(now + Duration::hours(1)), vec![]);
+        let open = Some(OPEN_RULE.to_string());
+        assert_eq!(
+            p.decide(&req("evil.example", "POST", "/upload"), now),
+            Decision::Allow {
+                rule: OPEN_RULE.into(),
+                max_body: None,
+                allow_private: false,
+                idle: None,
+            }
+        );
+        // Expired rule, method, path, websocket and body cap: each refusal of the rules.
+        assert_eq!(
+            allowed_by(p.decide(&req("docs.rs", "GET", "/x"), now)),
+            open
+        );
+        assert_eq!(
+            allowed_by(p.decide(&req("registry.npmjs.org", "PUT", "/react"), now)),
+            open
+        );
+        let mut big = req("registry.npmjs.org", "POST", "/-/npm/v1/security/audits");
+        big.content_length = Some(5000);
+        assert_eq!(allowed_by(p.decide(&big, now)), open);
+        let mut ws = req("registry.npmjs.org", "GET", "/");
+        ws.websocket = true;
+        assert_eq!(allowed_by(p.decide(&ws, now)), open);
+        let mut port = req("evil.example", "GET", "/");
+        port.port = 8443;
+        assert_eq!(allowed_by(p.decide(&port, now)), open);
+        // A rule that allows still names itself.
+        assert_eq!(
+            allowed_by(p.decide(&req("registry.npmjs.org", "GET", "/react"), now)),
+            Some("npm".into())
+        );
+    }
+
+    #[test]
+    fn open_egress_keeps_denies_credentials_mutes_and_the_selftest() {
+        let now = Utc::now();
+        let mute = |host: &str, paths: &[&str]| {
+            Mute {
+                host: host.into(),
+                paths: paths.iter().map(|p| p.to_string()).collect(),
+                note: None,
+            }
+            .checked()
+            .unwrap()
+        };
+        let mut p = opened(
+            policy(),
+            None,
+            vec![
+                mute("telemetry.example", &[]),
+                mute("*", &["/telemetry/**"]),
+            ],
+        );
+        p.rules
+            .push(rule("anthropic", Rule::read("api.anthropic.com")));
+        p.injections.push(Injection {
+            binding: "anthropic".into(),
+            host: "api.anthropic.com".into(),
+            paths: vec![],
+            methods: vec![],
+            place: crate::creds::Placement::Header {
+                name: "x-api-key".into(),
+                format: "{secret}".into(),
+            },
+            ignore_case: false,
+        });
+        assert!(matches!(
+            p.decide(
+                &req(
+                    "api.github.com",
+                    "POST",
+                    "/repos/a/b/actions/workflows/x/dispatches"
+                ),
+                now
+            ),
+            Decision::Deny(DenyReason::Explicit { .. })
+        ));
+        assert!(matches!(
+            p.decide(&req("api.anthropic.com", "POST", "/v1/files"), now),
+            Decision::Deny(DenyReason::MethodNotAllowed { .. })
+        ));
+        assert_eq!(
+            p.decide(&req("telemetry.example", "GET", "/"), now),
+            Decision::Deny(DenyReason::NoRule)
+        );
+        assert_eq!(
+            p.decide(&req("a.example", "POST", "/Telemetry/1"), now),
+            Decision::Deny(DenyReason::NoRule)
+        );
+        assert_eq!(
+            allowed_by(p.decide(&req("a.example", "POST", "/api"), now)),
+            Some(OPEN_RULE.into())
+        );
+        assert_eq!(
+            p.decide(&req("x1.selftest.luoto.invalid", "GET", "/"), now),
+            Decision::Deny(DenyReason::NoRule)
+        );
+    }
+
+    #[test]
+    fn open_egress_closes_at_its_time() {
+        let now = Utc::now();
+        let p = opened(policy(), Some(now - Duration::seconds(1)), vec![]);
+        assert!(p.open_at(now).is_none());
+        assert_eq!(
+            p.decide(&req("evil.example", "GET", "/"), now),
+            Decision::Deny(DenyReason::NoRule)
+        );
+        let p = opened(policy(), Some(now + Duration::minutes(5)), vec![]);
+        assert!(p.open_at(now).is_some());
+        assert_eq!(
+            p.decide(&req("evil.example", "GET", "/"), now + Duration::minutes(5)),
+            Decision::Deny(DenyReason::NoRule)
+        );
     }
 
     #[test]

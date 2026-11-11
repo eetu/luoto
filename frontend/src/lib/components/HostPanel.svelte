@@ -7,6 +7,11 @@
   let { host }: { host: string } = $props();
 
   const summary = $derived(app.egress.find((h) => h.host === host) ?? null);
+  // Reached through open egress: no rule allows it, so the form keeps it.
+  const opened = $derived((summary?.opened ?? 0) > 0);
+  const wrote = $derived(
+    summary?.methods.some((m) => !["GET", "HEAD", "OPTIONS"].includes(m)) ?? false,
+  );
   const isPrivate = $derived(
     host.endsWith(".internal") ||
       /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) ||
@@ -44,7 +49,11 @@
     {#if summary.last_message && summary.denied > 0}
       <p class="why">{summary.last_message}</p>
     {/if}
-    {#if summary.last_rule}
+    {#if opened}
+      <p class="muted small">
+        {summary.opened} let through by open egress: no rule allows it, and it closes with the window
+      </p>
+    {:else if summary.last_rule}
       <p class="muted small">
         allowed by rule <code>{summary.last_rule}</code>
       </p>
@@ -54,7 +63,8 @@
   <div class="section">
     <RuleBuilder
       {host}
-      wantsWrite={summary?.wants_write ?? false}
+      keep={opened}
+      wantsWrite={opened ? wrote : (summary?.wants_write ?? false)}
       paths={summary?.top_paths.map(([p]) => p) ?? []}
       privateHost={isPrivate}
       tlsRejected={summary?.tls_rejected ?? false}

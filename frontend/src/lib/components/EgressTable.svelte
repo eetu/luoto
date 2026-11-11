@@ -6,6 +6,7 @@
 
   function decision(h: HostSummary): { text: string; cls: string } {
     if (h.dns_only) return { text: "looked up", cls: "dns" };
+    if (h.opened > 0) return { text: "open", cls: "open" };
     if (h.tls_rejected) return { text: "pinned?", cls: "mixed" };
     if (h.denied > 0 && h.allowed === 0) return { text: "blocked", cls: "blocked" };
     if (h.denied > 0) return { text: "partly", cls: "mixed" };
@@ -36,9 +37,10 @@
         hint: "until revoked",
       },
       {
-        label: "Allow…",
+        label: h.opened > 0 ? "Keep…" : "Allow…",
         run: () => (app.subject = { kind: "host", host: h.host }),
-        hint: h.wants_write ? "write wanted" : undefined,
+        hint:
+          h.opened > 0 ? "reached through open egress" : h.wants_write ? "write wanted" : undefined,
       },
       { label: "Copy host", run: () => copyText(h.host) },
     ]);
@@ -177,6 +179,11 @@
 
   .chip.mixed {
     background: var(--halo-accent-soft);
+    color: var(--halo-accent);
+  }
+
+  .chip.open {
+    border: 1px solid var(--halo-accent);
     color: var(--halo-accent);
   }
 

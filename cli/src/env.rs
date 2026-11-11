@@ -152,8 +152,10 @@ pub fn dev_id_map(rt: &Runtime, octet: u8) -> Option<u32> {
 }
 
 pub fn ensure_vault(ctx: &Ctx) -> Result<()> {
-    let id = image_ids(&ctx.rt, &[ctx.image("vault")]).map_or_else(String::new, |[id]| id);
-    start_vault(ctx, &id)
+    crate::progress::wait("starting the vault", || {
+        let id = image_ids(&ctx.rt, &[ctx.image("vault")]).map_or_else(String::new, |[id]| id);
+        start_vault(ctx, &id)
+    })
 }
 
 /// The vault from its image `image_id`, and its networks.
@@ -225,10 +227,12 @@ fn start_or_create(ctx: &Ctx, spec: &RunSpec, image_id: &str, recreate: bool) ->
                 return Ok(Launch::Created);
             }
             if !same {
-                eprintln!(
-                    "note: {} was created from an older config or luoto version; `luoto up --recreate` applies it (volumes are kept)",
-                    spec.name
-                );
+                crate::progress::say(|| {
+                    eprintln!(
+                        "note: {} was created from an older config or luoto version; `luoto up --recreate` applies it (volumes are kept)",
+                        spec.name
+                    )
+                });
             }
             if state == "running" {
                 return Ok(Launch::AlreadyRunning);
@@ -397,6 +401,7 @@ pub fn remove_dev(ctx: &Ctx, env: &str) -> Result<()> {
 /// go); the next `up` makes both anew. Whether there was a home to discard.
 pub fn reset_home(ctx: &Ctx, env: &str) -> Result<bool> {
     ensure_vm(ctx)?;
+    let _waiting = crate::progress::waiting("discarding the home");
     let vol = names::volume(env, "home");
     if !ctx.rt.volume_exists(&vol) {
         return Ok(false);
@@ -419,17 +424,19 @@ pub fn ensure_vm(ctx: &Ctx) -> Result<()> {
     machine::start(&ctx.rt.bin, false)
 }
 
-/// What the env's agents and repos need and its config doesn't say: asked on a terminal,
-/// before the gate starts, so it has the answers (`agents::ask_missing`,
-/// `repos::ask_missing`).
+/// What the env's agents, repos and project need and its config doesn't say: asked on a
+/// terminal, before the gate starts, so it has the answers (`agents::ask_missing`,
+/// `repos::ask_missing`, `needs::ask`).
 fn ask_credentials(ctx: &Ctx, env: &str) -> Result<()> {
     let cfg = layered(ctx, env)?;
     crate::agents::ask_missing(ctx, env, &cfg)?;
     repos::ask_missing(ctx, env, &cfg)?;
+    crate::needs::ask(ctx, env, crate::wizard::Mode::Missing)?;
     Ok(())
 }
 
 pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
+    crate::azure_identity::forget_login_needed();
     ensure_vm(ctx)?;
     if !opts.quiet {
         crate::disk::warn_if_low(ctx);
@@ -454,8 +461,24 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     let stale_ca = matches!(made, ca::Made::Renewed(_))
         || state.dev_ca.as_deref().is_some_and(|h| h != ca_sha);
 
-    start_vault(ctx, &ids.vault)?;
+    // Quick when the env runs, so it says nothing then.
+    let starting = crate::progress::waiting(&format!("starting `{env}`"));
+    crate::progress::wait("starting the vault", || start_vault(ctx, &ids.vault))?;
 
+    if !rt.network_exists(&names::internal_net(env))
+        && let Some((holder, _)) = rt
+            .subnets()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(_, s)| *s == a.subnet)
+    {
+        let me = names::instance();
+        bail!(
+            "network `{holder}` already uses this env's subnet {}: `{me} export -e {env}`, \
+             `{me} rm -e {env}` and `{me} import {env}.luoto.tar` move the env to a free one",
+            a.subnet
+        );
+    }
     rt.create_internal_network(
         &names::internal_net(env),
         &a.subnet,
@@ -470,7 +493,9 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     for v in ["home", "gate"] {
         create_volume(ctx, env, v)?;
     }
-    populate_tools(ctx, env, &state, &ids.tools, &env_ca.cert_pem)?;
+    crate::progress::wait("copying luoto's tools into the env", || {
+        populate_tools(ctx, env, &state, &ids.tools, &env_ca.cert_pem)
+    })?;
 
     let gate = start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)?;
     let restart = if gate != Launch::AlreadyRunning {
@@ -494,6 +519,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         restarted && !opts.no_selftest,
         opts.quiet,
     )?;
+    drop(starting);
 
     // Nothing the clone of the env's own remote brings runs, installs or is granted until the
     // user has seen its luoto.toml (`project::review`) and what it would install (below).
@@ -548,12 +574,14 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         // The accepted settings reach the gate (policy, credentials, ports) and the runtime env.
         let image = p.image.clone();
         p = plan(ctx, env)?;
+        let _restarting = crate::progress::waiting(&format!("starting `{env}` with them"));
         if start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)? != Launch::AlreadyRunning {
             start_dev(ctx, env, &p, &state, &ids, Restart::Gate)?;
             after_start(ctx, env, &p, &state, !opts.no_selftest, opts.quiet)?;
         } else {
             sync::write_runtime_env(ctx, env, &p.compiled)?;
         }
+        drop(_restarting);
         if p.image != image {
             eprintln!(
                 "note: luoto.toml names another image; `luoto up --recreate` applies it (volumes are kept)"
@@ -624,6 +652,20 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
 
     crate::watch::spawn(ctx);
 
+    let open = p
+        .compiled
+        .policy
+        .open_at(chrono::Utc::now())
+        .map(|o| o.until);
+    if let Some(until) = open
+        && (opts.quiet || opts.brief)
+    {
+        let width = crate::text::columns().saturating_sub(10);
+        eprintln!(
+            "egress of `{env}` is {}",
+            crate::egress::state_line(env, until, width)
+        );
+    }
     if !opts.quiet && !opts.brief {
         println!(
             "env `{env}` is up{}",
@@ -649,6 +691,13 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             editors.join("|")
         );
         println!("  egress:  luoto egress -e {env}");
+        if let Some(until) = open {
+            let width = crate::text::columns().saturating_sub(11);
+            println!(
+                "           {}",
+                crate::egress::state_line(env, until, width)
+            );
+        }
         println!("  web UI:  luoto ui");
         // Now that the gate and vault run on the new images, the old ones are unused.
         if ids.pulled {
@@ -800,6 +849,12 @@ fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
         log_mb: Some(GATE_LOG_MB),
         ..Default::default()
     };
+    // A model server on this machine is `host.docker.internal`, which Docker Engine on Linux
+    // knows only when told (podman's hosts file and Docker Desktop have it).
+    if ctx.rt.flavor == Flavor::Docker {
+        spec.add_hosts
+            .push((crate::model_servers::HOST.into(), "host-gateway".into()));
+    }
     // Read at start: a changed CA changes the spec, which recreates the gate.
     if !p.compiled.upstream_cas.is_empty() {
         spec.env.push((
@@ -820,6 +875,7 @@ fn start_gate(
     env_ca: &EnvCa,
     image_id: &str,
 ) -> Result<Launch> {
+    let _waiting = crate::progress::waiting("starting the gate");
     let rt = &ctx.rt;
     let a = names::addrs(state.octet);
     let launch = start_or_create(ctx, &gate_spec(ctx, env, p, &a), image_id, true)?;
@@ -852,10 +908,12 @@ fn start_gate(
     if let Err(e) = bound
         .and_then(|()| sync::load_secrets(ctx, &p.compiled.vault_refs(), &format!("`{env}`"), true))
     {
-        eprintln!(
-            "warning: {e:#}\n         their hosts return 403 until the reference is fixed \
-             (`luoto edit -e {env}`) and `luoto vault unlock` loads it"
-        );
+        crate::progress::say(|| {
+            eprintln!(
+                "warning: {e:#}\n         their hosts return 403 until then; once it is fixed, \
+             `luoto up -e {env}` loads them"
+            )
+        });
     }
     Ok(launch)
 }
@@ -873,7 +931,9 @@ fn dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &str) ->
         cfg.resources.oci_runtime.clone()
     };
     if gvisor && (cfg.resources.memory.is_some() || cfg.resources.cpus.is_some()) {
-        eprintln!("warning: memory and CPU limits don't apply to gVisor envs (rootless podman)");
+        crate::progress::say(|| {
+            eprintln!("warning: memory and CPU limits don't apply to gVisor envs (rootless podman)")
+        });
     }
     Ok(RunSpec {
         name: names::dev(env),
@@ -934,18 +994,21 @@ fn start_dev(
     ids: &ImageIds,
     restart: Restart,
 ) -> Result<Launch> {
+    let _waiting = crate::progress::waiting("starting the dev container");
     let rt = &ctx.rt;
     let spec = dev_spec(ctx, env, p, state, &ids.tools)?;
     let mut launch = start_or_create(ctx, &spec, &ids.dev, false)?;
     if launch == Launch::AlreadyRunning && restart != Restart::No {
-        eprintln!(
-            "{} (what runs in it stops)",
-            if restart == Restart::Gate {
-                "the gate restarted, so the dev container restarts too"
-            } else {
-                "the dev container restarts to trust the new CA"
-            }
-        );
+        crate::progress::say(|| {
+            eprintln!(
+                "{} (what runs in it stops)",
+                if restart == Restart::Gate {
+                    "the gate restarted, so the dev container restarts too"
+                } else {
+                    "the dev container restarts to trust the new CA"
+                }
+            )
+        });
         // Not `restart`: podman gives up on it when the network teardown errs, as it does for
         // a gVisor container whose addresses runsc already took over.
         rt.stop(&names::dev(env))?;
@@ -995,8 +1058,9 @@ fn after_start(
 ) -> Result<()> {
     // Isolation first: secrets, dotfiles and the SSH key enter only a container that passed.
     if selftest {
-        check_isolation(ctx, env)?;
+        crate::progress::wait("checking the env's isolation", || check_isolation(ctx, env))?;
     }
+    let _waiting = crate::progress::waiting("setting up the env");
     sync::write_runtime_env(ctx, env, &p.compiled)?;
     // The login name is read back from the sandbox and ends up in the ssh_config the user
     // includes, so only a plain POSIX user name is kept.
@@ -1010,7 +1074,9 @@ fn after_start(
         .filter(|u| ssh::valid_user(u))
         .map(str::to_string);
     if user.is_none() && reported.is_some_and(|u| !u.is_empty()) {
-        eprintln!("warning: the env reported an invalid login name; SSH uses `dev`");
+        crate::progress::say(|| {
+            eprintln!("warning: the env reported an invalid login name; SSH uses `dev`")
+        });
     }
     if state.user != user {
         EnvState::update(&ctx.paths, env, |s| s.user = user)?;
@@ -1018,18 +1084,14 @@ fn after_start(
     // Home files may have replaced an agent's config, and with it luoto's entries there; an
     // agent with options gets them on every start.
     let copied = personal::apply(ctx, env, &p.cfg, state.home(), quiet) > 0;
-    for (name, opts) in &p.cfg.agents.0 {
-        let Some(a) = luoto_shared::profiles::agent(name) else {
-            continue;
-        };
-        if (copied || !opts.is_empty())
-            && let Err(e) = crate::agents::register(ctx, env, &a, opts)
-        {
-            eprintln!("warning: {} not set up for luoto ({e:#})", a.description);
-        }
-    }
+    let write = if copied {
+        crate::agents::Write::All
+    } else {
+        crate::agents::Write::Set
+    };
+    crate::agents::configure(ctx, env, &p.cfg, None, write)?;
     if let Err(e) = ssh::authorize(ctx, env) {
-        eprintln!("warning: SSH access not set up ({e:#})");
+        crate::progress::say(|| eprintln!("warning: SSH access not set up ({e:#})"));
     }
     ssh::write_config(ctx)?;
     Ok(())
@@ -1130,6 +1192,7 @@ pub fn stop_vm_if_unused(ctx: &Ctx) -> Result<bool> {
 }
 
 pub fn down(ctx: &Ctx, env: &str) -> Result<()> {
+    let _waiting = crate::progress::waiting(&format!("stopping `{env}`"));
     for c in [names::dev(env), names::gate(env)] {
         ctx.rt.stop(&c)?;
     }
@@ -1139,6 +1202,7 @@ pub fn down(ctx: &Ctx, env: &str) -> Result<()> {
 /// Delete the env's containers, networks, volumes, vault binding and state (CA, vault token,
 /// accepted luoto.toml), so a new env of the same name starts fresh.
 pub fn remove(ctx: &Ctx, env: &str) -> Result<()> {
+    let _waiting = crate::progress::waiting(&format!("removing `{env}`"));
     for c in [names::dev(env), names::gate(env)] {
         ctx.rt.remove_container(&c)?;
     }

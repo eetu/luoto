@@ -143,20 +143,73 @@ pub fn read(r: &str) -> Result<(String, Option<DateTime<Utc>>)> {
         Err(e) => return Err(e).context("run the Azure CLI (`az`)"),
     };
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let err: String = err.trim().chars().take(300).collect();
-        if err.contains("az login") {
+        let full = String::from_utf8_lossy(&out.stderr);
+        if let Some(why) = login_needed(&full) {
+            // `az login --identity` in the env asks the gate for this token.
+            if resource.contains("management.azure.com") {
+                LOGIN_NEEDED.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             bail!(
-                "the Azure CLI on this machine is not logged in{}: run `az login`{} ({err})",
-                tenant.map(|t| format!(" to {t}")).unwrap_or_default(),
-                tenant.map(|t| format!(" --tenant {t}")).unwrap_or_default()
+                "the Azure CLI's login on this machine {why}: run `az login{}` there{}",
+                tenant.map(|t| format!(" --tenant {t}")).unwrap_or_default(),
+                aad_reason(&full)
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
             );
         }
+        let err: String = full.trim().chars().take(300).collect();
         bail!("az account get-access-token failed: {err}");
     }
     let (token, expires) = parse_output(&out.stdout)?;
     remember_tenant(r, &token);
     Ok((token, expires))
+}
+
+/// An `az` login on this machine failed for want of the user: in-env logins that would only
+/// fail the same way are skipped.
+static LOGIN_NEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Why `az`'s error asks for a new `az login`, if it does: an expired or revoked refresh
+/// token, a sign-in that wants the user again (MFA, consent), or none at all.
+fn login_needed(err: &str) -> Option<&'static str> {
+    const EXPIRED: [&str; 4] = ["AADSTS700082", "AADSTS70043", "AADSTS50173", "AADSTS700084"];
+    if EXPIRED.iter().any(|c| err.contains(c)) || err.contains("refresh token has expired") {
+        Some("has expired")
+    } else if err.contains("AADSTS50076")
+        || err.contains("AADSTS50078")
+        || err.contains("AADSTS65001")
+        || err.contains("interaction_required")
+    {
+        Some("needs you to sign in again")
+    } else if err.contains("AADSTS") {
+        // az appends "run az login" to every AAD error: another code is no login of yours.
+        None
+    } else if err.contains("az login") {
+        Some("is missing")
+    } else {
+        None
+    }
+}
+
+/// Forget an earlier command's failed login: the user may have logged in since (`luoto ui`
+/// lives on).
+pub fn forget_login_needed() {
+    LOGIN_NEEDED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The AADSTS code in `err` and its first sentence: `AADSTS700082: The refresh token has
+/// expired due to inactivity.`
+fn aad_reason(err: &str) -> Option<String> {
+    let at = err.find("AADSTS")?;
+    let rest = &err[at..];
+    let end = rest.find(". ").map_or(rest.len(), |i| i + 1);
+    let line = rest[..end].lines().next().unwrap_or_default().trim();
+    Some(crate::text::display(line)).filter(|l| !l.is_empty())
+}
+
+/// Whether an `az` login on this machine failed for want of the user in this command.
+pub fn login_was_needed() -> bool {
+    LOGIN_NEEDED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Keep the tenant `token`, read for `r`, is for: its `tid`, when that is a tenant ID.
@@ -265,6 +318,10 @@ fn claims(token: &str) -> Option<serde_json::Value> {
 /// Log the env's Azure CLI in to the gate's managed identity as the dev user, with the first
 /// subscription as its default, when the image has `az`. Best effort: a failure is a note.
 pub fn login_in_env(ctx: &Ctx, env: &str, c: &AzureCred) {
+    // Its token comes from the login on this machine, whose failure was already said.
+    if login_was_needed() {
+        return;
+    }
     // Checked to be an ID, so a plain shell word.
     let Some(sub) = c.subscriptions.first().filter(|s| is_guid(s)) else {
         return;
@@ -275,16 +332,18 @@ pub fn login_in_env(ctx: &Ctx, env: &str, c: &AzureCred) {
          az account set --subscription {sub} --only-show-errors"
     );
     let dev = names::dev(env);
-    let run = ctx.rt.run([
-        "exec",
-        "-u",
-        UID,
-        dev.as_str(),
-        "sh",
-        "-c",
-        connect::LOGIN,
-        &script,
-    ]);
+    let run = crate::progress::wait("signing in to Azure in the env", || {
+        ctx.rt.run([
+            "exec",
+            "-u",
+            UID,
+            dev.as_str(),
+            "sh",
+            "-c",
+            connect::LOGIN,
+            &script,
+        ])
+    });
     if let Err(e) = run {
         eprintln!(
             "note: `az login --identity` failed in `{env}`, so az there is not logged in: {}\n      \
@@ -297,6 +356,28 @@ pub fn login_in_env(ctx: &Ctx, env: &str, c: &AzureCred) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_expired_az_login_says_so_in_a_line() {
+        let err = "ERROR: AADSTS700082: The refresh token has expired due to inactivity. The \
+                   token was issued on 2026-07-03T13:13:54Z and was inactive for 90.00:00:00. \
+                   Trace ID: dfb4\nRun the command below to authenticate interactively; \
+                   additional arguments may be added as needed:\naz login --scope x";
+        assert_eq!(login_needed(err), Some("has expired"));
+        assert_eq!(
+            aad_reason(err).as_deref(),
+            Some("AADSTS700082: The refresh token has expired due to inactivity.")
+        );
+        assert_eq!(
+            login_needed("ERROR: Please run 'az login' to setup account."),
+            Some("is missing")
+        );
+        assert_eq!(login_needed("ERROR: (ResourceNotFound) nope"), None);
+        // Another AAD error carries the same "az login" advice, and isn't a login to redo.
+        let typo = "ERROR: AADSTS500011: The resource principal named https://x was not found. \
+                    Run the command below to authenticate interactively:\naz login --scope x";
+        assert_eq!(login_needed(typo), None);
+    }
 
     const SUB: &str = "0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0";
     const APP: &str = "11111111-2222-3333-4444-555555555555";

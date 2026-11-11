@@ -406,7 +406,9 @@ pub fn hint_growth(ctx: &Ctx, env: &str) {
         human(s.free)
     );
     if ctx.rt.is_running(&names::dev(env)) {
-        let dirs = build_dirs(&ctx.rt, env);
+        let dirs = crate::progress::wait("measuring the env's build folders", || {
+            build_dirs(&ctx.rt, env)
+        });
         if !dirs.is_empty() {
             eprintln!(
                 "  the biggest build folders in `{env}`: {}",
@@ -443,11 +445,13 @@ pub fn note_superseded(ctx: &Ctx) {
     if let Ok(p) = plan(ctx)
         && !p.remove.is_empty()
     {
-        println!(
-            "note: {} superseded luoto image(s) take up to {}: `luoto prune` removes them",
-            p.remove.len(),
-            human(p.bytes())
-        );
+        crate::progress::say(|| {
+            println!(
+                "note: {} superseded luoto image(s) take up to {}: `luoto prune` removes them",
+                p.remove.len(),
+                human(p.bytes())
+            )
+        });
     }
 }
 
@@ -809,9 +813,11 @@ pub fn prune(yes: bool) -> Result<ExitCode> {
     let inst = names::instance();
     let place = place(rt);
     let in_vm = machine::is_luoto(rt.connection.as_deref());
-    let before = space(rt).ok().flatten();
-    let file_before = in_vm.then(|| machine::disk_file(&rt.bin)).flatten();
-    let p = plan(&ctx)?;
+    let (before, file_before, p) = crate::progress::wait("looking for older images", || {
+        let before = space(rt).ok().flatten();
+        let file_before = in_vm.then(|| machine::disk_file(&rt.bin)).flatten();
+        plan(&ctx).map(|p| (before, file_before, p))
+    })?;
     let mut failed = false;
     if p.remove.is_empty() {
         println!(
@@ -836,8 +842,14 @@ pub fn prune(yes: bool) -> Result<ExitCode> {
         if !yes && !confirm("Remove them?") {
             bail!("nothing removed (`{inst} prune --yes` skips the question)");
         }
-        let errors = remove(rt, &p.remove);
-        let left: BTreeSet<String> = images(rt)?.into_iter().map(|i| i.id).collect();
+        let (errors, left) = crate::progress::step(
+            &format!("removing {} image(s)", p.remove.len()),
+            || -> Result<_> {
+                let errors = remove(rt, &p.remove);
+                let left: BTreeSet<String> = images(rt)?.into_iter().map(|i| i.id).collect();
+                Ok((errors, left))
+            },
+        )?;
         let gone = p.remove.iter().filter(|i| !left.contains(&i.id)).count();
         println!("removed {gone} image(s)");
         if gone < p.remove.len() {
@@ -850,7 +862,12 @@ pub fn prune(yes: bool) -> Result<ExitCode> {
         }
     }
     // The images are gone either way; only the file on this machine keeps its size.
-    if in_vm && let Err(e) = machine::trim(&rt.bin) {
+    if in_vm
+        && let Err(e) =
+            crate::progress::step("handing the freed space back to this machine", || {
+                machine::trim(&rt.bin)
+            })
+    {
         println!("note: {e:#}");
     }
     if let (Some(b), Some(a)) = (before, space(rt).ok().flatten()) {

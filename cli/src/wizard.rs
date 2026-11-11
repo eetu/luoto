@@ -16,7 +16,7 @@ use crate::agents::Auth;
 use crate::config::{EnvConfig, GlobalConfig, Isolation};
 use crate::detect;
 use crate::init::Proposal;
-use crate::prompt::{menu_help, menu_rows};
+use crate::prompt::{Ask, menu_help, menu_rows};
 use crate::secrets::{self, OpAccount, OpItem, OpVault};
 use crate::text::{self, display};
 
@@ -117,7 +117,7 @@ fn isolation(p: &mut Proposal) -> Result<()> {
         .with_formatter(&short)
         .with_help_message(&help)
         .without_filtering()
-        .prompt_skippable()?
+        .ask()?
     {
         // gVisor is the default, so only the opt-out is written.
         p.cfg.isolation = (c.value == Isolation::Container).then_some(Isolation::Container);
@@ -160,11 +160,35 @@ fn pick_presets(p: &mut Proposal) -> Result<()> {
             .with_default(&selected)
             .with_help_message("space toggles, Enter confirms; [file] = suggested by the folder")
             .with_formatter(&shorts)
-            .prompt_skippable()?
+            .ask()?
     {
         p.cfg.presets = chosen.into_iter().map(|c| c.value).collect();
     }
     Ok(())
+}
+
+/// What `luoto egress keep` keeps of `rows` (label, description, checked at first): the
+/// indexes picked, or `None` for Esc, which keeps nothing.
+pub fn pick_kept(rows: &[(String, String, bool)]) -> Result<Option<Vec<usize>>> {
+    let selected: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.2)
+        .map(|(i, _)| i)
+        .collect();
+    let options = table(
+        rows.iter()
+            .enumerate()
+            .map(|(i, (label, desc, _))| (i, label.clone(), desc.clone()))
+            .collect(),
+        text::columns() - 4,
+    );
+    Ok(MultiSelect::new("Keep in the env's config:", options)
+        .with_default(&selected)
+        .with_help_message("space toggles, Enter keeps what is checked, Esc: nothing")
+        .with_formatter(&shorts)
+        .ask()?
+        .map(|chosen| chosen.into_iter().map(|c| c.value).collect()))
 }
 
 fn toolchains(p: &mut Proposal) -> Result<()> {
@@ -197,7 +221,7 @@ fn toolchains(p: &mut Proposal) -> Result<()> {
                 None => Validation::Valid,
             })
         })
-        .prompt_skippable()?
+        .ask()?
     else {
         return Ok(());
     };
@@ -239,7 +263,7 @@ fn pick_agents(cfg: &mut EnvConfig) -> Result<()> {
         .with_default(&selected)
         .with_help_message("space toggles, Enter confirms; the first `up` asks how each signs in")
         .with_formatter(&shorts)
-        .prompt_skippable()?
+        .ask()?
     {
         cfg.agents = crate::config::Agents::from_names(chosen.into_iter().map(|c| c.value));
     }
@@ -261,7 +285,7 @@ fn ports(cfg: &mut EnvConfig) -> Result<()> {
                 },
             )
         })
-        .prompt_skippable()?
+        .ask()?
     else {
         return Ok(());
     };
@@ -302,7 +326,7 @@ fn terminal_menu(
         .with_help_message(help)
         .with_page_size(page)
         .without_filtering()
-        .prompt_skippable()?
+        .ask()?
         .map(|c| c.value)
         .into())
 }
@@ -371,6 +395,8 @@ impl Mode {
 #[derive(Debug, PartialEq)]
 pub enum Answer {
     Set(Auth),
+    /// A model server: its own questions follow (`model_servers::ask`).
+    ModelServer,
     /// The config stays as it is: "Later", Esc at the first question, or what it has, picked
     /// again.
     Leave,
@@ -380,9 +406,14 @@ pub enum Answer {
 #[derive(Clone, PartialEq)]
 enum Pick {
     Kind(String),
+    ModelServer,
     LoginInside,
     Later,
 }
+
+/// A model server, as the first menu offers it beside the cloud's ways in.
+const SERVER: &str = "A model server";
+const SERVER_SHORT: &str = "yours, on this or another machine";
 
 /// The login inside, as the kind menu offers it.
 const LOGIN: &str = "Log in inside the sandbox";
@@ -397,17 +428,24 @@ pub fn credential(
     a: &profiles::Agent,
     global: &GlobalConfig,
     have: &[Auth],
+    on_server: bool,
     mode: Mode,
 ) -> Result<Answer> {
-    credential_with(a, have, mode, &mut terminal_menu, &mut |ask: &SecretAsk| {
-        secret(ask, global)
-    })
+    credential_with(
+        a,
+        have,
+        on_server,
+        mode,
+        &mut terminal_menu,
+        &mut |ask: &SecretAsk| secret(ask, global),
+    )
 }
 
 /// [`credential`], its menus put through `menu` and where the secret is kept asked by `secret`.
 fn credential_with(
     a: &profiles::Agent,
     have: &[Auth],
+    on_server: bool,
     mode: Mode,
     menu: &mut impl Menu,
     secret: &mut impl FnMut(&SecretAsk) -> Result<Step<Secret>>,
@@ -430,9 +468,14 @@ fn credential_with(
         )
     };
     println!("{}", text::wrap(&intro, "", text::columns()));
-    let current = |n: &str| have.iter().find(|h| h.provider() == n);
+    // What the agent starts on is current: a model server, else the cloud's.
+    let current = |n: &str| {
+        have.iter()
+            .find(|h| h.provider() == n)
+            .filter(|_| !on_server)
+    };
     let several = providers.len() > 1;
-    let mut rows: Vec<(Option<String>, String, String)> = providers
+    let mut rows: Vec<(Option<Pick>, String, String)> = providers
         .iter()
         .map(|p| {
             let note = p.description[p.title().len()..]
@@ -445,33 +488,42 @@ fn credential_with(
                 ""
             };
             (
-                Some(p.name.clone()),
+                Some(Pick::Kind(p.name.clone())),
                 format!("{}{mark}", p.title()),
                 note.to_string(),
             )
         })
         .collect();
+    if a.model_server.is_some() {
+        let mark = if on_server { " (current)" } else { "" };
+        rows.push((
+            Some(Pick::ModelServer),
+            format!("{SERVER}{mark}"),
+            SERVER_SHORT.into(),
+        ));
+    }
     if mode == Mode::Missing {
         rows.push((None, LATER.into(), LATER_SHORT.into()));
     }
+    let mut at = rows
+        .iter()
+        .position(|(_, l, _)| l.ends_with(" (current)"))
+        .unwrap_or(0);
     let options = table(rows, text::columns());
     let question = format!("Which provider should {} use?", a.title());
     let first = menu_help(mode.esc());
-    let mut at = providers
-        .iter()
-        .position(|p| current(&p.name).is_some())
-        .unwrap_or(0);
     loop {
         let p = if several {
             match pick(menu, &question, &options, at, &first)? {
-                Step::Got((i, Some(n))) => {
+                Step::Got((i, Some(Pick::Kind(n)))) => {
                     at = i;
                     providers
                         .iter()
                         .find(|p| p.name == n)
                         .context("a provider of the agent")?
                 }
-                Step::Got((_, None)) | Step::Back => return Ok(Answer::Leave),
+                Step::Got((_, Some(Pick::ModelServer))) => return Ok(Answer::ModelServer),
+                Step::Got(_) | Step::Back => return Ok(Answer::Leave),
             }
         } else if let Some(p) = providers.first() {
             p
@@ -479,10 +531,15 @@ fn credential_with(
             return Ok(Answer::Leave);
         };
         let how = How {
-            agent: a,
+            who: a.title(),
+            servers: a.model_server.is_some(),
+            login: true,
+            names_provider: false,
             provider: p,
             current: current(&p.name),
+            stored: have.iter().find(|h| h.provider() == p.name),
             first: !several,
+            on_server,
             mode,
         };
         match provider_auth(&how, menu, secret)? {
@@ -493,14 +550,55 @@ fn credential_with(
     }
 }
 
+/// How the env signs in to provider `p` for a project's `[needs]`, no agent's: the kind, then
+/// where it is kept. `have`: what the env has for it now.
+pub fn provider_credential(
+    p: &profiles::Provider,
+    global: &GlobalConfig,
+    have: Option<&Auth>,
+    mode: Mode,
+) -> Result<Answer> {
+    let how = How {
+        who: "the env",
+        servers: false,
+        login: false,
+        names_provider: true,
+        provider: p,
+        current: have,
+        stored: have,
+        first: true,
+        on_server: false,
+        mode,
+    };
+    Ok(
+        match provider_auth(&how, &mut terminal_menu, &mut |ask: &SecretAsk| {
+            secret(ask, global)
+        })? {
+            Step::Got(answer) => answer,
+            Step::Back => Answer::Leave,
+        },
+    )
+}
+
 /// What [`provider_auth`] asks about.
 struct How<'a> {
-    agent: &'a profiles::Agent,
+    /// Who signs in: an agent's name, or "the env".
+    who: &'a str,
+    /// "A model server" is offered beside the kinds (an agent that can use one).
+    servers: bool,
+    /// A login inside is offered where the provider allows one (an agent logs in).
+    login: bool,
+    /// The first question names the provider (no agent to name).
+    names_provider: bool,
     provider: &'a profiles::Provider,
-    /// What the env has for the provider.
+    /// What the env has for the provider, where the agent starts on it.
     current: Option<&'a Auth>,
+    /// What the env has for the provider, a model server or not: offered to keep.
+    stored: Option<&'a Auth>,
     /// Its first question is the step's first.
     first: bool,
+    /// The agent starts on a model server.
+    on_server: bool,
     mode: Mode,
 }
 
@@ -535,7 +633,15 @@ fn kind_rows(h: &How) -> Vec<(Pick, String, String)> {
             (pick, label, p.auth[k].short.clone())
         })
         .collect();
-    if !p.login_hosts.is_empty() {
+    if h.first && h.servers {
+        let mark = if h.on_server { " (current)" } else { "" };
+        rows.push((
+            Pick::ModelServer,
+            format!("{SERVER}{mark}"),
+            SERVER_SHORT.into(),
+        ));
+    }
+    if h.login && !p.login_hosts.is_empty() {
         let label = format!("{LOGIN}{}", mark(&Pick::LoginInside));
         rows.push((Pick::LoginInside, label, LOGIN_SHORT.into()));
     }
@@ -563,14 +669,14 @@ fn provider_auth(
         return Ok(Step::Got(Answer::Leave));
     }
     // One kind and no login: no question of the kind.
-    let asks = kinds.len() != 1 || !p.login_hosts.is_empty();
+    let asks = kinds.len() != 1 || (h.login && !p.login_hosts.is_empty());
     let first = menu_help(h.mode.esc());
     let back = menu_help("back");
     let help: &str = if h.first { &first } else { &back };
-    let question = if h.first {
-        format!("How should {} sign in?", h.agent.title())
+    let question = if h.first && !h.names_provider {
+        format!("How should {} sign in?", h.who)
     } else {
-        format!("How should {} sign in to {}?", h.agent.title(), p.title())
+        format!("How should {} sign in to {}?", h.who, p.title())
     };
     let mut at = rows
         .iter()
@@ -585,6 +691,7 @@ fn provider_auth(
                     at = i;
                     match pick {
                         Pick::Later => return Ok(Step::Got(Answer::Leave)),
+                        Pick::ModelServer => return Ok(Step::Got(Answer::ModelServer)),
                         Pick::LoginInside => {
                             return Ok(Step::Got(changed(h.current, inside)));
                         }
@@ -597,7 +704,7 @@ fn provider_auth(
         };
         let auth = &p.auth[&kind];
         println!("{}", text::wrap(&auth.how, "  ", text::columns()));
-        let kept = match h.current {
+        let kept = match h.stored {
             Some(Auth::Kind {
                 kind: k, reference, ..
             }) if *k == kind => Some(reference.as_str()),
@@ -919,7 +1026,7 @@ fn typed_reference(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String
                     Err(e) => Validation::Invalid(format!("{e:#}").into()),
                 })
             })
-            .prompt_skippable()?
+            .ask()?
         else {
             return Ok(Step::Back);
         };
@@ -1107,7 +1214,7 @@ fn pick_index(question: &str, shown: Vec<String>, at: usize) -> Result<Step<usiz
         .with_page_size(PAGE)
         .with_starting_cursor(at)
         .with_help_message(BROWSE_HELP)
-        .prompt_skippable()?
+        .ask()?
         .map(|c| c.value)
         .into())
 }
@@ -1141,7 +1248,7 @@ fn item_field(item: &OpItem) -> Result<Step<String>> {
                 Err(e) => Validation::Invalid(format!("{e:#}").into()),
             })
         })
-        .prompt_skippable()?;
+        .ask()?;
     Ok(typed.map(|s| s.trim().to_string()).into())
 }
 
@@ -1309,7 +1416,7 @@ fn paste(ask: &SecretAsk) -> Result<Step<String>> {
                 Validation::Valid
             })
         })
-        .prompt_skippable()?
+        .ask()?
         .map(|s| s.trim().to_string())
         .into())
 }
@@ -1390,6 +1497,7 @@ mod tests {
         let answer = credential_with(
             &a,
             have,
+            false,
             mode,
             &mut |question: &str, options: Vec<Choice<usize>>, at: usize, help: &str| {
                 menus.push(Asked {
@@ -1463,6 +1571,7 @@ mod tests {
             [
                 "Claude subscription token (recommended)  `claude setup-token` on this machine",
                 "Anthropic API key                        billed per use (platform.claude.com)",
+                "A model server                           yours, on this or another machine",
                 "Log in inside the sandbox                weaker: code in the env can read it",
                 "Later                                    the agent can't connect without one",
             ]
@@ -1757,7 +1866,7 @@ mod tests {
         let account = |id: &str, address: &str| OpAccount {
             id: id.into(),
             address: address.into(),
-            email: "eetu@example.com".into(),
+            email: "you@example.com".into(),
         };
         let all = [
             account("VZ7CWAKJKFHWVHZ3UFZQ5GPNSU", "my.1password.com"),
@@ -1766,11 +1875,11 @@ mod tests {
         ];
         assert_eq!(
             account_label(&all[1], &all),
-            "my.1password.com, eetu@example.com (Q3RTX2UJWVE2TMXFPN6HVOIB3Y)"
+            "my.1password.com, you@example.com (Q3RTX2UJWVE2TMXFPN6HVOIB3Y)"
         );
         assert_eq!(
             account_label(&all[2], &all),
-            "acme.1password.com, eetu@example.com"
+            "acme.1password.com, you@example.com"
         );
     }
 

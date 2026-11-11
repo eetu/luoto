@@ -140,17 +140,17 @@ mod tests {
     fn literal_and_wildcards() {
         assert!(glob_match("/v1/messages", "/v1/messages"));
         assert!(!glob_match("/v1/messages", "/v1/messages/batches"));
-        assert!(glob_match("/repos/*/foo", "/repos/eetu/foo"));
+        assert!(glob_match("/repos/*/foo", "/repos/octo/foo"));
         assert!(!glob_match("/repos/*/foo", "/repos/a/b/foo"));
-        assert!(glob_match("/repos/eetu/foo/**", "/repos/eetu/foo/pulls/1"));
-        assert!(glob_match("/repos/eetu/foo/**", "/repos/eetu/foo/"));
+        assert!(glob_match("/repos/octo/foo/**", "/repos/octo/foo/pulls/1"));
+        assert!(glob_match("/repos/octo/foo/**", "/repos/octo/foo/"));
         assert!(!glob_match(
-            "/repos/eetu/foo/**",
-            "/repos/eetu/foobar/pulls"
+            "/repos/octo/foo/**",
+            "/repos/octo/foobar/pulls"
         ));
         assert!(glob_match(
             "/**/git-upload-pack",
-            "/eetu/foo.git/git-upload-pack"
+            "/octo/foo.git/git-upload-pack"
         ));
         assert!(glob_match("**", "/anything/at/all"));
     }
@@ -164,7 +164,7 @@ mod tests {
         ));
         assert!(!glob_match("/basedpyright/**", "/basedpyright-x"));
         assert!(!glob_match("/basedpyright/**", "/based"));
-        assert!(glob_match("/repos/*/**", "/repos/eetu"));
+        assert!(glob_match("/repos/*/**", "/repos/octo"));
         assert!(!glob_match("/**", ""));
     }
 

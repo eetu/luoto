@@ -15,7 +15,7 @@ use luoto_shared::creds::{
 };
 use luoto_shared::policy::{
     Access, AccessLevel, AzureGuard, BodyDeny, CompiledRule, DenyRule, GitGuard, GithubGuard,
-    InternalName, Mode, Policy, READ_METHODS, Rule, RuleOrigin, rule_error,
+    InternalName, Mode, Open, Policy, READ_METHODS, Rule, RuleOrigin, rule_error,
 };
 use luoto_shared::{forges, presets, profiles};
 
@@ -24,7 +24,7 @@ use crate::config::{
     AzureCred, AzureDevopsCred, CustomCred, EnvConfig, GitCred, GithubCred, ProviderValue, SshCred,
     extend_unique,
 };
-use crate::{azure, azure_identity};
+use crate::{azure, azure_identity, model_servers};
 
 pub struct Compiled {
     pub policy: Policy,
@@ -73,6 +73,8 @@ struct Builder {
     /// The bindings `[credentials.azure]` reads from `az`, and their refs.
     azcli: BTreeMap<String, String>,
     tenant_from: Option<String>,
+    /// Hosts on this machine that take credentials over plain HTTP (model servers).
+    plain_http_credentials: Vec<String>,
 }
 
 impl Builder {
@@ -133,6 +135,7 @@ pub fn compile(
     for (pname, entries) in &cfg.credentials.providers {
         compile_provider(&mut b, pname, entries)?;
     }
+    compile_model_servers(&mut b, cfg)?;
     for (cname, c) in &cfg.credentials.custom {
         compile_custom(&mut b, cname, c)?;
     }
@@ -198,12 +201,19 @@ pub fn compile(
             .map_err(|e| anyhow!("deny for `{}`: {e}", crate::text::display(&d.host)))?;
         b.denies.push(rule);
     }
-    // Mutes only filter what egress views show; checked here so a bad one is reported.
+    // Mutes filter what egress views show, and open egress leaves what they cover denied;
+    // checked here so a bad one is reported.
+    let mut mutes = Vec::new();
     for m in &cfg.mute {
-        if let Err(e) = m.checked() {
-            bail!("mute for `{}`: {e}", crate::text::display(&m.host));
+        match m.checked() {
+            Ok(m) => mutes.push(m),
+            Err(e) => bail!("mute for `{}`: {e}", crate::text::display(&m.host)),
         }
     }
+    let open = cfg.egress.open_at(Utc::now())?.map(|until| Open {
+        until,
+        except: mutes,
+    });
     b.dev_env.extend(cfg.env.clone());
 
     // An `azcli:` ref is a token from your own az login, good for all of your Azure: only the
@@ -246,6 +256,8 @@ pub fn compile(
             .into_iter()
             .collect(),
         azure: azure_identity,
+        open,
+        plain_http_credentials: b.plain_http_credentials,
     };
     // A tunnel passes bytes unread: one you or a repository wrote can't cover a host whose
     // credentials, forge guards or denies the gate applies (`luoto allow` refuses it too).
@@ -277,6 +289,20 @@ pub fn check_agent_opts(
     name: &str,
     opts: &crate::config::AgentOpts,
 ) -> Result<()> {
+    for (key, args) in [("args", &opts.args), ("headless_args", &opts.headless_args)] {
+        if args.len() > 64 {
+            bail!("agents.{name}.{key}: at most 64 arguments");
+        }
+        if let Some(bad) = args
+            .iter()
+            .find(|x| x.len() > 4096 || x.contains(char::is_control))
+        {
+            bail!(
+                "agents.{name}.{key}: `{}` is not a plain argument",
+                crate::text::display(bad)
+            );
+        }
+    }
     for (key, value) in opts.values() {
         let Some(s) = a.settings.get(key) else {
             let takes: Vec<&str> = a.settings.keys().map(String::as_str).collect();
@@ -497,7 +523,11 @@ fn compile_custom(b: &mut Builder, cname: &str, c: &CustomCred) -> Result<()> {
         binding,
         host: host.clone(),
         paths: c.paths.clone(),
-        methods: Vec::new(),
+        methods: if c.write {
+            Vec::new()
+        } else {
+            methods(READ_METHODS)
+        },
         place: Placement::Header {
             name: c.header.to_ascii_lowercase(),
             format: c.format.clone(),
@@ -897,33 +927,45 @@ fn compile_github_one(
             .iter()
             .flat_map(|(o, r)| github_git_paths(o, r, write))
             .collect();
-        let mut api_paths: Vec<String> = list
+        let api_paths: Vec<String> = list
             .iter()
             .flat_map(|(o, r)| [format!("/repos/{o}/{r}"), format!("/repos/{o}/{r}/**")])
             .collect();
-        if graphql && (write || repos.is_empty()) {
-            api_paths.insert(0, "/graphql".to_string());
-        }
         // GitHub reads owner and repo in any case, and a remote keeps the case it was cloned
-        // with.
+        // with. Each injection goes only on what the rules below allow, so a wider rule (one
+        // the user adds, an approved request) never carries the token further: to a merge, a
+        // ref or file write that would pass the push guard by.
+        let api = |paths: Vec<String>, ms: &[&str]| Injection {
+            binding: binding.clone(),
+            host: forges::GITHUB_API.into(),
+            paths,
+            methods: methods(ms),
+            place: Placement::Header {
+                name: "authorization".into(),
+                format: "Bearer {secret}".into(),
+            },
+            ignore_case: true,
+        };
+        b.injections.push(api(api_paths, READ_METHODS));
+        if write {
+            let writes = list
+                .iter()
+                .flat_map(|(o, r)| github_rest_writes(o, r))
+                .collect();
+            b.injections.push(api(writes, &["POST", "PATCH"]));
+        }
+        // GraphQL reads are POSTs too; the guard decides which mutations pass.
+        if graphql && (write || repos.is_empty()) {
+            b.injections
+                .push(api(vec!["/graphql".into()], &["GET", "POST"]));
+        }
         b.injections.push(Injection {
             binding: binding.clone(),
             host: forges::GITHUB.into(),
             paths: paths.clone(),
-            methods: Vec::new(),
+            methods: methods(&["GET", "POST"]),
             place: Placement::Basic {
                 username: "x-access-token".into(),
-            },
-            ignore_case: true,
-        });
-        b.injections.push(Injection {
-            binding,
-            host: forges::GITHUB_API.into(),
-            paths: api_paths,
-            methods: Vec::new(),
-            place: Placement::Header {
-                name: "authorization".into(),
-                format: "Bearer {secret}".into(),
             },
             ignore_case: true,
         });
@@ -950,22 +992,7 @@ fn compile_github_one(
         Vec::new()
     };
     for (o, r) in &repos {
-        for path in [
-            "pulls",
-            "pulls/*",
-            "pulls/*/comments",
-            "pulls/*/comments/*/replies",
-            "pulls/*/reviews",
-            "pulls/*/requested_reviewers",
-            "pulls/comments/*",
-            "issues",
-            "issues/*",
-            "issues/*/comments",
-            "issues/*/labels",
-            "issues/comments/*",
-        ] {
-            write_paths.push(format!("/repos/{o}/{r}/{path}"));
-        }
+        write_paths.extend(github_rest_writes(o, r));
     }
     if !write_paths.is_empty() {
         b.rule(
@@ -981,6 +1008,120 @@ fn compile_github_one(
         );
     }
     Ok(repos.iter().map(|(o, r)| format!("{o}/{r}")).collect())
+}
+
+/// `[model_servers]`: each one's model endpoints on its exact host and port (private
+/// addresses for one on this machine or a private network), its token added by the gate; and
+/// the agents that start on one, checked against it.
+fn compile_model_servers(b: &mut Builder, cfg: &EnvConfig) -> Result<()> {
+    model_servers::check_all(&cfg.model_servers)?;
+    for (name, s) in &cfg.model_servers {
+        let ep = model_servers::check(name, s)?;
+        let host = ep.sandbox_host().to_string();
+        let paths = model_servers::endpoints(&s.api, &ep.base);
+        b.rule(
+            format!("model-server-{name}"),
+            &format!("model_server:{name}"),
+            Rule {
+                host: host.clone(),
+                port: Some(ep.port),
+                access: Access::Methods(methods(&["GET", "POST"])),
+                paths: paths.clone(),
+                allow_private: ep.this_machine() || s.private || ep.private_address(),
+                // A model that loads cold can take minutes to its first token.
+                idle: Some("30m".into()),
+                ..Default::default()
+            },
+        );
+        b.dev_env.insert(
+            model_servers::TOKEN_ENV.into(),
+            model_servers::PLACEHOLDER.into(),
+        );
+        let Some(token) = &s.token else { continue };
+        if ep.this_machine() {
+            b.plain_http_credentials.push(host.clone());
+        }
+        let binding = format!("model_server.{name}");
+        b.bindings.insert(
+            binding.clone(),
+            BindingSpec::Static {
+                secret_ref: token.clone(),
+            },
+        );
+        let header = s
+            .header
+            .as_deref()
+            .unwrap_or("authorization")
+            .to_ascii_lowercase();
+        let format = if header == "authorization" {
+            "Bearer {secret}"
+        } else {
+            "{secret}"
+        };
+        b.injections.push(Injection {
+            binding,
+            host,
+            paths,
+            methods: methods(&["GET", "POST"]),
+            place: Placement::Header {
+                name: header,
+                format: format.into(),
+            },
+            ignore_case: false,
+        });
+    }
+    for (agent, opts) in &cfg.agents.0 {
+        let Some(name) = &opts.model_server else {
+            continue;
+        };
+        let at = format!("agents.{agent}");
+        let Some(a) = profiles::agent(agent) else {
+            continue;
+        };
+        let Some(m) = &a.model_server else {
+            bail!("{at}: {} can't use a model server", a.title());
+        };
+        let Some(s) = cfg.model_servers.get(name) else {
+            bail!("{at}: model_server `{name}` has no [model_servers.{name}]");
+        };
+        if !s.api.contains(&m.api) {
+            bail!(
+                "{at}: {} needs the {} API, and model_servers.{name} serves {}",
+                a.title(),
+                m.api,
+                s.api.join(" and ")
+            );
+        }
+        if model_servers::model_for(opts, name, s).is_none() {
+            bail!("{at}: name the model on `{name}`: `model` here or in [model_servers.{name}]");
+        }
+    }
+    Ok(())
+}
+
+/// The REST paths of `o/r` the env may write: pull requests, reviews and issues.
+fn github_rest_writes(o: &str, r: &str) -> Vec<String> {
+    [
+        "pulls",
+        "pulls/*",
+        "pulls/*/comments",
+        "pulls/*/comments/*/replies",
+        "pulls/*/reviews",
+        "pulls/*/requested_reviewers",
+        "pulls/comments/*",
+        "issues",
+        "issues/*",
+        "issues/*/comments",
+        "issues/*/labels",
+        "issues/comments/*",
+    ]
+    .iter()
+    .map(|path| format!("/repos/{o}/{r}/{path}"))
+    .collect()
+}
+
+fn methods(ms: &[&str]) -> Vec<String> {
+    ms.iter().map(|m| m.to_string()).collect()
 }
 
 /// `[[credentials.git]]`, git over HTTPS on any other host: its token as basic auth on the
@@ -1083,7 +1224,7 @@ fn compile_git(
                 binding: id.clone(),
                 host: host.clone(),
                 paths: paths.clone(),
-                methods: Vec::new(),
+                methods: methods(&["GET", "POST"]),
                 place: Placement::Basic {
                     username: c.username.clone(),
                 },
@@ -1371,7 +1512,7 @@ fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Ve
         binding: "azure_devops".into(),
         host: azure::HOST.into(),
         paths: paths.clone(),
-        methods: Vec::new(),
+        methods: methods(&["GET", "POST"]),
         place: Placement::Basic {
             username: String::new(),
         },
@@ -1410,27 +1551,28 @@ fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Ve
         patches.push(format!("{base}/pullrequests/*"));
     }
     if !writable.is_empty() {
-        b.injections.push(Injection {
-            binding: "azure_devops".into(),
-            host: azure::HOST.into(),
-            paths: reads.iter().chain(&posts).cloned().collect(),
-            methods: Vec::new(),
-            place: Placement::Basic {
-                username: String::new(),
-            },
-            ignore_case: true,
-        });
-        for (id, methods, paths) in [
+        // Each method's token on its rule's paths alone (see compile_github_one).
+        for (id, ms, paths) in [
             ("azure-api-read", vec!["GET"], &reads),
             ("azure-api-post", vec!["POST"], &posts),
             ("azure-api-patch", vec!["PATCH"], &patches),
         ] {
+            b.injections.push(Injection {
+                binding: "azure_devops".into(),
+                host: azure::HOST.into(),
+                paths: paths.clone(),
+                methods: methods(&ms),
+                place: Placement::Basic {
+                    username: String::new(),
+                },
+                ignore_case: true,
+            });
             b.rule(
                 id.into(),
                 "azure_devops",
                 Rule {
                     host: azure::HOST.into(),
-                    access: Access::Methods(methods.iter().map(|m| m.to_string()).collect()),
+                    access: Access::Methods(methods(&ms)),
                     paths: paths.clone(),
                     ignore_case: true,
                     ..Default::default()
@@ -1503,9 +1645,9 @@ mod tests {
         toml::from_str(text).unwrap()
     }
 
-    /// The folder's remote `git@azure-invinite:v3/invinite/AppServices/pseudo-registry`.
+    /// The folder's remote `git@azure-fabrikam:v3/fabrikam/Apps/web-api`.
     fn alias() -> [(String, String); 1] {
-        [("invinite".into(), "azure-invinite".into())]
+        [("fabrikam".into(), "azure-fabrikam".into())]
     }
 
     fn decide(p: &Policy, host: &str, method: &str, path: &str) -> Decision {
@@ -1523,17 +1665,63 @@ mod tests {
     }
 
     #[test]
+    fn open_egress_compiles_with_the_mutes_and_never_widens_a_credentialed_host() {
+        let text = r#"
+[egress]
+open_until = "2099-01-01T00:00:00Z"
+
+[[mute]]
+host = "Telemetry.Example"
+
+[credentials.custom.api]
+host = "api.example.com"
+secret = "env:T"
+"#;
+        let mut c = cfg(text);
+        let mut global = crate::config::GlobalConfig::default();
+        global.mute.push(luoto_shared::policy::Mute {
+            host: "stats.example".into(),
+            ..Default::default()
+        });
+        global.layer_under(&mut c);
+        let p = compile("t", &c, GATE, &[]).unwrap().policy;
+        let open = p.open.as_ref().unwrap();
+        assert_eq!(open.until, "2099-01-01T00:00:00Z".parse().ok());
+        let except: Vec<&str> = open.except.iter().map(|m| m.host.as_str()).collect();
+        assert_eq!(except, ["stats.example", "telemetry.example"]);
+        let rule = |host: &str, method: &str| match decide(&p, host, method, "/x") {
+            Decision::Allow { rule, .. } => Some(rule),
+            Decision::Deny(_) => None,
+        };
+        assert_eq!(rule("upload.example", "PUT").as_deref(), Some("open"));
+        assert_eq!(rule("telemetry.example", "GET"), None);
+        assert_eq!(rule("stats.example", "GET"), None);
+        assert_eq!(rule("api.example.com", "PUT"), None);
+
+        for closed in ["", "[egress]\nopen_until = \"2000-01-01T00:00:00Z\"\n"] {
+            assert_eq!(
+                compile("t", &cfg(closed), GATE, &[]).unwrap().policy.open,
+                None
+            );
+        }
+        let forever = compile("t", &cfg("[egress]\nopen = true\n"), GATE, &[]).unwrap();
+        assert_eq!(forever.policy.open.map(|o| o.until), Some(None));
+        let both = "[egress]\nopen = true\nopen_until = \"2099-01-01T00:00:00Z\"\n";
+        assert!(compile("t", &cfg(both), GATE, &[]).is_err());
+    }
+
+    #[test]
     fn azure_devops_pull_requests_go_through_rest_but_are_completed_by_people() {
         use luoto_shared::policy::JsonBody;
         let text = r#"
 [credentials.azure_devops]
 token = "op://v/ado/pat"
-repos = ["invinite/InviniteInfra/azure-devops-agent"]
-read_repos = ["invinite/InviniteInfra/lib"]
+repos = ["fabrikam/Infra/build-agent"]
+read_repos = ["fabrikam/Infra/lib"]
 "#;
         let c = compile("t", &cfg(text), GATE, &alias()).unwrap();
         let p = &c.policy;
-        let base = "/invinite/InviniteInfra/_apis/git/repositories/azure-devops-agent";
+        let base = "/fabrikam/Infra/_apis/git/repositories/build-agent";
         let allowed = |method: &str, path: &str| {
             matches!(
                 decide(p, "dev.azure.com", method, path),
@@ -1560,9 +1748,9 @@ read_repos = ["invinite/InviniteInfra/lib"]
             ("POST", format!("{base}/pushes")),
             (
                 "POST",
-                "/invinite/InviniteInfra/_apis/git/repositories/lib/pullrequests".into(),
+                "/fabrikam/Infra/_apis/git/repositories/lib/pullrequests".into(),
             ),
-            ("POST", "/invinite/_apis/projects".into()),
+            ("POST", "/fabrikam/_apis/projects".into()),
         ] {
             assert!(!allowed(method, &path), "{method} {path}");
         }
@@ -1570,7 +1758,7 @@ read_repos = ["invinite/InviniteInfra/lib"]
             p.injections_for(
                 "GET",
                 "dev.azure.com",
-                "/invinite/InviniteInfra/_apis/git/repositories/lib/pullrequests"
+                "/fabrikam/Infra/_apis/git/repositories/lib/pullrequests"
             )
             .is_empty()
         );
@@ -1607,25 +1795,19 @@ read_repos = ["invinite/InviniteInfra/lib"]
 [credentials.azure_devops]
 token = "op://v/ado/pat"
 repos = [
-  "invinite/AppServices/pseudo-registry",
-  "invinite/Data Platform/dbt-core",
+  "fabrikam/Apps/web-api",
+  "fabrikam/Data Team/pipelines",
   "https://other@dev.azure.com/other/Web/_git/site",
 ]
 "#;
         let c = compile("t", &cfg(text), GATE, &alias()).unwrap();
         let p = &c.policy;
         for (method, path) in [
+            ("POST", "/fabrikam/Apps/_git/web-api/git-receive-pack"),
+            ("GET", "/Fabrikam/apps/_git/Web-Api/info/refs"),
             (
                 "POST",
-                "/invinite/AppServices/_git/pseudo-registry/git-receive-pack",
-            ),
-            (
-                "GET",
-                "/Invinite/appservices/_git/Pseudo-Registry/info/refs",
-            ),
-            (
-                "POST",
-                "/invinite/Data%20Platform/_git/dbt-core/git-upload-pack",
+                "/fabrikam/Data%20Team/_git/pipelines/git-upload-pack",
             ),
             ("POST", "/other/Web/_git/site/git-receive-pack"),
         ] {
@@ -1638,9 +1820,9 @@ repos = [
             );
         }
         for path in [
-            "/invinite/AppServices/_git/other/git-receive-pack",
-            "/invinite/Web/_git/site/git-receive-pack",
-            "/invinite/_apis/git/repositories",
+            "/fabrikam/Apps/_git/other/git-receive-pack",
+            "/fabrikam/Web/_git/site/git-receive-pack",
+            "/fabrikam/_apis/git/repositories",
         ] {
             assert!(
                 !matches!(
@@ -1653,7 +1835,7 @@ repos = [
         let inj = p.injections_for(
             "GET",
             "dev.azure.com",
-            "/INVINITE/AppServices/_git/pseudo-registry/info/refs",
+            "/FABRIKAM/Apps/_git/web-api/info/refs",
         );
         assert_eq!(inj.len(), 1);
         assert_eq!(inj[0].binding, "azure_devops");
@@ -1674,16 +1856,16 @@ repos = [
         assert!(
             guard
                 .repos
-                .contains(&"invinite/data%20platform/dbt-core".to_string())
+                .contains(&"fabrikam/data%20team/pipelines".to_string())
         );
         assert_eq!(guard.protected_branches, ["main", "master"]);
         let section = c
             .git_config
             .split("[url ")
-            .find(|s| s.starts_with("\"https://dev.azure.com/invinite/AppServices/_git/\""))
+            .find(|s| s.starts_with("\"https://dev.azure.com/fabrikam/Apps/_git/\""))
             .unwrap_or_default();
         assert!(
-            section.contains("\tinsteadOf = \"git@azure-invinite:v3/invinite/AppServices/\"\n"),
+            section.contains("\tinsteadOf = \"git@azure-fabrikam:v3/fabrikam/Apps/\"\n"),
             "the folder's SSH alias goes to HTTPS:\n{}",
             c.git_config
         );
@@ -1737,11 +1919,11 @@ host_keys = ["git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0Sd
             "GitHub remotes stay SSH"
         );
         assert!(c.git_config.contains(
-            "[url \"git@ssh.dev.azure.com:v3/invinite/\"]\n\tinsteadOf = \"invinite@vs-ssh.visualstudio.com:v3/invinite/\"\n"
+            "[url \"git@ssh.dev.azure.com:v3/fabrikam/\"]\n\tinsteadOf = \"fabrikam@vs-ssh.visualstudio.com:v3/fabrikam/\"\n"
         ));
         assert!(
             c.git_config
-                .contains("\tinsteadOf = \"git@azure-invinite:v3/invinite/\"\n")
+                .contains("\tinsteadOf = \"git@azure-fabrikam:v3/fabrikam/\"\n")
         );
         for bad in [
             "[credentials.ssh]\nkey = \"op://k\"\nhosts = []\n",
@@ -1805,6 +1987,195 @@ github_port = 443
     }
 
     #[test]
+    fn a_model_server_opens_its_model_endpoints_alone() {
+        let c = compile(
+            "t",
+            &cfg(r#"
+agents = ["claude"]
+[model_servers.mtplx]
+url = "http://localhost:8000"
+api = ["anthropic"]
+model = "qwen3"
+token = "env:MTPLX_TOKEN"
+[model_servers.gpu]
+url = "http://192.168.1.50:11434/v1"
+api = ["openai"]
+"#),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        let p = &c.policy;
+        let allows = |h: &str, port: u16, m: &str, path: &str| {
+            let req = RequestInfo {
+                host: h,
+                port,
+                method: m,
+                path,
+                websocket: false,
+                content_length: None,
+            };
+            matches!(p.decide(&req, Utc::now()), Decision::Allow { .. })
+        };
+        let here = "host.docker.internal";
+        assert!(allows(here, 8000, "POST", "/v1/messages"));
+        assert!(allows(here, 8000, "GET", "/v1/models"));
+        assert!(
+            !allows(here, 8000, "POST", "/v1/chat/completions"),
+            "not its API"
+        );
+        assert!(!allows(here, 8001, "POST", "/v1/messages"), "another port");
+        assert!(!allows("192.168.1.50", 11434, "POST", "/api/pull"));
+        assert!(allows(
+            "192.168.1.50",
+            11434,
+            "POST",
+            "/v1/chat/completions"
+        ));
+        let rule = |id: &str| &p.rules.iter().find(|r| r.id == id).unwrap().rule;
+        assert!(rule("model-server-mtplx").allow_private && rule("model-server-gpu").allow_private);
+        assert_eq!(p.plain_http_credentials, [here]);
+        assert_eq!(p.injections_for("POST", here, "/v1/messages").len(), 1);
+        assert!(c.vault_refs().contains("env:MTPLX_TOKEN"));
+    }
+
+    #[test]
+    fn a_model_server_config_that_cant_work_is_refused() {
+        let server = "[model_servers.box]\nurl = \"http://localhost:8000\"\napi = [\"openai\"]\n";
+        for (text, why) in [
+            (
+                "[agents.claude]\nmodel_server = \"none\"\nmodel = \"m\"",
+                "has no [model_servers.none]",
+            ),
+            (
+                &*format!("{server}[agents.claude]\nmodel_server = \"box\"\nmodel = \"m\""),
+                "needs the anthropic API",
+            ),
+            (
+                &*format!("{server}[agents.codex]\nmodel_server = \"box\""),
+                "name the model",
+            ),
+            (
+                &*format!("{server}[agents.copilot]\nmodel_server = \"box\""),
+                "can't use a model server",
+            ),
+            (
+                "[model_servers.lan]\nurl = \"http://192.168.1.5:8080\"\napi = [\"openai\"]\ntoken = \"env:T\"",
+                "only over HTTPS",
+            ),
+            (
+                "[model_servers.a]\nurl = \"http://localhost:1\"\napi = [\"openai\"]\ntoken = \"env:A\"\n\
+                 [model_servers.b]\nurl = \"http://127.0.0.1:2\"\napi = [\"openai\"]\ntoken = \"env:B\"",
+                "on one host",
+            ),
+            // A token can't share its host with a keyless server either: it would reach it.
+            (
+                "[model_servers.a]\nurl = \"http://localhost:4000\"\napi = [\"openai\"]\ntoken = \"env:A\"\n\
+                 [model_servers.b]\nurl = \"http://localhost:11434\"\napi = [\"openai\"]",
+                "on one host",
+            ),
+            (
+                "[model_servers.a]\nurl = \"https://gpu.example\"\napi = [\"openai\"]\ntoken = \"env:A\"\n\
+                 [model_servers.b]\nurl = \"https://gpu.example:8443\"\napi = [\"openai\"]\ntoken = \"env:B\"",
+                "on one host",
+            ),
+        ] {
+            let Err(e) = compile("t", &cfg(text), GATE, &[]) else {
+                panic!("{text}: compiled");
+            };
+            assert!(format!("{e:#}").contains(why), "{text}: {e:#}");
+        }
+    }
+
+    #[test]
+    fn a_wider_rule_never_carries_a_token_further() {
+        let c = compile(
+            "t",
+            &cfg(r#"
+presets = ["github"]
+[credentials.github]
+token = "op://v/gh/token"
+repos = ["acme/api"]
+[credentials.azure_devops]
+token = "op://v/ado/token"
+repos = ["org/proj/repo"]
+[credentials.custom.svc]
+host = "svc.example.com"
+secret = "op://v/svc/key"
+"#),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        let p = &c.policy;
+        let carries = |m: &str, h: &str, path: &str| !p.injections_for(m, h, path).is_empty();
+        // What the env's rules allow carries it...
+        assert!(carries(
+            "GET",
+            "api.github.com",
+            "/repos/acme/api/contents/a"
+        ));
+        assert!(carries("POST", "api.github.com", "/repos/acme/api/pulls"));
+        assert!(carries(
+            "PATCH",
+            "api.github.com",
+            "/repos/acme/api/issues/3"
+        ));
+        assert!(carries("POST", "api.github.com", "/graphql"));
+        assert!(carries(
+            "POST",
+            "github.com",
+            "/acme/api.git/git-receive-pack"
+        ));
+        // ...what a `*` write rule would add goes without it.
+        assert!(!carries(
+            "PUT",
+            "api.github.com",
+            "/repos/acme/api/contents/a"
+        ));
+        assert!(!carries(
+            "PUT",
+            "api.github.com",
+            "/repos/acme/api/pulls/1/merge"
+        ));
+        assert!(!carries(
+            "PATCH",
+            "api.github.com",
+            "/repos/acme/api/git/refs/heads/main"
+        ));
+        assert!(!carries("DELETE", "api.github.com", "/repos/acme/api"));
+        assert!(!carries(
+            "PUT",
+            "github.com",
+            "/acme/api.git/info/lfs/objects/x"
+        ));
+        let ado = "/org/proj/_apis/git/repositories/repo";
+        assert!(carries(
+            "GET",
+            "dev.azure.com",
+            &format!("{ado}/pullrequests/1")
+        ));
+        assert!(carries(
+            "PATCH",
+            "dev.azure.com",
+            &format!("{ado}/pullrequests/1")
+        ));
+        assert!(carries(
+            "POST",
+            "dev.azure.com",
+            &format!("{ado}/pullrequests/1/threads")
+        ));
+        assert!(!carries("DELETE", "dev.azure.com", ado));
+        assert!(!carries(
+            "PATCH",
+            "dev.azure.com",
+            &format!("{ado}/pullrequests/1/threads")
+        ));
+        assert!(carries("GET", "svc.example.com", "/v1/items"));
+        assert!(!carries("POST", "svc.example.com", "/v1/items"));
+    }
+
+    #[test]
     fn github_app_scopes_writes_to_granted_repos() {
         let c = compile(
             "t",
@@ -1814,7 +2185,7 @@ presets = ["github"]
 app_id = "1"
 installation_id = 2
 private_key = "op://v/app/key"
-repos = ["Eetu/Foo"]
+repos = ["Octo/Foo"]
 "#),
             GATE,
             &[],
@@ -1822,18 +2193,18 @@ repos = ["Eetu/Foo"]
         .unwrap();
         let p = &c.policy;
         assert!(matches!(
-            decide(p, "github.com", "POST", "/eetu/foo.git/git-receive-pack"),
+            decide(p, "github.com", "POST", "/octo/foo.git/git-receive-pack"),
             Decision::Allow { .. }
         ));
         assert!(
             matches!(
-                decide(p, "github.com", "POST", "/Eetu/Foo.git/git-receive-pack"),
+                decide(p, "github.com", "POST", "/Octo/Foo.git/git-receive-pack"),
                 Decision::Allow { .. }
             ),
             "a remote in the case it was cloned with"
         );
         assert_eq!(
-            p.injections_for("GET", "github.com", "/Eetu/Foo.git/info/refs")
+            p.injections_for("GET", "github.com", "/Octo/Foo.git/info/refs")
                 .len(),
             1
         );
@@ -1842,7 +2213,7 @@ repos = ["Eetu/Foo"]
             Decision::Allow { .. }
         ));
         assert!(matches!(
-            decide(p, "api.github.com", "POST", "/repos/eetu/foo/pulls"),
+            decide(p, "api.github.com", "POST", "/repos/octo/foo/pulls"),
             Decision::Allow { .. }
         ));
         assert!(!matches!(
@@ -1854,14 +2225,14 @@ repos = ["Eetu/Foo"]
                 p,
                 "api.github.com",
                 "POST",
-                "/repos/eetu/foo/actions/workflows/x/dispatches"
+                "/repos/octo/foo/actions/workflows/x/dispatches"
             ),
             Decision::Deny(DenyReason::Explicit { .. })
         ));
         for (method, path) in [
-            ("PATCH", "/repos/eetu/foo/pulls/7"),
-            ("POST", "/repos/eetu/foo/pulls/7/reviews"),
-            ("POST", "/repos/eetu/foo/issues/3/comments"),
+            ("PATCH", "/repos/octo/foo/pulls/7"),
+            ("POST", "/repos/octo/foo/pulls/7/reviews"),
+            ("POST", "/repos/octo/foo/issues/3/comments"),
             ("POST", "/graphql"),
         ] {
             assert!(
@@ -1874,14 +2245,14 @@ repos = ["Eetu/Foo"]
         }
         // REST routes around the push guard stay closed.
         for (method, path) in [
-            ("PUT", "/repos/eetu/foo/contents/src/main.rs"),
-            ("PATCH", "/repos/eetu/foo/git/refs/heads/main"),
-            ("POST", "/repos/eetu/foo/git/refs"),
-            ("DELETE", "/repos/eetu/foo/git/refs/heads/feature"),
-            ("PUT", "/repos/eetu/foo/pulls/7/merge"),
-            ("POST", "/repos/eetu/foo/merges"),
-            ("PATCH", "/repos/eetu/foo"),
-            ("DELETE", "/repos/eetu/foo/issues/comments/1"),
+            ("PUT", "/repos/octo/foo/contents/src/main.rs"),
+            ("PATCH", "/repos/octo/foo/git/refs/heads/main"),
+            ("POST", "/repos/octo/foo/git/refs"),
+            ("DELETE", "/repos/octo/foo/git/refs/heads/feature"),
+            ("PUT", "/repos/octo/foo/pulls/7/merge"),
+            ("POST", "/repos/octo/foo/merges"),
+            ("PATCH", "/repos/octo/foo"),
+            ("DELETE", "/repos/octo/foo/issues/comments/1"),
         ] {
             assert!(
                 !matches!(
@@ -1892,7 +2263,7 @@ repos = ["Eetu/Foo"]
             );
         }
         assert_eq!(
-            p.injections_for("GET", "github.com", "/eetu/foo.git/info/refs")
+            p.injections_for("GET", "github.com", "/octo/foo.git/info/refs")
                 .len(),
             1
         );
@@ -1980,12 +2351,12 @@ read_repos = ["org/Infra/agent"]
             &cfg(r#"
 [[credentials.github]]
 token = "op://v/fi/token"
-repos = ["invinite-fi/upcloud-dev"]
+repos = ["globex/infra-dev"]
 protected_branches = ["main"]
 
 [[credentials.github]]
 token = "op://v/open/token"
-repos = ["inviniteopen/upcloud-web"]
+repos = ["initech/portal"]
 protected_branches = ["prod"]
 "#),
             GATE,
@@ -2000,21 +2371,21 @@ protected_branches = ["prod"]
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            binding("github.com", "/invinite-fi/upcloud-dev/info/refs"),
+            binding("github.com", "/globex/infra-dev/info/refs"),
             ["github"]
         );
         assert_eq!(
-            binding("github.com", "/inviniteopen/upcloud-web/info/refs"),
+            binding("github.com", "/initech/portal/info/refs"),
             ["github-2"]
         );
         assert_eq!(
-            binding("api.github.com", "/repos/inviniteopen/upcloud-web/pulls"),
+            binding("api.github.com", "/repos/initech/portal/pulls"),
             ["github-2"]
         );
         assert_eq!(binding("api.github.com", "/graphql"), ["github"]);
         for path in [
-            "/repos/invinite-fi/upcloud-dev/pulls",
-            "/repos/inviniteopen/upcloud-web/pulls",
+            "/repos/globex/infra-dev/pulls",
+            "/repos/initech/portal/pulls",
         ] {
             assert!(matches!(
                 decide(p, "api.github.com", "POST", path),

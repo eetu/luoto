@@ -302,7 +302,7 @@ pub fn aliases(workspace: &crate::config::Workspace) -> Vec<(String, String)> {
     out
 }
 
-/// A URL path segment as people read it (`Data%20Platform` → `Data Platform`).
+/// A URL path segment as people read it (`Data%20Team` → `Data Team`).
 pub fn decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -339,26 +339,26 @@ mod tests {
 
     #[test]
     fn remote_urls_in_every_form_name_the_repo() {
-        let r = repo("invinite", "AppServices", "pseudo-registry");
+        let r = repo("fabrikam", "Apps", "web-api");
         for url in [
-            "https://dev.azure.com/invinite/AppServices/_git/pseudo-registry",
-            "https://invinite@dev.azure.com/invinite/AppServices/_git/pseudo-registry",
-            "https://invinite.visualstudio.com/AppServices/_git/pseudo-registry",
-            "https://invinite.visualstudio.com/DefaultCollection/AppServices/_git/pseudo-registry",
-            "git@ssh.dev.azure.com:v3/invinite/AppServices/pseudo-registry",
-            "ssh://git@ssh.dev.azure.com/v3/invinite/AppServices/pseudo-registry",
-            "invinite@vs-ssh.visualstudio.com:v3/invinite/AppServices/pseudo-registry",
+            "https://dev.azure.com/fabrikam/Apps/_git/web-api",
+            "https://fabrikam@dev.azure.com/fabrikam/Apps/_git/web-api",
+            "https://fabrikam.visualstudio.com/Apps/_git/web-api",
+            "https://fabrikam.visualstudio.com/DefaultCollection/Apps/_git/web-api",
+            "git@ssh.dev.azure.com:v3/fabrikam/Apps/web-api",
+            "ssh://git@ssh.dev.azure.com/v3/fabrikam/Apps/web-api",
+            "fabrikam@vs-ssh.visualstudio.com:v3/fabrikam/Apps/web-api",
         ] {
             assert_eq!(parse_url(url), Some((r.clone(), None)), "{url}");
         }
         assert_eq!(
-            parse_url("git@azure-invinite:v3/invinite/AppServices/pseudo-registry"),
-            Some((r.clone(), Some("azure-invinite".into()))),
+            parse_url("git@azure-fabrikam:v3/fabrikam/Apps/web-api"),
+            Some((r.clone(), Some("azure-fabrikam".into()))),
             "an alias from ~/.ssh/config"
         );
         assert_eq!(
-            parse_url("https://dev.azure.com/invinite/_git/AppServices").map(|(r, _)| r),
-            Some(repo("invinite", "AppServices", "AppServices"))
+            parse_url("https://dev.azure.com/fabrikam/_git/Apps").map(|(r, _)| r),
+            Some(repo("fabrikam", "Apps", "Apps"))
         );
         assert_eq!(parse_url("git@github.com:eetu/luoto.git"), None);
         assert_eq!(parse_url("https://github.com/eetu/luoto"), None);
@@ -367,17 +367,17 @@ mod tests {
     #[test]
     fn repos_are_org_project_repo_or_a_clone_url() {
         assert_eq!(
-            parse_repo("invinite/Data Platform/dbt-core").unwrap(),
-            repo("invinite", "Data%20Platform", "dbt-core")
+            parse_repo("fabrikam/Data Team/pipelines").unwrap(),
+            repo("fabrikam", "Data%20Team", "pipelines")
         );
         assert_eq!(
-            parse_repo("https://invinite@dev.azure.com/invinite/Data%20Platform/_git/dbt-core")
+            parse_repo("https://fabrikam@dev.azure.com/fabrikam/Data%20Team/_git/pipelines")
                 .unwrap(),
-            repo("invinite", "Data%20Platform", "dbt-core")
+            repo("fabrikam", "Data%20Team", "pipelines")
         );
         assert_eq!(
-            parse_repo("invinite/Data%20Platform/dbt-core.git").unwrap(),
-            repo("invinite", "Data%20Platform", "dbt-core"),
+            parse_repo("fabrikam/Data%20Team/pipelines.git").unwrap(),
+            repo("fabrikam", "Data%20Team", "pipelines"),
             "already encoded stays as it is"
         );
         assert!(parse_repo("project/repo").is_err());
@@ -396,37 +396,37 @@ mod tests {
 
     #[test]
     fn ssh_remotes_go_to_https_per_project_with_the_git_segment_added() {
-        let aliases = [("invinite".to_string(), "azure-invinite".to_string())];
-        let mut pairs = https_rewrites("invinite");
-        pairs.extend(ssh_to_https("invinite", &["AppServices".into()], &aliases));
-        let https = "https://dev.azure.com/invinite/AppServices/_git/pseudo-registry";
+        let aliases = [("fabrikam".to_string(), "azure-fabrikam".to_string())];
+        let mut pairs = https_rewrites("fabrikam");
+        pairs.extend(ssh_to_https("fabrikam", &["Apps".into()], &aliases));
+        let https = "https://dev.azure.com/fabrikam/Apps/_git/web-api";
         for url in [
-            "git@ssh.dev.azure.com:v3/invinite/AppServices/pseudo-registry",
-            "git@azure-invinite:v3/invinite/AppServices/pseudo-registry",
-            "invinite@vs-ssh.visualstudio.com:v3/invinite/AppServices/pseudo-registry",
+            "git@ssh.dev.azure.com:v3/fabrikam/Apps/web-api",
+            "git@azure-fabrikam:v3/fabrikam/Apps/web-api",
+            "fabrikam@vs-ssh.visualstudio.com:v3/fabrikam/Apps/web-api",
         ] {
             assert_eq!(rewritten(&pairs, url).as_deref(), Some(https), "{url}");
         }
         assert_eq!(
             rewritten(
                 &pairs,
-                "https://invinite.visualstudio.com/DefaultCollection/AppServices/_git/x"
+                "https://fabrikam.visualstudio.com/DefaultCollection/Apps/_git/x"
             )
             .as_deref(),
-            Some("https://dev.azure.com/invinite/AppServices/_git/x")
+            Some("https://dev.azure.com/fabrikam/Apps/_git/x")
         );
     }
 
     #[test]
     fn with_an_ssh_key_aliases_go_to_the_real_host_and_stay_ssh() {
-        let aliases = [("invinite".to_string(), "azure-invinite".to_string())];
-        let pairs = ssh_to_ssh("invinite", &aliases);
+        let aliases = [("fabrikam".to_string(), "azure-fabrikam".to_string())];
+        let pairs = ssh_to_ssh("fabrikam", &aliases);
         assert_eq!(
-            rewritten(&pairs, "git@azure-invinite:v3/invinite/AppServices/r").as_deref(),
-            Some("git@ssh.dev.azure.com:v3/invinite/AppServices/r")
+            rewritten(&pairs, "git@azure-fabrikam:v3/fabrikam/Apps/r").as_deref(),
+            Some("git@ssh.dev.azure.com:v3/fabrikam/Apps/r")
         );
         assert_eq!(
-            rewritten(&pairs, "git@ssh.dev.azure.com:v3/invinite/AppServices/r"),
+            rewritten(&pairs, "git@ssh.dev.azure.com:v3/fabrikam/Apps/r"),
             None,
             "already the real host"
         );
@@ -438,7 +438,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".git")).unwrap();
         std::fs::write(
             dir.path().join(".git/config"),
-            "[remote \"origin\"]\n\turl = git@azure-invinite:v3/invinite/AppServices/pseudo-registry\n",
+            "[remote \"origin\"]\n\turl = git@azure-fabrikam:v3/fabrikam/Apps/web-api\n",
         )
         .unwrap();
         std::fs::write(
@@ -452,7 +452,7 @@ mod tests {
         };
         assert_eq!(
             aliases(&ws),
-            [("invinite".to_string(), "azure-invinite".to_string())]
+            [("fabrikam".to_string(), "azure-fabrikam".to_string())]
         );
         let cloned = crate::config::Workspace {
             url: Some("git@my-azure:v3/acme/P/web".into()),

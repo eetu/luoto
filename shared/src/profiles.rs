@@ -167,12 +167,17 @@ pub struct Agent {
     pub name: String,
     pub description: String,
     pub command: String,
+    /// Flags that turn off or loosen the agent's own permission prompts besides `yolo`'s: a
+    /// repository's luoto.toml can't pass these (as a flag or in its `flag=value` form).
+    #[serde(default)]
+    pub prompt_flags: Vec<String>,
     /// Arguments that turn off the agent's own permission prompts (the sandbox is the
     /// boundary instead).
     #[serde(default)]
     pub yolo: Vec<String>,
     /// Its command line for one prompt without a terminal (`luoto run`), `{prompt}` where the
-    /// prompt goes; it answers on stdout and asks for no permission.
+    /// prompt goes and `{args}` where the env's `args` and `headless_args` go (where its CLI
+    /// takes options); it answers on stdout and asks for no permission.
     #[serde(default)]
     pub headless: Vec<String>,
     /// Providers this agent can use; suggested when adding the agent.
@@ -207,6 +212,33 @@ pub struct Agent {
     /// config: written at `up`, under anything the user chooses in a session.
     #[serde(default)]
     pub settings: BTreeMap<String, AgentSetting>,
+    /// How it uses a model server (`[model_servers]`), if it can.
+    #[serde(default)]
+    pub model_server: Option<AgentModelServer>,
+}
+
+/// How an agent uses a model server: the API it speaks there, and what luoto writes in its
+/// config with `{name}` (the server's), `{url}` (the server as the sandbox reaches it),
+/// `{model}`, `{context}` (its context window; `{context:n}` alone, as a number), `{output:n}`
+/// (an output cap that goes with the window) and `{token}` (a placeholder the gate replaces)
+/// filled in. An entry that names `{model}` or `{context}` is left out where that isn't known.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentModelServer {
+    /// `anthropic` or `openai`.
+    pub api: String,
+    /// The endpoint it calls (`/v1/responses`): a server must have it.
+    pub endpoint: String,
+    /// For every server of the env that serves `api`: what the agent can pick in a session.
+    #[serde(default)]
+    pub each: Vec<JsonSet>,
+    /// For the server the agent starts on (`[agents.<agent>] model_server`).
+    #[serde(default)]
+    pub default: Vec<JsonSet>,
+    /// How a session gets another of the env's models, `{name}` a server's: `codex --profile
+    /// {name}`. None: one per session, the one it starts on.
+    #[serde(default)]
+    pub switch: Option<String>,
 }
 
 impl Agent {

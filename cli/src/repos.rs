@@ -18,7 +18,7 @@ use crate::config::{
     Credentials, EnvConfig, EnvFile, GitCred, ListAs, Relisted, Repo, Workspace, extend_unique,
 };
 use crate::env::{Ctx, UID};
-use crate::prompt::menu_help;
+use crate::prompt::{Ask, menu_help};
 use crate::state::EnvState;
 use crate::text::{self, display, sh_quote};
 use crate::wizard::{Mode, Question, Step};
@@ -807,6 +807,7 @@ done; true"#;
 /// configured runs) and what the script prints, so both are bounded and only lines naming a
 /// folder asked about are read.
 pub fn unpushed(ctx: &Ctx, env: &str, repos: &BTreeSet<String>) -> Result<Vec<Unpushed>> {
+    let _waiting = crate::progress::waiting("checking the env's repos for work not pushed");
     let dev = names::dev(env);
     let dirs: Vec<String> = std::iter::once("/workspace".to_string())
         .chain(repos.iter().map(|r| format!("/workspace/{r}")))
@@ -969,7 +970,7 @@ pub enum Forge {
 
 impl Forge {
     /// How a repo of it is remembered as needing no credential.
-    fn key(&self, repo: &str) -> String {
+    pub(crate) fn key(&self, repo: &str) -> String {
         match self {
             Forge::Github(_) => format!("github:{}", repo.to_lowercase()),
             Forge::Azure(_) => format!("azure_devops:{}", repo.to_lowercase()),
@@ -1235,7 +1236,7 @@ fn git_details(host: &str, private: bool, ca: &mut Option<String>) -> Result<Str
         );
         let path = inquire::Text::new(&question)
             .with_help_message("empty when its certificate is public")
-            .prompt_skippable()?
+            .ask()?
             .unwrap_or_default();
         let path = path.trim();
         if !path.is_empty() {
@@ -1245,7 +1246,7 @@ fn git_details(host: &str, private: bool, ca: &mut Option<String>) -> Result<Str
     Ok(inquire::Text::new("User name sent with the token:")
         .with_default("oauth2")
         .with_help_message("GitLab takes oauth2; Forgejo and Gitea, the token's owner")
-        .prompt_skippable()?
+        .ask()?
         .unwrap_or_else(|| "oauth2".into()))
 }
 
@@ -1253,7 +1254,7 @@ fn git_details(host: &str, private: bool, ca: &mut Option<String>) -> Result<Str
 /// asked again, and not cloned, which would only fail.
 static LATER: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
-fn left_for_later(key: &str) -> bool {
+pub(crate) fn left_for_later(key: &str) -> bool {
     LATER.lock().is_ok_and(|s| s.contains(key))
 }
 
@@ -1692,7 +1693,13 @@ fn known_tokens(creds: &Credentials, forge: &Forge) -> Vec<(String, String)> {
 /// Ask what the env may do with `repo` (`Missing`: it has no access; `Change`: `repo auth`),
 /// then, for a private one, its token, and write the answer. Ends with the repo's summary, or
 /// `unchanged`. Whether the config changed.
-fn ask_repo(ctx: &Ctx, env: &str, forge: &Forge, repo: &str, mode: Mode) -> Result<bool> {
+pub(crate) fn ask_repo(
+    ctx: &Ctx,
+    env: &str,
+    forge: &Forge,
+    repo: &str,
+    mode: Mode,
+) -> Result<bool> {
     let f = EnvFile::load(&ctx.paths, env)?;
     let now = access_of(&f.cfg.credentials, &declined(ctx, env), forge, repo);
     let later = || -> Result<bool> {
@@ -2120,7 +2127,7 @@ repos = ["other/app"]
             "acme/api",
             "acme/.github",
             "https://github.com/acme/api.git",
-            "https://org@dev.azure.com/org/Data%20Platform/_git/api",
+            "https://org@dev.azure.com/org/Data%20Team/_git/api",
             "ssh://git@github.com/acme/api.git",
             "ssh://git@host.example:2222/x/y",
             "git@github.com:acme/api.git",
@@ -2151,7 +2158,7 @@ repos = ["other/app"]
         for u in [
             "https://ghp_secret@github.com/acme/api",
             "https://glpat-secret@gitlab.com/group/api.git",
-            "https://other@dev.azure.com/org/Data%20Platform/_git/api",
+            "https://other@dev.azure.com/org/Data%20Team/_git/api",
             "https://x@forge.example",
         ] {
             assert!(check_url(u).is_err(), "{u}");
@@ -2522,25 +2529,25 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
     fn hints_ask_for_https_credentials_per_owner() {
         let none = Credentials::default();
         let remotes: Vec<String> = [
-            "git@github.com:invinite-fi/upcloud-dev.git",
-            "https://github.com/inviniteopen/upcloud-web",
-            "git@azure-invinite:v3/invinite/InviniteInfra/agent",
+            "git@github.com:globex/infra-dev.git",
+            "https://github.com/initech/portal",
+            "git@azure-fabrikam:v3/fabrikam/Infra/agent",
             "https://gitlab.com/o/r",
         ]
         .map(String::from)
         .to_vec();
         let hint = credential_hint("e", &remotes, &none).unwrap();
         assert_eq!(hint.matches("[[credentials.github]]").count(), 2);
-        assert!(hint.contains("repos = [\"invinite-fi/upcloud-dev\"]"));
+        assert!(hint.contains("repos = [\"globex/infra-dev\"]"));
         assert!(hint.contains("[credentials.azure_devops]"));
-        assert!(hint.contains("invinite/InviniteInfra/agent"));
+        assert!(hint.contains("fabrikam/Infra/agent"));
         assert!(hint.contains("SSH remotes work"));
         let one = credential_hint("e", &remotes[1..2], &none).unwrap();
         assert!(one.contains("[credentials.github]\n") && !one.contains("SSH"));
 
         let have: Credentials = toml::from_str(
-            "[github]\ntoken = \"env:T\"\nread_repos = [\"inviniteopen/upcloud-web\"]\n\
-             [azure_devops]\ntoken = \"env:A\"\nrepos = [\"invinite/InviniteInfra/agent\"]\n\
+            "[github]\ntoken = \"env:T\"\nread_repos = [\"initech/portal\"]\n\
+             [azure_devops]\ntoken = \"env:A\"\nrepos = [\"fabrikam/Infra/agent\"]\n\
              [ssh]\nkey = \"env:K\"\nhosts = [\"github.com\"]\n",
         )
         .unwrap();
@@ -2661,7 +2668,7 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
             "[[github]]\ntoken = \"env:A\"\nrepos = [\"acme/web\"]\nread_repos = [\"Acme/API\"]\n\
              [[github]]\napp_id = \"1\"\ninstallation_id = 2\nprivate_key = \"env:K\"\n\
              repos = [\"other/x\"]\n\
-             [azure_devops]\ntoken = \"env:P\"\nread_repos = [\"org/Data Platform/infra\"]\n\
+             [azure_devops]\ntoken = \"env:P\"\nread_repos = [\"org/Data Team/infra\"]\n\
              [[git]]\nhost = \"gitlab.com\"\nread_repos = [\"group/pub\"]\n\
              [[git]]\nhost = \"forge.example\"\ntoken = \"env:F\"\nread_repos = [\"t/priv.git\"]\n",
         )
@@ -2688,7 +2695,7 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
             Some((Access::Public, None))
         );
         assert_eq!(
-            of(&Forge::Azure("org".into()), "org/Data%20Platform/infra"),
+            of(&Forge::Azure("org".into()), "org/Data%20Team/infra"),
             Some((Access::Read, Some("env:P".into())))
         );
         // Another host's repos without a token are public; with one, private.

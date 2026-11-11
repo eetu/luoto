@@ -55,6 +55,18 @@ pub struct SandboxStatus {
     pub credentialed_hosts: Vec<String>,
     pub recent_denials: Vec<Event>,
     pub requests: Vec<AccessRequest>,
+    /// The env's egress is open (`luoto egress open`): any HTTP(S) host but the credentialed
+    /// ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<OpenEgress>,
+}
+
+/// An env's open egress (`luoto egress open`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct OpenEgress {
+    /// When it closes; none: when the user closes it (`open = true`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

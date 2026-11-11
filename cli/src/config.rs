@@ -74,6 +74,14 @@ pub struct GlobalConfig {
         deserialize_with = "env_only"
     )]
     _credentials: (),
+    /// Refused: egress opens per env ([`open_per_env`]).
+    #[serde(
+        rename = "egress",
+        default,
+        skip_serializing,
+        deserialize_with = "open_per_env"
+    )]
+    _egress: (),
     #[serde(default)]
     pub sources: Sources,
 }
@@ -84,6 +92,13 @@ fn env_only<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
     Err(serde::de::Error::custom(
         "credentials go in each env's own file (envs/<env>.toml, `luoto edit -e <env>`), not \
          in config.toml",
+    ))
+}
+
+/// `[egress]` in config.toml: open egress is one env's, for a while.
+fn open_per_env<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
+    Err(serde::de::Error::custom(
+        "egress opens for one env at a time (`luoto egress open -e <env>`), not in config.toml",
     ))
 }
 
@@ -525,6 +540,9 @@ pub struct EnvConfig {
     pub auto_forward: Option<bool>,
     #[serde(default, rename = "allow", skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<Rule>,
+    /// Open egress (`luoto egress open`); only this file sets it.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub egress: Egress,
     /// Requests refused whatever allows them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<Deny>,
@@ -533,6 +551,9 @@ pub struct EnvConfig {
     pub mute: Vec<Mute>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub credentials: Credentials,
+    /// Model servers agents can use beside their providers (`model_servers.rs`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_servers: BTreeMap<String, ModelServer>,
     /// Secrets deliberately exposed to code in the sandbox as env vars.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sandbox_secrets: BTreeMap<String, String>,
@@ -550,6 +571,36 @@ pub struct EnvConfig {
     pub deps: Deps,
 }
 
+/// `[egress]`: what the env reaches beyond its rules.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Egress {
+    /// Any HTTP(S) host no rule allows, until `luoto egress close`: written by hand only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open: bool,
+    /// The same until then (`luoto egress open --for 1h`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl Egress {
+    /// Open at `now`: `Some(None)` with no end, `Some(Some(t))` until `t`.
+    pub fn open_at(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<Option<chrono::DateTime<chrono::Utc>>>> {
+        match (self.open, self.open_until) {
+            (true, Some(_)) => bail!(
+                "[egress]: `open = true` keeps it open with no end and `open_until` until a \
+                 time; keep one (`luoto egress open --for 1h` writes `open_until`)"
+            ),
+            (true, None) => Ok(Some(None)),
+            (false, Some(t)) if t > now => Ok(Some(Some(t))),
+            _ => Ok(None),
+        }
+    }
+}
+
 /// What can be chosen for an agent (its profile's `settings` say where each goes in its own
 /// config): the default for its sessions, which a session can still change.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -559,6 +610,16 @@ pub struct AgentOpts {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The `[model_servers]` entry it starts on, `model` naming the model there; without it,
+    /// its provider. Each developer's own: a luoto.toml can't set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_server: Option<String>,
+    /// Arguments for every start through luoto (`agent run`, `luoto run`), after its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Arguments for `luoto run` only, after `args`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headless_args: Vec<String>,
 }
 
 impl AgentOpts {
@@ -575,13 +636,49 @@ impl AgentOpts {
     }
 
     fn fill_from(&mut self, lower: &AgentOpts) {
-        if self.model.is_none() {
+        // On a model server, `model` names one of its models, which no team or default knows.
+        if self.model.is_none() && self.model_server.is_none() {
             self.model = lower.model.clone();
         }
         if self.effort.is_none() {
             self.effort = lower.effort.clone();
         }
+        if self.args.is_empty() {
+            self.args = lower.args.clone();
+        }
+        if self.headless_args.is_empty() {
+            self.headless_args = lower.headless_args.clone();
+        }
     }
+}
+
+/// `[model_servers.<name>]`: a server with an OpenAI- and/or Anthropic-compatible API, on this
+/// machine, your network or the internet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelServer {
+    /// As this machine reaches it: `http://localhost:11434`, `https://models.example.com`.
+    pub url: String,
+    /// What it serves: `anthropic`, `openai`.
+    pub api: Vec<String>,
+    /// The model agents use there unless their own `model` names another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The context window of the model agents use there, in tokens, for agents that can't
+    /// tell it from the model's name (Claude Code assumes 200k).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
+    /// Its token, a secret reference; none for a server that takes none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// The header the token goes in: `authorization` (as `Bearer`, the default), or another
+    /// as it is (`x-api-key`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// Its host name is on a private network, as a self-hosted one is (an address of one
+    /// says so itself).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private: bool,
 }
 
 /// The agents of an env: `agents = ["claude"]`, or `[agents.claude]` tables with options
@@ -764,6 +861,13 @@ pub fn parse_global(text: &str) -> Result<GlobalConfig> {
         if r.is_some_and(|r| r.starts_with(crate::azure_identity::AZCLI)) {
             bail!("{key}: an `azcli:` ref is only for [credentials.azure], which writes its own");
         }
+    }
+    // Model servers are each env's own, and so is which one an agent starts on.
+    if let Some((name, _)) = cfg.agents.0.iter().find(|(_, o)| o.model_server.is_some()) {
+        bail!(
+            "agents.{name}.model_server: an agent's model server is set in each env's file \
+             (`luoto agent auth`), not config.toml"
+        );
     }
     Ok(cfg)
 }
@@ -1316,6 +1420,91 @@ impl EnvFile {
     }
 
     /// Add `name` to the env's agents, in the form the file writes them.
+    /// Set (or, for `None`, remove) options of agent `name` under `[agents.<name>]`, the
+    /// agent listed if it wasn't; an `agents = [...]` list becomes tables for it.
+    pub fn set_agent_opts(&mut self, name: &str, opts: &[(&str, Option<&str>)]) -> Result<()> {
+        let path = self.path.display().to_string();
+        let listed: Option<Vec<String>> =
+            self.doc.get("agents").and_then(|i| i.as_array()).map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
+        if let Some(names) = listed {
+            let mut t = toml_edit::Table::new();
+            t.set_implicit(true);
+            for n in names {
+                t.insert(&n, toml_edit::table());
+            }
+            self.doc["agents"] = toml_edit::Item::Table(t);
+        }
+        let agents = self
+            .doc
+            .entry("agents")
+            .or_insert_with(|| {
+                let mut t = toml_edit::Table::new();
+                t.set_implicit(true);
+                toml_edit::Item::Table(t)
+            })
+            .as_table_like_mut()
+            .with_context(|| format!("`agents` in {path} is not a table"))?;
+        let table = agents
+            .entry(name)
+            .or_insert_with(toml_edit::table)
+            .as_table_like_mut()
+            .with_context(|| format!("`agents.{name}` in {path} is not a table"))?;
+        for (k, v) in opts {
+            match v {
+                Some(v) => {
+                    table.insert(k, toml_edit::value(*v));
+                }
+                None => {
+                    table.remove(k);
+                }
+            }
+        }
+        self.save()
+    }
+
+    /// `[model_servers.<name>]` as `server` has it, in place of what it had.
+    pub fn set_model_server(&mut self, name: &str, server: &ModelServer) -> Result<()> {
+        let path = self.path.display().to_string();
+        let servers = self
+            .doc
+            .entry("model_servers")
+            .or_insert_with(|| {
+                let mut t = toml_edit::Table::new();
+                t.set_implicit(true);
+                toml_edit::Item::Table(t)
+            })
+            .as_table_like_mut()
+            .with_context(|| format!("`model_servers` in {path} is not a table"))?;
+        let mut t = toml_edit::Table::new();
+        t.insert("url", toml_edit::value(server.url.as_str()));
+        let mut api = toml_edit::Array::new();
+        for a in &server.api {
+            api.push(a.as_str());
+        }
+        t.insert("api", toml_edit::value(api));
+        for (k, v) in [
+            ("model", &server.model),
+            ("token", &server.token),
+            ("header", &server.header),
+        ] {
+            if let Some(v) = v {
+                t.insert(k, toml_edit::value(v.as_str()));
+            }
+        }
+        if let Some(c) = server.context.and_then(|c| i64::try_from(c).ok()) {
+            t.insert("context", toml_edit::value(c));
+        }
+        if server.private {
+            t.insert("private", toml_edit::value(true));
+        }
+        servers.insert(name, toml_edit::Item::Table(t));
+        self.save()
+    }
+
     pub fn add_agent(&mut self, name: &str) -> Result<()> {
         let path = self.path.display().to_string();
         match self.doc.get_mut("agents") {
@@ -1351,6 +1540,34 @@ impl EnvFile {
     }
 
     /// Set `key = value` in the top-level table `table`, creating the table if needed.
+    /// Set `values` in the table at `path` (`["credentials", "custom", "stripe"]`), made where
+    /// missing, its other keys kept.
+    pub fn set_in_tables(
+        &mut self,
+        path: &[&str],
+        values: Vec<(&str, toml_edit::Value)>,
+    ) -> Result<()> {
+        let file = self.path.display().to_string();
+        let mut table: &mut dyn toml_edit::TableLike = self.doc.as_table_mut();
+        for (i, k) in path.iter().enumerate() {
+            let at = path[..=i].join(".");
+            table = table
+                .entry(k)
+                .or_insert_with(|| {
+                    let mut t = toml_edit::Table::new();
+                    // A parent table shows only as its children's headings.
+                    t.set_implicit(i + 1 < path.len());
+                    toml_edit::Item::Table(t)
+                })
+                .as_table_like_mut()
+                .with_context(|| format!("`{at}` in {file} is not a table"))?;
+        }
+        for (k, v) in values {
+            table.insert(k, toml_edit::Item::Value(v));
+        }
+        self.save()
+    }
+
     pub fn set_in_table(&mut self, table: &str, key: &str, value: &str) -> Result<()> {
         if !self.doc.contains_key(table) {
             self.doc[table] = toml_edit::table();
@@ -1412,10 +1629,43 @@ impl EnvFile {
         self.retain_rules(|r| r.id.as_deref() != Some(id_or_host) && r.host != id_or_host)
     }
 
-    /// Drop expired rules (keeps the file from accumulating stale grants).
+    /// Drop expired rules (keeps the file from accumulating stale grants), and an
+    /// `open_until` that has passed.
     pub fn prune_expired(&mut self) -> Result<usize> {
         let now = chrono::Utc::now();
+        if self.cfg.egress.open_until.is_some_and(|t| t <= now) {
+            self.set_open(None)?;
+        }
         self.retain_rules(|r| !r.expired(now))
+    }
+
+    /// `[egress]`: open until `until`, or closed with `None` (`open = true` goes too). The
+    /// table goes when nothing is left in it.
+    pub fn set_open(&mut self, until: Option<chrono::DateTime<chrono::Utc>>) -> Result<()> {
+        let path = self.path.display().to_string();
+        if until.is_none() && self.doc.get("egress").is_none() {
+            return Ok(());
+        }
+        let table = self
+            .doc
+            .entry("egress")
+            .or_insert_with(toml_edit::table)
+            .as_table_like_mut()
+            .with_context(|| format!("`egress` in {path} is not a table"))?;
+        table.remove("open");
+        match until {
+            Some(t) => {
+                let t = t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                table.insert("open_until", toml_edit::value(t));
+            }
+            None => {
+                table.remove("open_until");
+            }
+        }
+        if table.is_empty() {
+            self.doc.remove("egress");
+        }
+        self.save()
     }
 }
 
@@ -1487,7 +1737,7 @@ host = "docs.rs"
 app_id = "123"
 installation_id = 456
 private_key = "op://Dev/app/key"
-repos = ["eetu/foo"]
+repos = ["octo/foo"]
 permissions = { contents = "write" }
 
 [credentials.anthropic]
@@ -1567,6 +1817,52 @@ oauth_token = "op://Private/claude/token"
         f.set_provider_kind("openai", "api_key", &key).unwrap();
         assert_eq!(f.cfg.credentials.providers["openai"]["api_key"], key);
         assert!(f.set_provider_kind("nobody", "api_key", &key).is_err());
+    }
+
+    #[test]
+    fn a_need_writes_its_table_keeping_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        let text = "[workspace]\ndir = \"/w\"\n\n[credentials.custom.stripe]\nhost = \"old.example\"\nsecret = \"env:OLD\"\nheader = \"x-key\" # kept\n";
+        std::fs::write(&path, text).unwrap();
+        let mut f = EnvFile::parse(path.clone(), text).unwrap();
+        f.set_in_tables(
+            &["credentials", "custom", "stripe"],
+            vec![
+                ("host", "api.stripe.com".into()),
+                ("secret", "env:S".into()),
+            ],
+        )
+        .unwrap();
+        let c = &f.cfg.credentials.custom["stripe"];
+        assert_eq!(
+            (c.host.as_str(), c.secret.as_str(), c.header.as_str()),
+            ("api.stripe.com", "env:S", "x-key")
+        );
+        let mut subs = toml_edit::Array::new();
+        subs.push("00000000-0000-0000-0000-000000000001");
+        f.set_in_tables(
+            &["credentials", "azure"],
+            vec![("subscriptions", subs.into())],
+        )
+        .unwrap();
+        assert_eq!(
+            f.cfg
+                .credentials
+                .azure
+                .as_ref()
+                .unwrap()
+                .subscriptions
+                .len(),
+            1
+        );
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        // A parent shows only as its children's headings.
+        assert!(!on_disk.contains("[credentials]\n"), "{on_disk}");
+        assert!(
+            on_disk.contains("# kept") && on_disk.contains("[credentials.azure]"),
+            "{on_disk}"
+        );
     }
 
     #[test]
@@ -1678,6 +1974,56 @@ host = "telemetry.example"
         assert_eq!(cfg.deny[0].note.as_deref(), Some("config.toml"));
         let muted: Vec<&str> = cfg.mute.iter().map(|m| m.host.as_str()).collect();
         assert_eq!(muted, ["stats.example", "telemetry.example"]);
+    }
+
+    #[test]
+    fn open_egress_is_written_as_a_window_and_closed_in_place() {
+        let text = "# my env\npresets = []\n\n[egress]\nopen = true\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        std::fs::write(&path, text).unwrap();
+        let mut f = EnvFile::parse(path.clone(), text).unwrap();
+        let now = chrono::Utc::now();
+        assert_eq!(f.cfg.egress.open_at(now).unwrap(), Some(None));
+        let until: chrono::DateTime<chrono::Utc> = "2099-01-01T12:00:00Z".parse().unwrap();
+        f.set_open(Some(until)).unwrap();
+        assert_eq!(
+            f.cfg.egress,
+            Egress {
+                open: false,
+                open_until: Some(until)
+            }
+        );
+        assert_eq!(f.cfg.egress.open_at(now).unwrap(), Some(Some(until)));
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            saved.contains("open_until = \"2099-01-01T12:00:00Z\"") && !saved.contains("open ="),
+            "{saved}"
+        );
+        f.set_open(None).unwrap();
+        assert_eq!(f.cfg.egress, Egress::default());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            saved.starts_with("# my env") && !saved.contains("egress"),
+            "{saved}"
+        );
+
+        // A window that has passed is closed, and `up` drops it from the file.
+        let past = "[egress]\nopen_until = \"2000-01-01T00:00:00Z\"\n";
+        std::fs::write(&path, past).unwrap();
+        let mut f = EnvFile::parse(path.clone(), past).unwrap();
+        assert_eq!(f.cfg.egress.open_at(now).unwrap(), None);
+        f.prune_expired().unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("egress"));
+
+        let both = "[egress]\nopen = true\nopen_until = \"2099-01-01T00:00:00Z\"\n";
+        let f = EnvFile::parse(path.clone(), both).unwrap();
+        assert!(f.cfg.egress.open_at(now).is_err());
+        assert!(EnvFile::parse(path.clone(), "[egress]\nopen = \"yes\"\n").is_err());
+        assert!(EnvFile::parse(path, "[egress]\nopen_for = \"1h\"\n").is_err());
+
+        let e = parse_global("[egress]\nopen = true\n").unwrap_err();
+        assert!(format!("{e:#}").contains("luoto egress open -e"), "{e:#}");
     }
 
     #[test]
@@ -1799,10 +2145,10 @@ host = "telemetry.example"
         std::fs::write(&path, SAMPLE).unwrap();
         let mut f = EnvFile::parse(path.clone(), SAMPLE).unwrap();
         // A repo of an owner the App covers joins it.
-        f.add_github_repos("eetu", None, &["eetu/bar".into()], false)
+        f.add_github_repos("octo", None, &["octo/bar".into()], false)
             .unwrap();
         assert_eq!(f.cfg.credentials.github.0.len(), 1);
-        assert!(f.cfg.credentials.github.covers("eetu/bar", true));
+        assert!(f.cfg.credentials.github.covers("octo/bar", true));
         // Another owner's gets a credential of its own; the table becomes an array.
         f.add_github_repos(
             "acme",
@@ -1869,6 +2215,7 @@ host = "telemetry.example"
             AgentOpts {
                 model: Some("sonnet".into()),
                 effort: Some("high".into()),
+                ..Default::default()
             },
         )]));
         own.layer_under(&Agents::from_names(["opencode".to_string()]));

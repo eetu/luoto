@@ -44,20 +44,25 @@ pub fn load_secrets(ctx: &Ctx, refs: &BTreeSet<String>, whose: &str, renew: bool
         .cloned()
         .collect();
     if !missing.is_empty() {
-        eprintln!(
-            "unlocking {} secret(s) for {whose} from your secret store…",
-            missing.len()
-        );
-        let mut values = BTreeMap::new();
-        let mut failed = Vec::new();
-        for r in &missing {
-            match secrets::resolve(&ctx.global, r) {
-                Ok(v) => {
-                    values.insert(r.clone(), v);
+        let (values, failed) = crate::progress::step(
+            &format!(
+                "unlocking {} secret(s) for {whose} from your secret store",
+                missing.len()
+            ),
+            || {
+                let mut values = BTreeMap::new();
+                let mut failed = Vec::new();
+                for r in &missing {
+                    match secrets::resolve(&ctx.global, r) {
+                        Ok(v) => {
+                            values.insert(r.clone(), v);
+                        }
+                        Err(e) => failed.push((secrets::shown_ref(r), format!("{e:#}"))),
+                    }
                 }
-                Err(e) => failed.push(format!("{}: {e:#}", secrets::shown_ref(r))),
-            }
-        }
+                (values, failed)
+            },
+        );
         if !values.is_empty() {
             let load = VaultCtl::Load {
                 secrets: values,
@@ -70,11 +75,28 @@ pub fn load_secrets(ctx: &Ctx, refs: &BTreeSet<String>, whose: &str, renew: bool
                 "{} of {} secret(s) not loaded, so the credentials using them stay locked: {}",
                 failed.len(),
                 missing.len(),
-                failed.join("; ")
+                grouped(&failed)
             );
         }
     }
     Ok(())
+}
+
+/// `(ref, error)` pairs as a line each error says once, with every ref it hit:
+/// `ref1, ref2: error`.
+fn grouped(failed: &[(String, String)]) -> String {
+    let mut by_error: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (r, e) in failed {
+        match by_error.iter_mut().find(|(err, _)| err == e) {
+            Some((_, refs)) => refs.push(r),
+            None => by_error.push((e, vec![r])),
+        }
+    }
+    by_error
+        .iter()
+        .map(|(e, refs)| format!("{}: {e}", refs.join(", ")))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 pub fn apply_policy(ctx: &Ctx, env: &str, compiled: &Compiled) -> Result<()> {
@@ -117,6 +139,8 @@ pub fn reapply(ctx: &Ctx, env: &str) -> Result<Option<Plan>> {
     if applied.trim() != runtime_env_sum(&p.compiled) {
         write_runtime_env(ctx, env, &p.compiled)?;
     }
+    // The agents' options and model servers, as the config has them now.
+    crate::agents::configure(ctx, env, &p.cfg, None, crate::agents::Write::Changed)?;
     Ok(Some(p))
 }
 

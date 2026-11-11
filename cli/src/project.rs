@@ -46,7 +46,7 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "crate::config::is_default")]
     pub deps: Deps,
     #[serde(default, skip_serializing_if = "crate::config::is_default")]
-    pub needs: Needs,
+    pub needs: crate::needs::Needs,
     /// Repositories cloned beside the project in the env, each at `/workspace/<name>`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub repos: BTreeMap<String, ProjectRepo>,
@@ -59,21 +59,6 @@ pub struct ProjectRepo {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
-}
-
-/// Credentials the project expects; each developer fills in their own refs.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct Needs {
-    /// `owner/repo` the env should be able to push to.
-    #[serde(default)]
-    pub github: Vec<String>,
-    /// Provider profiles (`anthropic`, `openai`, …) or `custom.<name>`.
-    #[serde(default)]
-    pub credentials: Vec<String>,
-    /// Names of `[sandbox_secrets]` the project's code reads.
-    #[serde(default)]
-    pub sandbox_secrets: Vec<String>,
 }
 
 pub fn parse(text: &str) -> Result<ProjectConfig> {
@@ -93,6 +78,12 @@ pub fn parse(text: &str) -> Result<ProjectConfig> {
         bail!(
             "luoto.toml can't hold `mute`: muted denials are hidden from you, so only your own \
              config mutes"
+        );
+    }
+    if table.contains_key("egress") {
+        bail!(
+            "luoto.toml can't hold `egress`: only you open an env's egress, for a while \
+             (`luoto egress open`)"
         );
     }
     if table.contains_key("tools") {
@@ -125,6 +116,35 @@ fn validate(p: &ProjectConfig) -> Result<()> {
         let Some(a) = profiles::agent(name) else {
             bail!("luoto.toml: unknown agent `{}`", display(name));
         };
+        if opts.model_server.is_some() {
+            bail!(
+                "luoto.toml: agents.{}: `model_server` is each developer's own choice, in their \
+                 env's file",
+                display(name)
+            );
+        }
+        // The agent's own prompts are each developer's to turn off (`--yolo`) or loosen.
+        let loosens = |x: &str| {
+            a.yolo.iter().chain(&a.prompt_flags).any(|f| {
+                x == f
+                    || x.starts_with(&format!("{f}="))
+                    // `-anever`: a one-letter flag takes its value joined.
+                    || (f.len() == 2 && !f.starts_with("--") && x.starts_with(f.as_str()))
+            })
+        };
+        if let Some(y) = opts
+            .args
+            .iter()
+            .chain(&opts.headless_args)
+            .find(|x| loosens(x))
+        {
+            bail!(
+                "luoto.toml: agents.{}: `{}` turns off or loosens the agent's own prompts, \
+                 which only you do (`luoto agent run --yolo`, your env's own `args`)",
+                display(name),
+                display(y)
+            );
+        }
         crate::compile::check_agent_opts(&a, name, opts).context("luoto.toml")?;
     }
     for r in &p.allow {
@@ -138,41 +158,13 @@ fn validate(p: &ProjectConfig) -> Result<()> {
         }
     }
     deps::check(&p.deps, RuleOrigin::Sandbox).context("luoto.toml")?;
+    crate::needs::check(&p.needs)?;
     if let Some(i) = &p.image
         && !i
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"./:_@-".contains(&b))
     {
         bail!("luoto.toml: `{}` is not an image reference", display(i));
-    }
-    let word = |s: &str, extra: &[u8]| {
-        !s.is_empty()
-            && s.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || extra.contains(&b))
-    };
-    for r in &p.needs.github {
-        if r.split('/').count() != 2 || !word(r, b"/._-") {
-            bail!(
-                "luoto.toml: needs.github: `{}` is not owner/repo",
-                display(r)
-            );
-        }
-    }
-    for c in &p.needs.credentials {
-        if !word(c, b"._-") {
-            bail!(
-                "luoto.toml: needs.credentials: `{}` is not a name",
-                display(c)
-            );
-        }
-    }
-    for s in &p.needs.sandbox_secrets {
-        if !word(s, b"_") {
-            bail!(
-                "luoto.toml: needs.sandbox_secrets: `{}` is not a name",
-                display(s)
-            );
-        }
     }
     let mut folded = std::collections::BTreeSet::new();
     for (name, r) in &p.repos {
@@ -525,6 +517,9 @@ pub fn suggest(env: &str, own: &EnvConfig, accepted: Option<&ProjectConfig>) -> 
             plural(own.mute.len())
         ));
     }
+    if own.egress != crate::config::Egress::default() {
+        left_out.push("open egress (only you open an env's)".into());
+    }
 
     let text = format!(
         "# Suggested by `luoto project suggest` from env `{env}`: the settings it works with that a\n\
@@ -615,11 +610,23 @@ fn items(p: &ProjectConfig) -> Vec<(&'static str, String)> {
             .0
             .iter()
             .map(|(n, o)| {
-                let opts: Vec<String> = o
+                let quoted = |args: &[String]| {
+                    args.iter()
+                        .map(|x| format!("`{}`", display(x)))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                let mut opts: Vec<String> = o
                     .values()
                     .iter()
                     .map(|(k, v)| format!("{k} {}", display(v)))
                     .collect();
+                if !o.args.is_empty() {
+                    opts.push(format!("started with {}", quoted(&o.args)));
+                }
+                if !o.headless_args.is_empty() {
+                    opts.push(format!("headless with {}", quoted(&o.headless_args)));
+                }
                 if opts.is_empty() {
                     display(n)
                 } else {
@@ -668,26 +675,7 @@ fn items(p: &ProjectConfig) -> Vec<(&'static str, String)> {
             })
             .collect(),
     );
-    let mut needs: Vec<String> = Vec::new();
-    if !p.needs.github.is_empty() {
-        needs.push(format!(
-            "GitHub push to {}",
-            display(&p.needs.github.join(", "))
-        ));
-    }
-    needs.extend(
-        p.needs
-            .credentials
-            .iter()
-            .map(|c| format!("{} credential", display(c))),
-    );
-    needs.extend(
-        p.needs
-            .sandbox_secrets
-            .iter()
-            .map(|s| format!("secret {}", display(s))),
-    );
-    add("needs", needs);
+    add("needs", crate::needs::review(&p.needs));
     out
 }
 
@@ -731,63 +719,6 @@ fn credentials_reached(policy: &Policy, old: &ProjectConfig, new: &ProjectConfig
         for why in policy.credentials_reached(r) {
             out.push(format!("! {:<8} {}: {why}", "allow", display(&r.host)));
         }
-    }
-    out
-}
-
-/// Config snippets for credentials the project needs and the env lacks.
-pub fn missing_needs(p: &ProjectConfig, cfg: &EnvConfig) -> Vec<String> {
-    let mut out = Vec::new();
-    if !p.needs.github.is_empty() && cfg.credentials.github.is_empty() {
-        out.push(format!(
-            "[credentials.github]\ntoken = \"op://<vault>/<item>/<field>\"   # or app_id + installation_id + private_key\nrepos = [{}]",
-            p.needs
-                .github
-                .iter()
-                .map(|r| format!("\"{r}\""))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    for c in &p.needs.credentials {
-        if let Some(name) = c.strip_prefix("custom.") {
-            if !cfg.credentials.custom.contains_key(name) {
-                out.push(format!(
-                    "[credentials.custom.{name}]\nhost = \"<api host>\"\nsecret = \"op://<vault>/<item>/<field>\""
-                ));
-            }
-        } else if c == "azure" {
-            if cfg.credentials.azure.is_none() {
-                out.push(
-                    "[credentials.azure]\nsubscriptions = [\"<subscription id>\"]   # your az \
-                     login's token; or client_id + client_secret + tenant"
-                        .into(),
-                );
-            }
-        } else if !cfg.credentials.providers.contains_key(c) {
-            let kind = profiles::provider(c)
-                .and_then(|p| p.auth.keys().next().cloned())
-                .unwrap_or_else(|| "api_key".into());
-            out.push(format!(
-                "[credentials.{c}]\n{kind} = \"op://<vault>/<item>/<field>\""
-            ));
-        }
-    }
-    let secrets: Vec<&String> = p
-        .needs
-        .sandbox_secrets
-        .iter()
-        .filter(|s| !cfg.sandbox_secrets.contains_key(*s))
-        .collect();
-    if !secrets.is_empty() {
-        out.push(format!(
-            "[sandbox_secrets]\n{}",
-            secrets
-                .iter()
-                .map(|s| format!("{s} = \"op://<vault>/<item>/<field>\""))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
     }
     out
 }
@@ -874,6 +805,8 @@ fn source(running: bool, ws: &crate::config::Workspace) -> Source {
 
 pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
     let cfg = EnvFile::load(&ctx.paths, env)?.cfg;
+    let public = crate::repos::declined(ctx, env);
+    let missing = |p: &ProjectConfig| crate::needs::snippets(&p.needs, &cfg, &public);
     let old = accepted(ctx, env);
     let mut s = Status {
         state: State::None,
@@ -892,7 +825,7 @@ pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
         Source::Unread => {
             s.state = State::Unread;
             if let Some((_, p)) = &old {
-                s.needs = missing_needs(p, &cfg);
+                s.needs = missing(p);
             }
             return Ok(s);
         }
@@ -904,7 +837,7 @@ pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
         Ok(None) => {
             if let Some((_, p)) = &old {
                 s.state = State::Removed;
-                s.needs = missing_needs(p, &cfg);
+                s.needs = missing(p);
             }
             return Ok(s);
         }
@@ -915,7 +848,7 @@ pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
         }
     };
     s.current = summary(&new);
-    s.needs = missing_needs(&new, &cfg);
+    s.needs = missing(&new);
     let none = ProjectConfig::default();
     let changed_from = match &old {
         Some((t, p)) if *t == text || *p == new => None,
@@ -1061,17 +994,6 @@ mod tests {
     }
 
     #[test]
-    fn a_project_needing_azure_gets_its_section_suggested() {
-        let p = parse("[needs]\ncredentials = [\"azure\"]").unwrap();
-        let needs = missing_needs(&p, &EnvConfig::default());
-        assert_eq!(needs.len(), 1);
-        assert!(
-            needs[0].starts_with("[credentials.azure]\nsubscriptions"),
-            "{needs:?}"
-        );
-    }
-
-    #[test]
     fn refuses_secrets_tools_and_risky_rules() {
         assert!(parse("[credentials.github]\ntoken = \"op://x\"").is_err());
         assert!(parse("[credentials.azure]\nsubscriptions = [\"x\"]").is_err());
@@ -1083,12 +1005,47 @@ mod tests {
         assert!(parse("presets = [\"nope\"]").is_err());
         assert!(parse("image = \"x; rm\"").is_err());
         assert!(parse("[needs]\ngithub = [\"no-slash\"]").is_err());
+        // Which server an agent uses is each developer's own.
+        assert!(
+            parse("[model_servers.x]\nurl = \"http://localhost:1\"\napi = [\"openai\"]").is_err()
+        );
+        let err = parse("[agents.claude]\nmodel_server = \"x\"").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("each developer's own"),
+            "{err:#}"
+        );
+        // A team may set arguments, not the ones that turn the agent's prompts off.
+        assert!(parse("[agents.claude]\nheadless_args = [\"--bare\"]").is_ok());
+        let err =
+            parse("[agents.claude]\nargs = [\"--dangerously-skip-permissions\"]").unwrap_err();
+        assert!(format!("{err:#}").contains("--yolo"), "{err:#}");
+        for loose in [
+            "[agents.claude]\nargs = [\"--permission-mode\", \"bypassPermissions\"]",
+            "[agents.claude]\nheadless_args = [\"--settings=x.json\"]",
+            "[agents.codex]\nargs = [\"-anever\"]",
+            "[agents.codex]\nargs = [\"--config\", \"approval_policy=never\"]",
+            "[agents.copilot]\nargs = [\"--allow-all-tools\"]",
+        ] {
+            assert!(parse(loose).is_err(), "{loose}");
+        }
+        assert!(parse("[agents.codex]\nargs = [\"--search\"]").is_ok());
+        assert!(parse("[agents.claude]\nargs = [\"a\\u0007b\"]").is_err());
     }
 
     #[test]
     fn denies_only_tighten_but_mutes_would_hide() {
         let err = parse("[[mute]]\nhost = \"telemetry.example\"").unwrap_err();
         assert!(format!("{err:#}").contains("can't hold `mute`"), "{err:#}");
+        for open in [
+            "[egress]\nopen = true",
+            "[egress]\nopen_until = \"2099-01-01T00:00:00Z\"",
+        ] {
+            let err = parse(open).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("can't hold `egress`"),
+                "{err:#}"
+            );
+        }
         assert!(parse("[[deny]]\nhost = \"x.example\"\npaths = [\"v1\"]").is_err());
         let p = parse(
             "[[deny]]\nhost = \"registry.npmjs.org\"\nmethods = [\"POST\"]\nnote = \"no audits\"",
@@ -1142,7 +1099,7 @@ credentials = ["anthropic"]
         assert_eq!(cfg.ports, [5173, 3000]);
         assert_eq!(cfg.allow[0].id.as_deref(), Some("project-1"));
         assert_eq!(cfg.deps.system, ["libpq-dev"]);
-        let needs = missing_needs(&p, &cfg);
+        let needs = crate::needs::snippets(&p.needs, &cfg, &Default::default());
         assert_eq!(needs.len(), 2);
         assert!(needs[0].contains("repos = [\"acme/web\"]"));
     }
@@ -1260,6 +1217,9 @@ image = "localhost/mine:dev"
 presets = ["debian", "npm"]
 ports = [5173]
 idle_stop = "2h"
+
+[egress]
+open = true
 
 [agents.claude]
 model = "opus"
@@ -1383,7 +1343,7 @@ hosts = ["dl.k8s.io", "*"]
         assert_eq!(p.deps.run.len(), 1);
         assert_eq!(p.repos.keys().collect::<Vec<_>>(), ["api"]);
         assert_eq!(p.repos["api"].branch.as_deref(), Some("dev"));
-        assert_eq!(p.needs, Needs::default());
+        assert_eq!(p.needs, crate::needs::Needs::default());
         let out = s.left_out.join("\n");
         for said in [
             "1 expiring rule ",
@@ -1398,6 +1358,7 @@ hosts = ["dl.k8s.io", "*"]
             "credentials (github, azure_devops, anthropic, custom.stripe)",
             "sandbox secrets (DATABASE_URL)",
             "1 mute ",
+            "open egress",
         ] {
             assert!(out.contains(said), "`{said}` not in:\n{out}");
         }

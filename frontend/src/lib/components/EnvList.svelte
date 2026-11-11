@@ -6,7 +6,7 @@
   import { api } from "$lib/api";
   import VmDiskStatus from "$lib/components/VmDiskStatus.svelte";
   import { openMenu } from "$lib/menu.svelte";
-  import { act, app, copyText, selectEnv } from "$lib/stores/app.svelte";
+  import { act, app, copyText, openLeft, selectEnv } from "$lib/stores/app.svelte";
   import type { EnvRow } from "$lib/types";
 
   let { onNew }: { onNew: () => void } = $props();
@@ -34,6 +34,23 @@
           void act("rebuilding…", () => api.action(env.name, "rebuild"), `${env.name} rebuilt`),
         hint: "volumes kept",
       },
+      env.open
+        ? {
+            label: "Close egress",
+            run: () =>
+              void act("closing…", () => api.action(env.name, "close"), `${env.name}: rules only`),
+            hint: openLeft(env.open) ? `${openLeft(env.open)} left` : "no end",
+          }
+        : {
+            label: "Open egress for 1 h",
+            run: () =>
+              void act(
+                "opening…",
+                () => api.action(env.name, "open"),
+                `${env.name} reaches any HTTP(S) host for 1 h`,
+              ),
+            hint: "any HTTP(S) host",
+          },
       {
         label: "Copy shell command",
         run: () => copyText(`luoto shell -e ${env.name}`),
@@ -58,6 +75,13 @@
     >
       <span class="dot" class:on={env.dev === "running"} class:err={!!env.error}></span>
       <span class="name">{env.name}</span>
+      {#if env.open}
+        <span
+          class="pill open"
+          title="egress is open: any HTTP(S) host no rule allows, but those with your credentials and muted ones"
+          >{["open", openLeft(env.open)].filter(Boolean).join(", ")}</span
+        >
+      {/if}
       {#if env.pending > 0}
         <span class="pill accent" title="access requests waiting for you">{env.pending}</span>
       {/if}
@@ -160,6 +184,13 @@
   .pill.accent {
     background: var(--halo-accent);
     color: var(--halo-on-accent);
+  }
+
+  .pill.open {
+    border: 1px solid var(--halo-accent);
+    background: transparent;
+    color: var(--halo-accent);
+    white-space: nowrap;
   }
 
   .new {

@@ -11,6 +11,7 @@ import type {
   Install,
   LuotoEvent,
   Meta,
+  OpenEgress,
   Overview,
   ProjectStatus,
   VmDisk,
@@ -263,6 +264,13 @@ export function installLabel(i: Install): string {
 export function requestTarget(r: AccessRequest): string {
   if (!r.port) return r.host;
   return r.host.includes(":") ? `[${r.host}]:${r.port}` : `${r.host}:${r.port}`;
+}
+
+/** How long open egress has left: `52m`, `3h`, or empty when it has no end. */
+export function openLeft(open: OpenEgress): string {
+  if (!open.until) return "";
+  const m = Math.max(0, Math.ceil((Date.parse(open.until) - Date.now()) / 60_000));
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h`;
 }
 
 export function ago(ts?: string | null): string {

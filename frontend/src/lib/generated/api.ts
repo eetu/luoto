@@ -135,6 +135,8 @@ export type EnvRow = {
   repos: Repo[];
   pending: number;
   denied_recent: number;
+  /** Its egress is open (`luoto egress open`). */
+  open: OpenEgress | null;
   error: string | null;
 };
 
@@ -173,6 +175,8 @@ export type GateStatus = {
 export type HostSummary = {
   host: string;
   allowed: number;
+  /** Of `allowed`, those open egress let out: no rule allowed them. */
+  opened: number;
   denied: number;
   /** Of `denied`, those a mute hides when they are not left out. */
   muted: number;
@@ -283,6 +287,12 @@ export type NewEnv = {
 export type NewRule = {
   rule: Rule;
   force?: boolean;
+};
+
+/** An env's open egress (`luoto egress open`). */
+export type OpenEgress = {
+  /** When it closes; none: when the user closes it (`open = true`). */
+  until?: string;
 };
 
 export type Overview = {

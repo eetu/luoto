@@ -79,6 +79,7 @@ pub fn tools_for(ctx: &Ctx, cfg: &EnvConfig) -> BTreeMap<String, toml::Value> {
 /// What the env's workspace says about itself ([`detect`]), read inside it, where the work
 /// happens. Two calls into the env: the file list, then the few files detection reads.
 pub fn detect_in_env(ctx: &Ctx, env: &str) -> Result<Detected> {
+    let _waiting = crate::progress::waiting("reading the project's files");
     let files = workspace_files(ctx, &names::dev(env));
     let wanted = detect::read_paths(&files);
     let texts = workspace::read_files(ctx, env, &wanted, detect::READ_CAP, Oversize::Truncate)?
@@ -472,6 +473,7 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
     let e = Env::new(ctx, env, home);
     let mutes = events::Mutes::new(&cfg.mute);
     let tools = tools_for(ctx, cfg);
+    let checking = crate::progress::waiting("checking the env's toolchains");
     let found = e.probe()?;
     let missing = if found.mise {
         let conf = mise_conf(&tools)?;
@@ -481,10 +483,13 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
         e.missing_tools(&tools.keys().cloned().collect::<Vec<_>>())?
     } else {
         if !tools.is_empty() {
-            eprintln!("note: the env's image has no mise, so [tools] are not installed");
+            crate::progress::say(|| {
+                eprintln!("note: the env's image has no mise, so [tools] are not installed")
+            });
         }
         Vec::new()
     };
+    drop(checking);
     let marker = found.marker;
     let want = digest(&d);
     let packages = !(d.system.is_empty() && d.run.is_empty());

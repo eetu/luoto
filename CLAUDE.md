@@ -2,7 +2,8 @@
 
 Dev sandboxes that contain supply-chain attacks: tools run in a container whose only egress is
 a per-env policy gate; a per-VM vault holds secrets outside the sandbox. CLI + local web UI.
-User-facing docs: README.md. Threat model: SECURITY.md. A user-visible change gets an entry in
+User-facing docs: README.md (the overview and getting started), docs/ (the reference and
+guides). Threat model: SECURITY.md. A user-visible change gets an entry in
 CHANGELOG.md's top section (the release notes); ROADMAP.md holds only what isn't done.
 main is protected: it changes only by squash-merged pull request, from a branch named for the
 release (`packaging/README.md`). CI runs on pull requests (path-filtered) and weekly on main.
@@ -18,7 +19,9 @@ tools/       `sandbox` helper (status/check/request/relay/mcp/selftest, internal
 cli/         `luoto` host binary: runtime driver, env lifecycle, commands, `luoto ui` (axum)
 frontend/    SvelteKit SPA embedded into `luoto` (rust-embed of frontend/dist)
 image/       luoto-base dev image
-docs/        agents.md (per-agent facts), guides/ (task by task), examples/, screenshots/,
+docs/        first-session.md, configuration.md, projects.md, how-it-works.md, install.md
+             (the reference), agents.md (per-agent facts), guides/ (task by task), examples/,
+             screenshots/,
              logo/ (README header; its Inter is a subset of the letters it uses, so new text
              needs a new subset)
 packaging/   Homebrew/Scoop templates + render.sh (release steps in its README)
@@ -80,6 +83,10 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   exact text the user accepted (kept in the env's state); changes need a fresh accept. Never
   let it carry secret refs or mutes or skip `RuleOrigin::Sandbox` validation, and print its
   strings through `text::display`.
+- `needs.rs` owns its `[needs]`: one `Need` variant per kind, with its check, review line,
+  snippet and question in one `impl`. What the team knows of a need is a table named as it
+  (`[needs.azure]`, `[needs.custom.<name>]`), offered first; the answer goes in the
+  developer's own env file.
 - Config files carry their format (`version`, 1 when missing); `format.rs` upgrades every
   file in memory before it is parsed, and saving an env file writes the current format,
   keeping the old file beside it. A config change that would break an existing file is a
@@ -87,6 +94,10 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   a file in the old format. With the first step, `luoto doctor` reports files in an older
   format and `--fix` rewrites them (a copy kept); a `luoto.toml` is only shown as a diff for
   the team to commit. Unknown keys stay errors.
+- `model_servers.rs` owns `[model_servers]`: a server's exact host and port, only the model
+  endpoints of its APIs, its token added by the gate (over plain HTTP only to this machine,
+  `Policy.plain_http_credentials`). How an agent uses one is data (`[model_server]` in
+  `shared/agents`); `agents::configure` writes it, and removes what a gone server had.
 - `personal.rs` data only flows host → sandbox, on every `up`.
 - `archive.rs` is the file `luoto export` writes and `luoto import` reads (`transfer.rs`):
   untrusted input, so every entry is decoded, checked and written anew. Volume contents move
@@ -142,16 +153,21 @@ What the CLI asks and prints follows one grammar, whatever the feature:
   backticks. Without a terminal nothing blocks: the message gives the scripted form with the
   real choices (`--credential oauth_token=<ref>`).
 - **Output** fits 80 columns. Text from the sandbox or a remote goes through `text::display` /
-  `text::Relay`; what a command in the env prints, through `progress::tool` (on the terminal
-  after `o`, with `-v`, or its last lines when it fails). A slow step goes through
-  `progress::step`, and a line printed during one through `progress::say`. Color only through
-  `progress::accent` / `prompt::theme` (the UI's accent), none under `NO_COLOR`.
+  `text::Relay`; what a command prints, through `progress::tool` (in the env) or
+  `progress::host` (on this machine): on the terminal after `o`, with `-v`, or its last lines
+  when it fails. Anything that can take over a second runs in a `progress::step` (an action
+  the user should see: its own line) or a `progress::wait` (quick when all is well: named on
+  the spinner's line only while slow); a line printed during either goes through
+  `progress::say`, and a question or `op` runs in `progress::pause` (`prompt::Ask::ask`
+  does). Color only through `progress::accent` / `prompt::theme` (the UI's accent), none
+  under `NO_COLOR`.
 
 ## Working on this repo
 
 - A source build is the `luoto-dev` instance (`names::instance`): its own config dirs, vault
-  (10.212.1.0/24), `luoto-dev-<env>` names, keychain service and UI port, in the same VM as
-  an installed release, whose envs it never touches. `just link-dev` links
+  (10.212.1.0/24), env subnets and ID ranges (`names::env_octets`), `luoto-dev-<env>` names,
+  keychain service and UI port, in the same VM as an installed release, whose envs it never
+  touches. `just link-dev` links
   `~/.local/bin/luoto-dev` to the debug build.
 - `just images` builds images (tag `dev`); `luoto-dev setup --build` does the same.
 - `LUOTO_HOME=<dir>` isolates config/state for experiments (copy `config.toml` in: it names

@@ -29,7 +29,7 @@ use crate::imds;
 use crate::limits::{self, Activity, HEAD_GRACE, Limits, Slot, Watched};
 use crate::respond;
 use crate::state::State;
-use crate::upstream::{DialError, dial, http1_sender, test_server};
+use crate::upstream::{DialError, Reach, dial, http1_sender, test_server};
 
 #[derive(Clone, Debug)]
 pub struct Target {
@@ -62,8 +62,9 @@ impl Target {
     }
 }
 
-/// A kept-alive upstream connection and the destination it is for.
-type Upstream = (String, u16, bool, SendRequest<Body>);
+/// A kept-alive upstream connection, the destination it is for and what its dial could
+/// reach (a request reuses it only where its own decision allows as much).
+type Upstream = (String, u16, bool, Reach, SendRequest<Body>);
 
 /// Per client connection: how it arrived, its place under the connection cap, its progress
 /// and a reusable upstream connection.
@@ -93,23 +94,24 @@ impl ConnCtx {
         &self,
         state: &State,
         t: &Target,
-        allow_private: bool,
+        reach: Reach,
     ) -> Result<SendRequest<Body>, DialError> {
         let cached = self.upstream.lock().await.take();
-        if let Some((h, p, tls, mut s)) = cached
+        if let Some((h, p, tls, had, mut s)) = cached
             && h == t.host
             && p == t.port
             && tls == t.tls
+            && had.serves(reach)
             && s.ready().await.is_ok()
         {
             return Ok(s);
         }
-        let io = dial(state, &t.host, t.port, t.tls, allow_private).await?;
+        let io = dial(state, &t.host, t.port, t.tls, reach).await?;
         http1_sender(io).await
     }
 
-    async fn put_back(&self, t: &Target, s: SendRequest<Body>) {
-        *self.upstream.lock().await = Some((t.host.clone(), t.port, t.tls, s));
+    async fn put_back(&self, t: &Target, reach: Reach, s: SendRequest<Body>) {
+        *self.upstream.lock().await = Some((t.host.clone(), t.port, t.tls, reach, s));
     }
 }
 
@@ -361,6 +363,7 @@ async fn handle_inner(
 
     // What the response must not carry back: every form of a credential put on the request.
     let mut placed: Vec<String> = Vec::new();
+    let mut plain_to_this_machine = false;
     if policy.is_credentialed_host(&target.host) {
         // TRACE echoes the request, credential included.
         if method == "TRACE" {
@@ -381,8 +384,14 @@ async fn handle_inner(
             };
             return deny(ev, reason);
         }
-        // Over plain HTTP the credential would cross the network readable.
-        if !target.tls && test_server(&state, &target.host).is_none() {
+        // Over plain HTTP the credential would cross the network readable; to this machine it
+        // goes nowhere, and the dial makes sure it is this machine.
+        let this_machine = policy
+            .plain_http_credentials
+            .iter()
+            .any(|h| luoto_shared::host::host_matches(h, &target.host));
+        plain_to_this_machine = !target.tls && this_machine;
+        if !target.tls && !this_machine && test_server(&state, &target.host).is_none() {
             let reason = DenyReason::Guard {
                 reason: format!("{} gets credentials only over HTTPS", target.host),
             };
@@ -448,7 +457,11 @@ async fn handle_inner(
     // A long upload is progress, so the response-head limit counts from its last byte.
     body = watched(body, ctx.activity.clone());
 
-    let mut sender = match ctx.sender(&state, &target, allow_private).await {
+    let reach = Reach {
+        private: allow_private,
+        private_only: plain_to_this_machine,
+    };
+    let mut sender = match ctx.sender(&state, &target, reach).await {
         Ok(s) => s,
         Err(DialError::Denied(reason)) => return deny(ev, reason),
         Err(DialError::Failed(msg)) => return failed(&state, ev, StatusCode::BAD_GATEWAY, msg),
@@ -490,7 +503,7 @@ async fn handle_inner(
             });
         }
     } else {
-        ctx.put_back(&target, sender).await;
+        ctx.put_back(&target, reach, sender).await;
     }
 
     let (mut rparts, rbody) = boxed_parts(resp);

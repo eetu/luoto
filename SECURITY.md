@@ -19,9 +19,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Network.** The dev container sits on an internal network with no route out. Its default
   route and resolver are the env's gate. The gate is the only egress: HTTP(S) is inspected
   (per-env CA, key only in the gate, renewed by `up` 60 days before its two years end) and
-  checked against a default-deny policy of host, port, method, path, body size and expiry;
-  explicit denies, luoto's and the user's `[[deny]]`, beat
-  every allow. Non-HTTP TCP goes nowhere except through tunnel rules
+  checked against a default-deny policy of host, port, method, path, body size and expiry,
+  unless the env's egress is open (below); explicit denies, luoto's and the user's `[[deny]]`,
+  beat every allow. Non-HTTP TCP goes nowhere except through tunnel rules
   you grant (`luoto allow --tunnel`, a host and port, or an approved port request, after you
   confirm it goes uninspected) and SSH to the hosts an SSH credential
   names, on port 22 (GitHub's on `ssh.github.com:443` with `github_port = 443`); both pass
@@ -29,7 +29,18 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   with fake addresses and never forwarded. Destinations are resolved by the gate only after a
   request is allowed, every resolved address is checked against private, loopback,
   link-local, CGNAT and host-gateway ranges (including IPv4 inside IPv6), and the gate
-  connects to exactly the vetted address. Host, SNI and CONNECT authority must agree.
+  connects to exactly the vetted address. Host, SNI and CONNECT authority must agree. Only a
+  rule that says so reaches a private address (a self-hosted forge's, a model server's on
+  this machine or your network), and a connection dialed for one carries no request another
+  rule or open egress allowed.
+- **Open egress.** `luoto egress open` (an hour unless told otherwise; `open = true` until
+  removed) lets out over HTTP(S), as rule `open`, what no rule allows, to any host and port.
+  It never widens a host that gets a credential (its rules stay its only access), a muted
+  host, or the self-test's name; explicit denies, private-address vetting, credential
+  stripping, HTTPS-only injection and the forge and body guards still apply, and TLS stays
+  intercepted, so every request is logged with its method and path. Only the env's own file
+  opens it: config.toml and a repository's `luoto.toml` can't, nor can a request from the
+  sandbox, and `luoto import` lists it.
 - **Path matching.** A path is matched and forwarded in one canonical form; dot segments, empty
   segments and backslashes are refused.
 - **Secrets.** Root secrets live only in the vault's memory, loaded from the host's secret
@@ -42,7 +53,11 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   (GitHub installation tokens restricted to the env's repositories and permissions). On a
   credentialed host the gate removes any credential the client sent before injecting its own,
   so a dependency carrying an attacker's token cannot use it, and it injects only over TLS:
-  plain HTTP to a credentialed host is refused.
+  plain HTTP to a credentialed host is refused, except to a model server on this machine
+  (`[model_servers]`), whose requests never leave it; the gate dials one only where every
+  address of its name is private. A credential goes only on the methods and
+  paths its own rules allow: a wider rule (one you add, an approved request) lets more
+  requests through, but they go without it.
 - **GitHub writes.** Pushes only to the granted repositories, never to protected branches
   (default `main`, `master`), tags or branch deletions. REST writes are an allowlist — pull
   requests, reviews, issues and comments — so the contents, git-data, ref, merge, release and
@@ -171,10 +186,19 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   (that is what write means). Reads can leak a little through URLs to hosts whose logs an
   attacker can see, and through public counters (package download counts). A `*` read grant
   turns every host into such a channel; luoto asks for confirmation and offers time limits.
+- **Open egress.** While an env's egress is open, any code in it can upload anything to any
+  HTTP(S) host and download what it likes. What still holds: secrets stay in the vault and go only where their rules allow, private
+  addresses and services on your machine stay unreachable, raw TCP and SSH still need tunnel
+  rules, and UDP still goes nowhere. `luoto egress --open` shows where requests went; keep the window short.
 - **Model APIs.** Prompts to an allowed model API can carry data, and the API key can be
   spent by anything in the sandbox. Anthropic's, OpenAI's and Gemini's file and batch
   endpoints are denied, and so are requests asking them to fetch a URL or call an MCP server
   (unless `server_tools = true`); the other providers' are not.
+- **Model servers on this machine** (`[model_servers]`). The gate lets the sandbox reach only
+  the server's port and model endpoints, but the server runs with your privileges outside the
+  VM, so its request parsing is in reach of code in the env; its token may go there over
+  plain HTTP, which never leaves the machine. A server that forwards to a cloud service sends
+  the prompts there.
 - **Azure write access.** With `access = "write"`, code in the sandbox can do on the listed
   subscriptions whatever the identity's roles allow: create resources that reach the internet,
   read keys that `listKeys` returns. The gate refuses, at every scope, the writes that give

@@ -1,13 +1,15 @@
 description = "OpenCode"
 command = "opencode"
 providers = ["anthropic", "openai", "openrouter", "gemini"]
-headless = ["run", "{prompt}"]
+headless = ["run", "{args}", "{prompt}"]
 # The installer puts the binary in ~/.opencode/bin and only edits shell rc files.
 install = [
   "curl -fsSL https://opencode.ai/install | bash",
   "mkdir -p ~/.local/bin && ln -sf ~/.opencode/bin/opencode ~/.local/bin/opencode",
 ]
-install_hosts = ["opencode.ai", "github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]
+# opencode.ai/install redirects to the script on raw.githubusercontent.com, which asks the npm
+# registry for the latest version before GitHub.
+install_hosts = ["opencode.ai", "raw.githubusercontent.com", "registry.npmjs.org", "github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]
 env = { OPENCODE_DISABLE_AUTOUPDATE = "1", OPENCODE_DISABLE_SHARE = "1" }
 briefing = ["~/.config/opencode/AGENTS.md"]
 mcp = "opencode"
@@ -23,3 +25,25 @@ host = "models.dev"
 
 [[rule]]
 host = "models.opencode.ai"
+
+# Model servers: a provider each beside the cloud ones, under luoto's own ids so none takes a
+# built-in one's place, all in its model picker (OpenCode bundles the OpenAI-compatible SDK);
+# the one it starts on gives the default model.
+[model_server]
+api = "openai"
+endpoint = "/v1/chat/completions"
+switch = "its model picker (`/models`), the cloud's models beside them"
+each = [
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "npm"], value = "@ai-sdk/openai-compatible" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "name"], value = "{name}" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "options", "baseURL"], value = "{url}/v1" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "options", "apiKey"], value = "{token}" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "models"], value = {} },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "models", "{model}"], value = {} },
+  # OpenCode 1.x wants an output cap beside the window.
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "models", "{model}", "limit", "context"], value = "{context:n}" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "models", "{model}", "limit", "output"], value = "{output:n}" },
+]
+default = [
+  { file = "~/.config/opencode/opencode.json", path = ["model"], value = "luoto-{name}/{model}" },
+]

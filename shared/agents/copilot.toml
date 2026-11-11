@@ -1,7 +1,9 @@
 description = "GitHub Copilot CLI (untested)"
 command = "copilot"
 yolo = ["--yolo"]
-headless = ["-p", "{prompt}", "--allow-all-tools"]
+# What a luoto.toml can't pass: tools, paths and URLs allowed without asking.
+prompt_flags = ["--allow-all-tools", "--allow-all-paths", "--allow-all-urls", "--allow-all", "--allow-tool", "--allow-url"]
+headless = ["{args}", "-p", "{prompt}", "--allow-all-tools"]
 providers = ["copilot"]
 install = ["mkdir -p ~/.local && npm install -g --prefix ~/.local @github/copilot"]
 install_hosts = ["registry.npmjs.org"]

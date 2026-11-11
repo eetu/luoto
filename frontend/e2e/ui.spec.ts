@@ -25,6 +25,54 @@ test("a blocked host is allowed from the egress view", async ({ page }) => {
   });
 });
 
+test("open egress shows on the env and its hosts, kept until revoked", async ({ page }) => {
+  const writes = await mockApi(page);
+  const overview = fixture("overview");
+  const until = new Date(Date.now() + 52 * 60_000 - 5_000).toISOString();
+  await page.route(
+    (url) => url.pathname === "/api/overview",
+    (route) =>
+      route.fulfill({
+        json: { ...overview, envs: overview.envs.map((e) => ({ ...e, open: { until } })) },
+      }),
+  );
+  const [reached, ...rest] = fixture("egress");
+  const egress = [
+    {
+      ...reached,
+      allowed: 2,
+      opened: 2,
+      denied: 0,
+      methods: ["GET", "PUT"],
+      last_reason: null,
+      last_message: null,
+      last_rule: "open",
+    },
+    ...rest,
+  ];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/egress",
+    (route) => route.fulfill({ json: egress }),
+  );
+  await open(page);
+  const env = page.getByRole("button", { name: /^web/ });
+  await expect(env).toContainText("open, 52m");
+  await env.click();
+
+  const row = page.getByRole("row", { name: /example\.com/ });
+  await expect(row.locator(".chip")).toHaveText("open");
+  await row.click();
+  await expect(page.getByText("let through by open egress")).toBeVisible();
+  await page.getByRole("button", { name: "keep", exact: true }).click();
+
+  await expect.poll(() => writes.length).toBe(1);
+  expect(writes[0]).toMatchObject({
+    path: "/api/envs/web/rules",
+    body: { rule: { host: "example.com", access: "write", note: "kept from open egress" } },
+  });
+  expect((writes[0].body as { rule: { expires?: string } }).rule.expires).toBeUndefined();
+});
+
 test("the env panel shows how to connect", async ({ page }) => {
   await mockApi(page);
   await open(page);

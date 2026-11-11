@@ -535,6 +535,80 @@ async fn locking_the_vault_fails_credentialed_requests_closed() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "spawns binaries; run with `just it`"]
+async fn open_egress_lets_out_what_no_rule_allows_and_nothing_more() {
+    let upstream = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+    let at = *upstream.address();
+    let env = Env::start(&[
+        ("api.test", at),
+        ("open.test", at),
+        ("muted.test", at),
+        ("selftest.luoto.invalid", at),
+    ]);
+    env.credentials(
+        &[(
+            "t.key",
+            BindingSpec::Static {
+                secret_ref: "env:X".into(),
+            },
+        )],
+        &[("env:X", "real-secret")],
+    );
+    let open = |until| luoto_shared::policy::Open {
+        until: Some(until),
+        except: vec![luoto_shared::policy::Mute {
+            host: "muted.test".into(),
+            ..Default::default()
+        }],
+    };
+    env.apply(Policy {
+        open: Some(open(Utc::now() + TimeDelta::hours(1))),
+        ..credentialed_policy()
+    });
+
+    assert_eq!(
+        env.request("PUT", "http://open.test:8080/upload", &[], b"x")
+            .status,
+        200
+    );
+    // A host with a credential keeps to its rules; mutes and the self-test's name stay denied.
+    let r = env.request("POST", "http://api.test/secret", &[], b"");
+    assert!(
+        r.status == 403 && r.denied("method_not_allowed"),
+        "{}",
+        r.head
+    );
+    for url in [
+        "http://muted.test/",
+        "http://selftest.luoto.invalid/",
+        "http://x.selftest.luoto.invalid/",
+    ] {
+        let r = env.get(url);
+        assert!(r.status == 403 && r.denied("no_rule"), "{url}: {}", r.head);
+    }
+    let r = env.get(&format!("http://127.0.0.1:{}/", at.port()));
+    assert!(r.status == 403 && r.denied("private_address"), "{}", r.head);
+    let r = send(
+        env.gate_port,
+        b"GET /_sandbox/status HTTP/1.1\r\nHost: gate\r\nConnection: close\r\n\r\n",
+    );
+    assert!(r.json()["open"]["until"].is_string(), "{}", r.body);
+
+    // It closes at its time, with nothing to apply.
+    env.apply(Policy {
+        open: Some(open(Utc::now() + TimeDelta::seconds(1))),
+        ..credentialed_policy()
+    });
+    std::thread::sleep(Duration::from_millis(1500));
+    let r = env.get("http://open.test/");
+    assert!(r.status == 403 && r.denied("no_rule"), "{}", r.head);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
 async fn paths_and_methods_are_canonical_for_rules_and_check_alike() {
     let upstream = MockServer::start().await;
     Mock::given(method("GET"))

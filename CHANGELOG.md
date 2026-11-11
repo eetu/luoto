@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.4.3 (2026-11-11)
+
+- **Open egress:** `luoto egress open` lets an env reach any HTTP(S) host and port no rule
+  allows, as rule `open`, for an hour (`--for 2h`; `open = true` under `[egress]` in the env's
+  file for no end); `luoto egress close` ends it, and a running env takes either at once.
+  Hosts that get your credentials keep to their rules, muted hosts stay denied, and denies,
+  private addresses and the guards hold; TLS stays intercepted, so every request is logged.
+  `luoto egress --open` lists the hosts it reached, and `luoto egress keep` offers presets
+  that cover them, checked, else a rule per host (read, or write where a write went out),
+  unchecked: code in the env chose those hosts.
+  `luoto init --open[=2h]` starts a new env open. `up`, `status`, `sandbox status` and the
+  UI's env list say until when (its menu opens and closes it); `luoto run` lists the hosts
+  reached through it; the UI marks them `open` and offers its allow form as keep. Only the
+  env's own file opens it, not config.toml, a luoto.toml or a request; `luoto import` lists
+  it.
+- **Progress everywhere:** `setup` (the VM's creation and start, gVisor, image pulls and
+  builds), `up` (vault, gate, dev container, setup of the env, toolchain checks), `down`,
+  `rm`, `reset-home`, `doctor`, `prune`, `pull`, `--size`, `egress`, `vault unlock`
+  and `reload`, `upgrade` and `uninstall` show the spinner; what is quick when all is well
+  shows nothing then, and names itself on the spinner's line once it takes a while. What
+  podman prints while it pulls, builds or starts the VM is kept off the terminal as
+  installers' is (`o`, `-v`, or its last lines on a failure). Questions and `op` sign-ins
+  pause it.
+- **Model servers:** Claude Code, Codex and OpenCode can use a server of yours with an
+  OpenAI- or Anthropic-compatible API (Ollama, LM Studio, MTPLX, llama.cpp, vLLM, LiteLLM, a
+  hosted one), on this machine, your network or the internet, beside their cloud provider:
+  `[model_servers.<name>]` with `url`, `api` and an optional `token`, and `model_server` under
+  `[agents.<agent>]` for the one it starts on. "A model server" in the credential questions
+  finds those answering on this machine's usual ports, lists their models and keeps the
+  context window a server gives (`context`, which Claude Code can't tell for a model it
+  doesn't know). The gate opens
+  only the server's port and model endpoints and adds its token; OpenCode switches in its
+  model picker, Codex per start (`codex --profile <server>`). A config that can't work is
+  refused at `up` and `luoto edit`.
+- **Team needs asked:** what a project's `[needs]` names and the env lacks is asked at the
+  first `up` after accepting it, as an agent's credential is: a provider's kind and where it
+  is kept, a custom credential's host and secret, an Azure subscription, where a sandbox
+  secret is kept, and access to the repos to push to. What the team knows goes in a table
+  named as the need, offered first: `[needs.custom.<name>] host`, `[needs.azure]
+  subscriptions`. `luoto project needs` asks again, opening on what the env has; without a
+  terminal, what to add is printed as before.
+- **Agent arguments:** `args` (every start through luoto) and `headless_args` (`luoto run`
+  only) under `[agents.<agent>]`, in the env, `config.toml` or a team's `luoto.toml`, where
+  the agent's command line takes options, and more for one run after `--` (`luoto run …
+  -- --bare`); `["--bare", "--tools", "Bash,Read,Edit"]` cuts
+  Claude Code's request from 54 KB to 4 KB for a model of yours (`--bare` reads no subscription
+  token: with an API key or a model server). A `luoto.toml` can't pass the flags that turn off
+  or loosen the agent's own prompts (`prompt_flags` in its file).
+- **Agent installs:** an installer piped from a download (`curl … | bash`) fails the install
+  when the download does, instead of the agent passing as installed with nothing there.
+  OpenCode installs again: its installer moved to raw.githubusercontent.com and asks the npm
+  registry for the latest version.
+- **Private addresses stay with their rules:** a kept-alive connection the gate dialed for a
+  rule that allows private addresses (a self-hosted forge, a model server) carries no request
+  another rule or open egress allowed; such a request dials anew and is vetted.
+- **Credentials stay on their rules:** the GitHub, Azure DevOps and git tokens, and a read-only
+  `[credentials.custom]`, go only on the methods and paths their own rules allow. A wider rule
+  (`luoto allow '*' --write`, an approved request) no longer carries them further, to a merge
+  or a file or ref write past the push guard: those requests go without the token.
+- **Azure login:** an `az` login on this machine that has expired (a refresh token unused for
+  90 days) or wants you again (MFA, consent) is one line with its AADSTS reason and the fix,
+  `az login --tenant …`, then `luoto up`; secrets that failed the same way are named once,
+  and `az` in the env isn't logged in with what would only fail again.
+- **Subnets:** a release's envs take 10.213.1–127 and a source build's (`luoto-dev`)
+  10.213.128–254, with the user ID ranges that go with them, so an env imported from one into
+  the other never shares either. When another network holds an env's subnet, `up` names it
+  and the commands that move the env.
+
 ## 0.4.2 (2026-11-10)
 
 - **1Password accounts:** an `op://` ref can name the account it is in
