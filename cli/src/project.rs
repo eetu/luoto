@@ -74,6 +74,10 @@ pub struct Needs {
     /// Names of `[sandbox_secrets]` the project's code reads.
     #[serde(default)]
     pub sandbox_secrets: Vec<String>,
+    /// Azure subscriptions the project works in: what `up` offers first when it asks for
+    /// `[credentials.azure]`, each developer's answer still theirs.
+    #[serde(default)]
+    pub azure_subscriptions: Vec<String>,
 }
 
 pub fn parse(text: &str) -> Result<ProjectConfig> {
@@ -198,6 +202,14 @@ fn validate(p: &ProjectConfig) -> Result<()> {
             bail!(
                 "luoto.toml: needs.credentials: `{}` is not a name",
                 display(c)
+            );
+        }
+    }
+    for s in &p.needs.azure_subscriptions {
+        if !luoto_shared::azure_identity::is_guid(s) {
+            bail!(
+                "luoto.toml: needs.azure_subscriptions: `{}` is not a subscription ID",
+                display(s)
             );
         }
     }
@@ -737,6 +749,12 @@ fn items(p: &ProjectConfig) -> Vec<(&'static str, String)> {
             .iter()
             .map(|s| format!("secret {}", display(s))),
     );
+    if !p.needs.azure_subscriptions.is_empty() {
+        needs.push(format!(
+            "Azure subscription {} (offered when `up` asks)",
+            display(&p.needs.azure_subscriptions.join(", "))
+        ));
+    }
     add("needs", needs);
     out
 }
@@ -805,6 +823,11 @@ impl Need {
                 None if c == "azure" => Need::Azure,
                 None => Need::Provider(c.clone()),
             })
+            .chain(
+                (!p.needs.azure_subscriptions.is_empty()
+                    && !p.needs.credentials.iter().any(|c| c == "azure"))
+                .then_some(Need::Azure),
+            )
             .chain(
                 p.needs
                     .sandbox_secrets
@@ -896,7 +919,7 @@ pub fn ask_needs(ctx: &Ctx, env: &str, mode: crate::wizard::Mode) -> Result<bool
         let set = match &need {
             Need::Provider(n) => ask_provider(ctx, env, n, &own, mode)?,
             Need::Custom(n) => ask_custom(ctx, mode, env, n, &own)?,
-            Need::Azure => ask_azure(ctx, mode, env, &own)?,
+            Need::Azure => ask_azure(ctx, mode, env, &own, &p.needs.azure_subscriptions)?,
             Need::Secret(n) => ask_secret(ctx, mode, env, n, &own)?,
         };
         if set {
@@ -1038,15 +1061,54 @@ fn ask_custom(
     Ok(true)
 }
 
-fn ask_azure(ctx: &Ctx, mode: crate::wizard::Mode, env: &str, own: &EnvConfig) -> Result<bool> {
+fn ask_azure(
+    ctx: &Ctx,
+    mode: crate::wizard::Mode,
+    env: &str,
+    own: &EnvConfig,
+    named: &[String],
+) -> Result<bool> {
     use crate::prompt::Ask;
-    let had = own
+    let had: Vec<String> = own
         .credentials
         .azure
         .as_ref()
-        .and_then(|a| a.subscriptions.first().cloned());
+        .map(|a| a.subscriptions.clone())
+        .unwrap_or_default();
+    // What the project names, offered first; another is typed.
+    if !named.is_empty() {
+        let theirs = named.join(", ");
+        let current = |ids: &[String]| if had == ids { " (current)" } else { "" };
+        let mut rows = vec![(
+            Some(true),
+            format!("The project's (recommended){}", current(named)),
+            theirs.clone(),
+        )];
+        rows.push((
+            Some(false),
+            "Another subscription".into(),
+            "its ID, typed".into(),
+        ));
+        if mode == crate::wizard::Mode::Missing {
+            rows.push((
+                None,
+                "Later".into(),
+                "the env gets no Azure token yet".into(),
+            ));
+        }
+        match crate::wizard::ask_menu(crate::wizard::Question {
+            text: "Which Azure subscription should the env use?".into(),
+            rows,
+            at: 0,
+            help: crate::prompt::menu_help(mode.esc()),
+        })? {
+            Some(Some(true)) => return write_azure(ctx, env, named),
+            Some(Some(false)) => {}
+            Some(None) | None => return Ok(false),
+        }
+    }
     let Some(id) = inquire::Text::new("Which Azure subscription should the env use?")
-        .with_initial_value(had.as_deref().unwrap_or_default())
+        .with_initial_value(had.first().map_or("", String::as_str))
         .with_help_message(&format!(
             "its ID (`az account list -o table`), read through your `az` login; Esc: {}",
             mode.esc()
@@ -1062,9 +1124,15 @@ fn ask_azure(ctx: &Ctx, mode: crate::wizard::Mode, env: &str, own: &EnvConfig) -
     else {
         return Ok(false);
     };
-    let id = id.trim().to_ascii_lowercase();
+    write_azure(ctx, env, &[id.trim().to_ascii_lowercase()])
+}
+
+/// `[credentials.azure] subscriptions`, its other keys kept, and the summary.
+fn write_azure(ctx: &Ctx, env: &str, ids: &[String]) -> Result<bool> {
     let mut subs = toml_edit::Array::new();
-    subs.push(id.as_str());
+    for id in ids {
+        subs.push(id.as_str());
+    }
     EnvFile::load(&ctx.paths, env)?.set_in_tables(
         &["credentials", "azure"],
         vec![("subscriptions", subs.into())],
@@ -1073,7 +1141,7 @@ fn ask_azure(ctx: &Ctx, mode: crate::wizard::Mode, env: &str, own: &EnvConfig) -
         env,
         "Azure",
         vec![
-            ("subscription", id.clone()),
+            ("subscription", ids.join(", ")),
             ("token", "from your `az` login here (`az login`)".into()),
         ],
     );
@@ -1127,6 +1195,23 @@ fn ask_secret(
     Ok(true)
 }
 
+/// `[credentials.azure]` to add, with the subscriptions the project names.
+fn azure_snippet(named: &[String]) -> String {
+    let subs = if named.is_empty() {
+        "\"<subscription id>\"".to_string()
+    } else {
+        named
+            .iter()
+            .map(|s| format!("\"{s}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "[credentials.azure]\nsubscriptions = [{subs}]   # your az login's token; or client_id + \
+         client_secret + tenant"
+    )
+}
+
 /// Config snippets for credentials the project needs and the env lacks.
 pub fn missing_needs(p: &ProjectConfig, cfg: &EnvConfig) -> Vec<String> {
     let mut out = Vec::new();
@@ -1150,11 +1235,7 @@ pub fn missing_needs(p: &ProjectConfig, cfg: &EnvConfig) -> Vec<String> {
             }
         } else if c == "azure" {
             if cfg.credentials.azure.is_none() {
-                out.push(
-                    "[credentials.azure]\nsubscriptions = [\"<subscription id>\"]   # your az \
-                     login's token; or client_id + client_secret + tenant"
-                        .into(),
-                );
+                out.push(azure_snippet(&p.needs.azure_subscriptions));
             }
         } else if !cfg.credentials.providers.contains_key(c) {
             let kind = profiles::provider(c)
@@ -1502,6 +1583,12 @@ DATABASE_URL = "env:D"
             .map(Need::key)
             .collect();
         assert_eq!(left, ["azure"]);
+        // A named subscription asks for Azure by itself, and is offered in the snippet.
+        let sub = "00000000-0000-0000-0000-00000000000a";
+        let p = parse(&format!("[needs]\nazure_subscriptions = [\"{sub}\"]")).unwrap();
+        assert_eq!(Need::all(&p), [Need::Azure]);
+        assert!(azure_snippet(&p.needs.azure_subscriptions).contains(sub));
+        assert!(parse("[needs]\nazure_subscriptions = [\"prod\"]").is_err());
     }
 
     #[test]

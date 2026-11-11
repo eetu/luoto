@@ -36,7 +36,8 @@
   refused at `up` and `luoto edit`.
 - **Team needs asked:** what a project's `[needs]` names and the env lacks is asked at the
   first `up` after accepting it, as an agent's credential is: a provider's kind and where it
-  is kept, a custom credential's host and secret, an Azure subscription, where a sandbox
+  is kept, a custom credential's host and secret, an Azure subscription (the project's
+  `azure_subscriptions` offered first), where a sandbox
   secret is kept, and access to the repos to push to. `luoto project needs` asks again,
   opening on what the env has; without a terminal, what to add is printed as before.
 - **Agent arguments:** `args` (every start through luoto) and `headless_args` (`luoto run`

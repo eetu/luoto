@@ -22,13 +22,14 @@ system = ["libpq-dev"]
 [needs]                          # what each developer gives their own env
 github = ["acme/web"]            # repos to push to
 credentials = ["hetzner", "custom.stripe", "azure"]
+azure_subscriptions = ["<subscription id>"]   # offered first when `up` asks for Azure
 sandbox_secrets = ["DATABASE_URL"]
 ```
 
 The first `up` after accepting it asks each developer for what `[needs]` names and their env
 lacks, with the questions an agent's credential gets: a provider's kind and where it is kept,
-a custom credential's host and secret, an Azure subscription (read through their `az`
-login), where a sandbox secret is kept, and each repo's access. "Later" leaves one for the
+a custom credential's host and secret, an Azure subscription (the project's
+`azure_subscriptions` offered first, read through their `az` login), where a sandbox secret is kept, and each repo's access. "Later" leaves one for the
 next `up`; `luoto project needs` asks them all again, opening on what the env has. Without a
 terminal it prints what to add instead.
 
