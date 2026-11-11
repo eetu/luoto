@@ -292,25 +292,42 @@ struct Vars<'a> {
     context: Option<u64>,
 }
 
-/// `set` with its placeholders filled in; none when it names `{model}` or `{context}` and
-/// that isn't known. A value that is `{context:n}` alone becomes a number.
+/// The output cap that goes with a context window where an agent wants one beside it
+/// (OpenCode 1.x): no server gives one, so 32000, what agents ask for by default, or a quarter
+/// of a smaller window, which leaves the rest for the input.
+fn output_cap(context: u64) -> u64 {
+    (context / 4).min(32_000)
+}
+
+/// `set` with its placeholders filled in; none when it names `{model}` or `{context}` (or
+/// `{output}`, from it) and that isn't known. A value that is `{context:n}` or `{output:n}`
+/// alone becomes a number.
 fn fill(set: &JsonSet, v: &Vars) -> Option<JsonSet> {
     let names = |p: &str| {
         set.path.iter().any(|x| x.contains(p))
             || serde_json::to_string(&set.value).is_ok_and(|t| t.contains(p))
     };
-    if (names("{model}") && v.model.is_none()) || (names("{context") && v.context.is_none()) {
+    let windowed = names("{context") || names("{output");
+    if (names("{model}") && v.model.is_none()) || (windowed && v.context.is_none()) {
         return None;
     }
-    if set.value == Value::String("{context:n}".into()) {
+    let number = match set.value.as_str() {
+        Some("{context:n}") => v.context,
+        Some("{output:n}") => v.context.map(output_cap),
+        _ => None,
+    };
+    if let Some(n) = number {
         return Some(JsonSet {
             file: set.file.clone(),
             path: set
                 .path
                 .iter()
-                .map(|p| p.replace("{name}", v.name))
+                .map(|p| {
+                    p.replace("{name}", v.name)
+                        .replace("{model}", v.model.unwrap_or_default())
+                })
                 .collect(),
-            value: Value::from(v.context?),
+            value: Value::from(n),
         });
     }
     let text = |t: &str| {
@@ -1091,6 +1108,24 @@ mod tests {
         assert_eq!(window(&s), None);
         s.context = Some(204800);
         assert_eq!(window(&s), Some(Value::String("204800".into())));
+        let opencode = luoto_shared::profiles::agent("opencode").unwrap();
+        let servers = [("m".to_string(), s.clone())].into();
+        let adds = super::sets(
+            opencode.model_server.as_ref().unwrap(),
+            &opts,
+            &servers,
+            &Written::default(),
+        )
+        .adds;
+        let limit = |k: &str| {
+            adds.iter()
+                .find(|x| x.path == ["provider", "m", "models", "q", "limit", k])
+                .map(|x| x.value.clone())
+        };
+        // OpenCode 1.x refuses a limit without both.
+        assert_eq!(limit("context"), Some(Value::from(204800)));
+        assert_eq!(limit("output"), Some(Value::from(32000)));
+        assert_eq!(output_cap(8192), 2048);
         let codex = luoto_shared::profiles::agent("codex").unwrap();
         let servers = [("m".to_string(), s)].into();
         let adds = super::sets(
