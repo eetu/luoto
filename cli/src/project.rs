@@ -9,7 +9,7 @@
 //! tighten; it can't mute, which would hide denials from the user.
 //! Layering: config.toml < the accepted luoto.toml < the env's own config.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use crate::config::{Deps, EnvConfig, EnvFile, Repo, extend_unique};
 use crate::env::{Ctx, UpOptions};
 use crate::paths::write_private;
-use crate::text::{self, display};
+use crate::text::display;
 use crate::workspace::{self, Oversize};
 use crate::{deps, names, sync};
 
@@ -46,7 +46,7 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "crate::config::is_default")]
     pub deps: Deps,
     #[serde(default, skip_serializing_if = "crate::config::is_default")]
-    pub needs: Needs,
+    pub needs: crate::needs::Needs,
     /// Repositories cloned beside the project in the env, each at `/workspace/<name>`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub repos: BTreeMap<String, ProjectRepo>,
@@ -59,25 +59,6 @@ pub struct ProjectRepo {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
-}
-
-/// Credentials the project expects; each developer fills in their own refs.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct Needs {
-    /// `owner/repo` the env should be able to push to.
-    #[serde(default)]
-    pub github: Vec<String>,
-    /// Provider profiles (`anthropic`, `openai`, …) or `custom.<name>`.
-    #[serde(default)]
-    pub credentials: Vec<String>,
-    /// Names of `[sandbox_secrets]` the project's code reads.
-    #[serde(default)]
-    pub sandbox_secrets: Vec<String>,
-    /// Azure subscriptions the project works in: what `up` offers first when it asks for
-    /// `[credentials.azure]`, each developer's answer still theirs.
-    #[serde(default)]
-    pub azure_subscriptions: Vec<String>,
 }
 
 pub fn parse(text: &str) -> Result<ProjectConfig> {
@@ -177,49 +158,13 @@ fn validate(p: &ProjectConfig) -> Result<()> {
         }
     }
     deps::check(&p.deps, RuleOrigin::Sandbox).context("luoto.toml")?;
+    crate::needs::check(&p.needs)?;
     if let Some(i) = &p.image
         && !i
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"./:_@-".contains(&b))
     {
         bail!("luoto.toml: `{}` is not an image reference", display(i));
-    }
-    let word = |s: &str, extra: &[u8]| {
-        !s.is_empty()
-            && s.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || extra.contains(&b))
-    };
-    for r in &p.needs.github {
-        if r.split('/').count() != 2 || !word(r, b"/._-") {
-            bail!(
-                "luoto.toml: needs.github: `{}` is not owner/repo",
-                display(r)
-            );
-        }
-    }
-    for c in &p.needs.credentials {
-        if !word(c, b"._-") {
-            bail!(
-                "luoto.toml: needs.credentials: `{}` is not a name",
-                display(c)
-            );
-        }
-    }
-    for s in &p.needs.azure_subscriptions {
-        if !luoto_shared::azure_identity::is_guid(s) {
-            bail!(
-                "luoto.toml: needs.azure_subscriptions: `{}` is not a subscription ID",
-                display(s)
-            );
-        }
-    }
-    for s in &p.needs.sandbox_secrets {
-        if !word(s, b"_") {
-            bail!(
-                "luoto.toml: needs.sandbox_secrets: `{}` is not a name",
-                display(s)
-            );
-        }
     }
     let mut folded = std::collections::BTreeSet::new();
     for (name, r) in &p.repos {
@@ -730,32 +675,7 @@ fn items(p: &ProjectConfig) -> Vec<(&'static str, String)> {
             })
             .collect(),
     );
-    let mut needs: Vec<String> = Vec::new();
-    if !p.needs.github.is_empty() {
-        needs.push(format!(
-            "GitHub push to {}",
-            display(&p.needs.github.join(", "))
-        ));
-    }
-    needs.extend(
-        p.needs
-            .credentials
-            .iter()
-            .map(|c| format!("{} credential", display(c))),
-    );
-    needs.extend(
-        p.needs
-            .sandbox_secrets
-            .iter()
-            .map(|s| format!("secret {}", display(s))),
-    );
-    if !p.needs.azure_subscriptions.is_empty() {
-        needs.push(format!(
-            "Azure subscription {} (offered when `up` asks)",
-            display(&p.needs.azure_subscriptions.join(", "))
-        ));
-    }
-    add("needs", needs);
+    add("needs", crate::needs::review(&p.needs));
     out
 }
 
@@ -799,468 +719,6 @@ fn credentials_reached(policy: &Policy, old: &ProjectConfig, new: &ProjectConfig
         for why in policy.credentials_reached(r) {
             out.push(format!("! {:<8} {}: {why}", "allow", display(&r.host)));
         }
-    }
-    out
-}
-
-/// What a project's `[needs]` asks of each developer, one question each (`needs.github` is the
-/// repo access question's, `repos::ask_missing`).
-#[derive(Clone, Debug, PartialEq)]
-enum Need {
-    Provider(String),
-    Custom(String),
-    Azure,
-    Secret(String),
-}
-
-impl Need {
-    fn all(p: &ProjectConfig) -> Vec<Need> {
-        p.needs
-            .credentials
-            .iter()
-            .map(|c| match c.strip_prefix("custom.") {
-                Some(n) => Need::Custom(n.to_string()),
-                None if c == "azure" => Need::Azure,
-                None => Need::Provider(c.clone()),
-            })
-            .chain(
-                (!p.needs.azure_subscriptions.is_empty()
-                    && !p.needs.credentials.iter().any(|c| c == "azure"))
-                .then_some(Need::Azure),
-            )
-            .chain(
-                p.needs
-                    .sandbox_secrets
-                    .iter()
-                    .map(|s| Need::Secret(s.clone())),
-            )
-            .collect()
-    }
-
-    /// Whether the env's own file has it.
-    fn met(&self, cfg: &EnvConfig) -> bool {
-        match self {
-            Need::Provider(n) => cfg.credentials.providers.contains_key(n),
-            Need::Custom(n) => cfg.credentials.custom.contains_key(n),
-            Need::Azure => cfg.credentials.azure.is_some(),
-            Need::Secret(n) => cfg.sandbox_secrets.contains_key(n),
-        }
-    }
-
-    fn key(&self) -> String {
-        match self {
-            Need::Provider(n) => n.clone(),
-            Need::Custom(n) => format!("custom.{n}"),
-            Need::Azure => "azure".into(),
-            Need::Secret(n) => format!("sandbox_secrets.{n}"),
-        }
-    }
-}
-
-/// Needs left for later in this command: `up` asks before the gate starts and again after a
-/// review, and asks only once.
-static LATER: std::sync::Mutex<BTreeSet<(String, String)>> = std::sync::Mutex::new(BTreeSet::new());
-
-/// The credentials and sandbox secrets the env's accepted luoto.toml needs: on a terminal,
-/// each one its env's file lacks is asked (`Mode::Missing`, by `up`) or each one asked again
-/// from what it has (`Mode::Change`, `luoto project needs`), then written; without one, the
-/// snippets to add. Whether anything was written.
-pub fn ask_needs(ctx: &Ctx, env: &str, mode: crate::wizard::Mode) -> Result<bool> {
-    use crate::wizard::Mode;
-    let Some((_, p)) = accepted(ctx, env) else {
-        if mode == Mode::Change {
-            println!("env `{env}` has no accepted luoto.toml, so nothing it needs");
-        }
-        return Ok(false);
-    };
-    let own = EnvFile::load(&ctx.paths, env)?.cfg;
-    let later = |n: &Need| {
-        LATER
-            .lock()
-            .is_ok_and(|s| s.contains(&(env.to_string(), n.key())))
-    };
-    let asked: Vec<Need> = Need::all(&p)
-        .into_iter()
-        .filter(|n| mode == Mode::Change || (!n.met(&own) && !later(n)))
-        .collect();
-    if asked.is_empty() {
-        if mode == Mode::Change {
-            println!("the project's luoto.toml needs nothing only you add");
-        }
-        return Ok(false);
-    }
-    if !crate::prompt::interactive() {
-        if mode == Mode::Change {
-            bail!(
-                "these questions need a terminal; without one, add them to the env's file \
-                 (`luoto edit -e {env}`):\n\n{}",
-                missing_needs(&p, &EnvConfig::default()).join("\n\n")
-            );
-        }
-        let snippets: Vec<String> = missing_needs(&p, &own)
-            .into_iter()
-            .filter(|s| !s.starts_with("[credentials.github]"))
-            .collect();
-        crate::init::print_needs(env, &snippets);
-        return Ok(false);
-    }
-    println!(
-        "\n{}",
-        text::wrap(
-            "The project's luoto.toml needs credentials only you can add: the gate adds them to \
-             requests, and the sandbox sees a placeholder (a sandbox secret is the exception).",
-            "",
-            text::columns()
-        )
-    );
-    let mut wrote = false;
-    for need in asked {
-        println!();
-        let set = match &need {
-            Need::Provider(n) => ask_provider(ctx, env, n, &own, mode)?,
-            Need::Custom(n) => ask_custom(ctx, mode, env, n, &own)?,
-            Need::Azure => ask_azure(ctx, mode, env, &own, &p.needs.azure_subscriptions)?,
-            Need::Secret(n) => ask_secret(ctx, mode, env, n, &own)?,
-        };
-        if set {
-            wrote = true;
-        } else if mode == Mode::Missing
-            && let Ok(mut s) = LATER.lock()
-        {
-            s.insert((env.to_string(), need.key()));
-        }
-    }
-    Ok(wrote)
-}
-
-/// The summary a need's question ends with.
-fn need_summary(env: &str, title: &str, rows: Vec<(&str, String)>) {
-    let mut rows = rows;
-    rows.push(("change it", format!("luoto project needs -e {env}")));
-    println!("{}", crate::prompt::summary(title, &rows));
-}
-
-fn ask_provider(
-    ctx: &Ctx,
-    env: &str,
-    name: &str,
-    own: &EnvConfig,
-    mode: crate::wizard::Mode,
-) -> Result<bool> {
-    use crate::agents::Auth;
-    let Some(p) = profiles::provider(name) else {
-        println!(
-            "luoto.toml: needs.credentials: no provider `{}`",
-            display(name)
-        );
-        return Ok(false);
-    };
-    // A provider only signed in to inside the env is an agent's to log in to.
-    if p.auth.is_empty() {
-        return Ok(false);
-    }
-    let have = own.credentials.providers.get(name).and_then(|entries| {
-        p.auth.keys().find_map(|kind| match entries.get(kind) {
-            Some(crate::config::ProviderValue::Ref(r)) => Some(Auth::Kind {
-                provider: name.to_string(),
-                kind: kind.clone(),
-                reference: r.clone(),
-            }),
-            _ => None,
-        })
-    });
-    match crate::wizard::provider_credential(&p, &ctx.global, have.as_ref(), mode)? {
-        crate::wizard::Answer::Set(auth) => {
-            let (key, value) = auth.entry();
-            EnvFile::load(&ctx.paths, env)?.set_provider_kind(name, key, &value)?;
-            let shown = match &auth {
-                Auth::Kind {
-                    kind, reference, ..
-                } => format!(
-                    "{} = {}",
-                    p.auth.get(kind).map_or(kind.as_str(), |k| k.label.as_str()),
-                    crate::secrets::shown_ref(reference)
-                ),
-                Auth::LoginInside { .. } => "log in inside the sandbox".into(),
-            };
-            need_summary(env, p.title(), vec![("credential", shown)]);
-            Ok(true)
-        }
-        _ => Ok(false),
-    }
-}
-
-fn ask_custom(
-    ctx: &Ctx,
-    mode: crate::wizard::Mode,
-    env: &str,
-    name: &str,
-    own: &EnvConfig,
-) -> Result<bool> {
-    use crate::prompt::Ask;
-    let had = own.credentials.custom.get(name);
-    let help = format!(
-        "one exact host name, such as api.example.com; Esc: {}",
-        mode.esc()
-    );
-    let Some(host) = inquire::Text::new(&format!(
-        "Which host does the `{}` credential go to?",
-        display(name)
-    ))
-    .with_initial_value(had.map_or("", |c| c.host.as_str()))
-    .with_help_message(&help)
-    .with_validator(|v: &str| {
-        let ok = !v.contains(['*', '/', ' '])
-            && luoto_shared::host::normalize_host(v.trim()).is_ok()
-            && !v.trim().is_empty();
-        Ok(if ok {
-            inquire::validator::Validation::Valid
-        } else {
-            inquire::validator::Validation::Invalid("one exact host name".into())
-        })
-    })
-    .ask()?
-    else {
-        return Ok(false);
-    };
-    let host = host.trim().to_ascii_lowercase();
-    let label = format!("The `{}` credential", display(name));
-    let acct = format!("custom.{name}");
-    let title = format!("luoto custom {name}");
-    let help = crate::prompt::menu_help(mode.esc());
-    let ask = crate::wizard::SecretAsk {
-        label: &label,
-        acct: &acct,
-        title: &title,
-        later: mode == crate::wizard::Mode::Missing,
-        known: &[],
-        current: had.map(|c| c.secret.as_str()),
-        help: &help,
-        kind: None,
-    };
-    let crate::wizard::Step::Got(crate::wizard::Secret::Ref(r)) =
-        crate::wizard::secret(&ask, &ctx.global)?
-    else {
-        return Ok(false);
-    };
-    EnvFile::load(&ctx.paths, env)?.set_in_tables(
-        &["credentials", "custom", name],
-        vec![
-            ("host", host.as_str().into()),
-            ("secret", r.as_str().into()),
-        ],
-    )?;
-    need_summary(
-        env,
-        &format!("credentials.custom.{}", display(name)),
-        vec![
-            ("host", host.clone()),
-            ("credential", crate::secrets::shown_ref(&r)),
-        ],
-    );
-    Ok(true)
-}
-
-fn ask_azure(
-    ctx: &Ctx,
-    mode: crate::wizard::Mode,
-    env: &str,
-    own: &EnvConfig,
-    named: &[String],
-) -> Result<bool> {
-    use crate::prompt::Ask;
-    let had: Vec<String> = own
-        .credentials
-        .azure
-        .as_ref()
-        .map(|a| a.subscriptions.clone())
-        .unwrap_or_default();
-    // What the project names, offered first; another is typed.
-    if !named.is_empty() {
-        let theirs = named.join(", ");
-        let current = |ids: &[String]| if had == ids { " (current)" } else { "" };
-        let mut rows = vec![(
-            Some(true),
-            format!("The project's (recommended){}", current(named)),
-            theirs.clone(),
-        )];
-        rows.push((
-            Some(false),
-            "Another subscription".into(),
-            "its ID, typed".into(),
-        ));
-        if mode == crate::wizard::Mode::Missing {
-            rows.push((
-                None,
-                "Later".into(),
-                "the env gets no Azure token yet".into(),
-            ));
-        }
-        match crate::wizard::ask_menu(crate::wizard::Question {
-            text: "Which Azure subscription should the env use?".into(),
-            rows,
-            at: 0,
-            help: crate::prompt::menu_help(mode.esc()),
-        })? {
-            Some(Some(true)) => return write_azure(ctx, env, named),
-            Some(Some(false)) => {}
-            Some(None) | None => return Ok(false),
-        }
-    }
-    let Some(id) = inquire::Text::new("Which Azure subscription should the env use?")
-        .with_initial_value(had.first().map_or("", String::as_str))
-        .with_help_message(&format!(
-            "its ID (`az account list -o table`), read through your `az` login; Esc: {}",
-            mode.esc()
-        ))
-        .with_validator(|v: &str| {
-            Ok(if luoto_shared::azure_identity::is_guid(v.trim()) {
-                inquire::validator::Validation::Valid
-            } else {
-                inquire::validator::Validation::Invalid("a subscription ID".into())
-            })
-        })
-        .ask()?
-    else {
-        return Ok(false);
-    };
-    write_azure(ctx, env, &[id.trim().to_ascii_lowercase()])
-}
-
-/// `[credentials.azure] subscriptions`, its other keys kept, and the summary.
-fn write_azure(ctx: &Ctx, env: &str, ids: &[String]) -> Result<bool> {
-    let mut subs = toml_edit::Array::new();
-    for id in ids {
-        subs.push(id.as_str());
-    }
-    EnvFile::load(&ctx.paths, env)?.set_in_tables(
-        &["credentials", "azure"],
-        vec![("subscriptions", subs.into())],
-    )?;
-    need_summary(
-        env,
-        "Azure",
-        vec![
-            ("subscription", ids.join(", ")),
-            ("token", "from your `az` login here (`az login`)".into()),
-        ],
-    );
-    Ok(true)
-}
-
-fn ask_secret(
-    ctx: &Ctx,
-    mode: crate::wizard::Mode,
-    env: &str,
-    name: &str,
-    own: &EnvConfig,
-) -> Result<bool> {
-    println!(
-        "{}",
-        text::wrap(
-            &format!(
-                "`{}` goes into the env as the secret itself, for the project's code, so any \
-                 code there can read it.",
-                display(name)
-            ),
-            "",
-            text::columns()
-        )
-    );
-    let label = format!("`{}`", display(name));
-    let acct = format!("sandbox.{name}");
-    let title = format!("luoto sandbox {name}");
-    let help = crate::prompt::menu_help(mode.esc());
-    let ask = crate::wizard::SecretAsk {
-        label: &label,
-        acct: &acct,
-        title: &title,
-        later: mode == crate::wizard::Mode::Missing,
-        known: &[],
-        current: own.sandbox_secrets.get(name).map(String::as_str),
-        help: &help,
-        kind: None,
-    };
-    let crate::wizard::Step::Got(crate::wizard::Secret::Ref(r)) =
-        crate::wizard::secret(&ask, &ctx.global)?
-    else {
-        return Ok(false);
-    };
-    EnvFile::load(&ctx.paths, env)?.set_in_table("sandbox_secrets", name, &r)?;
-    need_summary(
-        env,
-        &format!("sandbox secret {}", display(name)),
-        vec![("credential", crate::secrets::shown_ref(&r))],
-    );
-    Ok(true)
-}
-
-/// `[credentials.azure]` to add, with the subscriptions the project names.
-fn azure_snippet(named: &[String]) -> String {
-    let subs = if named.is_empty() {
-        "\"<subscription id>\"".to_string()
-    } else {
-        named
-            .iter()
-            .map(|s| format!("\"{s}\""))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    format!(
-        "[credentials.azure]\nsubscriptions = [{subs}]   # your az login's token; or client_id + \
-         client_secret + tenant"
-    )
-}
-
-/// Config snippets for credentials the project needs and the env lacks.
-pub fn missing_needs(p: &ProjectConfig, cfg: &EnvConfig) -> Vec<String> {
-    let mut out = Vec::new();
-    if !p.needs.github.is_empty() && cfg.credentials.github.is_empty() {
-        out.push(format!(
-            "[credentials.github]\ntoken = \"op://<vault>/<item>/<field>\"   # or app_id + installation_id + private_key\nrepos = [{}]",
-            p.needs
-                .github
-                .iter()
-                .map(|r| format!("\"{r}\""))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    for c in &p.needs.credentials {
-        if let Some(name) = c.strip_prefix("custom.") {
-            if !cfg.credentials.custom.contains_key(name) {
-                out.push(format!(
-                    "[credentials.custom.{name}]\nhost = \"<api host>\"\nsecret = \"op://<vault>/<item>/<field>\""
-                ));
-            }
-        } else if c == "azure" {
-            if cfg.credentials.azure.is_none() {
-                out.push(azure_snippet(&p.needs.azure_subscriptions));
-            }
-        } else if !cfg.credentials.providers.contains_key(c) {
-            let kind = profiles::provider(c)
-                .and_then(|p| p.auth.keys().next().cloned())
-                .unwrap_or_else(|| "api_key".into());
-            out.push(format!(
-                "[credentials.{c}]\n{kind} = \"op://<vault>/<item>/<field>\""
-            ));
-        }
-    }
-    let secrets: Vec<&String> = p
-        .needs
-        .sandbox_secrets
-        .iter()
-        .filter(|s| !cfg.sandbox_secrets.contains_key(*s))
-        .collect();
-    if !secrets.is_empty() {
-        out.push(format!(
-            "[sandbox_secrets]\n{}",
-            secrets
-                .iter()
-                .map(|s| format!("{s} = \"op://<vault>/<item>/<field>\""))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
     }
     out
 }
@@ -1347,6 +805,8 @@ fn source(running: bool, ws: &crate::config::Workspace) -> Source {
 
 pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
     let cfg = EnvFile::load(&ctx.paths, env)?.cfg;
+    let public = crate::repos::declined(ctx, env);
+    let missing = |p: &ProjectConfig| crate::needs::snippets(&p.needs, &cfg, &public);
     let old = accepted(ctx, env);
     let mut s = Status {
         state: State::None,
@@ -1365,7 +825,7 @@ pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
         Source::Unread => {
             s.state = State::Unread;
             if let Some((_, p)) = &old {
-                s.needs = missing_needs(p, &cfg);
+                s.needs = missing(p);
             }
             return Ok(s);
         }
@@ -1377,7 +837,7 @@ pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
         Ok(None) => {
             if let Some((_, p)) = &old {
                 s.state = State::Removed;
-                s.needs = missing_needs(p, &cfg);
+                s.needs = missing(p);
             }
             return Ok(s);
         }
@@ -1388,7 +848,7 @@ pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
         }
     };
     s.current = summary(&new);
-    s.needs = missing_needs(&new, &cfg);
+    s.needs = missing(&new);
     let none = ProjectConfig::default();
     let changed_from = match &old {
         Some((t, p)) if *t == text || *p == new => None,
@@ -1534,64 +994,6 @@ mod tests {
     }
 
     #[test]
-    fn a_project_needing_azure_gets_its_section_suggested() {
-        let p = parse("[needs]\ncredentials = [\"azure\"]").unwrap();
-        let needs = missing_needs(&p, &EnvConfig::default());
-        assert_eq!(needs.len(), 1);
-        assert!(
-            needs[0].starts_with("[credentials.azure]\nsubscriptions"),
-            "{needs:?}"
-        );
-    }
-
-    #[test]
-    fn each_need_is_one_question_until_the_env_has_it() {
-        let p = parse(
-            "[needs]\ncredentials = [\"hetzner\", \"custom.stripe\", \"azure\"]\n\
-             sandbox_secrets = [\"DATABASE_URL\"]",
-        )
-        .unwrap();
-        let all = Need::all(&p);
-        assert_eq!(
-            all,
-            [
-                Need::Provider("hetzner".into()),
-                Need::Custom("stripe".into()),
-                Need::Azure,
-                Need::Secret("DATABASE_URL".into()),
-            ]
-        );
-        let none = EnvConfig::default();
-        assert!(all.iter().all(|n| !n.met(&none)));
-        let have: EnvConfig = toml::from_str(
-            r#"
-[workspace]
-dir = "/w"
-[credentials.hetzner]
-token = "env:H"
-[credentials.custom.stripe]
-host = "api.stripe.com"
-secret = "env:S"
-[sandbox_secrets]
-DATABASE_URL = "env:D"
-"#,
-        )
-        .unwrap();
-        let left: Vec<String> = all
-            .iter()
-            .filter(|n| !n.met(&have))
-            .map(Need::key)
-            .collect();
-        assert_eq!(left, ["azure"]);
-        // A named subscription asks for Azure by itself, and is offered in the snippet.
-        let sub = "00000000-0000-0000-0000-00000000000a";
-        let p = parse(&format!("[needs]\nazure_subscriptions = [\"{sub}\"]")).unwrap();
-        assert_eq!(Need::all(&p), [Need::Azure]);
-        assert!(azure_snippet(&p.needs.azure_subscriptions).contains(sub));
-        assert!(parse("[needs]\nazure_subscriptions = [\"prod\"]").is_err());
-    }
-
-    #[test]
     fn refuses_secrets_tools_and_risky_rules() {
         assert!(parse("[credentials.github]\ntoken = \"op://x\"").is_err());
         assert!(parse("[credentials.azure]\nsubscriptions = [\"x\"]").is_err());
@@ -1697,7 +1099,7 @@ credentials = ["anthropic"]
         assert_eq!(cfg.ports, [5173, 3000]);
         assert_eq!(cfg.allow[0].id.as_deref(), Some("project-1"));
         assert_eq!(cfg.deps.system, ["libpq-dev"]);
-        let needs = missing_needs(&p, &cfg);
+        let needs = crate::needs::snippets(&p.needs, &cfg, &Default::default());
         assert_eq!(needs.len(), 2);
         assert!(needs[0].contains("repos = [\"acme/web\"]"));
     }
@@ -1941,7 +1343,7 @@ hosts = ["dl.k8s.io", "*"]
         assert_eq!(p.deps.run.len(), 1);
         assert_eq!(p.repos.keys().collect::<Vec<_>>(), ["api"]);
         assert_eq!(p.repos["api"].branch.as_deref(), Some("dev"));
-        assert_eq!(p.needs, Needs::default());
+        assert_eq!(p.needs, crate::needs::Needs::default());
         let out = s.left_out.join("\n");
         for said in [
             "1 expiring rule ",

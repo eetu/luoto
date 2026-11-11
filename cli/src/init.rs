@@ -737,7 +737,7 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
     // The luoto.toml accepted by now: the folder's, or the clone's if `up` asked about it.
     if let Some((_, pc)) = project::accepted(&ctx, &name) {
         let cfg = EnvFile::load(&ctx.paths, &name)?.cfg;
-        let missing = project::missing_needs(&pc, &cfg);
+        let missing = crate::needs::snippets(&pc.needs, &cfg, &crate::repos::declined(&ctx, &name));
         if crate::prompt::interactive() {
             if !missing.is_empty() {
                 println!(

@@ -970,7 +970,7 @@ pub enum Forge {
 
 impl Forge {
     /// How a repo of it is remembered as needing no credential.
-    fn key(&self, repo: &str) -> String {
+    pub(crate) fn key(&self, repo: &str) -> String {
         match self {
             Forge::Github(_) => format!("github:{}", repo.to_lowercase()),
             Forge::Azure(_) => format!("azure_devops:{}", repo.to_lowercase()),
@@ -1254,7 +1254,7 @@ fn git_details(host: &str, private: bool, ca: &mut Option<String>) -> Result<Str
 /// asked again, and not cloned, which would only fail.
 static LATER: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
-fn left_for_later(key: &str) -> bool {
+pub(crate) fn left_for_later(key: &str) -> bool {
     LATER.lock().is_ok_and(|s| s.contains(key))
 }
 
@@ -1693,7 +1693,13 @@ fn known_tokens(creds: &Credentials, forge: &Forge) -> Vec<(String, String)> {
 /// Ask what the env may do with `repo` (`Missing`: it has no access; `Change`: `repo auth`),
 /// then, for a private one, its token, and write the answer. Ends with the repo's summary, or
 /// `unchanged`. Whether the config changed.
-fn ask_repo(ctx: &Ctx, env: &str, forge: &Forge, repo: &str, mode: Mode) -> Result<bool> {
+pub(crate) fn ask_repo(
+    ctx: &Ctx,
+    env: &str,
+    forge: &Forge,
+    repo: &str,
+    mode: Mode,
+) -> Result<bool> {
     let f = EnvFile::load(&ctx.paths, env)?;
     let now = access_of(&f.cfg.credentials, &declined(ctx, env), forge, repo);
     let later = || -> Result<bool> {
@@ -1798,16 +1804,7 @@ fn ask_repo(ctx: &Ctx, env: &str, forge: &Forge, repo: &str, mode: Mode) -> Resu
 /// as public so it isn't asked again; without one, say what to add. Whether the config
 /// changed.
 pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
-    let mut all = remotes(&cfg.workspace);
-    // The repositories the project's luoto.toml needs to push to, cloned here or not.
-    if let Some((_, p)) = crate::project::accepted(ctx, env) {
-        all.extend(
-            p.needs
-                .github
-                .iter()
-                .map(|r| format!("https://github.com/{r}.git")),
-        );
-    }
+    let all = remotes(&cfg.workspace);
     let skip = declined(ctx, env);
     let mut needs = uncovered(&all, &cfg.credentials);
     for (forge, repos) in needs.iter_mut() {

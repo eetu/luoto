@@ -91,7 +91,11 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
     } else {
         println!("accepted; applies on `luoto up -e {name}`");
     }
-    if crate::project::ask_needs(&ctx, name, crate::wizard::Mode::Missing)? && running {
+    // Without a terminal, what they need was printed above.
+    if crate::prompt::interactive()
+        && crate::needs::ask(&ctx, name, crate::wizard::Mode::Missing)?
+        && running
+    {
         sync::reapply(&ctx, name)?;
     }
     Ok(ExitCode::SUCCESS)
@@ -1312,7 +1316,7 @@ fn open_editor(path: &std::path::Path) -> Result<()> {
 /// `luoto project needs`: the `[needs]` questions again, and a running env takes the answers.
 pub fn project_needs(name: &str) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
-    if crate::project::ask_needs(&ctx, name, crate::wizard::Mode::Change)? {
+    if crate::needs::ask(&ctx, name, crate::wizard::Mode::Change)? {
         sync::reapply(&ctx, name)?;
     }
     Ok(ExitCode::SUCCESS)

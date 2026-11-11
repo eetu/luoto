@@ -424,14 +424,14 @@ pub fn ensure_vm(ctx: &Ctx) -> Result<()> {
     machine::start(&ctx.rt.bin, false)
 }
 
-/// What the env's agents and repos need and its config doesn't say: asked on a terminal,
-/// before the gate starts, so it has the answers (`agents::ask_missing`,
-/// `repos::ask_missing`).
+/// What the env's agents, repos and project need and its config doesn't say: asked on a
+/// terminal, before the gate starts, so it has the answers (`agents::ask_missing`,
+/// `repos::ask_missing`, `needs::ask`).
 fn ask_credentials(ctx: &Ctx, env: &str) -> Result<()> {
     let cfg = layered(ctx, env)?;
     crate::agents::ask_missing(ctx, env, &cfg)?;
     repos::ask_missing(ctx, env, &cfg)?;
-    crate::project::ask_needs(ctx, env, crate::wizard::Mode::Missing)?;
+    crate::needs::ask(ctx, env, crate::wizard::Mode::Missing)?;
     Ok(())
 }
 

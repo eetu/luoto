@@ -25,6 +25,7 @@ mod logs;
 mod machine;
 mod model_servers;
 mod names;
+mod needs;
 mod notify;
 mod paths;
 mod personal;

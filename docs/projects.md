@@ -21,17 +21,23 @@ system = ["libpq-dev"]
 
 [needs]                          # what each developer gives their own env
 github = ["acme/web"]            # repos to push to
-credentials = ["hetzner", "custom.stripe", "azure"]
-azure_subscriptions = ["<subscription id>"]   # offered first when `up` asks for Azure
+credentials = ["hetzner"]
 sandbox_secrets = ["DATABASE_URL"]
+
+[needs.custom.stripe]            # a table names a need and what the team knows of it
+host = "api.stripe.com"
+
+[needs.azure]
+subscriptions = ["<subscription id>"]
 ```
 
 The first `up` after accepting it asks each developer for what `[needs]` names and their env
 lacks, with the questions an agent's credential gets: a provider's kind and where it is kept,
-a custom credential's host and secret, an Azure subscription (the project's
-`azure_subscriptions` offered first, read through their `az` login), where a sandbox secret is kept, and each repo's access. "Later" leaves one for the
-next `up`; `luoto project needs` asks them all again, opening on what the env has. Without a
-terminal it prints what to add instead.
+a custom credential's host (the team's filled in) and secret, an Azure subscription (the
+team's offered first, read through their `az` login), where a sandbox secret is kept, and
+each repo's access. The answers go in the developer's own env file. "Later" leaves one for
+the next `up`; `luoto project needs` asks them all again, opening on what the env has.
+Without a terminal it prints what to add instead.
 
 It also takes `image`, `agents`, `[[deny]]` and the team's repositories (`[repos.<name>]`,
 [below](#several-repositories)); toolchains belong in `mise.toml`. Layering:

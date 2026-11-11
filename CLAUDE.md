@@ -83,6 +83,10 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   exact text the user accepted (kept in the env's state); changes need a fresh accept. Never
   let it carry secret refs or mutes or skip `RuleOrigin::Sandbox` validation, and print its
   strings through `text::display`.
+- `needs.rs` owns its `[needs]`: one `Need` variant per kind, with its check, review line,
+  snippet and question in one `impl`. What the team knows of a need is a table named as it
+  (`[needs.azure]`, `[needs.custom.<name>]`), offered first; the answer goes in the
+  developer's own env file.
 - Config files carry their format (`version`, 1 when missing); `format.rs` upgrades every
   file in memory before it is parsed, and saving an env file writes the current format,
   keeping the old file beside it. A config change that would break an existing file is a
