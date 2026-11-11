@@ -42,11 +42,11 @@ The env can keep its cloud credential and have servers too. The first menu of `l
 auth` says what the agent starts on; the rest stays. Where a session can switch depends on the
 agent:
 
-| agent | starts on | switching |
-| --- | --- | --- |
-| OpenCode | `model_server`, else its cloud default | in the session: `/models` lists the servers' models beside the cloud's |
-| Codex | `model_server` (its default profile) | per start: `codex --profile <server>`, `codex --profile cloud` |
-| Claude Code | `model_server`, else Anthropic | none: one endpoint a session; `luoto agent auth` changes it |
+| agent       | starts on                              | switching                                                              |
+| ----------- | -------------------------------------- | ---------------------------------------------------------------------- |
+| OpenCode    | `model_server`, else its cloud default | in the session: `/models` lists the servers' models beside the cloud's |
+| Codex       | `model_server` (its default profile)   | per start: `codex --profile <server>`, `codex --profile cloud`         |
+| Claude Code | `model_server`, else Anthropic         | none: one endpoint a session; `luoto agent auth` changes it            |
 
 ## What the gate allows
 

@@ -2,7 +2,8 @@
 
 Dev sandboxes that contain supply-chain attacks: tools run in a container whose only egress is
 a per-env policy gate; a per-VM vault holds secrets outside the sandbox. CLI + local web UI.
-User-facing docs: README.md. Threat model: SECURITY.md. A user-visible change gets an entry in
+User-facing docs: README.md (the overview and getting started), docs/ (the reference and
+guides). Threat model: SECURITY.md. A user-visible change gets an entry in
 CHANGELOG.md's top section (the release notes); ROADMAP.md holds only what isn't done.
 main is protected: it changes only by squash-merged pull request, from a branch named for the
 release (`packaging/README.md`). CI runs on pull requests (path-filtered) and weekly on main.
@@ -18,7 +19,9 @@ tools/       `sandbox` helper (status/check/request/relay/mcp/selftest, internal
 cli/         `luoto` host binary: runtime driver, env lifecycle, commands, `luoto ui` (axum)
 frontend/    SvelteKit SPA embedded into `luoto` (rust-embed of frontend/dist)
 image/       luoto-base dev image
-docs/        agents.md (per-agent facts), guides/ (task by task), examples/, screenshots/,
+docs/        first-session.md, configuration.md, projects.md, how-it-works.md, install.md
+             (the reference), agents.md (per-agent facts), guides/ (task by task), examples/,
+             screenshots/,
              logo/ (README header; its Inter is a subset of the letters it uses, so new text
              needs a new subset)
 packaging/   Homebrew/Scoop templates + render.sh (release steps in its README)

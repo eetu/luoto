@@ -7,8 +7,8 @@ an agent's login and history, toolchains you don't want to install again.
 
 ## From a source build to the release
 
-A source build is its own luoto, `luoto-dev`, beside the release in the same VM (see the
-README's Install details). Its envs aren't the release's; export one and import it:
+A source build is its own luoto, `luoto-dev`, beside the release in the same VM (see
+[Install details](../install.md)). Its envs aren't the release's; export one and import it:
 
 ```console
 $ luoto-dev export -e infra
