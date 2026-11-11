@@ -319,9 +319,9 @@ mod tests {
             "ver": "1.0"});
         let mut all = kept.clone();
         for (k, v) in [
-            ("name", json!("Eetu")),
-            ("upn", json!("eetu@example.com")),
-            ("unique_name", json!("eetu@example.com")),
+            ("name", json!("Ada")),
+            ("upn", json!("you@example.com")),
+            ("unique_name", json!("you@example.com")),
             ("ipaddr", json!("203.0.113.7")),
             ("wids", json!(["62e90394-69f5-4237-9190-012177145e10"])),
             ("scp", json!("user_impersonation")),

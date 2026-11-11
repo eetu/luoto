@@ -769,11 +769,11 @@ mod tests {
     /// `op account list --format json` from op 2.42, with a family account beside a personal
     /// one at the same address, and entries `--account` couldn't take.
     const ACCOUNTS: &str = r#"[
-      {"url": "acme.1password.com", "email": "eetu@acme.example",
+      {"url": "acme.1password.com", "email": "you@acme.example",
        "user_uuid": "BBWGBN7ZFNDRVPRPBXWNXTNC4Q", "account_uuid": "ZK4ONHBXKRHVBDDVX4L7QTCSDM"},
-      {"url": "my.1password.com", "email": "eetu@example.com",
+      {"url": "my.1password.com", "email": "you@example.com",
        "user_uuid": "XUQJRY5W7NC7BHG2QKVZ6JPF2A", "account_uuid": "VZ7CWAKJKFHWVHZ3UFZQ5GPNSU"},
-      {"url": "my.1password.com", "email": "eetu\u001b[31m@example.com",
+      {"url": "my.1password.com", "email": "you\u001b[31m@example.com",
        "user_uuid": "M3C6JSF2PBBN5KQ3AIQPPLC6HU", "account_uuid": "Q3RTX2UJWVE2TMXFPN6HVOIB3Y"},
       {"url": "-evil.1password.com", "email": "x@example.com",
        "user_uuid": "AAAA", "account_uuid": "AAAAAAAAAAAAAAAAAAAAAAAAAA"},
@@ -787,10 +787,10 @@ mod tests {
         let ids: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, [ACME, MINE, FAMILY]);
         assert_eq!(accounts[0].address, "acme.1password.com");
-        assert_eq!(accounts[0].shown(), "acme.1password.com, eetu@acme.example");
+        assert_eq!(accounts[0].shown(), "acme.1password.com, you@acme.example");
         assert_eq!(
             accounts[2].shown(),
-            "my.1password.com, eetu\\u{1b}[31m@example.com"
+            "my.1password.com, you\\u{1b}[31m@example.com"
         );
         let https = r#"[{"url": "https://acme.1password.com", "email": "",
                          "account_uuid": "ZK4ONHBXKRHVBDDVX4L7QTCSDM"}]"#;
@@ -819,7 +819,7 @@ mod tests {
                 .to_string();
             assert!(e.contains(MINE) && e.contains(FAMILY), "{e}");
             assert!(
-                e.contains("eetu@example.com") && !e.contains('\u{1b}'),
+                e.contains("you@example.com") && !e.contains('\u{1b}'),
                 "{e}"
             );
             assert!(!e.contains(ACME), "{e}");
@@ -835,7 +835,7 @@ mod tests {
         let accounts = parse_op_accounts(ACCOUNTS.as_bytes());
         assert_eq!(
             describe_ref(&format!("op://v/i/f?account={ACME}"), &accounts),
-            format!("op://v/i/f?account={ACME} (acme.1password.com, eetu@acme.example)")
+            format!("op://v/i/f?account={ACME} (acme.1password.com, you@acme.example)")
         );
         assert_eq!(
             describe_ref(
@@ -844,7 +844,7 @@ mod tests {
             ),
             format!(
                 "op://v/k/private key?ssh-format=openssh&account={FAMILY} \
-                 (my.1password.com, eetu\\u{{1b}}[31m@example.com)"
+                 (my.1password.com, you\\u{{1b}}[31m@example.com)"
             )
         );
         for plain in [
@@ -895,7 +895,7 @@ mod tests {
                "vault": {"id": "pqk3bxlnmi2adlfmzdp4syqxuu", "name": "Shared"},
                "category": "LOGIN", "last_edited_by": "BBWGBN7ZFNDRVPRPBXWNXTNC4Q",
                "created_at": "2025-03-04T10:00:00Z", "updated_at": "2026-10-01T10:00:00Z",
-               "additional_information": "eetu", "urls": [{"primary": true, "href": "https://x"}]},
+               "additional_information": "you", "urls": [{"primary": true, "href": "https://x"}]},
               {"id": "kqv5r2c6e4gq7ttnb2xmv4gm3q", "title": "Alpha\u001b]0;pwned\u0007/../x?account=EVIL",
                "category": "API_CREDENTIAL"},
               {"id": "zx3oyh4ffljsbcmgbxv7gaxnoy", "title": "deploy key", "category": "SSH_KEY"},

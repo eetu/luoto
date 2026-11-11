@@ -1701,7 +1701,7 @@ host = "docs.rs"
 app_id = "123"
 installation_id = 456
 private_key = "op://Dev/app/key"
-repos = ["eetu/foo"]
+repos = ["octo/foo"]
 permissions = { contents = "write" }
 
 [credentials.anthropic]
@@ -2063,10 +2063,10 @@ host = "telemetry.example"
         std::fs::write(&path, SAMPLE).unwrap();
         let mut f = EnvFile::parse(path.clone(), SAMPLE).unwrap();
         // A repo of an owner the App covers joins it.
-        f.add_github_repos("eetu", None, &["eetu/bar".into()], false)
+        f.add_github_repos("octo", None, &["octo/bar".into()], false)
             .unwrap();
         assert_eq!(f.cfg.credentials.github.0.len(), 1);
-        assert!(f.cfg.credentials.github.covers("eetu/bar", true));
+        assert!(f.cfg.credentials.github.covers("octo/bar", true));
         // Another owner's gets a credential of its own; the table becomes an array.
         f.add_github_repos(
             "acme",

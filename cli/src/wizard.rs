@@ -1823,7 +1823,7 @@ mod tests {
         let account = |id: &str, address: &str| OpAccount {
             id: id.into(),
             address: address.into(),
-            email: "eetu@example.com".into(),
+            email: "you@example.com".into(),
         };
         let all = [
             account("VZ7CWAKJKFHWVHZ3UFZQ5GPNSU", "my.1password.com"),
@@ -1832,11 +1832,11 @@ mod tests {
         ];
         assert_eq!(
             account_label(&all[1], &all),
-            "my.1password.com, eetu@example.com (Q3RTX2UJWVE2TMXFPN6HVOIB3Y)"
+            "my.1password.com, you@example.com (Q3RTX2UJWVE2TMXFPN6HVOIB3Y)"
         );
         assert_eq!(
             account_label(&all[2], &all),
-            "acme.1password.com, eetu@example.com"
+            "acme.1password.com, you@example.com"
         );
     }
 

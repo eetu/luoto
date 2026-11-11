@@ -1653,9 +1653,9 @@ mod tests {
         toml::from_str(text).unwrap()
     }
 
-    /// The folder's remote `git@azure-invinite:v3/invinite/AppServices/pseudo-registry`.
+    /// The folder's remote `git@azure-fabrikam:v3/fabrikam/Apps/web-api`.
     fn alias() -> [(String, String); 1] {
-        [("invinite".into(), "azure-invinite".into())]
+        [("fabrikam".into(), "azure-fabrikam".into())]
     }
 
     fn decide(p: &Policy, host: &str, method: &str, path: &str) -> Decision {
@@ -1724,12 +1724,12 @@ secret = "env:T"
         let text = r#"
 [credentials.azure_devops]
 token = "op://v/ado/pat"
-repos = ["invinite/InviniteInfra/azure-devops-agent"]
-read_repos = ["invinite/InviniteInfra/lib"]
+repos = ["fabrikam/Infra/build-agent"]
+read_repos = ["fabrikam/Infra/lib"]
 "#;
         let c = compile("t", &cfg(text), GATE, &alias()).unwrap();
         let p = &c.policy;
-        let base = "/invinite/InviniteInfra/_apis/git/repositories/azure-devops-agent";
+        let base = "/fabrikam/Infra/_apis/git/repositories/build-agent";
         let allowed = |method: &str, path: &str| {
             matches!(
                 decide(p, "dev.azure.com", method, path),
@@ -1756,9 +1756,9 @@ read_repos = ["invinite/InviniteInfra/lib"]
             ("POST", format!("{base}/pushes")),
             (
                 "POST",
-                "/invinite/InviniteInfra/_apis/git/repositories/lib/pullrequests".into(),
+                "/fabrikam/Infra/_apis/git/repositories/lib/pullrequests".into(),
             ),
-            ("POST", "/invinite/_apis/projects".into()),
+            ("POST", "/fabrikam/_apis/projects".into()),
         ] {
             assert!(!allowed(method, &path), "{method} {path}");
         }
@@ -1766,7 +1766,7 @@ read_repos = ["invinite/InviniteInfra/lib"]
             p.injections_for(
                 "GET",
                 "dev.azure.com",
-                "/invinite/InviniteInfra/_apis/git/repositories/lib/pullrequests"
+                "/fabrikam/Infra/_apis/git/repositories/lib/pullrequests"
             )
             .is_empty()
         );
@@ -1803,25 +1803,19 @@ read_repos = ["invinite/InviniteInfra/lib"]
 [credentials.azure_devops]
 token = "op://v/ado/pat"
 repos = [
-  "invinite/AppServices/pseudo-registry",
-  "invinite/Data Platform/dbt-core",
+  "fabrikam/Apps/web-api",
+  "fabrikam/Data Team/pipelines",
   "https://other@dev.azure.com/other/Web/_git/site",
 ]
 "#;
         let c = compile("t", &cfg(text), GATE, &alias()).unwrap();
         let p = &c.policy;
         for (method, path) in [
+            ("POST", "/fabrikam/Apps/_git/web-api/git-receive-pack"),
+            ("GET", "/Fabrikam/apps/_git/Web-Api/info/refs"),
             (
                 "POST",
-                "/invinite/AppServices/_git/pseudo-registry/git-receive-pack",
-            ),
-            (
-                "GET",
-                "/Invinite/appservices/_git/Pseudo-Registry/info/refs",
-            ),
-            (
-                "POST",
-                "/invinite/Data%20Platform/_git/dbt-core/git-upload-pack",
+                "/fabrikam/Data%20Team/_git/pipelines/git-upload-pack",
             ),
             ("POST", "/other/Web/_git/site/git-receive-pack"),
         ] {
@@ -1834,9 +1828,9 @@ repos = [
             );
         }
         for path in [
-            "/invinite/AppServices/_git/other/git-receive-pack",
-            "/invinite/Web/_git/site/git-receive-pack",
-            "/invinite/_apis/git/repositories",
+            "/fabrikam/Apps/_git/other/git-receive-pack",
+            "/fabrikam/Web/_git/site/git-receive-pack",
+            "/fabrikam/_apis/git/repositories",
         ] {
             assert!(
                 !matches!(
@@ -1849,7 +1843,7 @@ repos = [
         let inj = p.injections_for(
             "GET",
             "dev.azure.com",
-            "/INVINITE/AppServices/_git/pseudo-registry/info/refs",
+            "/FABRIKAM/Apps/_git/web-api/info/refs",
         );
         assert_eq!(inj.len(), 1);
         assert_eq!(inj[0].binding, "azure_devops");
@@ -1870,16 +1864,16 @@ repos = [
         assert!(
             guard
                 .repos
-                .contains(&"invinite/data%20platform/dbt-core".to_string())
+                .contains(&"fabrikam/data%20team/pipelines".to_string())
         );
         assert_eq!(guard.protected_branches, ["main", "master"]);
         let section = c
             .git_config
             .split("[url ")
-            .find(|s| s.starts_with("\"https://dev.azure.com/invinite/AppServices/_git/\""))
+            .find(|s| s.starts_with("\"https://dev.azure.com/fabrikam/Apps/_git/\""))
             .unwrap_or_default();
         assert!(
-            section.contains("\tinsteadOf = \"git@azure-invinite:v3/invinite/AppServices/\"\n"),
+            section.contains("\tinsteadOf = \"git@azure-fabrikam:v3/fabrikam/Apps/\"\n"),
             "the folder's SSH alias goes to HTTPS:\n{}",
             c.git_config
         );
@@ -1933,11 +1927,11 @@ host_keys = ["git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0Sd
             "GitHub remotes stay SSH"
         );
         assert!(c.git_config.contains(
-            "[url \"git@ssh.dev.azure.com:v3/invinite/\"]\n\tinsteadOf = \"invinite@vs-ssh.visualstudio.com:v3/invinite/\"\n"
+            "[url \"git@ssh.dev.azure.com:v3/fabrikam/\"]\n\tinsteadOf = \"fabrikam@vs-ssh.visualstudio.com:v3/fabrikam/\"\n"
         ));
         assert!(
             c.git_config
-                .contains("\tinsteadOf = \"git@azure-invinite:v3/invinite/\"\n")
+                .contains("\tinsteadOf = \"git@azure-fabrikam:v3/fabrikam/\"\n")
         );
         for bad in [
             "[credentials.ssh]\nkey = \"op://k\"\nhosts = []\n",
@@ -2188,7 +2182,7 @@ presets = ["github"]
 app_id = "1"
 installation_id = 2
 private_key = "op://v/app/key"
-repos = ["Eetu/Foo"]
+repos = ["Octo/Foo"]
 "#),
             GATE,
             &[],
@@ -2196,18 +2190,18 @@ repos = ["Eetu/Foo"]
         .unwrap();
         let p = &c.policy;
         assert!(matches!(
-            decide(p, "github.com", "POST", "/eetu/foo.git/git-receive-pack"),
+            decide(p, "github.com", "POST", "/octo/foo.git/git-receive-pack"),
             Decision::Allow { .. }
         ));
         assert!(
             matches!(
-                decide(p, "github.com", "POST", "/Eetu/Foo.git/git-receive-pack"),
+                decide(p, "github.com", "POST", "/Octo/Foo.git/git-receive-pack"),
                 Decision::Allow { .. }
             ),
             "a remote in the case it was cloned with"
         );
         assert_eq!(
-            p.injections_for("GET", "github.com", "/Eetu/Foo.git/info/refs")
+            p.injections_for("GET", "github.com", "/Octo/Foo.git/info/refs")
                 .len(),
             1
         );
@@ -2216,7 +2210,7 @@ repos = ["Eetu/Foo"]
             Decision::Allow { .. }
         ));
         assert!(matches!(
-            decide(p, "api.github.com", "POST", "/repos/eetu/foo/pulls"),
+            decide(p, "api.github.com", "POST", "/repos/octo/foo/pulls"),
             Decision::Allow { .. }
         ));
         assert!(!matches!(
@@ -2228,14 +2222,14 @@ repos = ["Eetu/Foo"]
                 p,
                 "api.github.com",
                 "POST",
-                "/repos/eetu/foo/actions/workflows/x/dispatches"
+                "/repos/octo/foo/actions/workflows/x/dispatches"
             ),
             Decision::Deny(DenyReason::Explicit { .. })
         ));
         for (method, path) in [
-            ("PATCH", "/repos/eetu/foo/pulls/7"),
-            ("POST", "/repos/eetu/foo/pulls/7/reviews"),
-            ("POST", "/repos/eetu/foo/issues/3/comments"),
+            ("PATCH", "/repos/octo/foo/pulls/7"),
+            ("POST", "/repos/octo/foo/pulls/7/reviews"),
+            ("POST", "/repos/octo/foo/issues/3/comments"),
             ("POST", "/graphql"),
         ] {
             assert!(
@@ -2248,14 +2242,14 @@ repos = ["Eetu/Foo"]
         }
         // REST routes around the push guard stay closed.
         for (method, path) in [
-            ("PUT", "/repos/eetu/foo/contents/src/main.rs"),
-            ("PATCH", "/repos/eetu/foo/git/refs/heads/main"),
-            ("POST", "/repos/eetu/foo/git/refs"),
-            ("DELETE", "/repos/eetu/foo/git/refs/heads/feature"),
-            ("PUT", "/repos/eetu/foo/pulls/7/merge"),
-            ("POST", "/repos/eetu/foo/merges"),
-            ("PATCH", "/repos/eetu/foo"),
-            ("DELETE", "/repos/eetu/foo/issues/comments/1"),
+            ("PUT", "/repos/octo/foo/contents/src/main.rs"),
+            ("PATCH", "/repos/octo/foo/git/refs/heads/main"),
+            ("POST", "/repos/octo/foo/git/refs"),
+            ("DELETE", "/repos/octo/foo/git/refs/heads/feature"),
+            ("PUT", "/repos/octo/foo/pulls/7/merge"),
+            ("POST", "/repos/octo/foo/merges"),
+            ("PATCH", "/repos/octo/foo"),
+            ("DELETE", "/repos/octo/foo/issues/comments/1"),
         ] {
             assert!(
                 !matches!(
@@ -2266,7 +2260,7 @@ repos = ["Eetu/Foo"]
             );
         }
         assert_eq!(
-            p.injections_for("GET", "github.com", "/eetu/foo.git/info/refs")
+            p.injections_for("GET", "github.com", "/octo/foo.git/info/refs")
                 .len(),
             1
         );
@@ -2354,12 +2348,12 @@ read_repos = ["org/Infra/agent"]
             &cfg(r#"
 [[credentials.github]]
 token = "op://v/fi/token"
-repos = ["invinite-fi/upcloud-dev"]
+repos = ["globex/infra-dev"]
 protected_branches = ["main"]
 
 [[credentials.github]]
 token = "op://v/open/token"
-repos = ["inviniteopen/upcloud-web"]
+repos = ["initech/portal"]
 protected_branches = ["prod"]
 "#),
             GATE,
@@ -2374,21 +2368,21 @@ protected_branches = ["prod"]
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            binding("github.com", "/invinite-fi/upcloud-dev/info/refs"),
+            binding("github.com", "/globex/infra-dev/info/refs"),
             ["github"]
         );
         assert_eq!(
-            binding("github.com", "/inviniteopen/upcloud-web/info/refs"),
+            binding("github.com", "/initech/portal/info/refs"),
             ["github-2"]
         );
         assert_eq!(
-            binding("api.github.com", "/repos/inviniteopen/upcloud-web/pulls"),
+            binding("api.github.com", "/repos/initech/portal/pulls"),
             ["github-2"]
         );
         assert_eq!(binding("api.github.com", "/graphql"), ["github"]);
         for path in [
-            "/repos/invinite-fi/upcloud-dev/pulls",
-            "/repos/inviniteopen/upcloud-web/pulls",
+            "/repos/globex/infra-dev/pulls",
+            "/repos/initech/portal/pulls",
         ] {
             assert!(matches!(
                 decide(p, "api.github.com", "POST", path),

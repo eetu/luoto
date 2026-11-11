@@ -402,8 +402,8 @@ mod tests {
     #[test]
     fn azure_paths_name_organization_project_and_repo() {
         assert_eq!(
-            azure_repo_of("/Invinite/AppServices/_git/Pseudo-Registry/git-receive-pack").as_deref(),
-            Some("invinite/appservices/pseudo-registry")
+            azure_repo_of("/Fabrikam/Apps/_git/Web-Api/git-receive-pack").as_deref(),
+            Some("fabrikam/apps/web-api")
         );
         assert_eq!(
             azure_repo_of("/o/_git/r.git/git-receive-pack").as_deref(),
@@ -419,7 +419,7 @@ mod tests {
 
     fn guard() -> GithubGuard {
         GithubGuard {
-            repos: vec!["eetu/foo".into()],
+            repos: vec!["octo/foo".into()],
             protected_branches: vec!["main".into()],
             graphql_mutations: vec!["createPullRequest".into()],
             ..Default::default()
@@ -529,10 +529,10 @@ mod tests {
     #[test]
     fn repo_from_path() {
         assert_eq!(
-            repo_of("/Eetu/Foo.git/git-receive-pack").as_deref(),
-            Some("eetu/foo")
+            repo_of("/Octo/Foo.git/git-receive-pack").as_deref(),
+            Some("octo/foo")
         );
-        assert_eq!(repo_of("/eetu/foo/info/refs").as_deref(), Some("eetu/foo"));
+        assert_eq!(repo_of("/octo/foo/info/refs").as_deref(), Some("octo/foo"));
         assert_eq!(repo_of("/"), None);
     }
 }

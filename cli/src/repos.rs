@@ -2121,7 +2121,7 @@ repos = ["other/app"]
             "acme/api",
             "acme/.github",
             "https://github.com/acme/api.git",
-            "https://org@dev.azure.com/org/Data%20Platform/_git/api",
+            "https://org@dev.azure.com/org/Data%20Team/_git/api",
             "ssh://git@github.com/acme/api.git",
             "ssh://git@host.example:2222/x/y",
             "git@github.com:acme/api.git",
@@ -2152,7 +2152,7 @@ repos = ["other/app"]
         for u in [
             "https://ghp_secret@github.com/acme/api",
             "https://glpat-secret@gitlab.com/group/api.git",
-            "https://other@dev.azure.com/org/Data%20Platform/_git/api",
+            "https://other@dev.azure.com/org/Data%20Team/_git/api",
             "https://x@forge.example",
         ] {
             assert!(check_url(u).is_err(), "{u}");
@@ -2523,25 +2523,25 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
     fn hints_ask_for_https_credentials_per_owner() {
         let none = Credentials::default();
         let remotes: Vec<String> = [
-            "git@github.com:invinite-fi/upcloud-dev.git",
-            "https://github.com/inviniteopen/upcloud-web",
-            "git@azure-invinite:v3/invinite/InviniteInfra/agent",
+            "git@github.com:globex/infra-dev.git",
+            "https://github.com/initech/portal",
+            "git@azure-fabrikam:v3/fabrikam/Infra/agent",
             "https://gitlab.com/o/r",
         ]
         .map(String::from)
         .to_vec();
         let hint = credential_hint("e", &remotes, &none).unwrap();
         assert_eq!(hint.matches("[[credentials.github]]").count(), 2);
-        assert!(hint.contains("repos = [\"invinite-fi/upcloud-dev\"]"));
+        assert!(hint.contains("repos = [\"globex/infra-dev\"]"));
         assert!(hint.contains("[credentials.azure_devops]"));
-        assert!(hint.contains("invinite/InviniteInfra/agent"));
+        assert!(hint.contains("fabrikam/Infra/agent"));
         assert!(hint.contains("SSH remotes work"));
         let one = credential_hint("e", &remotes[1..2], &none).unwrap();
         assert!(one.contains("[credentials.github]\n") && !one.contains("SSH"));
 
         let have: Credentials = toml::from_str(
-            "[github]\ntoken = \"env:T\"\nread_repos = [\"inviniteopen/upcloud-web\"]\n\
-             [azure_devops]\ntoken = \"env:A\"\nrepos = [\"invinite/InviniteInfra/agent\"]\n\
+            "[github]\ntoken = \"env:T\"\nread_repos = [\"initech/portal\"]\n\
+             [azure_devops]\ntoken = \"env:A\"\nrepos = [\"fabrikam/Infra/agent\"]\n\
              [ssh]\nkey = \"env:K\"\nhosts = [\"github.com\"]\n",
         )
         .unwrap();
@@ -2662,7 +2662,7 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
             "[[github]]\ntoken = \"env:A\"\nrepos = [\"acme/web\"]\nread_repos = [\"Acme/API\"]\n\
              [[github]]\napp_id = \"1\"\ninstallation_id = 2\nprivate_key = \"env:K\"\n\
              repos = [\"other/x\"]\n\
-             [azure_devops]\ntoken = \"env:P\"\nread_repos = [\"org/Data Platform/infra\"]\n\
+             [azure_devops]\ntoken = \"env:P\"\nread_repos = [\"org/Data Team/infra\"]\n\
              [[git]]\nhost = \"gitlab.com\"\nread_repos = [\"group/pub\"]\n\
              [[git]]\nhost = \"forge.example\"\ntoken = \"env:F\"\nread_repos = [\"t/priv.git\"]\n",
         )
@@ -2689,7 +2689,7 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
             Some((Access::Public, None))
         );
         assert_eq!(
-            of(&Forge::Azure("org".into()), "org/Data%20Platform/infra"),
+            of(&Forge::Azure("org".into()), "org/Data%20Team/infra"),
             Some((Access::Read, Some("env:P".into())))
         );
         // Another host's repos without a token are public; with one, private.
