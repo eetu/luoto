@@ -150,6 +150,8 @@ pub fn watch() -> Result<ExitCode> {
     let mut reread: HashMap<String, Instant> = HashMap::new();
     let mut azcli = Azcli::default();
     let mut disk_checked: Option<Instant> = None;
+    // Open egress closed here, by the end it had.
+    let mut closed: HashMap<String, chrono::DateTime<Utc>> = HashMap::new();
     loop {
         std::thread::sleep(TICK);
         // `stop` (luoto uninstall) removed it, and waits for this process to leave.
@@ -251,6 +253,21 @@ pub fn watch() -> Result<ExitCode> {
         forwards.retain(|k, _| wanted.contains(k));
         refused.retain(|k| wanted.contains(k));
         record(&ctx.paths, &forwards, &refused, &mut recorded);
+
+        // Open egress ends by this machine's clock: the gate checks the VM's, which can lag
+        // after this machine sleeps. Its policy is applied again without it, once.
+        for name in &running {
+            let until = config::EnvFile::load(&ctx.paths, name)
+                .ok()
+                .and_then(|f| f.cfg.egress.open_until);
+            if let Some(until) = until.filter(|u| *u <= Utc::now())
+                && closed.get(name) != Some(&until)
+                && crate::sync::reapply(&ctx, name).is_ok()
+            {
+                println!("{} closed open egress of `{name}`", Utc::now());
+                closed.insert(name.clone(), until);
+            }
+        }
 
         if creds_checked.elapsed() >= CREDS_EVERY {
             creds_checked = Instant::now();

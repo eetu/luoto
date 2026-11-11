@@ -1153,7 +1153,8 @@ pub fn egress_keep(name: &str, since: Option<&str>, yes: bool) -> Result<ExitCod
         } else {
             format!("read ({})", crate::text::display(&methods(&r.host)))
         };
-        rows.push((egress::rule_target(r), what, !write));
+        // The sandbox chose these hosts: each is yours to pick, never pre-checked.
+        rows.push((egress::rule_target(r), what, false));
     }
     let picked: Vec<usize> = if yes {
         (0..rows.len()).filter(|i| rows[*i].2).collect()
@@ -1163,15 +1164,18 @@ pub fn egress_keep(name: &str, since: Option<&str>, yes: bool) -> Result<ExitCod
         for (label, what, _) in &rows {
             println!("  {label:<wide$}  {what}");
         }
-        println!("`luoto egress keep -e {name} --yes` keeps the presets and read rules");
-        let writes: Vec<&luoto_shared::policy::Rule> =
-            p.rules.iter().filter(|r| r.access.allows("POST")).collect();
-        if !writes.is_empty() {
-            println!("a write only as you allow it:");
-            for r in writes {
+        println!("`luoto egress keep -e {name} --yes` keeps the presets");
+        if !p.rules.is_empty() {
+            println!("a host only as you allow it:");
+            for r in &p.rules {
                 let port = r.port.map(|p| format!(" --port {p}")).unwrap_or_default();
+                let write = if r.access.allows("POST") {
+                    " --write"
+                } else {
+                    ""
+                };
                 println!(
-                    "  luoto allow -e {name} {} --write{port}",
+                    "  luoto allow -e {name} {}{write}{port}",
                     crate::text::display(&r.host)
                 );
             }

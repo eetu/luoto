@@ -21,6 +21,7 @@ use crate::state::EnvState;
 use crate::text::sh_quote;
 use crate::wizard::{Answer, Mode};
 use crate::{events, model_servers, names, secrets, sync};
+use sha2::{Digest, Sha256};
 
 pub fn list() -> Result<ExitCode> {
     println!("agents:");
@@ -132,7 +133,7 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
         env_name,
         &env::layered(ctx, env_name)?,
         Some(agent),
-        true,
+        Write::All,
     )
 }
 
@@ -200,10 +201,10 @@ pub fn current(cfg: &EnvConfig, a: &profiles::Agent) -> Option<Auth> {
     configured(cfg, a).into_iter().next()
 }
 
-/// Whether agent `a` has a way to a model in the env: a credential, a model server it can
-/// use, or no provider to need one.
+/// Whether agent `a` has a way to a model in the env: a credential, a model server it starts
+/// on, or no provider to need one. A server it can only switch to leaves its start without one.
 pub fn has_credential(cfg: &EnvConfig, a: &profiles::Agent) -> bool {
-    a.providers.is_empty() || current(cfg, a).is_some() || !usable_servers(cfg, a).is_empty()
+    a.providers.is_empty() || current(cfg, a).is_some() || starts_on(cfg, a).is_some()
 }
 
 /// Whether every way agent `a` has in is a login inside: nothing for the gate to add.
@@ -660,7 +661,13 @@ pub fn settings(
             now: model_servers::Written::default(),
         },
     };
+    let on_server = opts.model_server.is_some() && a.model_server.is_some();
     let options = opts.values().into_iter().filter_map(|(key, value)| {
+        // On a server, `model` is one of its models: its own entries write it where it goes
+        // (a Codex profile), not as the cloud's.
+        if on_server && key == "model" {
+            return None;
+        }
         let s = a.settings.get(key)?;
         Some(profiles::JsonSet {
             file: s.file.clone(),
@@ -680,11 +687,14 @@ pub fn configure(
     env_name: &str,
     cfg: &EnvConfig,
     only: Option<&str>,
-    all: bool,
+    write: Write,
 ) -> Result<()> {
-    let mut written = EnvState::load(&ctx.paths, env_name)?
-        .map(|s| s.agent_servers)
+    let state = EnvState::load(&ctx.paths, env_name)?;
+    let mut written = state
+        .as_ref()
+        .map(|s| s.agent_servers.clone())
         .unwrap_or_default();
+    let mut sums = state.map(|s| s.agent_sets).unwrap_or_default();
     for (name, opts) in &cfg.agents.0 {
         if only.is_some_and(|o| o != name) {
             continue;
@@ -694,7 +704,15 @@ pub fn configure(
         };
         let before = written.get(name).cloned().unwrap_or_default();
         let (sets, now) = settings(&a, opts, cfg, &before);
-        if sets.is_empty() && !all {
+        let sum = hex::encode(Sha256::digest(
+            serde_json::to_vec(&sets).unwrap_or_default(),
+        ));
+        let skip = match write {
+            Write::All => false,
+            Write::Set => sets.is_empty(),
+            Write::Changed => sets.is_empty() || sums.get(name) == Some(&sum),
+        };
+        if skip {
             continue;
         }
         if let Err(e) = register(ctx, env_name, &a, &sets) {
@@ -708,8 +726,23 @@ pub fn configure(
         } else {
             written.insert(name.clone(), now);
         }
+        sums.insert(name.clone(), sum);
     }
-    EnvState::update(&ctx.paths, env_name, |s| s.agent_servers = written)
+    EnvState::update(&ctx.paths, env_name, |s| {
+        s.agent_servers = written;
+        s.agent_sets = sums;
+    })
+}
+
+/// Which agents [`configure`] writes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Write {
+    /// Every one: their config may be new (home files copied, an install).
+    All,
+    /// Those with something to write (`up`).
+    Set,
+    /// Those whose writes changed since the last (a rule change): a session's `/model` stays.
+    Changed,
 }
 
 /// The model server agent `a` starts on in `cfg`, by name.
@@ -1474,7 +1507,7 @@ model = "qwen3"
         assert_eq!(row("credential"), "OpenAI API key = env:KEY");
         assert_eq!(
             row("switch"),
-            "`codex --profile mtplx`; the cloud: `codex --profile cloud`"
+            "`codex --profile luoto-mtplx` (the cloud: `--profile cloud`)"
         );
         assert!(s.lines().all(|l| l.chars().count() < 80), "{s}");
         // Claude Code has one endpoint a session: a server it doesn't start on is no way in.

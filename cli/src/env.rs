@@ -435,6 +435,7 @@ fn ask_credentials(ctx: &Ctx, env: &str) -> Result<()> {
 }
 
 pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
+    crate::azure_identity::forget_login_needed();
     ensure_vm(ctx)?;
     if !opts.quiet {
         crate::disk::warn_if_low(ctx);
@@ -464,7 +465,11 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     crate::progress::wait("starting the vault", || start_vault(ctx, &ids.vault))?;
 
     if !rt.network_exists(&names::internal_net(env))
-        && let Some((holder, _)) = rt.subnets()?.into_iter().find(|(_, s)| *s == a.subnet)
+        && let Some((holder, _)) = rt
+            .subnets()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(_, s)| *s == a.subnet)
     {
         let me = names::instance();
         bail!(
@@ -575,6 +580,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         } else {
             sync::write_runtime_env(ctx, env, &p.compiled)?;
         }
+        drop(_restarting);
         if p.image != image {
             eprintln!(
                 "note: luoto.toml names another image; `luoto up --recreate` applies it (volumes are kept)"
@@ -842,6 +848,12 @@ fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
         log_mb: Some(GATE_LOG_MB),
         ..Default::default()
     };
+    // A model server on this machine is `host.docker.internal`, which Docker Engine on Linux
+    // knows only when told (podman's hosts file and Docker Desktop have it).
+    if ctx.rt.flavor == Flavor::Docker {
+        spec.add_hosts
+            .push((crate::model_servers::HOST.into(), "host-gateway".into()));
+    }
     // Read at start: a changed CA changes the spec, which recreates the gate.
     if !p.compiled.upstream_cas.is_empty() {
         spec.env.push((
@@ -1071,7 +1083,12 @@ fn after_start(
     // Home files may have replaced an agent's config, and with it luoto's entries there; an
     // agent with options gets them on every start.
     let copied = personal::apply(ctx, env, &p.cfg, state.home(), quiet) > 0;
-    crate::agents::configure(ctx, env, &p.cfg, None, copied)?;
+    let write = if copied {
+        crate::agents::Write::All
+    } else {
+        crate::agents::Write::Set
+    };
+    crate::agents::configure(ctx, env, &p.cfg, None, write)?;
     if let Err(e) = ssh::authorize(ctx, env) {
         crate::progress::say(|| eprintln!("warning: SSH access not set up ({e:#})"));
     }

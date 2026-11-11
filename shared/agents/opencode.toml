@@ -26,22 +26,24 @@ host = "models.dev"
 [[rule]]
 host = "models.opencode.ai"
 
-# Model servers: a provider each beside the cloud ones, all in its model picker (OpenCode
-# bundles the OpenAI-compatible SDK); the one it starts on gives the default model.
+# Model servers: a provider each beside the cloud ones, under luoto's own ids so none takes a
+# built-in one's place, all in its model picker (OpenCode bundles the OpenAI-compatible SDK);
+# the one it starts on gives the default model.
 [model_server]
 api = "openai"
 endpoint = "/v1/chat/completions"
 switch = "its model picker (`/models`), the cloud's models beside them"
 each = [
-  { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "npm"], value = "@ai-sdk/openai-compatible" },
-  { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "name"], value = "{name}" },
-  { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "options", "baseURL"], value = "{url}/v1" },
-  { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "options", "apiKey"], value = "{token}" },
-  { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "models", "{model}"], value = {} },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "npm"], value = "@ai-sdk/openai-compatible" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "name"], value = "{name}" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "options", "baseURL"], value = "{url}/v1" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "options", "apiKey"], value = "{token}" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "models"], value = {} },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "models", "{model}"], value = {} },
   # OpenCode 1.x wants an output cap beside the window.
-  { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "models", "{model}", "limit", "context"], value = "{context:n}" },
-  { file = "~/.config/opencode/opencode.json", path = ["provider", "{name}", "models", "{model}", "limit", "output"], value = "{output:n}" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "models", "{model}", "limit", "context"], value = "{context:n}" },
+  { file = "~/.config/opencode/opencode.json", path = ["provider", "luoto-{name}", "models", "{model}", "limit", "output"], value = "{output:n}" },
 ]
 default = [
-  { file = "~/.config/opencode/opencode.json", path = ["model"], value = "{name}/{model}" },
+  { file = "~/.config/opencode/opencode.json", path = ["model"], value = "luoto-{name}/{model}" },
 ]

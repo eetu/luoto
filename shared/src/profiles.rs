@@ -167,6 +167,10 @@ pub struct Agent {
     pub name: String,
     pub description: String,
     pub command: String,
+    /// Flags that turn off or loosen the agent's own permission prompts besides `yolo`'s: a
+    /// repository's luoto.toml can't pass these (as a flag or in its `flag=value` form).
+    #[serde(default)]
+    pub prompt_flags: Vec<String>,
     /// Arguments that turn off the agent's own permission prompts (the sandbox is the
     /// boundary instead).
     #[serde(default)]

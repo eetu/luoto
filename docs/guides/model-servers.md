@@ -3,7 +3,9 @@
 An agent can use a model server of your own beside its cloud provider: one on this machine
 (Ollama, LM Studio, MTPLX, llama.cpp, vLLM, LiteLLM), on your network, or a hosted one on the
 internet. Anything that serves an OpenAI- or Anthropic-compatible API works; luoto doesn't need
-to know which program it is.
+to know which program it is. Each agent needs one endpoint of it: Claude Code `/v1/messages`,
+Codex `/v1/responses` (the Responses API, its only one), OpenCode `/v1/chat/completions`; the
+questions check it.
 
 ## Setting one up
 
@@ -45,7 +47,7 @@ agent:
 | agent       | starts on                              | switching                                                              |
 | ----------- | -------------------------------------- | ---------------------------------------------------------------------- |
 | OpenCode    | `model_server`, else its cloud default | in the session: `/models` lists the servers' models beside the cloud's |
-| Codex       | `model_server` (its default profile)   | per start: `codex --profile <server>`, `codex --profile cloud`         |
+| Codex       | `model_server` (its default profile)   | per start: `codex --profile luoto-<server>`, `codex --profile cloud`   |
 | Claude Code | `model_server`, else Anthropic         | none: one endpoint a session; `luoto agent auth` changes it            |
 
 ## What the gate allows
@@ -65,7 +67,10 @@ minutes while a model loads, so the gate waits up to 30 minutes on the server.
 
 `up`, `luoto edit` and `luoto agent auth` refuse a config that can't work: an agent naming a
 server the env lacks, a server without the API the agent speaks, no model, a token over plain
-HTTP off this machine, two servers on this machine with a token.
+HTTP off this machine, a server with a token on the same host as another (the gate adds a
+token by host and path, not port, so it would reach both). In the agents' own configs luoto's
+entries go under `luoto-<server>` (a Codex profile and provider, an OpenCode provider), beside
+their built-in ones.
 
 ## Speed
 

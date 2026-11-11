@@ -1,6 +1,8 @@
 description = "Claude Code"
 command = "claude"
 yolo = ["--dangerously-skip-permissions"]
+# What a luoto.toml can't pass: these change, or let settings change, its permission prompts.
+prompt_flags = ["--permission-mode", "--allow-dangerously-skip-permissions", "--allowedTools", "--allowed-tools", "--settings"]
 # `{args}` first: an option that takes a list (`--tools`) ends at `-p`.
 headless = ["{args}", "-p", "--dangerously-skip-permissions", "--output-format", "text", "{prompt}"]
 providers = ["anthropic"]

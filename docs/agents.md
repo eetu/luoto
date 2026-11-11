@@ -113,7 +113,9 @@ use prompts to improve its products, until its Google Cloud project has billing.
 
 ## OpenCode
 
-- Installs with OpenCode's installer from its GitHub releases, and runs with auto-update and
+- Installs with OpenCode's installer (`opencode.ai`, which redirects to the script on
+  `raw.githubusercontent.com`; it asks `registry.npmjs.org` for the latest version, else
+  `api.github.com`, and downloads from its GitHub releases), and runs with auto-update and
   session sharing off (`OPENCODE_DISABLE_AUTOUPDATE`, `OPENCODE_DISABLE_SHARE`).
 - Takes any of `anthropic`, `openai`, `openrouter` or `gemini`.
 - Reads its model catalogue from `models.dev` and `models.opencode.ai`.

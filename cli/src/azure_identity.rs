@@ -145,7 +145,10 @@ pub fn read(r: &str) -> Result<(String, Option<DateTime<Utc>>)> {
     if !out.status.success() {
         let full = String::from_utf8_lossy(&out.stderr);
         if let Some(why) = login_needed(&full) {
-            LOGIN_NEEDED.store(true, std::sync::atomic::Ordering::Relaxed);
+            // `az login --identity` in the env asks the gate for this token.
+            if resource.contains("management.azure.com") {
+                LOGIN_NEEDED.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             bail!(
                 "the Azure CLI's login on this machine {why}: run `az login{}` there{}",
                 tenant.map(|t| format!(" --tenant {t}")).unwrap_or_default(),
@@ -178,11 +181,20 @@ fn login_needed(err: &str) -> Option<&'static str> {
         || err.contains("interaction_required")
     {
         Some("needs you to sign in again")
+    } else if err.contains("AADSTS") {
+        // az appends "run az login" to every AAD error: another code is no login of yours.
+        None
     } else if err.contains("az login") {
         Some("is missing")
     } else {
         None
     }
+}
+
+/// Forget an earlier command's failed login: the user may have logged in since (`luoto ui`
+/// lives on).
+pub fn forget_login_needed() {
+    LOGIN_NEEDED.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The AADSTS code in `err` and its first sentence: `AADSTS700082: The refresh token has
@@ -361,6 +373,10 @@ mod tests {
             Some("is missing")
         );
         assert_eq!(login_needed("ERROR: (ResourceNotFound) nope"), None);
+        // Another AAD error carries the same "az login" advice, and isn't a login to redo.
+        let typo = "ERROR: AADSTS500011: The resource principal named https://x was not found. \
+                    Run the command below to authenticate interactively:\naz login --scope x";
+        assert_eq!(login_needed(typo), None);
     }
 
     const SUB: &str = "0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0";

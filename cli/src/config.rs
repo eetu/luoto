@@ -636,7 +636,8 @@ impl AgentOpts {
     }
 
     fn fill_from(&mut self, lower: &AgentOpts) {
-        if self.model.is_none() {
+        // On a model server, `model` names one of its models, which no team or default knows.
+        if self.model.is_none() && self.model_server.is_none() {
             self.model = lower.model.clone();
         }
         if self.effort.is_none() {
@@ -860,6 +861,13 @@ pub fn parse_global(text: &str) -> Result<GlobalConfig> {
         if r.is_some_and(|r| r.starts_with(crate::azure_identity::AZCLI)) {
             bail!("{key}: an `azcli:` ref is only for [credentials.azure], which writes its own");
         }
+    }
+    // Model servers are each env's own, and so is which one an agent starts on.
+    if let Some((name, _)) = cfg.agents.0.iter().find(|(_, o)| o.model_server.is_some()) {
+        bail!(
+            "agents.{name}.model_server: an agent's model server is set in each env's file \
+             (`luoto agent auth`), not config.toml"
+        );
     }
     Ok(cfg)
 }

@@ -150,8 +150,8 @@ env's `agents` or its `luoto.toml`), applies the env's current config and starts
 `/workspace`; `--yolo` turns off its own permission prompts (OpenCode has no
 flag for it), since the sandbox is the boundary. After that first run the command (`claude`,
 `codex`, …) also works in any env terminal, including an editor's. Each agent needs a credential
-for one of its providers under `[credentials.<provider>]`; the gate adds it to every request and
-the sandbox sees only a placeholder. `luoto agent auth <agent>` changes it, its questions
+for one of its providers under `[credentials.<provider>]`, or a model server of yours; the gate
+adds it to every request and the sandbox sees only a placeholder. `luoto agent auth <agent>` changes it, its questions
 opening on what the env has. [docs/agents.md](docs/agents.md#credentials) covers where
 to get one, how the prompt keeps it, and logins inside the sandbox, with the hosts and
 verification status of each agent. `luoto agent list` shows agents and providers. Model,

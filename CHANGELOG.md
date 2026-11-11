@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.3
+## 0.4.3 (2026-11-11)
 
 - **Open egress:** `luoto egress open` lets an env reach any HTTP(S) host and port no rule
   allows, as rule `open`, for an hour (`--for 2h`; `open = true` under `[egress]` in the env's
@@ -8,7 +8,8 @@
   Hosts that get your credentials keep to their rules, muted hosts stay denied, and denies,
   private addresses and the guards hold; TLS stays intercepted, so every request is logged.
   `luoto egress --open` lists the hosts it reached, and `luoto egress keep` offers presets
-  that cover them, else a rule per host (read, or write where a write went out, unchecked).
+  that cover them, checked, else a rule per host (read, or write where a write went out),
+  unchecked: code in the env chose those hosts.
   `luoto init --open[=2h]` starts a new env open. `up`, `status`, `sandbox status` and the
   UI's env list say until when (its menu opens and closes it); `luoto run` lists the hosts
   reached through it; the UI marks them `open` and offers its allow form as keep. Only the
@@ -16,7 +17,7 @@
   it.
 - **Progress everywhere:** `setup` (the VM's creation and start, gVisor, image pulls and
   builds), `up` (vault, gate, dev container, setup of the env, toolchain checks), `down`,
-  `rm`, `reset-home`, `doctor`, `prune`, `pull`, `--size`, `egress`, `logs`, `vault unlock`
+  `rm`, `reset-home`, `doctor`, `prune`, `pull`, `--size`, `egress`, `vault unlock`
   and `reload`, `upgrade` and `uninstall` show the spinner; what is quick when all is well
   shows nothing then, and names itself on the spinner's line once it takes a while. What
   podman prints while it pulls, builds or starts the VM is kept off the terminal as
@@ -37,12 +38,16 @@
   only) under `[agents.<agent>]`, in the env, `config.toml` or a team's `luoto.toml`, where
   the agent's command line takes options, and more for one run after `--` (`luoto run …
   -- --bare`); `["--bare", "--tools", "Bash,Read,Edit"]` cuts
-  Claude Code's request from 54 KB to 4 KB for a model of yours. A `luoto.toml` can't set the
-  agent's prompt-skipping flags.
+  Claude Code's request from 54 KB to 4 KB for a model of yours (`--bare` reads no subscription
+  token: with an API key or a model server). A `luoto.toml` can't pass the flags that turn off
+  or loosen the agent's own prompts (`prompt_flags` in its file).
 - **Agent installs:** an installer piped from a download (`curl … | bash`) fails the install
   when the download does, instead of the agent passing as installed with nothing there.
   OpenCode installs again: its installer moved to raw.githubusercontent.com and asks the npm
   registry for the latest version.
+- **Private addresses stay with their rules:** a kept-alive connection the gate dialed for a
+  rule that allows private addresses (a self-hosted forge, a model server) carries no request
+  another rule or open egress allowed; such a request dials anew and is vetted.
 - **Credentials stay on their rules:** the GitHub, Azure DevOps and git tokens, and a read-only
   `[credentials.custom]`, go only on the methods and paths their own rules allow. A wider rule
   (`luoto allow '*' --write`, an approved request) no longer carries them further, to a merge

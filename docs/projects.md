@@ -47,7 +47,9 @@ only proposes:
 - A changed file (from a `git pull` in the env, or the sandbox itself) applies only after you
   accept the difference: `up` lists it and asks; where it can't ask (no terminal, the UI,
   `up --all`) it waits for `luoto project apply`. `luoto project ignore` stops applying it.
-- It can't hold credentials, secret refs or `[[mute]]` (which would hide denials from you),
+- It can't hold credentials, secret refs, model servers, `[egress]` or `[[mute]]` (which
+  would hide denials from you), nor pick an agent's model server or pass the flags that loosen
+  its permission prompts,
   and its rules pass the checks the sandbox's own access requests get (no `*`, no multi-tenant
   wildcards, no private addresses). Write access and uninspected tunnels are spelled out in
   the review. Its denies only tighten.

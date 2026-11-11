@@ -1,6 +1,8 @@
 description = "OpenAI Codex CLI"
 command = "codex"
 yolo = ["--dangerously-bypass-approvals-and-sandbox"]
+# What a luoto.toml can't pass: approval and sandbox modes, and config or a profile that sets them.
+prompt_flags = ["--full-auto", "--yolo", "--ask-for-approval", "-a", "--sandbox", "-s", "--config", "-c", "--profile", "-p"]
 headless = ["exec", "{args}", "--dangerously-bypass-approvals-and-sandbox", "{prompt}"]
 providers = ["openai"]
 install = ["mkdir -p ~/.local && npm install -g --prefix ~/.local @openai/codex"]
@@ -18,22 +20,24 @@ file = "~/.codex/config.toml"
 path = ["model_reasoning_effort"]
 values = ["minimal", "low", "medium", "high", "xhigh"]
 
-# Model servers: a provider and a profile each (`codex --profile <name>`), the Responses API
-# (Codex has no other); the one it starts on is the default profile.
+# Model servers: a provider and a profile each (`codex --profile luoto-<name>`), under luoto's
+# own keys, since Codex's built-in providers (`ollama`, `openai`) win over one of the same
+# name; the Responses API (Codex has no other). The one it starts on is the default profile,
+# and its window goes where Codex reads one, at the top level.
 [model_server]
 api = "openai"
+switch = "`codex --profile luoto-{name}` (the cloud: `--profile cloud`)"
 endpoint = "/v1/responses"
-switch = "`codex --profile {name}`; the cloud: `codex --profile cloud`"
 each = [
-  { file = "~/.codex/config.toml", path = ["model_providers", "{name}", "name"], value = "{name}" },
-  { file = "~/.codex/config.toml", path = ["model_providers", "{name}", "base_url"], value = "{url}/v1" },
-  { file = "~/.codex/config.toml", path = ["model_providers", "{name}", "wire_api"], value = "responses" },
-  { file = "~/.codex/config.toml", path = ["model_providers", "{name}", "env_key"], value = "LUOTO_MODEL_TOKEN" },
-  { file = "~/.codex/config.toml", path = ["profiles", "{name}", "model_provider"], value = "{name}" },
-  { file = "~/.codex/config.toml", path = ["profiles", "{name}", "model"], value = "{model}" },
-  { file = "~/.codex/config.toml", path = ["profiles", "{name}", "model_context_window"], value = "{context:n}" },
+  { file = "~/.codex/config.toml", path = ["model_providers", "luoto-{name}", "name"], value = "{name}" },
+  { file = "~/.codex/config.toml", path = ["model_providers", "luoto-{name}", "base_url"], value = "{url}/v1" },
+  { file = "~/.codex/config.toml", path = ["model_providers", "luoto-{name}", "wire_api"], value = "responses" },
+  { file = "~/.codex/config.toml", path = ["model_providers", "luoto-{name}", "env_key"], value = "LUOTO_MODEL_TOKEN" },
+  { file = "~/.codex/config.toml", path = ["profiles", "luoto-{name}", "model_provider"], value = "luoto-{name}" },
+  { file = "~/.codex/config.toml", path = ["profiles", "luoto-{name}", "model"], value = "{model}" },
+  { file = "~/.codex/config.toml", path = ["profiles", "cloud", "model_provider"], value = "openai" },
 ]
 default = [
-  { file = "~/.codex/config.toml", path = ["profile"], value = "{name}" },
-  { file = "~/.codex/config.toml", path = ["profiles", "cloud", "model_provider"], value = "openai" },
+  { file = "~/.codex/config.toml", path = ["profile"], value = "luoto-{name}" },
+  { file = "~/.codex/config.toml", path = ["model_context_window"], value = "{context:n}" },
 ]

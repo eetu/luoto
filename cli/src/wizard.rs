@@ -534,6 +534,7 @@ fn credential_with(
             agent: a,
             provider: p,
             current: current(&p.name),
+            stored: have.iter().find(|h| h.provider() == p.name),
             first: !several,
             on_server,
             mode,
@@ -550,8 +551,10 @@ fn credential_with(
 struct How<'a> {
     agent: &'a profiles::Agent,
     provider: &'a profiles::Provider,
-    /// What the env has for the provider.
+    /// What the env has for the provider, where the agent starts on it.
     current: Option<&'a Auth>,
+    /// What the env has for the provider, a model server or not: offered to keep.
+    stored: Option<&'a Auth>,
     /// Its first question is the step's first.
     first: bool,
     /// The agent starts on a model server.
@@ -661,7 +664,7 @@ fn provider_auth(
         };
         let auth = &p.auth[&kind];
         println!("{}", text::wrap(&auth.how, "  ", text::columns()));
-        let kept = match h.current {
+        let kept = match h.stored {
             Some(Auth::Kind {
                 kind: k, reference, ..
             }) if *k == kind => Some(reference.as_str()),

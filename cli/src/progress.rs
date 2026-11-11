@@ -670,14 +670,21 @@ mod term {
     pub const HIDES_CURSOR: bool = true;
 
     /// What ends luoto from the terminal or a supervisor.
-    const SIGNALS: [libc::c_int; 4] = [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP];
+    /// What stops it as well (Ctrl-Z): after `fg` the spinner goes on without reading keys.
+    const SIGNALS: [libc::c_int; 5] = [
+        libc::SIGINT,
+        libc::SIGQUIT,
+        libc::SIGTERM,
+        libc::SIGHUP,
+        libc::SIGTSTP,
+    ];
 
     /// The terminal's settings and the signals' actions before [`Term::take`] changed them.
     struct Saved {
         termios: UnsafeCell<MaybeUninit<libc::termios>>,
         /// `termios` holds stdin's settings, changed for keys.
         keys: AtomicBool,
-        actions: UnsafeCell<[MaybeUninit<libc::sigaction>; 4]>,
+        actions: UnsafeCell<[MaybeUninit<libc::sigaction>; 5]>,
     }
 
     // SAFETY: written only by `take`, before it installs the handler that reads it, and only
@@ -687,7 +694,7 @@ mod term {
     static SAVED: Saved = Saved {
         termios: UnsafeCell::new(MaybeUninit::uninit()),
         keys: AtomicBool::new(false),
-        actions: UnsafeCell::new([const { MaybeUninit::uninit() }; 4]),
+        actions: UnsafeCell::new([const { MaybeUninit::uninit() }; 5]),
     };
 
     pub struct Term(());
@@ -716,10 +723,12 @@ mod term {
                     quiet.c_lflag &= !(libc::ICANON | libc::ECHO);
                     quiet.c_cc[libc::VMIN] = 0;
                     quiet.c_cc[libc::VTIME] = 0;
-                    SAVED.keys.store(
-                        libc::tcsetattr(0, libc::TCSANOW, &raw const quiet) == 0,
-                        Ordering::SeqCst,
-                    );
+                    // Set first: a signal between the change and the flag would leave the
+                    // terminal without echo.
+                    SAVED.keys.store(true, Ordering::SeqCst);
+                    if libc::tcsetattr(0, libc::TCSANOW, &raw const quiet) != 0 {
+                        SAVED.keys.store(false, Ordering::SeqCst);
+                    }
                 }
             }
             Term(())

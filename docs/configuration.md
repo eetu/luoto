@@ -9,8 +9,8 @@ a config file is its format (1 when missing): luoto reads older formats and refu
 from a newer luoto.
 
 ```toml
-presets = ["debian", "github", "github-releases", "toolchains", "npm"]   # see shared/presets/
-agents = ["claude"]           # with options: [agents.claude] tables (docs/guides/agent-settings.md)
+presets = ["debian", "github", "github-releases", "toolchains", "npm"]   # see ../shared/presets/
+agents = ["claude"]           # with options: [agents.claude] tables (guides/agent-settings.md)
 ports = [5173]                # published by the gate itself (servers listening on all interfaces)
 # isolation = "container"     # default gVisor; this shares the VM's kernel, builds ~1.6× faster
 # idle_stop = "2h"            # default 30m; "off" disables
@@ -27,7 +27,7 @@ dir = "/Users/me/dev/web"     # the project folder, copied in on the first `up`
 host = "docs.rs"
 paths = ["/serde/**"]         # /serde and below; `*` stays within one path segment
 expires = "2026-12-01T00:00:00Z"
-# idle = "2h"                 # how long it may sit silent before the gate closes it (see Limits)
+# idle = "2h"                 # how long it may sit silent before the gate closes it (see Limits in the README)
 
 [egress]                      # open: any HTTP(S) host no rule allows (`luoto egress open`)
 open_until = "2026-12-01T15:00:00Z"   # or `open = true`: until you remove it
@@ -115,7 +115,8 @@ hosts = ["dl.k8s.io"]         # extra hosts readable only while installs run
 ```
 
 `config.toml` takes `[tools]`, `[deps]`, `[[deny]]`, `[[mute]]`, `idle_stop` and
-`auto_forward` too, for every env, and `[agents.<name>]` options (`model`, `effort`) for every
+`auto_forward` too, for every env, and `[agents.<name>]` options (`model`, `effort`, `args`,
+`headless_args`) for every
 env that has that agent; an env's own, and its `luoto.toml`'s, come on top. Credentials go
 only in each env's own file. `notifications = false` there turns desktop notifications off.
 

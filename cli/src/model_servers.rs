@@ -199,6 +199,33 @@ pub fn check(name: &str, s: &ModelServer) -> Result<Endpoint> {
     Ok(ep)
 }
 
+/// Every `[model_servers]` entry checked, and the set as a whole: the gate adds a token by
+/// host and path, not port, so a token can't share its host with another server.
+pub fn check_all(servers: &BTreeMap<String, ModelServer>) -> Result<()> {
+    let mut by_host: BTreeMap<String, Vec<(&str, bool)>> = BTreeMap::new();
+    for (name, s) in servers {
+        let ep = check(name, s)?;
+        by_host
+            .entry(ep.sandbox_host().to_string())
+            .or_default()
+            .push((name, s.token.is_some()));
+    }
+    for (host, on) in by_host {
+        if on.len() > 1 && on.iter().any(|(_, t)| *t) {
+            let names: Vec<String> = on
+                .iter()
+                .map(|(n, _)| format!("model_servers.{n}"))
+                .collect();
+            bail!(
+                "{}: on one host ({host}) with a token; the gate adds a token by host, not port, \
+                 so it would reach them all. Keep one of them, or give each its own host name",
+                names.join(" and ")
+            );
+        }
+    }
+    Ok(())
+}
+
 /// What an agent's model is on server `name`: its own `model` where it starts there, else
 /// the server's.
 pub fn model_for<'a>(opts: &'a AgentOpts, name: &str, s: &'a ModelServer) -> Option<&'a str> {
@@ -242,6 +269,9 @@ pub fn sets(
 ) -> Sets {
     let mut now = Written::default();
     let mut adds = Vec::new();
+    // Entries that can't be filled (no model or window known now), where their path doesn't
+    // depend on what is unknown: what an earlier write put there goes.
+    let mut unfilled: Vec<(String, Vec<String>)> = Vec::new();
     for (name, s) in servers.iter().filter(|(_, s)| s.api.contains(&m.api)) {
         let Ok(ep) = Endpoint::parse(&s.url) else {
             continue;
@@ -252,10 +282,20 @@ pub fn sets(
             model: model_for(opts, name, s),
             context: s.context,
         };
-        adds.extend(m.each.iter().filter_map(|set| fill(set, &vars)));
+        let default = opts.model_server.as_deref() == Some(name.as_str());
+        let entries = m.each.iter().chain(m.default.iter().filter(|_| default));
+        for set in entries {
+            match fill(set, &vars) {
+                Some(filled) => adds.push(filled),
+                None if !set.path.iter().any(|p| p.contains("{model}")) => unfilled.push((
+                    set.file.clone(),
+                    set.path.iter().map(|p| p.replace("{name}", name)).collect(),
+                )),
+                None => {}
+            }
+        }
         now.each.insert(name.clone());
-        if opts.model_server.as_deref() == Some(name.as_str()) {
-            adds.extend(m.default.iter().filter_map(|set| fill(set, &vars)));
+        if default {
             now.default = Some(name.clone());
         }
     }
@@ -281,6 +321,9 @@ pub fn sets(
         for set in &m.default {
             remove(&set.file, set.path.clone());
         }
+    }
+    for (file, path) in unfilled {
+        remove(&file, path);
     }
     Sets { removes, adds, now }
 }
@@ -456,6 +499,8 @@ pub fn probe(ep: &Endpoint, token: Option<&str>, header: &str) -> Probe {
 /// Whether the server at `ep` has `path`, from an empty POST: 404 where it doesn't. None when
 /// it didn't answer.
 pub fn has_endpoint(ep: &Endpoint, token: Option<&str>, header: &str, path: &str) -> Option<bool> {
+    // An empty request: an API that has the path refuses it (400, 422) or the caller (401,
+    // 403); 404, 405 and 501 come from a server without it.
     curl(
         "POST",
         &format!("{}{path}", ep.url()),
@@ -463,7 +508,7 @@ pub fn has_endpoint(ep: &Endpoint, token: Option<&str>, header: &str, path: &str
         header,
         ep.this_machine(),
     )
-    .map(|(c, _)| c != 404)
+    .map(|(c, _)| matches!(c, 200..=299 | 400 | 401 | 403 | 415 | 422))
 }
 
 /// The model IDs of a `/v1/models` answer (OpenAI's and Anthropic's shape alike).
@@ -543,7 +588,8 @@ fn curl(
     use std::io::Write;
     use std::process::{Command, Stdio};
     let mut c = Command::new(if cfg!(windows) { "curl.exe" } else { "curl" });
-    c.args(["-sS", "--max-time", "3", "-X", method, "-o", "-"])
+    // `-q` first: a `~/.curlrc` (`--fail`, a proxy) would change the answers.
+    c.args(["-q", "-sS", "--max-time", "3", "-X", method, "-o", "-"])
         .args(["-w", "\n%{http_code}", "-K", "-"]);
     if local {
         c.args(["--noproxy", "*"]);
@@ -686,7 +732,13 @@ pub fn ask(global: &GlobalConfig, a: &profiles::Agent, cfg: &EnvConfig) -> Resul
         let picked = match row {
             Row::Have(name) => {
                 let s = cfg.model_servers[&name].clone();
-                let ep = Endpoint::parse(&s.url).map_err(|e| anyhow::anyhow!(e))?;
+                let ep = match check(&name, &s) {
+                    Ok(ep) => ep,
+                    Err(e) => {
+                        println!("{}", text::wrap(&format!("{e:#}"), "  ", text::columns()));
+                        continue;
+                    }
+                };
                 let token = match &s.token {
                     Some(r) => readable_token(global, r),
                     None => None,
@@ -808,6 +860,29 @@ fn new_server(
         );
         return Ok(None);
     }
+    let api = match p.apis() {
+        apis if !apis.is_empty() => apis,
+        _ => match ask_api(m)? {
+            Some(apis) => apis,
+            None => return Ok(None),
+        },
+    };
+    if !api.contains(&m.api) {
+        println!(
+            "{}",
+            text::wrap(
+                &format!(
+                    "It serves the {} API; {} speaks {}.",
+                    api.join(" and "),
+                    a.title(),
+                    m.api
+                ),
+                "  ",
+                text::columns()
+            )
+        );
+        return Ok(None);
+    }
     let mut token = None;
     if takes_token {
         let label = format!("The token of {}", ep.url());
@@ -835,29 +910,6 @@ fn new_server(
             }
             Step::Got(Secret::Later) | Step::Back => return Ok(None),
         }
-    }
-    let api = match p.apis() {
-        apis if !apis.is_empty() => apis,
-        _ => match ask_api(m)? {
-            Some(apis) => apis,
-            None => return Ok(None),
-        },
-    };
-    if !api.contains(&m.api) {
-        println!(
-            "{}",
-            text::wrap(
-                &format!(
-                    "It serves the {} API; {} speaks {}.",
-                    api.join(" and "),
-                    a.title(),
-                    m.api
-                ),
-                "  ",
-                text::columns()
-            )
-        );
-        return Ok(None);
     }
     let model = match ask_model(a, &p.models, None)? {
         Step::Got(m) => m,
@@ -1119,7 +1171,7 @@ mod tests {
         .adds;
         let limit = |k: &str| {
             adds.iter()
-                .find(|x| x.path == ["provider", "m", "models", "q", "limit", k])
+                .find(|x| x.path == ["provider", "luoto-m", "models", "q", "limit", k])
                 .map(|x| x.value.clone())
         };
         // OpenCode 1.x refuses a limit without both.
@@ -1137,7 +1189,7 @@ mod tests {
         .adds;
         let at = adds
             .iter()
-            .find(|x| x.path == ["profiles", "m", "model_context_window"])
+            .find(|x| x.path == ["model_context_window"])
             .map(|x| x.value.clone());
         assert_eq!(at, Some(Value::from(204800)));
     }
@@ -1219,14 +1271,14 @@ mod tests {
         assert_eq!(now.each, ["mtplx".to_string()].into());
         let at = |path: &[&str]| got.iter().find(|s| s.path == path).map(|s| s.value.clone());
         assert_eq!(
-            at(&["model_providers", "mtplx", "base_url"]),
+            at(&["model_providers", "luoto-mtplx", "base_url"]),
             Some(Value::String("http://host.docker.internal:8000/v1".into()))
         );
         assert_eq!(
-            at(&["profiles", "mtplx", "model"]),
+            at(&["profiles", "luoto-mtplx", "model"]),
             Some(Value::String("q3".into()))
         );
-        assert_eq!(at(&["profile"]), Some(Value::String("mtplx".into())));
+        assert_eq!(at(&["profile"]), Some(Value::String("luoto-mtplx".into())));
         // The server goes, and with it what was written for it.
         let s = super::sets(&m, &AgentOpts::default(), &BTreeMap::new(), &now);
         assert!(s.adds.is_empty());
@@ -1234,8 +1286,8 @@ mod tests {
         assert!(now.is_empty());
         assert!(got.iter().all(|s| s.value.is_null()));
         let paths: Vec<_> = got.iter().map(|s| s.path.join(".")).collect();
-        assert!(paths.contains(&"model_providers.mtplx".to_string()));
-        assert!(paths.contains(&"profiles.mtplx".to_string()));
+        assert!(paths.contains(&"model_providers.luoto-mtplx".to_string()));
+        assert!(paths.contains(&"profiles.luoto-mtplx".to_string()));
         assert!(paths.contains(&"profile".to_string()));
     }
 
@@ -1250,6 +1302,10 @@ mod tests {
         .into();
         let got = super::sets(&m, &AgentOpts::default(), &servers, &Written::default()).adds;
         assert!(!got.is_empty());
-        assert!(got.iter().all(|s| !s.path.join(".").contains("models")));
+        // Its models reset, and none named: no model is known.
+        assert!(
+            got.iter()
+                .all(|s| s.path.len() <= 3 || s.path[2] != "models")
+        );
     }
 }

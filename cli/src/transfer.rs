@@ -513,7 +513,7 @@ fn secret_refs(text: &str) -> Vec<(String, String)> {
     }
     let mut out = Vec::new();
     if let Ok(t) = toml::from_str::<toml::Table>(text) {
-        for key in ["credentials", "sandbox_secrets"] {
+        for key in ["credentials", "sandbox_secrets", "model_servers"] {
             if let Some(v) = t.get(key) {
                 walk(v, key.to_string(), &mut out);
             }
@@ -714,6 +714,23 @@ fn summary(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) -> Vec<String>
             );
         }
     }
+    for (n, s) in &cfg.model_servers {
+        let place = match crate::model_servers::Endpoint::parse(&s.url) {
+            Ok(ep) if ep.this_machine() => "on this machine: the env reaches its model API",
+            Ok(ep) if ep.private_address() || s.private => "on a private network",
+            Ok(_) => "on the internet",
+            Err(_) => "not a valid address",
+        };
+        let token = if s.token.is_some() {
+            ", with its token"
+        } else {
+            ""
+        };
+        line(
+            "model",
+            format!("{} at {} ({place}{token})", display(n), display(&s.url)),
+        );
+    }
     match cfg.isolation {
         Some(config::Isolation::Container) => line(
             "isolation",
@@ -815,9 +832,22 @@ fn imported_state(octet: u8, m: &Moved, cfg: &EnvConfig) -> EnvState {
         .iter()
         .filter(|(_, r)| r.dir.is_some())
         .map(|(n, _)| n.clone());
+    // Its home holds what the agents' configs had of the model servers: as written for this
+    // config, so a server removed here takes its entries along.
+    let agent_servers = cfg
+        .agents
+        .0
+        .iter()
+        .filter_map(|(n, o)| {
+            let a = luoto_shared::profiles::agent(n)?;
+            let (_, w) = crate::agents::settings(&a, o, cfg, &Default::default());
+            (!w.is_empty()).then(|| (n.clone(), w))
+        })
+        .collect();
     EnvState {
         seeded: m.seeded || cfg.workspace.dir.is_some(),
         repos: m.repos.iter().cloned().chain(folders).collect(),
+        agent_servers,
         ..EnvState::fresh(octet, m.home.clone())
     }
 }

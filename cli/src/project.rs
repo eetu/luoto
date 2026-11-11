@@ -138,16 +138,24 @@ fn validate(p: &ProjectConfig) -> Result<()> {
                 display(name)
             );
         }
-        // The agent's own prompts are each developer's to turn off (`--yolo`).
+        // The agent's own prompts are each developer's to turn off (`--yolo`) or loosen.
+        let loosens = |x: &str| {
+            a.yolo.iter().chain(&a.prompt_flags).any(|f| {
+                x == f
+                    || x.starts_with(&format!("{f}="))
+                    // `-anever`: a one-letter flag takes its value joined.
+                    || (f.len() == 2 && !f.starts_with("--") && x.starts_with(f.as_str()))
+            })
+        };
         if let Some(y) = opts
             .args
             .iter()
             .chain(&opts.headless_args)
-            .find(|x| a.yolo.contains(x))
+            .find(|x| loosens(x))
         {
             bail!(
-                "luoto.toml: agents.{}: `{}` turns off the agent's own prompts, which only \
-                 `luoto agent run --yolo` does",
+                "luoto.toml: agents.{}: `{}` turns off or loosens the agent's own prompts, \
+                 which only you do (`luoto agent run --yolo`, your env's own `args`)",
                 display(name),
                 display(y)
             );
@@ -1139,6 +1147,16 @@ mod tests {
         let err =
             parse("[agents.claude]\nargs = [\"--dangerously-skip-permissions\"]").unwrap_err();
         assert!(format!("{err:#}").contains("--yolo"), "{err:#}");
+        for loose in [
+            "[agents.claude]\nargs = [\"--permission-mode\", \"bypassPermissions\"]",
+            "[agents.claude]\nheadless_args = [\"--settings=x.json\"]",
+            "[agents.codex]\nargs = [\"-anever\"]",
+            "[agents.codex]\nargs = [\"--config\", \"approval_policy=never\"]",
+            "[agents.copilot]\nargs = [\"--allow-all-tools\"]",
+        ] {
+            assert!(parse(loose).is_err(), "{loose}");
+        }
+        assert!(parse("[agents.codex]\nargs = [\"--search\"]").is_ok());
         assert!(parse("[agents.claude]\nargs = [\"a\\u0007b\"]").is_err());
     }
 

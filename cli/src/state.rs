@@ -44,6 +44,10 @@ pub struct EnvState {
     /// removes when a server goes (`agents::configure`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_servers: BTreeMap<String, crate::model_servers::Written>,
+    /// A digest of what luoto last wrote into each agent's config: a rule change rewrites
+    /// only what changed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_sets: BTreeMap<String, String>,
 }
 
 impl EnvState {
@@ -106,8 +110,16 @@ pub fn reserve(ctx: &Ctx, env: &str, make: impl FnOnce(u8) -> EnvState) -> Resul
     let lock = std::fs::File::create(ctx.paths.data.join("octets.lock"))?;
     lock.lock().context("lock the subnets")?;
     let used: Vec<String> = ctx.rt.subnets()?.into_iter().map(|(_, s)| s).collect();
-    let octet = free_octet(names::env_octets(), &taken(&ctx.paths)?, &used)
-        .context("no free subnet left for a new env")?;
+    let octet = free_octet(names::env_octets(), &taken(&ctx.paths)?, &used).with_context(|| {
+        let r = names::env_octets();
+        format!(
+            "no free subnet left in 10.213.{}-{}.0/24, this luoto's range: `{} rm` an env \
+                 to free one",
+            r.start(),
+            r.end(),
+            names::instance()
+        )
+    })?;
     let s = make(octet);
     s.save(&ctx.paths, env)?;
     Ok(s)
@@ -127,6 +139,7 @@ impl EnvState {
             tools: None,
             dev_ca: None,
             agent_servers: BTreeMap::new(),
+            agent_sets: BTreeMap::new(),
         }
     }
 }

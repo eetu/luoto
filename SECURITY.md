@@ -29,7 +29,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   with fake addresses and never forwarded. Destinations are resolved by the gate only after a
   request is allowed, every resolved address is checked against private, loopback,
   link-local, CGNAT and host-gateway ranges (including IPv4 inside IPv6), and the gate
-  connects to exactly the vetted address. Host, SNI and CONNECT authority must agree.
+  connects to exactly the vetted address. Host, SNI and CONNECT authority must agree. Only a
+  rule that says so reaches a private address (a self-hosted forge's, a model server's on
+  this machine or your network), and a connection dialed for one carries no request another
+  rule or open egress allowed.
 - **Open egress.** `luoto egress open` (an hour unless told otherwise; `open = true` until
   removed) lets out over HTTP(S), as rule `open`, what no rule allows, to any host and port.
   It never widens a host that gets a credential (its rules stay its only access), a muted
@@ -50,7 +53,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   (GitHub installation tokens restricted to the env's repositories and permissions). On a
   credentialed host the gate removes any credential the client sent before injecting its own,
   so a dependency carrying an attacker's token cannot use it, and it injects only over TLS:
-  plain HTTP to a credentialed host is refused. A credential goes only on the methods and
+  plain HTTP to a credentialed host is refused, except to a model server on this machine
+  (`[model_servers]`), whose requests never leave it; the gate dials one only where every
+  address of its name is private. A credential goes only on the methods and
   paths its own rules allow: a wider rule (one you add, an approved request) lets more
   requests through, but they go without it.
 - **GitHub writes.** Pushes only to the granted repositories, never to protected branches
@@ -183,8 +188,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   turns every host into such a channel; luoto asks for confirmation and offers time limits.
 - **Open egress.** While an env's egress is open, any code in it can upload anything to any
   HTTP(S) host and download what it likes. What still holds: secrets stay in the vault and go only where their rules allow, private
-  addresses and services on your machine stay unreachable, and raw TCP, SSH and UDP still
-  need tunnel rules. `luoto egress --open` shows where requests went; keep the window short.
+  addresses and services on your machine stay unreachable, raw TCP and SSH still need tunnel
+  rules, and UDP still goes nowhere. `luoto egress --open` shows where requests went; keep the window short.
 - **Model APIs.** Prompts to an allowed model API can carry data, and the API key can be
   spent by anything in the sandbox. Anthropic's, OpenAI's and Gemini's file and batch
   endpoints are denied, and so are requests asking them to fetch a URL or call an MCP server

@@ -45,7 +45,7 @@ flowchart TB
   CLI get a briefing and an MCP server: they can see the policy and ask you for access instead
   of guessing.
 
-`SECURITY.md` has the threat model, including what luoto does not stop.
+[SECURITY.md](../SECURITY.md) has the threat model, including what luoto does not stop.
 
 ## Platforms
 

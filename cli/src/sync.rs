@@ -140,7 +140,7 @@ pub fn reapply(ctx: &Ctx, env: &str) -> Result<Option<Plan>> {
         write_runtime_env(ctx, env, &p.compiled)?;
     }
     // The agents' options and model servers, as the config has them now.
-    crate::agents::configure(ctx, env, &p.cfg, None, false)?;
+    crate::agents::configure(ctx, env, &p.cfg, None, crate::agents::Write::Changed)?;
     Ok(Some(p))
 }
 

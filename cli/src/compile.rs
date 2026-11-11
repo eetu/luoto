@@ -1014,7 +1014,7 @@ fn compile_github_one(
 /// addresses for one on this machine or a private network), its token added by the gate; and
 /// the agents that start on one, checked against it.
 fn compile_model_servers(b: &mut Builder, cfg: &EnvConfig) -> Result<()> {
-    let mut tokened_here: Vec<&str> = Vec::new();
+    model_servers::check_all(&cfg.model_servers)?;
     for (name, s) in &cfg.model_servers {
         let ep = model_servers::check(name, s)?;
         let host = ep.sandbox_host().to_string();
@@ -1039,14 +1039,6 @@ fn compile_model_servers(b: &mut Builder, cfg: &EnvConfig) -> Result<()> {
         );
         let Some(token) = &s.token else { continue };
         if ep.this_machine() {
-            // The gate tells servers apart by host and path, not port.
-            if let Some(other) = tokened_here.first() {
-                bail!(
-                    "model_servers.{name} and model_servers.{other}: two servers on this machine \
-                     with a token; the gate can add only one there"
-                );
-            }
-            tokened_here.push(name);
             b.plain_http_credentials.push(host.clone());
         }
         let binding = format!("model_server.{name}");
@@ -2074,7 +2066,18 @@ api = ["openai"]
             (
                 "[model_servers.a]\nurl = \"http://localhost:1\"\napi = [\"openai\"]\ntoken = \"env:A\"\n\
                  [model_servers.b]\nurl = \"http://127.0.0.1:2\"\napi = [\"openai\"]\ntoken = \"env:B\"",
-                "two servers on this machine",
+                "on one host",
+            ),
+            // A token can't share its host with a keyless server either: it would reach it.
+            (
+                "[model_servers.a]\nurl = \"http://localhost:4000\"\napi = [\"openai\"]\ntoken = \"env:A\"\n\
+                 [model_servers.b]\nurl = \"http://localhost:11434\"\napi = [\"openai\"]",
+                "on one host",
+            ),
+            (
+                "[model_servers.a]\nurl = \"https://gpu.example\"\napi = [\"openai\"]\ntoken = \"env:A\"\n\
+                 [model_servers.b]\nurl = \"https://gpu.example:8443\"\napi = [\"openai\"]\ntoken = \"env:B\"",
+                "on one host",
             ),
         ] {
             let Err(e) = compile("t", &cfg(text), GATE, &[]) else {

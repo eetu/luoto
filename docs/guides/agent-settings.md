@@ -31,10 +31,15 @@ args = ["--tools", "Bash,Read,Edit"]   # every start through luoto: `agent run`,
 headless_args = ["--bare"]             # `luoto run` only, after `args`
 ```
 
-They go where the agent's command line takes options (after `run` for OpenCode, `exec` for
-Codex), and `luoto agent run -- …` or `luoto run … -- …` adds more for one start. `claude` typed in a shell starts
-without them. A team's `luoto.toml` may set them, shown in its review; it can't set the
-agent's own prompt-skipping flags, which only `--yolo` gives.
+They follow the agent's command (for `luoto run`, where its command line takes options: after
+`run` for OpenCode, `exec` for Codex), and `luoto agent run claude -- …` or
+`luoto run … -- …` adds more for one start. `claude` typed in a shell starts without them. Claude Code's
+`--bare` reads no subscription token, so it needs an `api_key` or a model server.
+
+A team's `luoto.toml` may set them, shown in its review, but not the flags that turn off or
+loosen the agent's own permission prompts (its `yolo` flags and the ones its file in
+`shared/agents` lists as `prompt_flags`, such as Claude Code's `--permission-mode` and
+`--settings`, or Codex's `--full-auto` and `--config`): only you set those.
 
 ## Credentials without the prompt
 
