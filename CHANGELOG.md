@@ -25,7 +25,12 @@
   it too. Secrets are never requested from inside: you add them with `luoto var set`.
 - **Egress view:** a host a rule allows since it was blocked reads as allowed, its denials as
   history ("blocked before rule r1"), instead of "partly" with the old denial's text.
-- **`luoto ui`:** picking the env shown after the vault brings its panel back.
+- **`luoto ui`'s vault view:** the vault is a view of its own, every env's credentials in one
+  table: what each is for, where its secret is kept (the ref, never the value), the hosts it
+  goes to, whether the vault holds it, and refs in memory no env uses. A credential shows
+  what else shares its secret and the command that changes it; unlock only while locked, and
+  right-click on the vault for unlock, reload and lock. An env's credentials section lists
+  the same, with an unlock while secrets are missing.
 - **macOS notifications** go through `terminal-notifier`, which the Homebrew formula now
   installs, instead of Script Editor; macOS asks once to allow them. Without it, or until
   allowed, they come through `osascript` as before. A notification says "has a request",

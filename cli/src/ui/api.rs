@@ -88,6 +88,7 @@ pub fn routes() -> Router<Ui> {
         )
         .route("/envs/{name}/pull", get(pull_plan).post(pull_apply))
         .route("/envs/{name}/{action}", post(env_action))
+        .route("/vault", get(vault_view))
         .route("/vault/{action}", post(vault_action))
         .route("/stream", get(stream))
 }
@@ -535,24 +536,17 @@ async fn pull_apply(Path(name): Path<String>, Json(a): Json<PullApply>) -> ApiRe
 }
 
 #[derive(Serialize)]
-struct Injected {
-    host: String,
-    binding: String,
-}
-
-#[derive(Serialize)]
 struct EnvDetail {
     name: String,
     path: String,
     rules: Vec<CompiledRule>,
-    injections: Vec<Injected>,
     denies: usize,
     warnings: Vec<String>,
     dev: String,
     gate: String,
     gate_status: Option<GateStatus>,
-    credentials: Vec<String>,
-    missing_secrets: Vec<String>,
+    /// Its vault bindings, with where each is kept and where it goes.
+    credentials: Vec<crate::credentials::Credential>,
     /// The env's own variables (`[env]`, `[sandbox_secrets]`).
     variables: Vec<crate::vars::EnvVar>,
     /// What luoto sets in the env's shells besides them (credentials' placeholders, agents'
@@ -571,20 +565,7 @@ async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
         let gate_status = (gate == "running")
             .then(|| ctl::gate_status(&ctx.rt, &name).ok())
             .flatten();
-        let vault_env = ctl::vault_status(&ctx.rt)
-            .ok()
-            .and_then(|v| v.envs.into_iter().find(|e| e.env == name));
-        let mut injections: Vec<Injected> = p
-            .compiled
-            .policy
-            .injections
-            .iter()
-            .map(|i| Injected {
-                host: i.host.clone(),
-                binding: i.binding.clone(),
-            })
-            .collect();
-        injections.dedup_by(|a, b| a.host == b.host && a.binding == b.binding);
+        let vault = ctl::vault_status(&ctx.rt).ok();
         let ports = if dev == "running" {
             ports::of_env(&ctx.paths, &name, &p.cfg.ports, gate == "running")
         } else {
@@ -603,13 +584,11 @@ async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
             rules: p.compiled.policy.rules.clone(),
             denies: p.compiled.policy.denies.len(),
             warnings: p.compiled.warnings.clone(),
-            credentials: p.compiled.bindings.keys().cloned().collect(),
-            missing_secrets: vault_env.map(|v| v.missing).unwrap_or_default(),
+            credentials: crate::credentials::of(&name, &p.cfg, &p.compiled, vault.as_ref()),
             variables: crate::vars::listed(&p.cfg),
             luoto_variables: crate::vars::luoto_names(&p.compiled, &p.cfg)
                 .into_iter()
                 .collect(),
-            injections,
             name,
             dev,
             gate,
@@ -792,6 +771,50 @@ async fn env_action(Path((name, action)): Path<(String, String)>) -> ApiResult<V
             other => anyhow::bail!("unknown action `{other}`"),
         }
         Ok(json!({ "ok": true }))
+    })
+    .await
+    .map(Json)
+}
+
+/// The vault across envs: its state, every env's credentials, and what it holds that none
+/// uses.
+#[derive(Serialize)]
+struct VaultView {
+    /// None: the vault isn't running.
+    status: Option<VaultStatus>,
+    credentials: Vec<crate::credentials::Credential>,
+    unused: Vec<String>,
+    /// Envs whose config doesn't compile, and why.
+    errors: Vec<String>,
+}
+
+async fn vault_view() -> ApiResult<VaultView> {
+    blocking(|| {
+        let ctx = Ctx::load()?;
+        let status = ctl::vault_status(&ctx.rt).ok();
+        let mut credentials = Vec::new();
+        let mut errors = Vec::new();
+        for name in crate::config::list_envs(&ctx.paths)? {
+            match env::plan(&ctx, &name) {
+                Ok(p) => credentials.extend(crate::credentials::of(
+                    &name,
+                    &p.cfg,
+                    &p.compiled,
+                    status.as_ref(),
+                )),
+                Err(e) => errors.push(format!("{name}: {e:#}")),
+            }
+        }
+        let unused = status
+            .as_ref()
+            .map(|v| crate::credentials::unused(v, &credentials))
+            .unwrap_or_default();
+        Ok(VaultView {
+            status,
+            credentials,
+            unused,
+            errors,
+        })
     })
     .await
     .map(Json)

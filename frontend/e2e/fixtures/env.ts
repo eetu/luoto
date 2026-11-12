@@ -235,7 +235,6 @@ export default {
       "access": "read"
     }
   ],
-  "injections": [],
   "denies": 0,
   "warnings": [],
   "dev": "running",
@@ -248,7 +247,6 @@ export default {
     "pending_requests": 0
   },
   "credentials": [],
-  "missing_secrets": [],
   "variables": [
     { "kind": "plain", "name": "RUST_LOG", "value": "debug" },
     { "kind": "secret", "name": "DATABASE_URL", "kept": "op://Dev/local-db/url" }

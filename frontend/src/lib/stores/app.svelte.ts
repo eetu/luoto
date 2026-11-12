@@ -1,6 +1,6 @@
-// App-wide state shared by the panels: what exists (overview), which env and subject are
-// selected, the selected env's egress, requests and project status, disk use, and the status
-// line.
+// App-wide state shared by the panels: what exists (overview), what the surface shows (an
+// env's egress or the vault), which env and subject are selected, the selected env's egress,
+// requests and project status, the vault's credentials, disk use, and the status line.
 
 import { api, ApiError, followEvents, risksOf } from "$lib/api";
 import type {
@@ -14,6 +14,7 @@ import type {
   OpenEgress,
   Overview,
   ProjectStatus,
+  VaultView,
   VmDisk,
 } from "$lib/types";
 
@@ -21,7 +22,9 @@ export type Subject =
   | { kind: "env" }
   | { kind: "host"; host: string }
   | { kind: "request"; id: number }
-  | { kind: "vault" };
+  /** The vault as a whole, or one of its credentials: the surface shows the vault. */
+  | { kind: "vault" }
+  | { kind: "credential"; env: string; binding: string };
 
 export const WINDOWS = [
   { minutes: 15, label: "15 min" },
@@ -52,6 +55,9 @@ class AppState {
   egress = $state<HostSummary[]>([]);
   requests = $state<AccessRequest[]>([]);
   subject = $state<Subject>({ kind: "env" });
+  /** What the surface shows: the selected env's egress, or the vault across envs. */
+  view = $state<"env" | "vault">("env");
+  vault = $state<VaultView | null>(null);
   minutes = $state(60);
   deniedOnly = $state(false);
   search = $state("");
@@ -132,6 +138,22 @@ export async function refreshEnv(): Promise<void> {
   }
 }
 
+/** Every env's credentials and what the vault holds: a compile per env, so only while shown. */
+export async function refreshVault(): Promise<void> {
+  try {
+    app.vault = await api.vaultView();
+  } catch (e) {
+    failed(e);
+  }
+}
+
+/** Show the vault on the surface, with one of its credentials as the subject if given. */
+export function openVault(credential?: { env: string; binding: string }): void {
+  app.view = "vault";
+  app.subject = credential ? { kind: "credential", ...credential } : { kind: "vault" };
+  void refreshVault();
+}
+
 export async function selectEnv(name: string): Promise<void> {
   if (app.env !== name) {
     app.env = name;
@@ -140,7 +162,8 @@ export async function selectEnv(name: string): Promise<void> {
     app.egress = [];
     app.requests = [];
   }
-  // Picking the env shown already brings its panel back (from the vault's, a host's).
+  // Picking the env shown already brings its egress and panel back (from the vault, a host).
+  app.view = "env";
   app.subject = { kind: "env" };
   await refreshEnv();
 }
@@ -220,6 +243,7 @@ export function startSync(): () => void {
       pendingRefresh ??= setTimeout(() => {
         pendingRefresh = null;
         void refreshEnv();
+        if (app.view === "vault") void refreshVault();
       }, 400);
     }
   };
@@ -240,7 +264,10 @@ export function startSync(): () => void {
   void api.meta().then((m) => (app.meta = m), failed);
   void refreshVmDisk();
   const overviewTimer = setInterval(() => void refreshOverview(), 5000);
-  const envTimer = setInterval(() => void refreshEnv(), 8000);
+  const envTimer = setInterval(() => {
+    void refreshEnv();
+    if (app.view === "vault") void refreshVault();
+  }, 8000);
   const diskTimer = setInterval(() => void refreshVmDisk(), 300_000);
   return () => {
     ctrl.abort();

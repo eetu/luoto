@@ -2,8 +2,9 @@
 
 SvelteKit (runes) SPA, adapter-static to `dist/`, embedded into `luoto` by rust-embed (the
 `cli/build.rs` re-embeds on rebuild). halo-design tokens in `src/lib/styles/halo.css`
-(verbatim copy of the family file); halo-interaction shell: env list (navigate), egress view
-(surface), subject panel (host, request, env or vault) and status bar.
+(verbatim copy of the family file); halo-interaction shell: env list and the vault
+(navigate), an env's egress view or the vault view of every env's credentials (surface,
+`app.view`), subject panel (host, request, env, vault or one credential) and status bar.
 
 - `src/lib/api.ts` is the only fetch layer. The API's types are generated from the Rust
   structs into `src/lib/generated/api.ts` (`just types`; never edit it) and re-exported by

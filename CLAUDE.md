@@ -146,7 +146,9 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   the gate starts), and the gate mounts only that folder, read-only.
 - The UI API requires the per-run token; keep Host/Origin checks on any new route.
 - `ui/api.rs` holds no policy logic: its routes call the core the CLI uses (`rules.rs`,
-  `init.rs`, `project.rs`, `sync.rs`), so the two can't drift.
+  `init.rs`, `project.rs`, `sync.rs`, `credentials.rs`), so the two can't drift.
+  `credentials.rs` lists an env's credentials as people see them (what for, the ref through
+  `secrets::shown_ref`, hosts, vault state, the command that changes it), never a value.
 - Gate, vault and `sandbox` are Linux binaries; Linux-only modules are `cfg(target_os =
   "linux")` so the workspace still builds on macOS/Windows.
 

@@ -472,14 +472,36 @@ test("the env panel lists its variables, a secret by where it is kept", async ({
   await expect(page.getByText("set by luoto: GIT_TERMINAL_PROMPT")).toBeVisible();
 });
 
-test("after the vault, picking the env shown brings its panel back", async ({ page }) => {
+test("the vault is a view of every env's credentials, each with how to change it", async ({
+  page,
+}) => {
   await mockApi(page);
   await open(page);
   await page.getByRole("button", { name: /^web/ }).click();
   await page.getByRole("button", { name: "no secrets in use" }).click();
-  await expect(page.getByText("bindings per env")).toBeVisible();
+
+  // The surface is the vault now, not the env's egress.
+  await expect(page.getByRole("heading", { name: "vault", exact: true })).toBeVisible();
+  await expect(page.getByText("web egress")).toHaveCount(0);
+  const github = page.getByRole("row", { name: /github/ });
+  await expect(github).toContainText("keyring:luoto/github-pat");
+  await expect(page.getByRole("row", { name: /custom\.billing/ })).toContainText("missing");
+  await expect(page.getByRole("row", { name: /op:\/\/Old\/retired/ })).toContainText("unused");
+
+  await github.click();
+  await expect(page.getByText("web: github")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /luoto repo auth -e web acme\/web/ }),
+  ).toBeVisible();
+  await page.getByRole("row", { name: /custom\.billing/ }).click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: /Copy change command/ })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await expect(page.getByText("Pick a credential")).toBeVisible();
+
+  // Picking the env brings its egress and panel back.
   await page.getByRole("button", { name: /^web/ }).click();
-  await expect(page.getByText("bindings per env")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "vault", exact: true })).toHaveCount(0);
   await expect(page.getByText("set by luoto: GIT_TERMINAL_PROMPT")).toBeVisible();
 });
 

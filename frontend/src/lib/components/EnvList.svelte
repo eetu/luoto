@@ -6,12 +6,64 @@
   import { api } from "$lib/api";
   import VmDiskStatus from "$lib/components/VmDiskStatus.svelte";
   import { openMenu } from "$lib/menu.svelte";
-  import { act, app, copyText, openLeft, selectEnv } from "$lib/stores/app.svelte";
+  import {
+    act,
+    app,
+    copyText,
+    openLeft,
+    openVault,
+    refreshVault,
+    say,
+    selectEnv,
+  } from "$lib/stores/app.svelte";
   import type { EnvRow } from "$lib/types";
 
   let { onNew }: { onNew: () => void } = $props();
 
   const vault = $derived(app.overview?.vault ?? null);
+  // Secrets the envs' credentials need and the vault lacks: an unlock reads them.
+  const missing = $derived(vault?.envs.reduce((n, e) => n + e.missing.length, 0) ?? 0);
+
+  function vaultMenu(e: MouseEvent) {
+    const locked = vault?.locked ?? true;
+    const then = () => (app.view === "vault" ? refreshVault() : undefined);
+    openMenu(e, "vault", [
+      {
+        label: "Unlock",
+        run: () =>
+          void act(
+            "unlocking… (your secret store may ask to authorize)",
+            () => api.vault("unlock"),
+            "vault unlocked",
+          ).then(then),
+        disabled: !vault || (!locked && missing === 0),
+        hint: !vault ? "not running" : !locked && missing === 0 ? "unlocked" : undefined,
+      },
+      {
+        label: "Read secrets again",
+        run: () =>
+          void act("reading secrets again… (your secret store may ask)", api.reloadVault).then(
+            (r) => {
+              if (r) say(`read ${r.read}: ${r.changed} changed`, r.failed.length > 0);
+              return then();
+            },
+          ),
+        disabled: !vault || locked,
+        hint: !vault ? "not running" : locked ? "locked" : "after rotating one",
+      },
+      {
+        label: "Lock",
+        run: () =>
+          void act(
+            "locking…",
+            () => api.vault("lock"),
+            "vault locked; credentialed hosts now get 403",
+          ).then(then),
+        disabled: !vault || locked,
+        hint: !vault ? "not running" : locked ? "locked" : "every env's credentials",
+      },
+    ]);
+  }
 
   function menu(e: MouseEvent, env: EnvRow) {
     const running = env.dev === "running";
@@ -68,8 +120,7 @@
   {#each app.overview?.envs ?? [] as env (env.name)}
     <button
       class="row"
-      class:selected={app.env === env.name && app.subject.kind !== "vault"}
-      class:shown={app.env === env.name && app.subject.kind === "vault"}
+      class:selected={app.view === "env" && app.env === env.name}
       onclick={() => void selectEnv(env.name)}
       oncontextmenu={(e) => menu(e, env)}
       title={env.error ?? `${env.name}: dev ${env.dev}, gate ${env.gate}`}
@@ -99,8 +150,9 @@
   <p class="label vault-label">vault</p>
   <button
     class="row"
-    class:selected={app.subject.kind === "vault"}
-    onclick={() => (app.subject = { kind: "vault" })}
+    class:selected={app.view === "vault"}
+    onclick={() => openVault()}
+    oncontextmenu={vaultMenu}
   >
     {#if !vault}
       <Lock size={14} /><span class="name muted">not running</span>
@@ -110,7 +162,13 @@
       <Lock size={14} /><span class="name">locked</span>
     {:else}
       <LockOpen size={14} class="accent-icon" /><span class="name">unlocked</span>
-      <span class="pill">{vault.loaded_refs.length}</span>
+      {#if missing > 0}
+        <span class="pill warn" title="secrets the envs need and the vault lacks: unlock reads them"
+          >{missing}</span
+        >
+      {:else}
+        <span class="pill" title="secrets in memory">{vault.loaded_refs.length}</span>
+      {/if}
     {/if}
   </button>
 
@@ -147,11 +205,6 @@
     background: var(--halo-accent-soft);
   }
 
-  /* The env whose egress the surface shows while the vault is the subject. */
-  .row.shown {
-    border-color: var(--halo-border);
-  }
-
   .name {
     flex: 1;
     overflow: hidden;
@@ -185,6 +238,11 @@
     font-size: 11px;
     line-height: 18px;
     text-align: center;
+  }
+
+  .pill.warn {
+    background: color-mix(in srgb, var(--halo-error) 15%, transparent);
+    color: var(--halo-error);
   }
 
   .pill.accent {

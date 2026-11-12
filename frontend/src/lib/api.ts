@@ -29,6 +29,7 @@ import type {
   SelftestReport,
   SetupInfo,
   Shown,
+  VaultView,
   VmDisk,
 } from "./types";
 
@@ -154,6 +155,7 @@ export const api = {
     }),
   vault: (action: "unlock" | "lock") => request<unknown>("POST", `/vault/${action}`, {}),
   reloadVault: () => request<Reloaded>("POST", "/vault/reload", {}),
+  vaultView: () => request<VaultView>("GET", "/vault"),
 };
 
 /** Follow the live event stream (fetch-based SSE, so the token can travel in a header). */

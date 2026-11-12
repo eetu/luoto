@@ -60,6 +60,30 @@ export type CreatedEnv = {
   name: string;
 };
 
+export type CredState =
+  /** The vault holds its secret. */
+  | "loaded"
+  /** The vault runs unlocked but lacks it: `luoto vault unlock` reads it. */
+  | "missing"
+  /** The vault is locked (after a restart): `luoto vault unlock`. */
+  | "locked"
+  /** The env isn't registered with the vault yet: `luoto up`. */
+  | "not_up";
+
+export type Credential = {
+  env: string;
+  binding: string;
+  /** What it is for, for people: `GitHub token for acme/api`, `anthropic oauth_token, for claude`. */
+  what: string;
+  /** Where its secret is kept, as `luoto` shows refs. */
+  kept: string;
+  /** Where the gate adds it; an SSH key's, the hosts it logs in to. */
+  hosts: string[];
+  state: CredState;
+  /** The command that changes it; none: the env's own file does (`luoto edit`). */
+  change: string | null;
+};
+
 export type Decision = {
   /**
    * When the request shown was filed: the gate numbers requests anew when it restarts, so
@@ -100,14 +124,13 @@ export type EnvDetail = {
   name: string;
   path: string;
   rules: CompiledRule[];
-  injections: Injected[];
   denies: number;
   warnings: string[];
   dev: string;
   gate: string;
   gate_status: GateStatus | null;
-  credentials: string[];
-  missing_secrets: string[];
+  /** Its vault bindings, with where each is kept and where it goes. */
+  credentials: Credential[];
   /** The env's own variables (`[env]`, `[sandbox_secrets]`). */
   variables: EnvVar[];
   /**
@@ -222,11 +245,6 @@ export type HostSummary = {
   last_seen: string | null;
   wants_write: boolean;
   tls_rejected: boolean;
-};
-
-export type Injected = {
-  host: string;
-  binding: string;
 };
 
 /**
@@ -595,6 +613,19 @@ export type VaultStatus = {
   locked: boolean;
   loaded_refs: string[];
   envs: VaultEnvSummary[];
+};
+
+/**
+ * The vault across envs: its state, every env's credentials, and what it holds that none
+ * uses.
+ */
+export type VaultView = {
+  /** None: the vault isn't running. */
+  status: VaultStatus | null;
+  credentials: Credential[];
+  unused: string[];
+  /** Envs whose config doesn't compile, and why. */
+  errors: string[];
 };
 
 export type Verdict = "allow" | "deny";

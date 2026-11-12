@@ -11,6 +11,7 @@ mod compile;
 mod complete;
 mod config;
 mod connect;
+mod credentials;
 mod ctl;
 mod deps;
 mod detect;

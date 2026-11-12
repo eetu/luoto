@@ -11,6 +11,7 @@ import project from "./fixtures/project";
 import remote from "./fixtures/remote";
 import requests from "./fixtures/requests";
 import setup from "./fixtures/setup";
+import vault from "./fixtures/vault";
 
 // Fixtures are real `luoto ui` responses (env renamed to `web`), each checked against its
 // generated API type by `yarn typecheck`, so one that drifts from the Rust types fails there.
@@ -26,6 +27,7 @@ const fixtures = {
   remote,
   requests,
   setup,
+  vault,
 };
 
 export const fixture = <K extends keyof typeof fixtures>(name: K): (typeof fixtures)[K] =>
@@ -36,6 +38,7 @@ type Route = { method: string; path: RegExp; body: (req: Request) => unknown };
 const routes: Route[] = [
   { method: "GET", path: /^\/api\/overview$/, body: () => fixture("overview") },
   { method: "GET", path: /^\/api\/meta$/, body: () => fixture("meta") },
+  { method: "GET", path: /^\/api\/vault$/, body: () => fixture("vault") },
   { method: "GET", path: /^\/api\/setup$/, body: () => fixture("setup") },
   { method: "GET", path: /^\/api\/disk$/, body: () => fixture("disk") },
   { method: "GET", path: /^\/api\/disk\/envs$/, body: () => fixture("envDisk") },

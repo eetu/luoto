@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { expect, test } from "@playwright/test";
 
-import type { Overview } from "../src/lib/types";
+import type { Overview, VaultView } from "../src/lib/types";
 
 // The README screenshots, taken from a real `luoto ui` and env (`just shots` provides both):
 // a request blocked, allowed from the UI and through on the retry; then a credential the
@@ -52,9 +52,11 @@ test("blocked, allowed from the UI, then through", async ({ page }) => {
   await page.getByRole("button", { name: "allow", exact: true }).click();
   await expect(page.getByText(/allowed example\.com/)).toBeVisible();
   expect(fetchInside("https://example.com/")).toBe("200");
-  await expect(page.getByRole("row", { name: /example\.com/ })).toContainText("partly", {
-    timeout: 30_000,
-  });
+  // The rule allows what was blocked before it: the row reads as allowed, its denial as history.
+  await expect(page.getByRole("row", { name: /example\.com/ })).toContainText(
+    "blocked before rule",
+    { timeout: 30_000 },
+  );
   await page.screenshot({ path: out("egress-allowed.png") });
 });
 
@@ -65,14 +67,25 @@ test("a credential the sandbox never sees", async ({ page }) => {
   expect(fetchInside("https://httpbin.org/bearer")).toBe("200");
 
   // The vault is shared by every env on this machine, not just this LUOTO_HOME's: the page
-  // gets it with only this env's row and the demo secret's ref, so no real env names or
-  // secret refs reach the README.
+  // gets it (the overview's and the vault view's) with only this env's rows and the demo
+  // secret's ref, so no real env names or secret refs reach the README.
   await page.route("**/api/overview", async (route) => {
     const response = await route.fetch();
     const body = (await response.json()) as Overview;
     if (body.vault) {
       body.vault.envs = body.vault.envs.filter((e) => e.env === env);
       body.vault.loaded_refs = body.vault.loaded_refs.filter((r) => r === DEMO_REF);
+    }
+    await route.fulfill({ response, json: body });
+  });
+  await page.route("**/api/vault", async (route) => {
+    const response = await route.fetch();
+    const body = (await response.json()) as VaultView;
+    body.credentials = body.credentials.filter((c) => c.env === env);
+    body.unused = [];
+    if (body.status) {
+      body.status.envs = body.status.envs.filter((e) => e.env === env);
+      body.status.loaded_refs = body.status.loaded_refs.filter((r) => r === DEMO_REF);
     }
     await route.fulfill({ response, json: body });
   });
