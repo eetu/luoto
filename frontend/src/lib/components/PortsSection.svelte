@@ -57,20 +57,7 @@
   }
 
   .cmd {
-    display: flex;
-    gap: 6px;
-    align-items: center;
     width: 100%;
     margin: 4px 0;
-    padding: 4px 6px;
-    border: none;
-    border-radius: var(--halo-radius);
-    background: var(--halo-bg-light);
-    color: var(--halo-text-main);
-    text-align: left;
-  }
-
-  .cmd code {
-    flex: 1;
   }
 </style>

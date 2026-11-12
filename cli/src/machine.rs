@@ -39,6 +39,91 @@ pub fn stopped(rt: &Runtime) -> bool {
     is_luoto(rt.connection.as_deref()) && !running(&rt.bin)
 }
 
+/// The oldest Apple `container` luoto runs on.
+pub const APPLE_MIN: (u32, u32, u32) = (1, 7, 1);
+
+/// Whether Apple's `container` can run here: macOS 26 or later on Apple silicon (also for an
+/// Intel build of luoto under Rosetta).
+pub fn apple_host() -> bool {
+    let read = |cmd: &str, args: &[&str]| {
+        Command::new(cmd)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    cfg!(target_os = "macos")
+        && read("sysctl", &["-n", "hw.optional.arm64"]).as_deref() == Some("1")
+        && read("sw_vers", &["-productVersion"]).is_some_and(|v| macos_major(&v) >= Some(26))
+}
+
+fn macos_major(version: &str) -> Option<u32> {
+    version.split('.').next()?.trim().parse().ok()
+}
+
+/// The command that installs Apple's `container` (or upgrades an older one), where Homebrew
+/// is there.
+pub fn apple_install(upgrade: bool) -> Option<Vec<String>> {
+    let has_brew = Command::new("brew")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    let verb = if upgrade { "upgrade" } else { "install" };
+    has_brew.then(|| vec!["brew".into(), verb.into(), "container".into()])
+}
+
+/// Apple's `container` needs its system service, not a VM: started here when it isn't
+/// running.
+pub fn ensure_apple_service(rt: &Runtime) -> Result<()> {
+    if apple_running(rt) {
+        return Ok(());
+    }
+    start_apple_service(rt)
+}
+
+/// Whether Apple's container service runs.
+pub fn apple_running(rt: &Runtime) -> bool {
+    rt.run(["system", "status"])
+        .is_ok_and(|s| apple_service_running(&s))
+}
+
+/// Start the service; its first start downloads the kernel every container boots, which
+/// `container` would otherwise ask about.
+pub fn start_apple_service(rt: &Runtime) -> Result<()> {
+    let status = crate::progress::step("starting the container service", || {
+        crate::progress::tool(rt, ["system", "start", "--enable-kernel-install"], &|_| {})
+    })?;
+    if !status.success() {
+        bail!("`container system start --enable-kernel-install` failed");
+    }
+    Ok(())
+}
+
+/// Whether `container system status` says the service runs.
+fn apple_service_running(status: &str) -> bool {
+    status.lines().any(|l| {
+        let mut w = l.split_whitespace();
+        w.next() == Some("status") && w.next() == Some("running")
+    })
+}
+
+/// `container build`'s flags sizing its builder VM, which starts with 2 CPUs and 2 GB: too
+/// small for luoto's Rust workspace. `just images` computes the same.
+pub fn apple_builder() -> [String; 4] {
+    let cpus = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let gib = host_memory_mib().map_or(8, |m| (m / 1024 / 2).clamp(4, 16));
+    [
+        "--cpus".into(),
+        cpus.to_string(),
+        "--memory".into(),
+        format!("{gib}g"),
+    ]
+}
+
 /// The API socket podman forwards from the machine (macOS); None where it isn't a file.
 pub fn api_socket() -> Option<std::path::PathBuf> {
     cfg!(target_os = "macos").then(|| {
@@ -344,6 +429,16 @@ pub fn host_mounts(bin: &str) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn apple_needs_macos_26() {
+        assert_eq!(super::macos_major("26.0"), Some(26));
+        assert_eq!(super::macos_major("15.6.1\n"), Some(15));
+        assert_eq!(super::macos_major(""), None);
+        let status = "FIELD   VALUE\nstatus  running\nclient.version  1.7.1\n";
+        assert!(super::apple_service_running(status));
+        assert!(!super::apple_service_running("status  stopped\n"));
+    }
+
     #[test]
     fn describes_the_machine_in_a_line_without_its_paths() {
         let v = serde_json::json!([{

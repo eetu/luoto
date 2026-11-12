@@ -17,6 +17,9 @@ use crate::names;
 pub enum Flavor {
     Podman,
     Docker,
+    /// Apple's `container` CLI: every container is a VM of its own, so there is no shared VM
+    /// to manage, no OCI runtime to pick, no ID map and no pinned address.
+    Apple,
 }
 
 #[derive(Clone, Debug)]
@@ -40,6 +43,9 @@ pub struct RunSpec {
     pub env: Vec<(String, String)>,
     /// (volume, target, read-only)
     pub mounts: Vec<(String, String, bool)>,
+    /// One folder of a volume, read-only, as (volume, folder, target); podman, and Docker 26 or
+    /// later ([`Runtime::mounts_folders`]).
+    pub folder_mounts: Vec<(String, String, String)>,
     pub ports: Vec<(u16, u16)>,
     pub labels: Vec<(String, String)>,
     pub cap_drop_all: bool,
@@ -63,6 +69,11 @@ pub struct RunSpec {
     /// The most of the container's log podman keeps, in MB. Docker keeps the daemon's own
     /// log driver and its settings.
     pub log_mb: Option<u32>,
+    /// Unix sockets the container publishes on the host, as (host path, container path);
+    /// Apple only.
+    pub published_sockets: Vec<(String, String)>,
+    /// Arguments added to the container VM's kernel command line; Apple only.
+    pub kernel_args: Vec<String>,
 }
 
 /// The state (`running`, `exited`, …) of every luoto container, read in one call.
@@ -199,11 +210,7 @@ impl Runtime {
                 bail!("no container runtime found; run `luoto setup` to install podman or docker")
             }
         };
-        let flavor = if Self::is_podman(&bin) {
-            Flavor::Podman
-        } else {
-            Flavor::Docker
-        };
+        let flavor = Self::flavor_of(&bin);
         let api = (flavor == Flavor::Podman
             && crate::machine::is_luoto(global.connection.as_deref()))
         .then(crate::machine::api_socket)
@@ -216,26 +223,43 @@ impl Runtime {
         })
     }
 
-    fn is_podman(bin: &str) -> bool {
+    /// Podman or Apple's `container` by name or by what `--version` prints; anything else is
+    /// Docker-compatible.
+    fn flavor_of(bin: &str) -> Flavor {
         if bin.contains("podman") {
-            return true;
+            return Flavor::Podman;
         }
-        Command::new(bin).arg("--version").output().is_ok_and(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .to_lowercase()
-                .contains("podman")
-        })
+        let base = std::path::Path::new(bin).file_name();
+        if base.is_some_and(|b| b == "container") {
+            return Flavor::Apple;
+        }
+        let version = Command::new(bin)
+            .arg("--version")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase())
+            .unwrap_or_default();
+        if version.contains("podman") {
+            Flavor::Podman
+        } else if version.contains("container cli") {
+            Flavor::Apple
+        } else {
+            Flavor::Docker
+        }
     }
 
     pub fn name(&self) -> &'static str {
         match self.flavor {
             Flavor::Podman => "podman",
             Flavor::Docker => "docker",
+            Flavor::Apple => "container",
         }
     }
 
     pub fn command(&self) -> Command {
         let mut c = Command::new(&self.bin);
+        if self.flavor == Flavor::Apple {
+            return c;
+        }
         // The forwarded API socket skips an SSH handshake per call (about 50 ms each) and the
         // VM's sshd limits on parallel connections (port forwards open many).
         if let Some(sock) = self.api.as_ref().filter(|s| s.exists()) {
@@ -246,6 +270,7 @@ impl Runtime {
             match self.flavor {
                 Flavor::Podman => c.args(["--connection", conn]),
                 Flavor::Docker => c.args(["--context", conn]),
+                Flavor::Apple => &mut c,
             };
         }
         c
@@ -447,13 +472,42 @@ impl Runtime {
     /// Pull `image` as a step: a first pull can take minutes on a slow network, and the
     /// spinner's line shows the runtime's latest.
     pub fn pull(&self, image: &str) -> Result<()> {
+        // Apple's CLI pulls only through `image pull`, and unpacks every platform of an index
+        // unless told which: luoto's images run on arm64 there.
+        let args: &[&str] = match self.flavor {
+            Flavor::Apple => &[
+                "image",
+                "pull",
+                "--progress",
+                "plain",
+                "--platform",
+                "linux/arm64",
+                image,
+            ],
+            _ => &["pull", image],
+        };
         let status = crate::progress::step(&format!("pulling {image}"), || {
-            crate::progress::tool(self, ["pull", image], &|_| {})
+            crate::progress::tool(self, args, &|_| {})
         })?;
         if !status.success() {
             bail!("pulling {image} failed");
         }
         Ok(())
+    }
+
+    /// Whether a container can mount one folder of a volume: Docker from 26 on.
+    pub fn mounts_folders(&self) -> bool {
+        static DOCKER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        match self.flavor {
+            Flavor::Podman => true,
+            Flavor::Apple => false,
+            Flavor::Docker => *DOCKER.get_or_init(|| {
+                self.run(["version", "--format", "{{.Server.Version}}"])
+                    .ok()
+                    .and_then(|v| v.trim().split('.').next()?.parse::<u32>().ok())
+                    .is_some_and(|major| major >= 26)
+            }),
+        }
     }
 
     pub fn version(&self) -> Result<String> {
@@ -465,6 +519,13 @@ impl Runtime {
     /// the role label; podman (5, 6) and docker print the same `.State` words as inspect's
     /// `.State.Status`.
     pub fn states(&self) -> Result<States> {
+        if self.flavor == Flavor::Apple {
+            let out = self.run(["ls", "-a", "--format", "json"])?;
+            return Ok(States {
+                by_name: apple_states(&out)?,
+                vm_stopped: false,
+            });
+        }
         let role = format!("label={}", names::LABEL_ROLE);
         match self.run([
             "ps",
@@ -484,6 +545,10 @@ impl Runtime {
     }
 
     pub fn container_state(&self, name: &str) -> Option<String> {
+        if self.flavor == Flavor::Apple {
+            let out = self.run(["inspect", name]).ok()?;
+            return apple_inspect(&out, "").map(|(state, _)| state);
+        }
         self.run([
             "container",
             "inspect",
@@ -497,6 +562,10 @@ impl Runtime {
 
     /// State and one label in a single call; None when the container doesn't exist.
     pub fn container_state_label(&self, name: &str, label: &str) -> Option<(String, String)> {
+        if self.flavor == Flavor::Apple {
+            let out = self.run(["inspect", name]).ok()?;
+            return apple_inspect(&out, label);
+        }
         let out = self
             .run([
                 "container",
@@ -511,6 +580,36 @@ impl Runtime {
         Some((state.to_string(), value.to_string()))
     }
 
+    /// The image IDs of `images`, in their order; `None` unless every one is there.
+    pub fn image_ids(&self, images: &[String]) -> Option<Vec<String>> {
+        if self.flavor == Flavor::Apple {
+            let out = self
+                .run(
+                    ["image", "inspect"]
+                        .into_iter()
+                        .map(String::from)
+                        .chain(images.iter().cloned()),
+                )
+                .ok()?;
+            return apple_image_ids(&out, images);
+        }
+        let out = self
+            .run(
+                ["image", "inspect", "--format", "{{.Id}}"]
+                    .into_iter()
+                    .map(String::from)
+                    .chain(images.iter().cloned()),
+            )
+            .ok()?;
+        let ids: Vec<String> = out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect();
+        (ids.len() == images.len()).then_some(ids)
+    }
+
     pub fn image_exists(&self, image: &str) -> bool {
         self.succeeds(["image", "inspect", image])
     }
@@ -523,13 +622,23 @@ impl Runtime {
         self.succeeds(["volume", "inspect", name])
     }
 
+    /// The labels the runtime takes: Apple's rejects one with an empty value, which reads the
+    /// same as a missing one.
+    fn kept<'a>(
+        &self,
+        labels: &'a [(String, String)],
+    ) -> impl Iterator<Item = &'a (String, String)> + use<'a> {
+        let apple = self.flavor == Flavor::Apple;
+        labels.iter().filter(move |(_, v)| !apple || !v.is_empty())
+    }
+
     /// Create the volume unless it exists; true when it was created.
     pub fn create_volume(&self, name: &str, labels: &[(String, String)]) -> Result<bool> {
         if self.volume_exists(name) {
             return Ok(false);
         }
         let mut args = vec!["volume".to_string(), "create".into()];
-        for (k, v) in labels {
+        for (k, v) in self.kept(labels) {
             args.push("--label".into());
             args.push(format!("{k}={v}"));
         }
@@ -539,6 +648,9 @@ impl Runtime {
 
     /// Every network's subnets, as (network, subnet).
     pub fn subnets(&self) -> Result<Vec<(String, String)>> {
+        if self.flavor == Flavor::Apple {
+            return apple_subnets(&self.run(["network", "list", "--format", "json"])?);
+        }
         let names = self.run(["network", "ls", "--format", "{{.Name}}"])?;
         let names: Vec<&str> = names
             .lines()
@@ -569,7 +681,8 @@ impl Runtime {
     }
 
     /// A network with no route out. `route_via` installs a default route to that address in
-    /// every container on the network (podman); Docker gets it from a helper later.
+    /// every container on the network (podman); Docker gets it from a helper later. Apple's is
+    /// host-only, its gateway the subnet's first address.
     pub fn create_internal_network(
         &self,
         name: &str,
@@ -587,10 +700,12 @@ impl Runtime {
             "--internal".into(),
             "--subnet".into(),
             subnet.into(),
-            "--gateway".into(),
-            gateway.into(),
         ];
+        if self.flavor != Flavor::Apple {
+            args.extend(["--gateway".into(), gateway.into()]);
+        }
         match self.flavor {
+            Flavor::Apple => {}
             Flavor::Podman => {
                 args.push("--disable-dns".into());
                 if let Some(r) = route_via {
@@ -608,7 +723,7 @@ impl Runtime {
                 }
             }
         }
-        for (k, v) in labels {
+        for (k, v) in self.kept(labels) {
             args.push("--label".into());
             args.push(format!("{k}={v}"));
         }
@@ -621,7 +736,7 @@ impl Runtime {
             return Ok(());
         }
         let mut args: Vec<String> = vec!["network".into(), "create".into()];
-        for (k, v) in labels {
+        for (k, v) in self.kept(labels) {
             args.push("--label".into());
             args.push(format!("{k}={v}"));
         }
@@ -630,6 +745,9 @@ impl Runtime {
     }
 
     pub fn run_args(&self, spec: &RunSpec, create_only: bool) -> Vec<String> {
+        if self.flavor == Flavor::Apple {
+            return apple_run_args(spec, create_only);
+        }
         let mut a: Vec<String> = vec![if create_only { "create" } else { "run" }.into()];
         if !create_only {
             a.push("-d".into());
@@ -640,7 +758,7 @@ impl Runtime {
             a.extend(["--hostname".into(), h.clone()]);
         }
         let networks: &[(String, Option<Ipv4Addr>)] = match self.flavor {
-            Flavor::Podman => &spec.networks,
+            Flavor::Podman | Flavor::Apple => &spec.networks,
             // Docker attaches extra networks with `network connect` before start.
             Flavor::Docker => &spec.networks[..spec.networks.len().min(1)],
         };
@@ -655,7 +773,7 @@ impl Runtime {
                     "--ip".into(),
                     ip.to_string(),
                 ]),
-                (_, None) => a.extend(["--network".into(), net.clone()]),
+                _ => a.extend(["--network".into(), net.clone()]),
             }
         }
         for d in &spec.dns {
@@ -671,6 +789,16 @@ impl Runtime {
             a.extend([
                 "-v".into(),
                 format!("{volume}:{dst}{}", if *ro { ":ro" } else { "" }),
+            ]);
+        }
+        let subpath = match self.flavor {
+            Flavor::Docker => "volume-subpath",
+            _ => "subpath",
+        };
+        for (volume, folder, dst) in &spec.folder_mounts {
+            a.extend([
+                "--mount".into(),
+                format!("type=volume,source={volume},target={dst},{subpath}={folder},ro"),
             ]);
         }
         for (host, cont) in &spec.ports {
@@ -714,6 +842,7 @@ impl Runtime {
                 }
             }
             Flavor::Podman => a.extend(self.id_map_args(spec.id_map)),
+            Flavor::Apple => {}
         }
         // Podman takes `max-size` with every log driver (journald keeps its own bounds).
         if let Some(mb) = spec.log_mb
@@ -750,7 +879,7 @@ impl Runtime {
     pub fn create_and_start(&self, spec: &RunSpec) -> Result<()> {
         match self.flavor {
             Flavor::Podman if spec.oci_runtime.is_some() => self.run_on_runtime(spec),
-            Flavor::Podman => self.run(self.run_args(spec, false)).map(|_| ()),
+            Flavor::Podman | Flavor::Apple => self.run(self.run_args(spec, false)).map(|_| ()),
             Flavor::Docker => {
                 self.run(self.run_args(spec, true))?;
                 for (net, ip) in spec.networks.iter().skip(1) {
@@ -841,9 +970,224 @@ impl Runtime {
     }
 }
 
+/// `container run`'s arguments. Apple's CLI has no hostname, extra hosts, sysctls, security
+/// options, restart policy, log options, ID maps, OCI runtime or pinned addresses: those parts
+/// of the spec are left out (each container is a VM of its own, its kernel not the host's).
+fn apple_run_args(spec: &RunSpec, create_only: bool) -> Vec<String> {
+    let mut a: Vec<String> = vec![if create_only { "create" } else { "run" }.into()];
+    if !create_only {
+        a.push("-d".into());
+    }
+    a.extend(["--name".into(), spec.name.clone()]);
+    for (net, _) in &spec.networks {
+        a.extend(["--network".into(), net.clone()]);
+    }
+    for d in &spec.dns {
+        a.extend(["--dns".into(), d.clone()]);
+    }
+    for (k, v) in &spec.env {
+        a.extend(["-e".into(), format!("{k}={v}")]);
+    }
+    for (volume, dst, ro) in &spec.mounts {
+        a.extend([
+            "--mount".into(),
+            format!(
+                "type=volume,source={volume},target={dst}{}",
+                if *ro { ",readonly" } else { "" }
+            ),
+        ]);
+    }
+    for (host, cont) in &spec.ports {
+        a.extend(["-p".into(), format!("127.0.0.1:{host}:{cont}")]);
+    }
+    for (host, cont) in &spec.published_sockets {
+        a.extend(["--publish-socket".into(), format!("{host}:{cont}")]);
+    }
+    for k in &spec.kernel_args {
+        a.extend(["--kernel-arg".into(), k.clone()]);
+    }
+    for (k, v) in spec.labels.iter().filter(|(_, v)| !v.is_empty()) {
+        a.extend(["--label".into(), format!("{k}={v}")]);
+    }
+    if spec.cap_drop_all {
+        a.extend(["--cap-drop".into(), "ALL".into()]);
+    }
+    for c in &spec.cap_add {
+        a.extend(["--cap-add".into(), c.clone()]);
+    }
+    // `type=soft:hard`; a single value is both.
+    for u in &spec.ulimits {
+        let u = match u.split_once('=') {
+            Some((k, v)) if !v.contains(':') => format!("{k}={v}:{v}"),
+            _ => u.clone(),
+        };
+        a.extend(["--ulimit".into(), u]);
+    }
+    for t in &spec.tmpfs {
+        a.extend(["--tmpfs".into(), t.clone()]);
+    }
+    if spec.read_only {
+        a.push("--read-only".into());
+    }
+    if let Some(m) = &spec.memory {
+        a.extend(["--memory".into(), m.clone()]);
+    }
+    // A VM has whole CPUs.
+    if let Some(c) = spec.cpus {
+        a.extend(["--cpus".into(), (c.ceil().max(1.0) as u32).to_string()]);
+    }
+    if let Some(u) = &spec.user {
+        a.extend(["--user".into(), u.clone()]);
+    }
+    if let Some(e) = &spec.entrypoint {
+        a.extend(["--entrypoint".into(), e.clone()]);
+    }
+    a.push(spec.image.clone());
+    a.extend(spec.cmd.iter().cloned());
+    a
+}
+
+fn json_array(out: &str) -> Result<Vec<Value>> {
+    let v: Value = serde_json::from_str(out.trim()).context("container JSON")?;
+    Ok(v.as_array().cloned().unwrap_or_default())
+}
+
+/// Every luoto container's state (those with the role label), by name, from `ls -a --format
+/// json`.
+fn apple_states(out: &str) -> Result<HashMap<String, String>> {
+    Ok(json_array(out)?
+        .iter()
+        .filter(|c| !c["configuration"]["labels"][names::LABEL_ROLE].is_null())
+        .filter_map(|c| {
+            Some((
+                c["id"].as_str()?.to_string(),
+                c["status"]["state"].as_str()?.to_string(),
+            ))
+        })
+        .collect())
+}
+
+/// State and one label (empty when unset) of the container `inspect` printed.
+fn apple_inspect(out: &str, label: &str) -> Option<(String, String)> {
+    let c = json_array(out).ok()?.into_iter().next()?;
+    let state = c["status"]["state"].as_str()?.to_string();
+    let value = c["configuration"]["labels"][label]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    Some((state, value))
+}
+
+/// The IDs of `images` from one `image inspect`, matched by reference.
+fn apple_image_ids(out: &str, images: &[String]) -> Option<Vec<String>> {
+    let all = json_array(out).ok()?;
+    images
+        .iter()
+        .map(|img| {
+            all.iter()
+                .find(|i| i["configuration"]["name"].as_str() == Some(img.as_str()))
+                .or_else(|| (all.len() == 1).then(|| &all[0]))?["id"]
+                .as_str()
+                .map(String::from)
+        })
+        .collect()
+}
+
+/// (network, subnet) of every network `network list --format json` printed.
+fn apple_subnets(out: &str) -> Result<Vec<(String, String)>> {
+    Ok(json_array(out)?
+        .iter()
+        .filter_map(|n| {
+            let sub = n["status"]["ipv4Subnet"]
+                .as_str()
+                .or(n["configuration"]["ipv4Subnet"].as_str())?;
+            Some((n["id"].as_str()?.to_string(), sub.to_string()))
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const APPLE_LS: &str = r#"[{"configuration":{"id":"luoto-dev-web-gate","labels":{"luoto.role":"gate","luoto.spec":"abc"},"networks":[{"network":"luoto-dev-web-out","options":{"hostname":"luoto-dev-web-gate"}}]},"id":"luoto-dev-web-gate","status":{"networks":[{"hostname":"luoto-dev-web-gate","ipv4Address":"192.168.65.2/24","ipv4Gateway":"192.168.65.1","macAddress":"fe:61:8f:72:cc:9d","mtu":1280,"network":"luoto-dev-web-out","variant":"reserved"}],"startedDate":"2026-11-11T20:57:10Z","state":"running"}},{"configuration":{"id":"luoto-dev-web","labels":{"luoto.role":"dev"}},"id":"luoto-dev-web","status":{"networks":[],"state":"stopped"}},{"configuration":{"id":"buildkit","labels":{"com.apple.container.resource.role":"builder"}},"id":"buildkit","status":{"networks":[],"state":"stopped"}}]"#;
+
+    #[test]
+    fn apple_listings_parse() {
+        let s = apple_states(APPLE_LS).unwrap();
+        assert_eq!(s.len(), 2);
+        assert_eq!(s["luoto-dev-web-gate"], "running");
+        assert_eq!(s["luoto-dev-web"], "stopped");
+        assert_eq!(
+            apple_inspect(APPLE_LS, names::LABEL_SPEC),
+            Some(("running".into(), "abc".into()))
+        );
+        assert_eq!(
+            apple_inspect(APPLE_LS, "nope"),
+            Some(("running".into(), String::new()))
+        );
+        let nets = r#"[{"configuration":{"ipv4Subnet":"10.250.7.0/24","labels":{},"mode":"hostOnly","name":"tb-net1"},"id":"tb-net1","status":{"ipv4Gateway":"10.250.7.1","ipv4Subnet":"10.250.7.0/24"}},{"configuration":{"labels":{"com.apple.container.resource.role":"builtin"},"mode":"nat","name":"default"},"id":"default","status":{"ipv4Gateway":"192.168.64.1","ipv4Subnet":"192.168.64.0/24"}}]"#;
+        assert_eq!(
+            apple_subnets(nets).unwrap(),
+            vec![
+                ("tb-net1".into(), "10.250.7.0/24".into()),
+                ("default".into(), "192.168.64.0/24".into())
+            ]
+        );
+        let imgs = r#"[{"configuration":{"descriptor":{"digest":"sha256:b6"},"name":"localhost/luoto-gate:dev"},"id":"b6","variants":[]},{"configuration":{"name":"localhost/luoto-vault:dev"},"id":"02","variants":[]}]"#;
+        let want = [
+            "localhost/luoto-vault:dev".to_string(),
+            "localhost/luoto-gate:dev".into(),
+        ];
+        assert_eq!(
+            apple_image_ids(imgs, &want),
+            Some(vec!["02".into(), "b6".into()])
+        );
+        assert_eq!(apple_image_ids(imgs, &["x".into(), "y".into()]), None);
+    }
+
+    #[test]
+    fn apple_takes_what_its_cli_has() {
+        let s = RunSpec {
+            hostname: Some("h".into()),
+            add_hosts: vec![("a".into(), "b".into())],
+            sysctls: vec!["net.ipv4.ip_forward=0".into()],
+            restart: Some("on-failure".into()),
+            log_mb: Some(5),
+            id_map: Some(65_537),
+            oci_runtime: Some("/r/runsc".into()),
+            security_opts: vec!["label=disable".into()],
+            mounts: vec![("v".into(), "/opt/luoto".into(), true)],
+            ulimits: vec!["core=0".into()],
+            cpus: Some(1.5),
+            published_sockets: vec![("/h/dev.sock".into(), "/run/luoto/net.sock".into())],
+            ..spec()
+        };
+        let a = rt(Flavor::Apple).run_args(&s, false).join(" ");
+        assert!(
+            a.starts_with("run -d --name luoto-t-gate --network luoto-t --network luoto-t-out")
+        );
+        for gone in [
+            "--hostname",
+            "--add-host",
+            "--sysctl",
+            "--restart",
+            "--log-opt",
+            "--uidmap",
+            "--runtime",
+            "--security-opt",
+            "--ip",
+            ":ip=",
+        ] {
+            assert!(!a.contains(gone), "{gone} in {a}");
+        }
+        assert!(a.contains("--mount type=volume,source=v,target=/opt/luoto,readonly"));
+        assert!(a.contains("--ulimit core=0:0"));
+        assert!(a.contains("--cpus 2"));
+        assert!(a.contains("--publish-socket /h/dev.sock:/run/luoto/net.sock"));
+        assert!(a.contains("-p 127.0.0.1:5173:5173"));
+        assert!(a.contains("--cap-drop ALL --cap-add NET_ADMIN"));
+    }
 
     fn rt(flavor: Flavor) -> Runtime {
         Runtime {
@@ -907,6 +1251,20 @@ mod tests {
         assert!(a.starts_with("create "));
         assert!(a.contains("--network luoto-t --ip 10.213.1.2"));
         assert!(!a.contains("luoto-t-out"));
+    }
+
+    #[test]
+    fn a_folder_of_a_volume_mounts_read_only_by_each_runtimes_name_for_it() {
+        let s = RunSpec {
+            folder_mounts: vec![("v".into(), "web".into(), "/run/x".into())],
+            ..spec()
+        };
+        let podman = rt(Flavor::Podman).run_args(&s, false).join(" ");
+        assert!(podman.contains("--mount type=volume,source=v,target=/run/x,subpath=web,ro"));
+        let docker = rt(Flavor::Docker).run_args(&s, true).join(" ");
+        assert!(
+            docker.contains("--mount type=volume,source=v,target=/run/x,volume-subpath=web,ro")
+        );
     }
 
     #[test]

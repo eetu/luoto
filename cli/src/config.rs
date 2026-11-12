@@ -18,7 +18,7 @@ pub struct GlobalConfig {
     /// The config format (`format.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
-    /// `podman` or `docker` (or a path to either).
+    /// `podman`, `docker` or `container` (Apple's), or a path to one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     /// Podman connection / Docker context to use (e.g. the dedicated `luoto` machine).

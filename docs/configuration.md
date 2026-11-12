@@ -119,6 +119,8 @@ hosts = ["dl.k8s.io"]         # extra hosts readable only while installs run
 `headless_args`) for every
 env that has that agent; an env's own, and its `luoto.toml`'s, come on top. Credentials go
 only in each env's own file. `notifications = false` there turns desktop notifications off.
+`runtime = "container"` there (`luoto setup` offers it) runs envs on Apple's `container`
+([install.md](install.md)).
 
 A `[[deny]]` beats every allow: a preset's, a rule's, an approved request's. It applies to the
 HTTP(S) the gate reads: a tunnel rule can't cover a denied host, and SSH to

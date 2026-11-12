@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config;
 use crate::env::{self, Ctx};
@@ -77,11 +77,12 @@ pub fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
         })
 }
 
-fn probe_runtime(flavor: Flavor, min: (u32, u32)) -> Option<RuntimeInfo> {
+fn probe_runtime(flavor: Flavor, min: (u32, u32, u32)) -> Option<RuntimeInfo> {
     let rt = Runtime {
         bin: match flavor {
             Flavor::Podman => "podman",
             Flavor::Docker => "docker",
+            Flavor::Apple => "container",
         }
         .into(),
         flavor,
@@ -89,7 +90,7 @@ fn probe_runtime(flavor: Flavor, min: (u32, u32)) -> Option<RuntimeInfo> {
         api: None,
     };
     let version = parse_version(&rt.version().ok()?);
-    let version_ok = version.is_some_and(|(a, b, _)| (a, b) >= min);
+    let version_ok = version.is_some_and(|v| v >= min);
     let (reachable, detail) = match flavor {
         // luoto starts its own machine there; podman's default one doesn't matter.
         Flavor::Podman if crate::machine::supported() => {
@@ -109,6 +110,10 @@ fn probe_runtime(flavor: Flavor, min: (u32, u32)) -> Option<RuntimeInfo> {
                 "docker CLI installed but the engine is not running".into(),
             ),
         },
+        Flavor::Apple if machine::apple_running(&rt) => {
+            (true, "Apple's container, service running".to_string())
+        }
+        Flavor::Apple => (false, "Apple's container, service stopped".to_string()),
     };
     Some(RuntimeInfo {
         name: rt.bin,
@@ -174,7 +179,7 @@ pub fn detect() -> Detection {
             .status()
             .is_ok()
     };
-    let runtimes = [(Flavor::Podman, (5, 2)), (Flavor::Docker, (28, 0))]
+    let runtimes = [(Flavor::Podman, (5, 2, 0)), (Flavor::Docker, (28, 0, 0))]
         .into_iter()
         .filter_map(|(f, min)| probe_runtime(f, min))
         .collect();
@@ -267,8 +272,241 @@ pub struct SetupOpts {
     /// Build luoto's images from this source tree instead of pulling them.
     #[arg(long)]
     pub build: bool,
+    /// Run envs on this runtime: `container` (Apple's, on macOS 26 or later on Apple silicon)
+    /// or `podman`.
+    #[arg(long, value_enum)]
+    pub runtime: Option<RuntimeChoice>,
     #[arg(long, short)]
     pub yes: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeChoice {
+    Container,
+    Podman,
+}
+
+impl RuntimeChoice {
+    pub fn flavor(self) -> Flavor {
+        match self {
+            RuntimeChoice::Container => Flavor::Apple,
+            RuntimeChoice::Podman => Flavor::Podman,
+        }
+    }
+}
+
+const APPLE_HOST_ONLY: &str = "Apple's container needs macOS 26 or later on Apple silicon";
+
+/// Apple's `container` as found: `None` where it can't run, `Some(None)` where it isn't
+/// installed.
+pub fn probe_apple() -> Option<Option<RuntimeInfo>> {
+    machine::apple_host().then(|| probe_runtime(Flavor::Apple, machine::APPLE_MIN))
+}
+
+/// What `--runtime podman` looks at: podman alone.
+fn podman_only(mut d: Detection) -> Detection {
+    d.runtimes.retain(|r| r.name == "podman");
+    d
+}
+
+/// A runtime setup offers where Apple's `container` runs: its menu row in a terminal, its
+/// choice in the UI.
+#[derive(Debug, Serialize)]
+pub struct RuntimeOption {
+    pub runtime: RuntimeChoice,
+    pub label: String,
+    pub description: String,
+    pub recommended: bool,
+    /// config.toml names it.
+    pub current: bool,
+    /// Where the choice starts: the current runtime, else the recommended one.
+    pub selected: bool,
+    /// The command that sets it up.
+    pub setup: String,
+}
+
+/// The runtimes setup offers where Apple's `container` runs, the recommended first.
+pub fn runtime_options(current: Option<Flavor>) -> Vec<RuntimeOption> {
+    let start = if current == Some(Flavor::Podman) {
+        RuntimeChoice::Podman
+    } else {
+        RuntimeChoice::Container
+    };
+    [
+        (
+            RuntimeChoice::Container,
+            "Apple's container",
+            "every container is a VM of its own",
+        ),
+        (
+            RuntimeChoice::Podman,
+            "podman",
+            "every env in luoto's one VM, under gVisor",
+        ),
+    ]
+    .into_iter()
+    .map(|(runtime, label, description)| RuntimeOption {
+        runtime,
+        label: label.into(),
+        description: description.into(),
+        recommended: runtime == RuntimeChoice::Container,
+        current: current == Some(runtime.flavor()),
+        selected: runtime == start,
+        setup: format!(
+            "luoto setup --runtime {}",
+            match runtime {
+                RuntimeChoice::Container => "container",
+                RuntimeChoice::Podman => "podman",
+            }
+        ),
+    })
+    .collect()
+}
+
+/// What Apple's `container` lacks before setup can use it.
+#[derive(Debug, Serialize)]
+pub struct AppleNeed {
+    /// The oldest version luoto runs on.
+    pub min: String,
+    /// The command that installs or upgrades it; `None` without Homebrew.
+    pub install: Option<Vec<String>>,
+}
+
+/// `None` when `info` (its probe) is installed and new enough.
+pub fn apple_need(info: Option<&RuntimeInfo>) -> Option<AppleNeed> {
+    if info.is_some_and(|i| i.version_ok) {
+        return None;
+    }
+    let (a, b, c) = machine::APPLE_MIN;
+    Some(AppleNeed {
+        min: format!("{a}.{b}.{c}"),
+        install: machine::apple_install(info.is_some()),
+    })
+}
+
+/// Setup's choice of runtime where Apple's `container` runs, and what each choice needs.
+#[derive(Debug, Serialize)]
+pub struct RuntimeOffer {
+    pub options: Vec<RuntimeOption>,
+    /// Apple's container; `None` when it isn't installed.
+    pub apple: Option<RuntimeInfo>,
+    pub apple_need: Option<AppleNeed>,
+    /// What `--runtime podman` recommends.
+    pub podman: Recommendation,
+}
+
+/// `None` where Apple's `container` can't run (`apple` from `probe_apple`), and for docker,
+/// which only config.toml sets.
+pub fn offer(
+    d: &Detection,
+    apple: Option<Option<RuntimeInfo>>,
+    current: Option<Flavor>,
+) -> Option<RuntimeOffer> {
+    let apple = apple?;
+    (current != Some(Flavor::Docker)).then(|| RuntimeOffer {
+        options: runtime_options(current),
+        apple_need: apple_need(apple.as_ref()),
+        apple,
+        podman: recommend(&podman_only(d.clone())),
+    })
+}
+
+/// The install `--install` runs for `runtime`, or for the recommended one.
+pub fn install_command(runtime: Option<RuntimeChoice>) -> Result<Vec<String>> {
+    let cmd = match runtime {
+        Some(RuntimeChoice::Container) => {
+            let apple = probe_apple().context(APPLE_HOST_ONLY)?;
+            let need = apple_need(apple.as_ref()).context("Apple's container is installed")?;
+            return need.install.with_context(|| {
+                format!(
+                    "install Apple's container {} from https://github.com/apple/container/releases",
+                    need.min
+                )
+            });
+        }
+        Some(RuntimeChoice::Podman) => recommend(&podman_only(detect())).install,
+        None => recommend(&detect()).install,
+    };
+    cmd.context("nothing to install")
+}
+
+/// The runtime in a line, as setup's summary and the UI say it.
+pub fn runtime_line(rt: &Runtime) -> String {
+    let version = parse_version(&rt.version().unwrap_or_default())
+        .map(|(a, b, c)| format!(" {a}.{b}.{c}"))
+        .unwrap_or_default();
+    match rt.flavor {
+        Flavor::Apple => format!("Apple's container{version}: each container its own VM"),
+        Flavor::Podman if machine::is_luoto(rt.connection.as_deref()) => {
+            format!("podman{version}, in luoto's VM")
+        }
+        _ => format!("{}{version}", rt.name()),
+    }
+}
+
+/// The runtime an existing config names: its `runtime`, or podman for luoto's VM.
+pub fn configured(global: &config::GlobalConfig) -> Option<Flavor> {
+    match (&global.runtime, &global.connection) {
+        (Some(_), _) => Runtime::from_config(global).ok().map(|rt| rt.flavor),
+        (None, Some(_)) => Some(Flavor::Podman),
+        (None, None) => None,
+    }
+}
+
+/// The runtime to set up on a Mac that runs Apple's `container`: the one asked for, else
+/// asked about, else (without a terminal) the configured one or Apple's. `None` for Esc on a
+/// first setup.
+fn choose(o: &SetupOpts, current: Option<Flavor>) -> Result<Option<Flavor>> {
+    Ok(match (o.runtime, current) {
+        (Some(RuntimeChoice::Container), _) => Some(Flavor::Apple),
+        (Some(RuntimeChoice::Podman), _) => Some(Flavor::Podman),
+        // Docker was set by hand; setup doesn't offer it.
+        (None, Some(Flavor::Docker)) => Some(Flavor::Docker),
+        (None, _) if crate::prompt::interactive() => {
+            crate::wizard::pick_runtime(current)?.or(current)
+        }
+        (None, _) => Some(current.unwrap_or(Flavor::Apple)),
+    })
+}
+
+/// Install or upgrade Apple's `container` (with `--install`) and start its service; false
+/// when the install is left to the user.
+fn apple_ready(o: &SetupOpts, info: Option<&RuntimeInfo>) -> Result<bool> {
+    if let Some(AppleNeed { min, install }) = apple_need(info) {
+        let Some(cmd) = install else {
+            bail!(
+                "luoto needs Apple's container {min} or later: install it from \
+                 https://github.com/apple/container/releases, then `luoto setup --runtime container`"
+            );
+        };
+        println!("\nluoto needs Apple's container {min} or later");
+        println!("install command: {}", cmd.join(" "));
+        if !o.install {
+            println!("re-run with `luoto setup --install --runtime container` to run it");
+            return Ok(false);
+        }
+        if !o.yes && !confirm("Run it now?") {
+            bail!("not installed");
+        }
+        let status = Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .status()
+            .context("run installer")?;
+        if !status.success() {
+            bail!("installer failed");
+        }
+    }
+    let rt = Runtime {
+        bin: "container".into(),
+        flavor: Flavor::Apple,
+        connection: None,
+        api: None,
+    };
+    if !machine::apple_running(&rt) {
+        machine::start_apple_service(&rt)?;
+    }
+    Ok(true)
 }
 
 fn source_root() -> Option<PathBuf> {
@@ -281,44 +519,41 @@ fn source_root() -> Option<PathBuf> {
 pub fn build_images(rt: &Runtime, tag: &str) -> Result<()> {
     let root = source_root()
         .context("luoto's source tree is not available; build images from a checkout")?;
-    for (target, comp) in [("gate", "gate"), ("vault", "vault"), ("tools", "tools")] {
-        let status =
-            crate::progress::step(&format!("building {}", names::image(comp, tag)), || {
-                crate::progress::tool(
-                    rt,
-                    [
-                        "build",
-                        "-f",
-                        &root.join("Containerfile").to_string_lossy(),
-                        "--target",
-                        target,
-                        "-t",
-                        &names::image(comp, tag),
-                        &root.to_string_lossy(),
-                    ],
-                    &|_| {},
-                )
-            })?;
+    let builder: Vec<String> = match rt.flavor {
+        Flavor::Apple => machine::apple_builder().into(),
+        _ => Vec::new(),
+    };
+    let file = root.join("Containerfile").to_string_lossy().into_owned();
+    let dir = root.to_string_lossy().into_owned();
+    let image_dir = root.join("image");
+    let base_file = image_dir
+        .join("Containerfile")
+        .to_string_lossy()
+        .into_owned();
+    let base_dir = image_dir.to_string_lossy().into_owned();
+    let builds = [
+        ("gate", vec!["-f", &file, "--target", "gate", &dir]),
+        ("vault", vec!["-f", &file, "--target", "vault", &dir]),
+        ("tools", vec!["-f", &file, "--target", "tools", &dir]),
+        ("base", vec!["-f", &base_file, &base_dir]),
+    ];
+    for (comp, args) in builds {
+        let image = names::image(comp, tag);
+        let (context, args) = args.split_last().context("build args")?;
+        let status = crate::progress::step(&format!("building {image}"), || {
+            crate::progress::tool(
+                rt,
+                ["build"]
+                    .into_iter()
+                    .chain(builder.iter().map(String::as_str))
+                    .chain(args.iter().copied())
+                    .chain(["-t", &image, context]),
+                &|_| {},
+            )
+        })?;
         if !status.success() {
-            bail!("building {comp} failed");
+            bail!("building {image} failed");
         }
-    }
-    let status = crate::progress::step(&format!("building {}", names::image("base", tag)), || {
-        crate::progress::tool(
-            rt,
-            [
-                "build",
-                "-f",
-                &root.join("image").join("Containerfile").to_string_lossy(),
-                "-t",
-                &names::image("base", tag),
-                &root.join("image").to_string_lossy(),
-            ],
-            &|_| {},
-        )
-    })?;
-    if !status.success() {
-        bail!("building the base image failed");
     }
     Ok(())
 }
@@ -326,7 +561,11 @@ pub fn build_images(rt: &Runtime, tag: &str) -> Result<()> {
 pub fn setup(o: SetupOpts) -> Result<ExitCode> {
     let paths = Paths::get()?;
     let mut global = config::load_global(&paths)?;
-    let d = crate::progress::wait("looking at this machine's container runtimes", detect);
+    // `apple` is None where Apple's `container` can't run, Some(None) where it isn't installed.
+    let (mut d, apple) =
+        crate::progress::wait("looking at this machine's container runtimes", || {
+            (detect(), probe_apple())
+        });
     println!(
         "host: {} {}{}",
         d.os,
@@ -336,9 +575,9 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
             .map(|s| format!(" ({s})"))
             .unwrap_or_default()
     );
-    for r in &d.runtimes {
+    for r in d.runtimes.iter().chain(apple.iter().flatten()) {
         println!(
-            "  {:<7} {} {}",
+            "  {:<9} {} {}",
             r.name,
             r.version
                 .map(|(a, b, c)| format!("{a}.{b}.{c}"))
@@ -346,10 +585,66 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
             r.detail
         );
     }
-    if d.runtimes.is_empty() {
+    if d.runtimes.is_empty() && apple.as_ref().is_none_or(Option::is_none) {
         println!("  no container runtime found");
     }
-    let rec = recommend(&d);
+    let choice = match &apple {
+        None if o.runtime == Some(RuntimeChoice::Container) => bail!(APPLE_HOST_ONLY),
+        None => o.runtime.map(|_| Flavor::Podman),
+        Some(_) => match choose(&o, configured(&global))? {
+            Some(c) => Some(c),
+            None => {
+                println!("nothing set up; `luoto setup` asks again");
+                return Ok(ExitCode::SUCCESS);
+            }
+        },
+    };
+    let before = configured(&global);
+    if before.is_some() && choice.is_some() && choice != before {
+        let envs = config::list_envs(&paths)?.len();
+        if envs > 0 {
+            println!(
+                "! {envs} env(s) keep their containers and volumes on {}: work not pulled to \
+                 this machine stays there",
+                match before {
+                    Some(Flavor::Apple) => "container",
+                    Some(Flavor::Docker) => "docker",
+                    _ => "podman",
+                }
+            );
+        }
+    }
+    if choice == Some(Flavor::Apple) {
+        if !apple_ready(&o, apple.clone().flatten().as_ref())? {
+            return Ok(ExitCode::SUCCESS);
+        }
+        // Podman's VM and gVisor aren't Apple's: each container is a VM of its own.
+        global.runtime = Some("container".into());
+        global.connection = None;
+        global.gvisor = None;
+    } else {
+        if choice == Some(Flavor::Podman) {
+            d = podman_only(d);
+            if configured(&global) != Some(Flavor::Podman) {
+                global.runtime = Some("podman".into());
+            }
+        }
+        if !podman_ready(&o, &d, &paths, &mut global)? {
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
+    finish(o, paths, global, apple.is_some())
+}
+
+/// The podman (or docker) half of `setup`: install it with `--install`, then luoto's VM;
+/// false when the install is left to the user.
+fn podman_ready(
+    o: &SetupOpts,
+    d: &Detection,
+    paths: &Paths,
+    global: &mut config::GlobalConfig,
+) -> Result<bool> {
+    let rec = recommend(d);
     println!("\nrecommendation: {}", rec.summary);
     for r in &rec.reasons {
         println!("  - {r}");
@@ -361,7 +656,7 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
         println!("\ninstall command: {}", cmd.join(" "));
         if !o.install {
             println!("re-run with `luoto setup --install` to run it");
-            return Ok(ExitCode::SUCCESS);
+            return Ok(false);
         }
         if !o.yes && !confirm("Run it now?") {
             bail!("not installed");
@@ -375,7 +670,7 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
         }
     }
 
-    let rt = Runtime::from_config(&global)?;
+    let rt = Runtime::from_config(global)?;
     if rt.flavor == Flavor::Podman && machine::supported() {
         // Envs run in luoto's own VM: none of your folders, an ID range per env, gVisor.
         if !machine::exists(&rt.bin) {
@@ -424,7 +719,17 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
             );
         }
     }
+    Ok(true)
+}
 
+/// Images, the vault and the summary, once the runtime is ready; on a Mac that runs Apple's
+/// `container` the summary names the other runtime.
+fn finish(
+    o: SetupOpts,
+    paths: Paths,
+    mut global: config::GlobalConfig,
+    apple_host: bool,
+) -> Result<ExitCode> {
     let rt = Runtime::from_config(&global)?;
     global.runtime.get_or_insert_with(|| rt.bin.clone());
     let mut new_images = true;
@@ -471,7 +776,19 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
             crate::ssh::tilde(&home)
         );
     }
-    println!("\nready. Next, in a project folder: luoto init [--agent claude]");
+    let mut rows = vec![("runtime", runtime_line(&ctx.rt))];
+    if apple_host
+        && let Some(other) = runtime_options(Some(ctx.rt.flavor))
+            .into_iter()
+            .find(|o| !o.current)
+    {
+        rows.push(("change it", other.setup));
+    }
+    rows.push((
+        "next",
+        "luoto init [--agent claude], in a project folder".into(),
+    ));
+    println!("\n{}", crate::prompt::summary("ready", &rows));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -552,15 +869,50 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
             }
         }
     }
-    out.say(format!(
-        "runtime: {} ({})",
-        ctx.rt.name(),
-        ctx.rt.version().unwrap_or_else(|e| format!("error: {e}"))
-    ));
-    out.say(match &ctx.global.gvisor {
-        Some(p) => format!("gVisor: {p} (dev containers run on it unless an env opts out)"),
-        None => "gVisor: not set up; dev containers share the VM's kernel".into(),
-    });
+    if ctx.rt.flavor == Flavor::Apple {
+        let (a, b, c) = machine::APPLE_MIN;
+        let fix = |upgrade| {
+            machine::apple_install(upgrade).map_or_else(
+                || "https://github.com/apple/container/releases".to_string(),
+                |cmd| format!("`{}`", cmd.join(" ")),
+            )
+        };
+        match ctx.rt.version().ok().and_then(|v| parse_version(&v)) {
+            None => {
+                out.say(format!(
+                    "runtime: Apple's container is not installed; {}",
+                    fix(false)
+                ));
+                return Ok(false);
+            }
+            Some(v) if v < machine::APPLE_MIN => {
+                ok = false;
+                out.say(format!(
+                    "runtime: Apple's container {}.{}.{} is older than {a}.{b}.{c}; {}",
+                    v.0,
+                    v.1,
+                    v.2,
+                    fix(true)
+                ));
+            }
+            Some((x, y, z)) => out.say(format!("runtime: Apple's container {x}.{y}.{z}")),
+        }
+        if !machine::apple_running(&ctx.rt) {
+            out.say("runtime: its service is stopped; `container system start`".into());
+            return Ok(ok);
+        }
+        out.say("isolation: every container is a VM of its own".into());
+    } else {
+        out.say(format!(
+            "runtime: {} ({})",
+            ctx.rt.name(),
+            ctx.rt.version().unwrap_or_else(|e| format!("error: {e}"))
+        ));
+        out.say(match &ctx.global.gvisor {
+            Some(p) => format!("gVisor: {p} (dev containers run on it unless an env opts out)"),
+            None => "gVisor: not set up; dev containers share the VM's kernel".into(),
+        });
+    }
     for c in ["gate", "vault", "tools", "base"] {
         let img = ctx.image(c);
         let present = ctx.rt.image_exists(&img);
@@ -582,7 +934,11 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
     });
     let probe_port = 47_000 + (rand::random::<u16>() % 1000);
     let probe_name = format!("luoto-probe-{probe_port}");
+    // A host-network listener on the env's gateway; Apple's dev containers have no network.
     let probe = crate::progress::wait("starting a probe for the self-tests", || {
+        if ctx.rt.flavor == Flavor::Apple {
+            bail!("no host network");
+        }
         ctx.rt.run([
             "run",
             "-d",
@@ -693,6 +1049,33 @@ mod tests {
         };
         let r = recommend(&det("linux", vec![running], Some("apt")));
         assert!(r.install.is_none() && r.notes.iter().any(|n| n.contains("no VM boundary")));
+    }
+
+    #[test]
+    fn offers_apple_first_and_starts_at_the_current_runtime() {
+        let info = |name: &str| RuntimeInfo {
+            name: name.into(),
+            version: Some((29, 0, 0)),
+            version_ok: true,
+            reachable: true,
+            detail: String::new(),
+        };
+        let d = det("macos", vec![info("docker")], Some("brew"));
+        let apple = || Some(Some(info("container")));
+        assert!(offer(&d, None, None).is_none());
+        assert!(offer(&d, apple(), Some(Flavor::Docker)).is_none());
+
+        let first = offer(&d, apple(), None).unwrap();
+        let picked: Vec<_> = first.options.iter().map(|o| o.selected).collect();
+        assert_eq!(picked, [true, false]);
+        assert!(first.options[0].recommended && first.apple_need.is_none());
+        // The podman choice ignores the running docker.
+        assert_eq!(first.podman.summary, "install podman");
+
+        let podman = offer(&d, apple(), Some(Flavor::Podman)).unwrap();
+        let o = &podman.options[1];
+        assert!(o.selected && o.current && !o.recommended);
+        assert_eq!(o.setup, "luoto setup --runtime podman");
     }
 
     #[test]

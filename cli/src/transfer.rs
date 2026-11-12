@@ -1,8 +1,9 @@
 //! `luoto export` and `luoto import`: an env moved to another luoto (a release and a source
 //! build are separate instances in one VM, `names::instance`) or another machine, as one file
 //! (`archive.rs`). Each volume streams through a container in the env's user namespace
-//! (`env::dev_id_map`), so the archive holds the container's own IDs and the new volumes get
-//! the new env's, whatever subnet each env has; nothing of a volume is unpacked on the host.
+//! (`env::dev_id_map`; on Apple's `container`, a VM of its own), so the archive holds the
+//! container's own IDs and the new volumes get the new env's, whatever subnet each env has;
+//! nothing of a volume is unpacked on the host.
 //! Secret values, the CA and the vault token don't move: import makes a new CA and token, and
 //! the config's refs are read on this machine at `up`.
 
@@ -21,7 +22,7 @@ use crate::config::{self, EnvConfig, EnvFile};
 use crate::env::{self, Ctx};
 use crate::paths::{Paths, write_private};
 use crate::prompt::confirm;
-use crate::runtime::Runtime;
+use crate::runtime::{Flavor, Runtime};
 use crate::state::{self, EnvState};
 use crate::text::display;
 use crate::{ca, disk, names, project, repos, workspace};
@@ -35,32 +36,141 @@ const MAX_STDERR: usize = 64 * 1024;
 /// What the config's secret refs start with (`secrets.rs`).
 const REF_SCHEMES: [&str; 6] = ["op://", "vault://", "keyring:", "env:", "file:", "azcli:"];
 
-/// A container of luoto's tools image with the volume `vol` alone, in the env's user
-/// namespace (`id_map`): no network, a read-only root and only the capabilities tar needs to
-/// read (or `write`) every file. Its output isn't logged: it is the volume's contents.
-fn tar_args(rt: &Runtime, image: &str, vol: &str, id_map: Option<u32>, write: bool) -> Vec<String> {
-    let mut a = volume_container(rt, image, vol, id_map, write);
+/// tar reading the volume to its output, or (`write`) unpacking its input into it.
+fn tar_cmd(write: bool) -> Vec<String> {
     let tar: &[&str] = if write {
         &["tar", "-x", "--numeric-owner", "-f", "-", "-C", MOUNT]
     } else {
         &["tar", "-c", "-f", "-", "-C", MOUNT, "."]
     };
-    a.extend(tar.iter().map(|s| s.to_string()));
-    a
+    tar.iter().map(|s| s.to_string()).collect()
 }
 
-/// [`tar_args`]' container giving the NUL-separated paths on its input the owner
-/// `uid:gid`, the links themselves (`chown -h`).
-fn chown_args(
-    rt: &Runtime,
-    image: &str,
-    vol: &str,
+/// Giving the NUL-separated paths on its input the owner `uid:gid`, the links themselves
+/// (`chown -h`).
+fn chown_cmd(uid: u64, gid: u64) -> Vec<String> {
+    ["xargs", "-0", "chown", "-h", &format!("{uid}:{gid}")]
+        .map(String::from)
+        .into()
+}
+
+/// The capabilities tar needs to read (or `write`) every file of the volume.
+fn caps(write: bool) -> &'static [&'static str] {
+    if write {
+        &["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID"]
+    } else {
+        &["DAC_READ_SEARCH"]
+    }
+}
+
+/// A container of luoto's tools image with the volume `vol` alone, in the env's user
+/// namespace (`id_map`): no network, a read-only root and only [`caps`]. Each command runs
+/// in a container of its own, whose output isn't logged: it is the volume's contents.
+/// Apple's `container` logs a container's output to a file on this machine, but not an
+/// `exec`'s, so there one helper per volume runs and each command is `exec`ed in it.
+struct VolumeBox<'a> {
+    rt: &'a Runtime,
+    image: String,
+    vol: String,
     id_map: Option<u32>,
-    uid: u64,
-    gid: u64,
-) -> Vec<String> {
-    let mut a = volume_container(rt, image, vol, id_map, true);
-    a.extend(["xargs", "-0", "chown", "-h", &format!("{uid}:{gid}")].map(String::from));
+    write: bool,
+    /// Apple's helper container.
+    helper: Option<String>,
+}
+
+impl<'a> VolumeBox<'a> {
+    fn open(ctx: &'a Ctx, env: &str, what: &str, id_map: Option<u32>, write: bool) -> Result<Self> {
+        let mut b = VolumeBox {
+            rt: &ctx.rt,
+            image: ctx.image("tools"),
+            vol: names::volume(env, what),
+            id_map,
+            write,
+            helper: None,
+        };
+        if ctx.rt.flavor == Flavor::Apple {
+            let name = helper_name(env, what);
+            // One a cut-short export or import left.
+            ctx.rt.remove_container(&name)?;
+            ctx.rt
+                .run(apple_helper_args(&name, &b.image, &b.vol, write))
+                .with_context(|| format!("start a container with {}", b.vol))?;
+            b.helper = Some(name.clone());
+            // Apple formats a new volume with an empty lost+found, which isn't the env's.
+            if write {
+                let rmdir = format!("rmdir {MOUNT}/lost+found 2>/dev/null; true");
+                ctx.rt.run(["exec", &name, "sh", "-c", &rmdir])?;
+            }
+        }
+        Ok(b)
+    }
+
+    /// The runtime's arguments that run `cmd` with the volume at [`MOUNT`], `input` on its
+    /// stdin when asked.
+    fn args(&self, input: bool, cmd: Vec<String>) -> Vec<String> {
+        let mut a: Vec<String> = match &self.helper {
+            Some(h) => {
+                let mut a = vec!["exec".to_string()];
+                if input {
+                    a.push("-i".into());
+                }
+                a.push(h.clone());
+                a
+            }
+            None => volume_container(self.rt, &self.image, &self.vol, self.id_map, self.write),
+        };
+        a.extend(cmd);
+        a
+    }
+}
+
+impl Drop for VolumeBox<'_> {
+    fn drop(&mut self) {
+        if let Some(h) = &self.helper {
+            let _ = self.rt.remove_container(h);
+        }
+    }
+}
+
+/// Apple's helper for env's volume `what`: a `.` no env or container name of luoto's has
+/// keeps it apart from them.
+fn helper_name(env: &str, what: &str) -> String {
+    format!("{}.{what}.move", names::dev(env))
+}
+
+/// Apple's helper: [`volume_container`]'s, a VM of its own with the volume (read-only unless
+/// `write`) and no network, idle until removed. Apple has no ID maps: the dev container's
+/// IDs are the volume's own.
+fn apple_helper_args(name: &str, image: &str, vol: &str, write: bool) -> Vec<String> {
+    let mut a: Vec<String> = [
+        "run",
+        "-d",
+        "--rm",
+        "--progress",
+        "none",
+        "--name",
+        name,
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+    ]
+    .map(String::from)
+    .into();
+    for c in caps(write) {
+        a.extend(["--cap-add".into(), (*c).into()]);
+    }
+    a.extend([
+        "--mount".into(),
+        format!(
+            "type=volume,source={vol},target={MOUNT}{}",
+            if write { "" } else { ",readonly" }
+        ),
+        image.into(),
+        "sleep".into(),
+        "2147483647".into(),
+    ]);
     a
 }
 
@@ -88,12 +198,7 @@ fn volume_container(
     ] {
         a.push(f.into());
     }
-    let caps: &[&str] = if write {
-        &["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID"]
-    } else {
-        &["DAC_READ_SEARCH"]
-    };
-    for c in caps {
+    for c in caps(write) {
         a.extend(["--cap-add".into(), (*c).into()]);
     }
     a.extend(rt.id_map_args(id_map));
@@ -212,8 +317,12 @@ fn create_private(path: &Path) -> Result<File> {
 
 /// The names of the runtime's volumes.
 fn volumes(rt: &Runtime) -> Result<BTreeSet<String>> {
-    Ok(rt
-        .run(["volume", "ls", "--format", "{{.Name}}"])?
+    let out = if rt.flavor == Flavor::Apple {
+        rt.run(["volume", "list", "--quiet"])?
+    } else {
+        rt.run(["volume", "ls", "--format", "{{.Name}}"])?
+    };
+    Ok(out
         .lines()
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
@@ -363,11 +472,11 @@ fn read_volume<W: Write>(
     id_map: Option<u32>,
     w: &mut archive::Writer<W>,
 ) -> Result<()> {
-    let vol = names::volume(env, part.volume().unwrap_or_default());
+    let vbox = VolumeBox::open(ctx, env, part.volume().unwrap_or_default(), id_map, false)?;
     let mut child = ctx
         .rt
         .command()
-        .args(tar_args(&ctx.rt, &ctx.image("tools"), &vol, id_map, false))
+        .args(vbox.args(false, tar_cmd(false)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -409,6 +518,8 @@ struct Extract<'a> {
     env: &'a str,
     id_map: Option<u32>,
     running: Option<(Child, Option<JoinHandle<String>>)>,
+    /// The open volume's container.
+    vbox: Option<VolumeBox<'a>>,
 }
 
 impl Extract<'_> {
@@ -418,6 +529,12 @@ impl Extract<'_> {
             None => (true, String::new()),
         }
     }
+
+    /// Wait for tar and let the volume go, so it can be removed.
+    fn end(&mut self) {
+        self.wait();
+        self.vbox = None;
+    }
 }
 
 impl archive::Sink for Extract<'_> {
@@ -426,18 +543,18 @@ impl archive::Sink for Extract<'_> {
         if !env::create_volume(self.ctx, self.env, what)? {
             bail!("{} exists already", names::volume(self.env, what));
         }
-        let vol = names::volume(self.env, what);
+        let vbox = self.vbox.insert(VolumeBox::open(
+            self.ctx,
+            self.env,
+            what,
+            self.id_map,
+            true,
+        )?);
         let mut child = self
             .ctx
             .rt
             .command()
-            .args(tar_args(
-                &self.ctx.rt,
-                &self.ctx.image("tools"),
-                &vol,
-                self.id_map,
-                true,
-            ))
+            .args(vbox.args(true, tar_cmd(true)))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -459,8 +576,7 @@ impl archive::Sink for Extract<'_> {
         if !said.is_empty() {
             eprintln!("note: tar, writing the {}: {said}", part.label());
         }
-        let what = part.volume().context("not a volume")?;
-        let vol = names::volume(self.env, what);
+        let vbox = self.vbox.take().context("no volume open")?;
         // One container per owner, nearly always the dev user's alone.
         let mut by_owner: BTreeMap<(u64, u64), Vec<u8>> = BTreeMap::new();
         for l in links {
@@ -470,15 +586,10 @@ impl archive::Sink for Extract<'_> {
             paths.push(0);
         }
         for ((uid, gid), paths) in by_owner {
-            let args = chown_args(
-                &self.ctx.rt,
-                &self.ctx.image("tools"),
-                &vol,
-                self.id_map,
-                uid,
-                gid,
-            );
-            let out = self.ctx.rt.run_stdin(args, &paths);
+            let out = self
+                .ctx
+                .rt
+                .run_stdin(vbox.args(true, chown_cmd(uid, gid)), &paths);
             if let Err(e) = out {
                 eprintln!(
                     "note: the {}'s links keep root as their owner ({e:#})",
@@ -923,6 +1034,7 @@ pub fn import(file: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
         env: &name,
         id_map: env::dev_id_map(&ctx.rt, octet),
         running: None,
+        vbox: None,
     };
     let mut progress = Progress::new("importing", Some(total));
     let read = archive::read_volumes(&mut dec, &head.manifest, &mut sink, &mut |n| {
@@ -932,7 +1044,7 @@ pub fn import(file: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
     let done = read.and_then(|()| settle(&ctx, &name, &head, &cfg.doc.to_string()));
     if let Err(e) = done {
         // Its input is closed: the container ends, and its volume can go.
-        sink.wait();
+        sink.end();
         let _ = std::fs::remove_file(&cfg_path);
         return Err(match env::remove(&ctx, &name) {
             Ok(()) => e,
@@ -1038,6 +1150,18 @@ mod tests {
         }
     }
 
+    fn tar_args(
+        rt: &Runtime,
+        image: &str,
+        vol: &str,
+        id_map: Option<u32>,
+        write: bool,
+    ) -> Vec<String> {
+        let mut a = volume_container(rt, image, vol, id_map, write);
+        a.extend(tar_cmd(write));
+        a
+    }
+
     #[test]
     fn volumes_stream_through_a_container_in_the_envs_user_namespace() {
         let start = crate::machine::dev_id_start(7);
@@ -1078,6 +1202,25 @@ mod tests {
             crate::machine::dev_id_start(7),
             crate::machine::dev_id_start(8)
         );
+    }
+
+    #[test]
+    fn apples_volumes_stream_through_an_exec_in_a_helper_vm() {
+        let read = apple_helper_args("luoto-web.work.move", "img", "luoto-web-work", false);
+        let read = read.join(" ");
+        assert!(read.starts_with(
+            "run -d --rm --progress none --name luoto-web.work.move --network none --read-only \
+             --cap-drop ALL --cap-add DAC_READ_SEARCH"
+        ));
+        assert!(read.ends_with(
+            "--mount type=volume,source=luoto-web-work,target=/v,readonly img sleep 2147483647"
+        ));
+        let write = apple_helper_args("h", "img", "v", true).join(" ");
+        assert!(write.contains("--cap-add CHOWN --cap-add DAC_OVERRIDE"));
+        assert!(write.contains("--mount type=volume,source=v,target=/v img"));
+        // No env's container is named with a dot.
+        assert!(config::validate_name("web.work").is_err());
+        assert!(helper_name("web", "work").ends_with("-web.work.move"));
     }
 
     #[test]

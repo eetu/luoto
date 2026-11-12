@@ -1,5 +1,6 @@
 //! Shared types and the policy engine for luoto. No I/O: the CLI, gate, vault and sandbox
-//! helper all depend on this crate, so it stays dependency-light and fully unit-tested.
+//! helper all depend on this crate, so it stays dependency-light and fully unit-tested. The
+//! one exception is `tun`, behind its feature, for the gate and the sandbox helper.
 
 pub mod api;
 pub mod azure_identity;
@@ -7,11 +8,14 @@ pub mod creds;
 pub mod ctl;
 pub mod events;
 pub mod forges;
+pub mod frame;
 pub mod glob;
 pub mod host;
 pub mod policy;
 pub mod presets;
 pub mod profiles;
+#[cfg(all(target_os = "linux", feature = "tun"))]
+pub mod tun;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -19,8 +23,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROXY_PORT: u16 = 3128;
 /// Port the gate's transparent catch-all listens on (iptables REDIRECT target).
 pub const TRANSPARENT_PORT: u16 = 15001;
-/// Port the vault listens on (vault network only).
-pub const VAULT_PORT: u16 = 8200;
+/// Where a gate reaches the vault: a unix socket that is its env's alone (the env's folder of
+/// the vault's socket volume, or on Apple the gate's broker, `gate/src/uplink.rs`).
+pub const VAULT_SOCKET: &str = "/run/luoto/vault/vault.sock";
 /// Hostname the sandbox uses for the gate.
 pub const GATE_HOST: &str = "gate";
 

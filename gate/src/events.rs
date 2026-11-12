@@ -1,6 +1,7 @@
-//! Event emitter: numbered JSON lines on stdout, and the latest denials for the in-sandbox
-//! API. One writer thread owns stdout so lines never interleave; the queue to it is bounded,
-//! so a log reader that falls behind costs events, never memory or a request's time.
+//! Event emitter: numbered JSON lines on stdout (or the event file, `eventlog.rs`), and the
+//! latest denials for the in-sandbox API. One writer thread owns the output so lines never
+//! interleave; the queue to it is bounded, so a log reader that falls behind costs events,
+//! never memory or a request's time.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -11,6 +12,10 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 use luoto_shared::events::{Event, EventKind, Intake, Source, Verdict};
 
+use anyhow::Context;
+
+use crate::config::Config;
+use crate::eventlog::EventFile;
 use crate::state::lock;
 
 /// Denials kept for `/_sandbox/status`.
@@ -48,8 +53,17 @@ pub struct Emitter {
 }
 
 impl Emitter {
-    pub fn new(env: String) -> Self {
-        Self::with_writer(env, QUEUE, std::io::stdout())
+    /// Events to stdout, or to the event file the config names.
+    pub fn new(cfg: &Config) -> anyhow::Result<Self> {
+        let env = cfg.env.clone();
+        Ok(match &cfg.events_file {
+            Some(path) => {
+                let file = EventFile::open(path, cfg.events_mb * 1024 * 1024)
+                    .with_context(|| format!("open {}", path.display()))?;
+                Self::with_writer(env, QUEUE, file)
+            }
+            None => Self::with_writer(env, QUEUE, std::io::stdout()),
+        })
     }
 
     fn with_writer<W: Write + Send + 'static>(env: String, queue: usize, out: W) -> Self {

@@ -5,6 +5,7 @@
 mod agent_setup;
 mod gate;
 mod mcp;
+mod net;
 mod selftest;
 mod ssh_agent;
 
@@ -89,6 +90,12 @@ enum Cmd {
         #[arg(long, default_value = ssh_agent::SOCKET)]
         socket: std::path::PathBuf,
     },
+    /// Serve the env's tun link to the gate (started by init.sh when `LUOTO_NET=tun`).
+    #[command(hide = true)]
+    Net {
+        #[arg(long, default_value = "/run/luoto-net/net.sock")]
+        socket: std::path::PathBuf,
+    },
     /// Link the luoto briefing and register the MCP server for an agent (used by `luoto agent add`).
     #[command(hide = true)]
     AgentSetup {
@@ -138,6 +145,7 @@ fn main() -> ExitCode {
         Cmd::Relay { port } => relay(port),
         Cmd::Mcp => mcp::serve(),
         Cmd::SshAgent { socket } => ssh_agent::serve(&socket).map(|()| ExitCode::SUCCESS),
+        Cmd::Net { socket } => net::serve(&socket).map(|()| ExitCode::SUCCESS),
         Cmd::AgentSetup { mcp, briefing, set } => agent_setup::run(mcp.as_deref(), &briefing, &set),
         Cmd::Selftest { json, probe } => return selftest::run(json, probe.as_deref()),
     };

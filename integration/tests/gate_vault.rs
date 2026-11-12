@@ -7,7 +7,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
@@ -177,11 +177,22 @@ fn read(id: &str, host: &str) -> CompiledRule {
 struct Env {
     vault_sock: PathBuf,
     gate_sock: PathBuf,
-    vault_port: u16,
+    /// The folder of the vault's sockets, one folder per env.
+    vault_sockets: PathBuf,
     gate_port: u16,
+    /// Stops the links of `start_linked`.
+    linked: Option<Arc<AtomicBool>>,
     _gate: Proc,
     _vault: Proc,
     _dir: tempfile::TempDir,
+}
+
+impl Drop for Env {
+    fn drop(&mut self) {
+        if let Some(stop) = &self.linked {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Env {
@@ -205,16 +216,40 @@ impl Env {
         gate_env: &[(&str, &str)],
         vault_env: &[(&str, &str)],
     ) -> Env {
+        Env::launch(resolve, gate_env, vault_env, false)
+    }
+
+    /// As on Apple: the vault serves one socket on which each connection names its env, and
+    /// the gate serves its vault socket over links the test opens and joins, as luoto's watcher
+    /// does.
+    fn start_linked(resolve: &[(&str, SocketAddr)]) -> Env {
+        Env::launch(resolve, &[], &[], true)
+    }
+
+    fn launch(
+        resolve: &[(&str, SocketAddr)],
+        gate_env: &[(&str, &str)],
+        vault_env: &[(&str, &str)],
+        linked: bool,
+    ) -> Env {
         build();
         let dir = tempfile::tempdir().unwrap();
         let vault_sock = dir.path().join("v.sock");
         let gate_sock = dir.path().join("g.sock");
-        let vault_port = free_port();
+        let vault_sockets = dir.path().join("vs");
+        let shared = dir.path().join("shared.sock");
+        let uplink = dir.path().join("up.sock");
         let gate_port = free_port();
         let bin = root().join("target/debug");
+        let mut vault = Command::new(bin.join("luoto-vault"));
+        if linked {
+            vault.env("LUOTO_VAULT_SOCKET", &shared);
+        } else {
+            std::fs::create_dir(&vault_sockets).unwrap();
+            vault.env("LUOTO_VAULT_SOCKETS", &vault_sockets);
+        }
         let vault = Proc(
-            Command::new(bin.join("luoto-vault"))
-                .env("LUOTO_VAULT_ADDR", format!("127.0.0.1:{vault_port}"))
+            vault
                 .env("LUOTO_CTL_SOCKET", &vault_sock)
                 .envs(vault_env.iter().copied())
                 .stdout(Stdio::null())
@@ -222,9 +257,18 @@ impl Env {
                 .unwrap(),
         );
         let resolve: Vec<String> = resolve.iter().map(|(h, a)| format!("{h}={a}")).collect();
+        let mut gate = Command::new(bin.join("luoto-gate"));
+        if linked {
+            gate.env("LUOTO_VAULT_SOCKET", dir.path().join("gv/vault.sock"))
+                .env("LUOTO_VAULT_UPLINK", &uplink);
+        } else {
+            gate.env(
+                "LUOTO_VAULT_SOCKET",
+                vault_sockets.join(ENV).join("vault.sock"),
+            );
+        }
         let gate = Proc(
-            Command::new(bin.join("luoto-gate"))
-                .env("LUOTO_ENV", ENV)
+            gate.env("LUOTO_ENV", ENV)
                 .env("LUOTO_GATE_IP", "10.255.255.1")
                 .env("LUOTO_PROXY_ADDR", format!("127.0.0.1:{gate_port}"))
                 .env("LUOTO_STATE_DIR", dir.path().join("gate"))
@@ -237,17 +281,25 @@ impl Env {
         );
         wait_for(&vault_sock);
         wait_for(&gate_sock);
+        let linked = linked.then(|| {
+            let stop = Arc::new(AtomicBool::new(false));
+            for _ in 0..2 {
+                let (up, shared, stop) = (uplink.clone(), shared.clone(), stop.clone());
+                std::thread::spawn(move || link_to_vault(&up, &shared, &stop));
+            }
+            stop
+        });
         let env = Env {
             vault_sock,
             gate_sock,
-            vault_port,
+            vault_sockets,
             gate_port,
+            linked,
             _gate: gate,
             _vault: vault,
             _dir: dir,
         };
         env.gate(&GateCtl::SetVault {
-            url: format!("http://127.0.0.1:{vault_port}"),
             token: TOKEN.into(),
         });
         env
@@ -332,15 +384,68 @@ impl Env {
 
     /// What the vault answers the env's gate for `binding`.
     fn credential(&self, binding: &str) -> Reply {
-        let body = serde_json::json!({ "binding": binding }).to_string();
-        let raw = format!(
-            "POST /v1/credential HTTP/1.1\r\nHost: vault\r\nAuthorization: Bearer {TOKEN}\r\n\
-             Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        );
-        send(self.vault_port, raw.as_bytes())
+        self.credential_as(ENV, TOKEN, binding)
+    }
+
+    /// What the vault answers for `binding` on `env`'s socket, to `token`.
+    fn credential_as(&self, env: &str, token: &str, binding: &str) -> Reply {
+        let sock = self.vault_sockets.join(env).join("vault.sock");
+        let mut s = UnixStream::connect(&sock).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        exchange(&mut s, credential_request(token, binding).as_bytes())
     }
 }
+
+fn credential_request(token: &str, binding: &str) -> String {
+    let body = serde_json::json!({ "binding": binding }).to_string();
+    format!(
+        "POST /v1/credential HTTP/1.1\r\nHost: vault\r\nAuthorization: Bearer {token}\r\n\
+         Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// What luoto's watcher does on Apple: keep a link open to the gate's uplink socket and, once
+/// the gate writes on it, join it to the vault's socket after the env's name.
+fn link_to_vault(uplink: &Path, vault: &Path, stop: &AtomicBool) {
+    while !stop.load(Ordering::Relaxed) {
+        let Ok(mut g) = UnixStream::connect(uplink) else {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        };
+        g.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut buf = vec![0u8; 16 * 1024];
+        let n = loop {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            match g.read(&mut buf) {
+                Ok(n) => break n,
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(_) => break 0,
+            }
+        };
+        if n == 0 {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        g.set_read_timeout(None).unwrap();
+        let mut v = UnixStream::connect(vault).unwrap();
+        v.write_all(format!("{ENV}\n").as_bytes()).unwrap();
+        v.write_all(&buf[..n]).unwrap();
+        let (mut g2, mut v2) = (g.try_clone().unwrap(), v.try_clone().unwrap());
+        let back = std::thread::spawn(move || {
+            let _ = std::io::copy(&mut v2, &mut g2);
+            let _ = g2.shutdown(std::net::Shutdown::Both);
+        });
+        let _ = std::io::copy(&mut g, &mut v);
+        let _ = v.shutdown(std::net::Shutdown::Both);
+        let _ = back.join();
+    }
+}
+
+impl Env {}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "spawns binaries; run with `just it`"]
@@ -462,6 +567,91 @@ async fn credentials_replace_whatever_the_sandbox_sent() {
     assert_eq!(r.status, 200, "{}", r.head);
     let r = env.get("http://api.test/qsecret?key=attacker&alt=json");
     assert_eq!(r.status, 200, "{}", r.head);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn a_token_counts_only_on_its_own_envs_socket() {
+    let upstream = MockServer::start().await;
+    let env = Env::start(&[("api.test", *upstream.address())]);
+    let secret = |r: &str| BindingSpec::Static {
+        secret_ref: r.into(),
+    };
+    env.credentials(&[("t.key", secret("env:X"))], &[("env:X", "real-secret")]);
+    env.vault(&VaultCtl::Bind {
+        env: "other".into(),
+        token_sha256: hex::encode(Sha256::digest(b"other-token")),
+        bindings: BTreeMap::from([("t.key".to_string(), secret("env:Y"))]),
+    });
+    let ok = env.credential_as(ENV, TOKEN, "t.key");
+    assert_eq!(
+        (ok.status, ok.json()["value"].as_str()),
+        (200, Some("real-secret"))
+    );
+    assert_eq!(env.credential_as("other", TOKEN, "t.key").status, 403);
+    assert_eq!(env.credential_as(ENV, "other-token", "t.key").status, 403);
+    assert_eq!(
+        env.credential_as("other", "other-token", "t.key").status,
+        423
+    );
+
+    // Unbound, the env's socket is gone: its gate reports the credential as not registered.
+    env.vault(&VaultCtl::Unbind { env: ENV.into() });
+    assert!(!env.vault_sockets.join(ENV).exists());
+    env.gate(&GateCtl::FlushCredentials);
+    env.apply(credentialed_policy());
+    let r = env.get("http://api.test/secret");
+    assert!(
+        r.status == 403 && r.body.contains("not registered"),
+        "{}",
+        r.body
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn credentials_come_over_the_links_the_host_joins_to_the_vault() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/secret"))
+        .and(header("x-api-key", "real-secret"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+    let env = Env::start_linked(&[("api.test", *upstream.address())]);
+    env.credentials(
+        &[(
+            "t.key",
+            BindingSpec::Static {
+                secret_ref: "env:X".into(),
+            },
+        )],
+        &[("env:X", "real-secret")],
+    );
+    env.apply(credentialed_policy());
+    for _ in 0..3 {
+        env.gate(&GateCtl::FlushCredentials);
+        let r = env.get("http://api.test/secret");
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+
+    // A connection naming another env gets nothing for this env's token.
+    let shared = env._dir.path().join("shared.sock");
+    let mut s = UnixStream::connect(&shared).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let raw = format!("other\n{}", credential_request(TOKEN, "t.key"));
+    assert_eq!(exchange(&mut s, raw.as_bytes()).status, 403);
+
+    // Without links, a vault call fails closed.
+    env.linked.as_ref().unwrap().store(true, Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(300));
+    env.gate(&GateCtl::FlushCredentials);
+    let r = env.get("http://api.test/secret");
+    assert!(
+        r.status == 502 && r.body.contains("vault unavailable"),
+        "{}",
+        r.body
+    );
 }
 
 /// `api.test` readable, with the `t.key` credential on `/secret` (a header) and `/qsecret`

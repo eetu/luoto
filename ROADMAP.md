@@ -12,8 +12,6 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
 - **Container hardening:** dropped capabilities, `nosuid,nodev` mounts, user namespaces on
   Docker; tunnel rules check the SNI inside the tunnel; client credentials stripped on every
   host.
-- **A VM per env on macOS** with Apple's `container`, once its host-only networks are verified
-  against raw-IP TCP.
 - **gVisor on Linux** installed by `luoto setup --install`.
 - **The process behind a request,** named from outside by gVisor's runtime monitoring.
 - **Malicious and brand-new package versions** refused at registry hosts (OSV `MAL-*`, a

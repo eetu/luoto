@@ -102,6 +102,76 @@ pub fn listening(rt: &Runtime, dev: &str) -> Option<BTreeSet<u16>> {
     Some(parse_listening(&out))
 }
 
+/// The ports a dev container listens on, from one `exec` that prints its tables every 2 s
+/// (Apple logs each `exec` in the VM's console log, which nothing caps, so a look per tick
+/// would grow it all day). Dropping it ends the `exec`.
+pub struct Listening {
+    child: std::process::Child,
+    open: Arc<std::sync::Mutex<Option<BTreeSet<u16>>>>,
+}
+
+/// The line that ends one printing of the tables.
+const LISTENING_END: &str = "--luoto-end--";
+/// The most one printing may hold: the sandbox writes what that `exec` prints.
+const LISTENING_CAP: usize = 1 << 20;
+
+impl Listening {
+    pub fn start(rt: &Runtime, dev: &str) -> Option<Self> {
+        let script = format!(
+            "while :; do cat /proc/net/tcp /proc/net/tcp6; echo {LISTENING_END}; sleep 2; done"
+        );
+        let mut child = rt
+            .command()
+            .args(["exec", dev, "sh", "-c", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let out = child.stdout.take()?;
+        let open: Arc<std::sync::Mutex<Option<BTreeSet<u16>>>> = Arc::default();
+        let shared = open.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let mut table = String::new();
+            for line in std::io::BufReader::new(out).lines() {
+                let Ok(line) = line else { return };
+                if line == LISTENING_END {
+                    let ports = parse_listening(&table);
+                    *shared.lock().unwrap_or_else(|e| e.into_inner()) = Some(ports);
+                    table.clear();
+                } else if table.len() + line.len() < LISTENING_CAP {
+                    table.push_str(&line);
+                    table.push('\n');
+                } else {
+                    return;
+                }
+            }
+        });
+        Some(Listening { child, open })
+    }
+
+    /// The ports of the latest printing; None before the first, or once the `exec` ended.
+    pub fn current(&mut self) -> Option<BTreeSet<u16>> {
+        if !matches!(self.child.try_wait(), Ok(None)) {
+            return None;
+        }
+        self.open.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Whether the `exec` still runs.
+    pub fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+}
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// `/proc/net/tcp{,6}` rows in LISTEN state (`0A`), by local port.
 fn parse_listening(table: &str) -> BTreeSet<u16> {
     table

@@ -19,6 +19,21 @@ pw() { awk -F: -v u="$USER_UID" -v f="$1" '$3==u{print $f; exit}' /etc/passwd 2>
 
 mkdir -p /etc/luoto
 
+# --- tun link: an env without a network card reaches the gate over a socket the host joins --
+if [ "${LUOTO_NET:-}" = tun ]; then
+  LUOTO_GATE_IP="${LUOTO_GATE_IP:-169.254.1.1}"
+  NET_SOCK="${LUOTO_NET_SOCKET:-/run/luoto-net/net.sock}"
+  rm -f "$NET_SOCK"
+  mkdir -p /run/luoto
+  "$T/bin/sandbox" net --socket "$NET_SOCK" </dev/null >/run/luoto/net.log 2>&1 &
+  i=0
+  while [ ! -S "$NET_SOCK" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  if [ ! -S "$NET_SOCK" ]; then
+    log "warning: the tun link did not start; this env has no network"
+    head -c 4096 /run/luoto/net.log >&2
+  fi
+fi
+
 # --- resolver: the gate is the only DNS server -------------------------------------------
 if [ -n "${LUOTO_GATE_IP:-}" ]; then
   if ! grep -q "nameserver ${LUOTO_GATE_IP}\$" /etc/resolv.conf 2>/dev/null; then
@@ -71,6 +86,10 @@ fi
 HOME_DIR="$(pw 6)"
 HOME_DIR="${HOME_DIR:-/home/$USER_NAME}"
 mkdir -p "$HOME_DIR"
+# A new volume on a runtime that formats it (Apple's) is root's and holds an empty lost+found.
+for d in /workspace "$HOME_DIR"; do
+  [ "$(ls -A "$d" 2>/dev/null)" = "lost+found" ] && rmdir "$d/lost+found" 2>/dev/null
+done
 [ "$(stat -c %u "$HOME_DIR" 2>/dev/null)" = "$USER_UID" ] || chown "$USER_UID:$USER_UID" "$HOME_DIR"
 # zsh runs its new-user wizard in a home without zsh files; the image's defaults are enough.
 if have zsh; then
@@ -177,6 +196,14 @@ mkdir -p /run/luoto
 echo "$USER_NAME" >/run/luoto/user
 touch /run/luoto/ready
 log "ready (user $USER_NAME, env ${LUOTO_ENV:-?})"
+# A runtime that keeps the container's output uncapped (Apple's) gets nothing more: no process
+# keeps it open, so root in the sandbox can't write to it through /proc either. Its /dev is the
+# VM's, whose consoles the runtime logs uncapped on the host: their nodes go, and the container
+# lacks MKNOD to make them again.
+if [ "${LUOTO_OUTPUT:-}" = startup ]; then
+  rm -f /dev/console /dev/kmsg /dev/hvc[0-9]* /dev/tty[0-9]* /dev/ttyS[0-9]* /dev/ttyAMA[0-9]*
+  exec </dev/null >/dev/null 2>&1
+fi
 
 trap 'exit 0' TERM INT
 while :; do sleep 3600 & wait $!; done

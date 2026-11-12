@@ -82,7 +82,7 @@ fn dispatch(state: &State, op: GateCtl) -> CtlResponse {
             }
             Err(e) => CtlResponse::err(format!("{e:#}")),
         },
-        GateCtl::SetVault { url, token } => match state.set_vault(url, token) {
+        GateCtl::SetVault { token } => match state.set_vault(token) {
             Ok(()) => {
                 lifecycle(state, "vault configured".into());
                 CtlResponse::ok(true)

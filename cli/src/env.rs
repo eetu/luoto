@@ -3,7 +3,7 @@
 //! env's gate and vault in line with its config; `state` is what the host keeps of it.
 
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -65,21 +65,7 @@ fn spec_hash(rt: &Runtime, spec: &RunSpec, image_id: &str) -> String {
 
 /// The IDs of `images` from one `image inspect`; `None` unless every one is there.
 fn image_ids<const N: usize>(rt: &Runtime, images: &[String; N]) -> Option<[String; N]> {
-    let out = rt
-        .run(
-            ["image", "inspect", "--format", "{{.Id}}"]
-                .into_iter()
-                .map(String::from)
-                .chain(images.iter().cloned()),
-        )
-        .ok()?;
-    let ids: Vec<String> = out
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect();
-    ids.try_into().ok()
+    rt.image_ids(images)?.try_into().ok()
 }
 
 pub fn env_image(ctx: &Ctx, cfg: &EnvConfig) -> String {
@@ -158,32 +144,26 @@ pub fn ensure_vault(ctx: &Ctx) -> Result<()> {
     })
 }
 
-/// The vault from its image `image_id`, and its networks.
+/// Where the vault serves gates: its socket volume on podman and Docker, a folder of its
+/// image (owned by its user) on Apple, where it publishes one socket from there.
+const VAULT_SOCKETS: &str = "/run/luoto-vault";
+const APPLE_VAULT_SOCKET: &str = "/run/luoto-vault/vault.sock";
+
+/// The vault from its image `image_id`, its egress network and its socket volume.
 fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
     let rt = &ctx.rt;
-    rt.create_internal_network(
-        &names::vault_net(),
-        &names::vault_subnet(),
-        &names::vault_gw(),
-        None,
-        &labels("", "vault"),
-    )?;
     rt.create_bridge_network(&names::vault_out_net(), &labels("", "vault"))?;
-    let spec = RunSpec {
+    let apple = rt.flavor == Flavor::Apple;
+    let mut spec = RunSpec {
         name: names::vault(),
         image: ctx.image("vault"),
         hostname: Some(names::vault()),
-        networks: vec![
-            (names::vault_net(), Some(names::vault_ip())),
-            (names::vault_out_net(), None),
-        ],
+        networks: vec![(names::vault_out_net(), None)],
         env: vec![
-            (
-                "LUOTO_VAULT_ADDR".into(),
-                format!("{}:{}", names::vault_ip(), luoto_shared::VAULT_PORT),
-            ),
             ("LUOTO_CTL_SOCKET".into(), "/run/luoto/ctl.sock".into()),
+            ("LUOTO_VAULT_SOCKETS".into(), VAULT_SOCKETS.into()),
         ],
+        mounts: vec![(names::vault_sockets(), VAULT_SOCKETS.into(), false)],
         cap_drop_all: true,
         read_only: true,
         tmpfs: vec!["/run/luoto:rw,mode=1777,size=1m".into()],
@@ -193,11 +173,46 @@ fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
         log_mb: Some(VAULT_LOG_MB),
         ..Default::default()
     };
-    start_or_create(ctx, &spec, image_id, true)?;
+    if apple {
+        // A volume there is attached to one running container, and a socket on a tmpfs or a
+        // read-only root is not published: the vault's own folder holds the one socket.
+        let host = vault_socket(ctx);
+        #[cfg(unix)]
+        if let Some(dir) = host.parent() {
+            own_dir(dir)?;
+        }
+        spec.env = vec![
+            ("LUOTO_CTL_SOCKET".into(), "/run/luoto/ctl.sock".into()),
+            ("LUOTO_VAULT_SOCKET".into(), APPLE_VAULT_SOCKET.into()),
+        ];
+        spec.mounts.clear();
+        spec.read_only = false;
+        spec.published_sockets = vec![(host.display().to_string(), APPLE_VAULT_SOCKET.into())];
+        spec.memory = Some(APPLE_SMALL_MEMORY.into());
+    } else {
+        rt.create_volume(&names::vault_sockets(), &labels("", "vault"))?;
+    }
+    if start_or_create(ctx, &spec, image_id, true)? == Launch::Created {
+        remove_old_vault_net(ctx);
+    }
     wait_until(Duration::from_secs(20), || ctl::vault_status(rt).ok())
         .context("vault did not come up")?;
     Ok(())
 }
+
+/// The network every gate shared with the vault before luoto 0.4.4, once the vault and the
+/// gates were made anew without it. Until the last of them is, removing it fails.
+fn remove_old_vault_net(ctx: &Ctx) {
+    let net = names::old_vault_net();
+    if ctx.rt.network_exists(&net) {
+        let _ = ctx.rt.run(["network", "rm", &net]);
+    }
+}
+
+/// Memory of the gate and vault VMs on Apple (its default is 1 GB a container).
+const APPLE_SMALL_MEMORY: &str = "512M";
+/// The dev VM's memory on Apple when the env sets none.
+const APPLE_DEV_MEMORY: &str = "8G";
 
 /// What `start_or_create` did.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -359,6 +374,17 @@ fn populate_tools(
     if !created && state.tools.as_deref() == Some(stamp.as_str()) {
         return Ok(());
     }
+    let mount = if ctx.rt.flavor == Flavor::Apple {
+        // A volume is attached to one running container at a time there: the dev container
+        // stops while the volume fills, and `up` starts it again.
+        ctx.rt.stop(&names::dev(env))?;
+        [
+            "--mount".to_string(),
+            format!("type=volume,source={vol},target=/opt/luoto"),
+        ]
+    } else {
+        ["-v".to_string(), format!("{vol}:/opt/luoto")]
+    };
     ctx.rt.run_stdin(
         [
             "run",
@@ -366,8 +392,8 @@ fn populate_tools(
             "-i",
             "--network",
             "none",
-            "-v",
-            &format!("{vol}:/opt/luoto"),
+            &mount[0],
+            &mount[1],
             &ctx.image("tools"),
             "sh",
             "-c",
@@ -413,6 +439,9 @@ pub fn reset_home(ctx: &Ctx, env: &str) -> Result<bool> {
 
 /// On macOS and Windows, podman envs run only in luoto's own VM, started here if needed.
 pub fn ensure_vm(ctx: &Ctx) -> Result<()> {
+    if ctx.rt.flavor == Flavor::Apple {
+        return machine::ensure_apple_service(&ctx.rt);
+    }
     if ctx.rt.flavor != Flavor::Podman || !machine::supported() {
         return Ok(());
     }
@@ -465,7 +494,10 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     let starting = crate::progress::waiting(&format!("starting `{env}`"));
     crate::progress::wait("starting the vault", || start_vault(ctx, &ids.vault))?;
 
-    if !rt.network_exists(&names::internal_net(env))
+    // On Apple the dev container's only link is the tun device to its gate: no env network.
+    let apple = rt.flavor == Flavor::Apple;
+    if !apple
+        && !rt.network_exists(&names::internal_net(env))
         && let Some((holder, _)) = rt
             .subnets()
             .unwrap_or_default()
@@ -479,13 +511,15 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             a.subnet
         );
     }
-    rt.create_internal_network(
-        &names::internal_net(env),
-        &a.subnet,
-        &a.gateway.to_string(),
-        Some(&a.gate.to_string()),
-        &labels(env, "net"),
-    )?;
+    if !apple {
+        rt.create_internal_network(
+            &names::internal_net(env),
+            &a.subnet,
+            &a.gateway.to_string(),
+            Some(&a.gate.to_string()),
+            &labels(env, "net"),
+        )?;
+    }
     rt.create_bridge_network(&names::egress_net(env), &labels(env, "net"))?;
     // The workspace is filled once per volume: the host remembers that it did, but a volume
     // created now (a new VM, a removed volume) starts empty whatever the host remembers.
@@ -498,7 +532,9 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     })?;
 
     let gate = start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)?;
-    let restart = if gate != Launch::AlreadyRunning {
+    // On Apple the dev container keeps its tun device when the gate restarts: the host link
+    // joins it to the new gate.
+    let restart = if gate != Launch::AlreadyRunning && !apple {
         Restart::Gate
     } else if stale_ca {
         Restart::Ca
@@ -576,7 +612,8 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         p = plan(ctx, env)?;
         let _restarting = crate::progress::waiting(&format!("starting `{env}` with them"));
         if start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)? != Launch::AlreadyRunning {
-            start_dev(ctx, env, &p, &state, &ids, Restart::Gate)?;
+            let restart = if apple { Restart::No } else { Restart::Gate };
+            start_dev(ctx, env, &p, &state, &ids, restart)?;
             after_start(ctx, env, &p, &state, !opts.no_selftest, opts.quiet)?;
         } else {
             sync::write_runtime_env(ctx, env, &p.compiled)?;
@@ -788,13 +825,96 @@ fn filled(s: &mut EnvState, cloned: bool) {
 }
 
 /// The gate's log is the env's event history: over 100 000 events, and a flood of them can't
-/// fill the disk.
+/// fill the disk. On Apple it caps the event file and the one before it.
 const GATE_LOG_MB: u32 = 50;
 /// The vault logs only an error that stops it: 1 MB holds thousands, and bounds a crash loop.
 const VAULT_LOG_MB: u32 = 1;
 /// The dev container logs init.sh's few lines a start, and whatever the sandbox (root in its
 /// container) writes to the main process's output, which this bounds.
 const DEV_LOG_MB: u32 = 10;
+
+/// On Apple every env's link has the same two ends: the gate and the dev container meet only
+/// over their tun device.
+pub const APPLE_GATE_IP: &str = "169.254.1.1";
+pub const APPLE_DEV_IP: &str = "169.254.1.2";
+/// Where the gate listens for its end of the tun link, published to the host.
+const APPLE_GATE_SOCKET: &str = "/run/luoto-gate-net/net.sock";
+/// Where the gate takes the links to the vault the watcher opens, published to the host.
+const APPLE_GATE_UPLINK: &str = "/run/luoto-gate-net/vault.sock";
+/// The gate's event file on Apple, in its state volume.
+const APPLE_GATE_EVENTS: &str = "/var/lib/luoto-gate/events.jsonl";
+/// Where the dev container's `sandbox` listens for its end.
+const APPLE_DEV_SOCKET: &str = "/run/luoto-net/net.sock";
+/// The longest path a unix socket address holds on macOS.
+const SUN_PATH_MAX: usize = 104;
+
+/// `dir`, or when a socket in it is too long an address, a short folder of its own in the temp
+/// dir.
+fn socket_dir(dir: PathBuf) -> PathBuf {
+    if dir.join("vault.sock").as_os_str().len() < SUN_PATH_MAX {
+        return dir;
+    }
+    let tag = hex::encode(&Sha256::digest(dir.as_os_str().as_encoded_bytes())[..6]);
+    std::env::temp_dir().join(format!("luoto-{tag}"))
+}
+
+/// The host ends of an env's links on Apple, in its state folder (`socket_dir`).
+pub struct LinkSockets {
+    /// The dev container's end of the tun link.
+    pub dev: PathBuf,
+    /// The gate's end of the tun link.
+    pub gate: PathBuf,
+    /// Where the watcher opens the gate's links to the vault (`gate/src/uplink.rs`).
+    pub uplink: PathBuf,
+}
+
+pub fn link_sockets(ctx: &Ctx, env: &str) -> LinkSockets {
+    let dir = socket_dir(ctx.paths.env_state(env));
+    LinkSockets {
+        dev: dir.join("dev.sock"),
+        gate: dir.join("gate.sock"),
+        uplink: dir.join("vault.sock"),
+    }
+}
+
+/// The vault's socket on Apple, published to the host: a connection names its env in its
+/// first line, then speaks for that env. The instance's, as the vault is, whichever config dir
+/// (`LUOTO_HOME`) started it.
+pub fn vault_socket(ctx: &Ctx) -> PathBuf {
+    let data = Paths::of(names::instance()).map_or_else(|_| ctx.paths.data.clone(), |p| p.data);
+    socket_dir(data.join("vault")).join("vault.sock")
+}
+
+/// Create `dir` for an env's link sockets, only this user's: a folder someone else made or can
+/// enter (a shared temp dir) is refused, so nobody else's socket stands in for the gate.
+#[cfg(unix)]
+fn own_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let made = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir);
+    made.with_context(|| format!("create {}", dir.display()))?;
+    let m = std::fs::symlink_metadata(dir).with_context(|| format!("read {}", dir.display()))?;
+    // SAFETY: getuid has no preconditions.
+    let uid = unsafe { libc::getuid() };
+    if !m.is_dir() || m.uid() != uid {
+        bail!(
+            "{} isn't a folder of yours; remove it and run `luoto up` again",
+            dir.display()
+        );
+    }
+    if m.permissions().mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restrict {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+fn set_env(env: &mut Vec<(String, String)>, key: &str, value: &str) {
+    env.retain(|(k, _)| k != key);
+    env.push((key.into(), value.into()));
+}
 
 fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
     let cfg = &p.cfg;
@@ -805,7 +925,6 @@ fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
         networks: vec![
             (names::internal_net(env), Some(a.gate)),
             (names::egress_net(env), None),
-            (names::vault_net(), None),
         ],
         env: vec![
             ("LUOTO_ENV".into(), env.into()),
@@ -849,6 +968,43 @@ fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
         log_mb: Some(GATE_LOG_MB),
         ..Default::default()
     };
+    let vault_dir = Path::new(luoto_shared::VAULT_SOCKET)
+        .parent()
+        .map_or_else(String::new, |d| d.display().to_string());
+    if ctx.rt.flavor == Flavor::Apple {
+        let socks = link_sockets(ctx, env);
+        spec.networks = vec![(names::egress_net(env), None)];
+        set_env(&mut spec.env, "LUOTO_GATE_IP", APPLE_GATE_IP);
+        set_env(
+            &mut spec.env,
+            "LUOTO_INTERNAL_SUBNET",
+            &format!("{APPLE_DEV_IP}/32"),
+        );
+        set_env(&mut spec.env, "LUOTO_DEV_IP", APPLE_DEV_IP);
+        set_env(&mut spec.env, "LUOTO_TUN_SOCKET", APPLE_GATE_SOCKET);
+        // Apple keeps a container's output uncapped and only until it starts again: events go
+        // to a capped file in the gate's volume, read by `luoto-gate events`.
+        set_env(&mut spec.env, "LUOTO_EVENTS_FILE", APPLE_GATE_EVENTS);
+        set_env(&mut spec.env, "LUOTO_EVENTS_MB", &GATE_LOG_MB.to_string());
+        set_env(&mut spec.env, "LUOTO_VAULT_UPLINK", APPLE_GATE_UPLINK);
+        spec.published_sockets = vec![
+            (socks.gate.display().to_string(), APPLE_GATE_SOCKET.into()),
+            (socks.uplink.display().to_string(), APPLE_GATE_UPLINK.into()),
+        ];
+        spec.memory = Some(APPLE_SMALL_MEMORY.into());
+    } else if ctx.rt.mounts_folders() {
+        // Only the env's own folder of the vault's sockets.
+        spec.folder_mounts = vec![(names::vault_sockets(), env.into(), vault_dir)];
+    } else {
+        // Docker before 26 mounts whole volumes: the gate sees every env's socket, and the
+        // vault's check that a token is its socket's env is all that keeps them apart.
+        spec.mounts
+            .push((names::vault_sockets(), "/run/luoto/vaults".into(), true));
+        spec.env.push((
+            "LUOTO_VAULT_SOCKET".into(),
+            format!("/run/luoto/vaults/{env}/vault.sock"),
+        ));
+    }
     // A model server on this machine is `host.docker.internal`, which Docker Engine on Linux
     // knows only when told (podman's hosts file and Docker Desktop have it).
     if ctx.rt.flavor == Flavor::Docker {
@@ -878,7 +1034,19 @@ fn start_gate(
     let _waiting = crate::progress::waiting("starting the gate");
     let rt = &ctx.rt;
     let a = names::addrs(state.octet);
+    #[cfg(unix)]
+    if rt.flavor == Flavor::Apple
+        && let Some(dir) = link_sockets(ctx, env).gate.parent()
+    {
+        own_dir(dir)?;
+    }
+    // The vault makes the env's folder of sockets, which the gate mounts, as it binds the env.
+    // With a running gate this comes before `apply_policy` (`sync::bind_vault`).
+    sync::bind_vault(ctx, env, state, &p.compiled)?;
     let launch = start_or_create(ctx, &gate_spec(ctx, env, p, &a), image_id, true)?;
+    if launch == Launch::Created {
+        remove_old_vault_net(ctx);
+    }
     let gs = wait_until(Duration::from_secs(20), || ctl::gate_status(rt, env).ok())
         .with_context(|| format!("gate for `{env}` did not come up (see `luoto logs -e {env}`)"))?;
     if gs.ca_pem_sha256 != Some(env_ca.pem_sha256()) {
@@ -896,18 +1064,14 @@ fn start_gate(
             rt,
             env,
             &GateCtl::SetVault {
-                url: format!("http://{}:{}", names::vault_ip(), luoto_shared::VAULT_PORT),
                 token: state.vault_token.clone(),
             },
         )?;
     }
-    let bound = sync::bind_vault(ctx, env, state, &p.compiled);
     sync::apply_policy(ctx, env, &p.compiled)?;
     // Credentials failing to unlock must not block the env: credentialed hosts fail closed
     // ("credentials locked") until `luoto vault unlock` succeeds.
-    if let Err(e) = bound
-        .and_then(|()| sync::load_secrets(ctx, &p.compiled.vault_refs(), &format!("`{env}`"), true))
-    {
+    if let Err(e) = sync::load_secrets(ctx, &p.compiled.vault_refs(), &format!("`{env}`"), true) {
         crate::progress::say(|| {
             eprintln!(
                 "warning: {e:#}\n         their hosts return 403 until then; once it is fixed, \
@@ -922,6 +1086,9 @@ fn dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &str) ->
     let rt = &ctx.rt;
     let cfg = &p.cfg;
     let a = names::addrs(state.octet);
+    if rt.flavor == Flavor::Apple {
+        return Ok(apple_dev_spec(ctx, env, p, state, tools_id));
+    }
     let gvisor = cfg.isolation(&ctx.global) == Isolation::Gvisor;
     let runsc = if gvisor {
         Some(ctx.global.gvisor.clone().context(
@@ -973,6 +1140,71 @@ fn dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &str) ->
     })
 }
 
+/// The dev container on Apple: a VM of its own, which is the isolation `isolation = "gvisor"`
+/// asks for, so the setting (and an OCI runtime) has nothing to choose there. No network: its
+/// only link is the tun device `sandbox` makes on the published socket.
+fn apple_dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &str) -> RunSpec {
+    let cfg = &p.cfg;
+    let dev_sock = link_sockets(ctx, env).dev;
+    let gate_ip: Ipv4Addr = APPLE_GATE_IP.parse().unwrap_or(Ipv4Addr::UNSPECIFIED);
+    let mut env_vars = static_dev_env(env, gate_ip);
+    env_vars.push(("LUOTO_NET".into(), "tun".into()));
+    env_vars.push(("LUOTO_DEV_IP".into(), APPLE_DEV_IP.into()));
+    // Apple keeps the container's output uncapped: init.sh closes it once ready.
+    env_vars.push(("LUOTO_OUTPUT".into(), "startup".into()));
+    RunSpec {
+        name: names::dev(env),
+        image: p.image.clone(),
+        networks: vec![("none".into(), None)],
+        dns: vec![APPLE_GATE_IP.into()],
+        env: env_vars,
+        mounts: vec![
+            (names::volume(env, "work"), "/workspace".into(), false),
+            (names::volume(env, "home"), state.home().into(), false),
+            (names::volume(env, "tools"), "/opt/luoto".into(), true),
+        ],
+        published_sockets: vec![(dev_sock.display().to_string(), APPLE_DEV_SOCKET.into())],
+        // The VM's console is logged uncapped on the host: the kernel writes to it only what
+        // stops it, and keeps no audit trail (with none, sudo stays quiet without AUDIT_WRITE).
+        kernel_args: vec!["loglevel=1".into(), "audit=0".into()],
+        // Podman's default set, without MKNOD (init.sh removes the VM's console nodes) and with
+        // NET_ADMIN for the tun device.
+        cap_drop_all: true,
+        cap_add: [
+            "CHOWN",
+            "DAC_OVERRIDE",
+            "FOWNER",
+            "FSETID",
+            "KILL",
+            "NET_BIND_SERVICE",
+            "SETFCAP",
+            "SETGID",
+            "SETPCAP",
+            "SETUID",
+            "SYS_CHROOT",
+            "NET_ADMIN",
+        ]
+        .map(String::from)
+        .to_vec(),
+        tmpfs: vec!["/run/luoto:rw,mode=755,size=4m".into()],
+        entrypoint: Some("/opt/luoto/init.sh".into()),
+        user: Some("0:0".into()),
+        memory: Some(
+            cfg.resources
+                .memory
+                .clone()
+                .unwrap_or_else(|| APPLE_DEV_MEMORY.into()),
+        ),
+        cpus: cfg.resources.cpus,
+        labels: [
+            labels(env, "dev"),
+            vec![("luoto.tools".into(), tools_id.into())],
+        ]
+        .concat(),
+        ..Default::default()
+    }
+}
+
 /// Why `start_dev` restarts a dev container that is running.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Restart {
@@ -998,6 +1230,11 @@ fn start_dev(
     let rt = &ctx.rt;
     let spec = dev_spec(ctx, env, p, state, &ids.tools)?;
     let mut launch = start_or_create(ctx, &spec, &ids.dev, false)?;
+    // On Apple the watcher joins the dev container's tun link to the gate: init.sh needs it
+    // before it can finish.
+    if rt.flavor == Flavor::Apple {
+        crate::watch::spawn(ctx);
+    }
     if launch == Launch::AlreadyRunning && restart != Restart::No {
         crate::progress::say(|| {
             eprintln!(

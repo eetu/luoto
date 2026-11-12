@@ -1,5 +1,6 @@
 //! The background watcher: one per config dir, started by `up`, `down` and commands that work
-//! in an env. Every 2 s it forwards the ports running envs listen on (see `ports`) and posts
+//! in an env. Every 2 s it forwards the ports running envs listen on (see `ports`), on Apple
+//! joins their tun links and their gates' links to the vault (see `tunlink`), and posts
 //! desktop notifications (see `notify`); every 30 s it reads again the credentials upstreams
 //! refused, from sources that need no one, and the Azure CLI's tokens the vault holds before
 //! they expire; every minute it stops envs that have been idle for
@@ -139,6 +140,19 @@ pub fn watch() -> Result<ExitCode> {
     };
     let stamp = exe_stamp();
     let mut forwards: HashMap<(String, u16), ports::Forward> = HashMap::new();
+    // Apple: each running dev container's tun link, joined to its gate.
+    #[cfg(unix)]
+    let mut links: HashMap<String, crate::tunlink::Link> = HashMap::new();
+    #[cfg(not(unix))]
+    let links: HashMap<String, ()> = HashMap::new();
+    // Apple: each running gate's links to the vault.
+    #[cfg(unix)]
+    let mut uplinks: HashMap<String, crate::tunlink::Uplinks> = HashMap::new();
+    // Apple restarts nothing on its own: a gate seen stopped under a running dev container
+    // (since when, and when it was last started here).
+    let mut gate_down: HashMap<String, (Instant, Option<Instant>)> = HashMap::new();
+    // Apple: one long-lived look at each running dev container's listening ports.
+    let mut listeners: HashMap<String, ports::Listening> = HashMap::new();
     let mut refused: HashSet<(String, u16)> = HashSet::new();
     let mut recorded: Option<BTreeMap<String, ports::Watched>> = None;
     let notices = notify::Notices::default();
@@ -158,20 +172,58 @@ pub fn watch() -> Result<ExitCode> {
         if !lock_file.exists() {
             return Ok(ExitCode::SUCCESS);
         }
-        // A new luoto takes over once nothing is forwarded: leaving now would cut the
-        // connections of a running dev server.
-        if exe_stamp() != stamp && forwards.is_empty() {
+        // A new luoto takes over once nothing is forwarded or linked: leaving now would cut
+        // the connections of a running dev server, or an env's network.
+        if exe_stamp() != stamp && forwards.is_empty() && links.is_empty() {
             return Ok(ExitCode::SUCCESS);
         }
-        let ctx = Ctx::load()?;
-        let states = ctx.rt.states().unwrap_or_default();
+        // An env's network runs through this process: while it links any, a failed look (a
+        // config being saved, the runtime busy) waits for the next tick instead of leaving.
+        let ctx = match Ctx::load() {
+            Ok(c) => c,
+            Err(e) if links.is_empty() => return Err(e),
+            Err(_) => continue,
+        };
+        let states = match ctx.rt.states() {
+            Ok(s) => s,
+            Err(_) if !links.is_empty() => continue,
+            Err(_) => Default::default(),
+        };
         if states.vm_stopped {
             return Ok(ExitCode::SUCCESS);
         }
-        let running: Vec<String> = config::list_envs(&ctx.paths)?
+        let envs = match config::list_envs(&ctx.paths) {
+            Ok(e) => e,
+            Err(e) if links.is_empty() => return Err(e),
+            Err(_) => continue,
+        };
+        let running: Vec<String> = envs
             .into_iter()
             .filter(|e| states.running(&names::dev(e)))
             .collect();
+        #[cfg(unix)]
+        if ctx.rt.flavor == crate::runtime::Flavor::Apple {
+            links.retain(|e, _| running.contains(e));
+            for name in &running {
+                links.entry(name.clone()).or_insert_with(|| {
+                    let s = env::link_sockets(&ctx, name);
+                    println!("{} linking `{name}` to its gate", Utc::now());
+                    crate::tunlink::Link::start(s.dev, s.gate)
+                });
+            }
+            uplinks.retain(|e, _| running.contains(e) && states.running(&names::gate(e)));
+            for name in running.iter().filter(|e| states.running(&names::gate(e))) {
+                uplinks.entry(name.clone()).or_insert_with(|| {
+                    let s = env::link_sockets(&ctx, name);
+                    let vault = env::vault_socket(&ctx);
+                    crate::tunlink::Uplinks::start(s.uplink, vault, name.clone())
+                });
+            }
+        }
+        if ctx.rt.flavor == crate::runtime::Flavor::Apple {
+            restart_gates(&ctx, &states, &running, &mut gate_down);
+        }
+        listeners.retain(|e, _| running.contains(e));
         if running.is_empty() {
             forwards.clear();
             refused.clear();
@@ -225,7 +277,17 @@ pub fn watch() -> Result<ExitCode> {
                 continue;
             }
             let dev = names::dev(name);
-            let Some(open) = ports::listening(&ctx.rt, &dev) else {
+            let open = if ctx.rt.flavor == crate::runtime::Flavor::Apple {
+                if listeners.get_mut(name).is_none_or(|l| !l.alive())
+                    && let Some(l) = ports::Listening::start(&ctx.rt, &dev)
+                {
+                    listeners.insert(name.clone(), l);
+                }
+                listeners.get_mut(name).and_then(ports::Listening::current)
+            } else {
+                ports::listening(&ctx.rt, &dev)
+            };
+            let Some(open) = open else {
                 // A failed look (the runtime busy) keeps what is forwarded, and what is taken:
                 // dropping a forward would refuse the next connections.
                 let kept = forwards.keys().chain(refused.iter());
@@ -297,6 +359,44 @@ pub fn watch() -> Result<ExitCode> {
                 Ok(()) => println!("{} stopped `{name}`: idle for {limit:?}", Utc::now()),
                 Err(e) => println!("{} could not stop `{name}`: {e:#}", Utc::now()),
             }
+        }
+    }
+}
+
+/// How long a gate stays stopped under a running dev container before it is started again
+/// (longer than `up` leaves one between creating and starting it), and how often at most.
+const GATE_DOWN_FOR: Duration = Duration::from_secs(5);
+const GATE_RESTART_EVERY: Duration = Duration::from_secs(30);
+
+/// On Apple, where nothing restarts a container that stopped: start the gate of each env whose
+/// dev container runs (`down` stops the dev container first, so that gate stopped on its own).
+/// It serves at once from its state volume, as after podman's own restart.
+fn restart_gates(
+    ctx: &Ctx,
+    states: &crate::runtime::States,
+    running: &[String],
+    gate_down: &mut HashMap<String, (Instant, Option<Instant>)>,
+) {
+    gate_down.retain(|e, _| running.contains(e));
+    for name in running {
+        let gate = names::gate(name);
+        if states.running(&gate) || !states.exists(&gate) {
+            if let Some(d) = gate_down.get_mut(name) {
+                d.0 = Instant::now();
+            }
+            continue;
+        }
+        let (since, last) = gate_down
+            .entry(name.clone())
+            .or_insert((Instant::now(), None));
+        if since.elapsed() < GATE_DOWN_FOR || last.is_some_and(|l| l.elapsed() < GATE_RESTART_EVERY)
+        {
+            continue;
+        }
+        *last = Some(Instant::now());
+        match ctx.rt.run(["start", &gate]) {
+            Ok(_) => println!("{} started the stopped gate of `{name}`", Utc::now()),
+            Err(e) => println!("{} could not start the gate of `{name}`: {e:#}", Utc::now()),
         }
     }
 }

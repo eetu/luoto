@@ -4,14 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use luoto_shared::events::{Event, EventKind, Intake, Verdict};
 use luoto_shared::policy::{Mute, OPEN_RULE};
 use serde::Serialize;
 
 use crate::names;
-use crate::runtime::Runtime;
+use crate::runtime::{Flavor, Runtime};
 
 /// Parse event lines out of mixed container output (diagnostics on stderr are skipped).
 pub fn parse_lines(text: &str) -> Vec<Event> {
@@ -22,36 +22,111 @@ pub fn parse_lines(text: &str) -> Vec<Event> {
         .collect()
 }
 
-fn logs_args<'a>(container: &'a str, since: Option<&'a str>, follow: bool) -> Vec<&'a str> {
-    let mut args = vec!["logs"];
+/// Whether `container` writes its events to its event file rather than its log: a gate on
+/// Apple, whose logs nothing caps (`luoto-gate events` reads the file).
+pub fn in_file(rt: &Runtime, container: &str) -> bool {
+    rt.flavor == Flavor::Apple && container != names::vault()
+}
+
+fn logs_args(rt: &Runtime, container: &str, since: Option<&str>, follow: bool) -> Vec<String> {
+    if in_file(rt, container) {
+        let mut args = file_args(container, follow, None);
+        if let Some(t) = since.and_then(since_cut) {
+            args.extend(["--since".into(), t.to_rfc3339()]);
+        }
+        return args;
+    }
+    let mut args = vec!["logs".to_string()];
     if follow {
-        args.push("-f");
+        args.push("-f".into());
     }
-    if let Some(s) = since {
-        args.extend(["--since", s]);
+    // Apple's `logs` has no `--since`: its events are cut by their own time (`since_cut`).
+    if let Some(s) = since
+        && rt.flavor != Flavor::Apple
+    {
+        args.extend(["--since".into(), s.into()]);
     }
-    args.push(container);
+    args.push(container.into());
     args
 }
 
-pub fn read(rt: &Runtime, container: &str, since: Option<&str>) -> Result<Vec<Event>> {
-    let _waiting = crate::progress::waiting("reading the gate's log");
-    let out = rt
-        .command()
-        .args(logs_args(container, since, false))
-        .stdin(Stdio::null())
-        .output()
-        .context("read logs")?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push('\n');
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    let mut events = parse_lines(&text);
-    events.sort_by_key(|e| (e.ts, e.seq));
-    Ok(events)
+/// The runtime arguments that print a gate's event file, the last `lines` of it when given.
+pub fn file_args(container: &str, follow: bool, lines: Option<usize>) -> Vec<String> {
+    // As the user the gate drops to, who owns the file: an exec has no capability to read it.
+    let mut args: Vec<String> = [
+        "exec",
+        "-u",
+        "65534:65534",
+        container,
+        "luoto-gate",
+        "events",
+    ]
+    .map(String::from)
+    .into();
+    if follow {
+        args.push("-f".into());
+    }
+    if let Some(n) = lines {
+        args.extend(["-n".into(), n.to_string()]);
+    }
+    args
+}
+
+/// The time `since` (`30m`, `2h`, `1d`, `45s` ago, Unix seconds, or an RFC 3339 time) names.
+fn since_cut(since: &str) -> Option<DateTime<Utc>> {
+    if let Ok(t) = DateTime::parse_from_rfc3339(since) {
+        return Some(t.with_timezone(&Utc));
+    }
+    if !since.is_empty() && since.bytes().all(|b| b.is_ascii_digit()) {
+        return DateTime::from_timestamp(since.parse().ok()?, 0);
+    }
+    let (n, unit) = since.split_at(since.char_indices().last()?.0);
+    let n: i64 = n.parse().ok()?;
+    let d = match unit {
+        "s" => chrono::Duration::seconds(n),
+        "m" => chrono::Duration::minutes(n),
+        "h" => chrono::Duration::hours(n),
+        "d" => chrono::Duration::days(n),
+        _ => return None,
+    };
+    Some(Utc::now() - d)
+}
+
+/// Whether `e` falls in the window the runtime itself didn't cut (Apple's).
+fn in_window(rt: &Runtime, cut: Option<DateTime<Utc>>, e: &Event) -> bool {
+    rt.flavor != Flavor::Apple || cut.is_none_or(|c| e.ts.is_none_or(|t| t >= c))
 }
 
 pub fn gate_events(rt: &Runtime, env: &str, since: Option<&str>) -> Result<Vec<Event>> {
-    read(rt, &names::gate(env), since)
+    let _waiting = crate::progress::waiting("reading the gate's log");
+    let container = &names::gate(env);
+    let out = rt
+        .command()
+        .args(logs_args(rt, container, since, false))
+        .stdin(Stdio::null())
+        .output()
+        .context("read logs")?;
+    if in_file(rt, container) && !out.status.success() {
+        if rt.container_state(container).as_deref() != Some("running") {
+            bail!(
+                "`{env}`'s gate isn't running, and its events show once it is (`luoto up -e {env}`)"
+            );
+        }
+        bail!(
+            "reading {container}'s events failed: {}",
+            crate::text::display(String::from_utf8_lossy(&out.stderr).trim())
+        );
+    }
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push('\n');
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    let cut = since
+        .filter(|_| rt.flavor == Flavor::Apple)
+        .and_then(since_cut);
+    let mut events = parse_lines(&text);
+    events.retain(|e| in_window(rt, cut, e));
+    events.sort_by_key(|e| (e.ts, e.seq));
+    Ok(events)
 }
 
 /// Follow a container's events, calling `f` for each (stops when `f` returns false).
@@ -63,16 +138,20 @@ pub fn follow(
 ) -> Result<()> {
     let mut child = rt
         .command()
-        .args(logs_args(container, since, true))
+        .args(logs_args(rt, container, since, true))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .context("follow logs")?;
     let stdout = child.stdout.take().context("logs stdout")?;
+    let cut = since
+        .filter(|_| rt.flavor == Flavor::Apple)
+        .and_then(since_cut);
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
         if let Some(ev) = parse_lines(&line).into_iter().next()
+            && in_window(rt, cut, &ev)
             && !f(ev)
         {
             break;
@@ -497,6 +576,19 @@ pub fn fmt_event(e: &Event) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn since_reads_ages_unix_seconds_and_times_and_never_panics() {
+        assert_eq!(
+            since_cut("1731360000").map(|t| t.timestamp()),
+            Some(1_731_360_000)
+        );
+        let age = Utc::now() - since_cut("2h").unwrap();
+        assert!((7199..=7201).contains(&age.num_seconds()));
+        assert!(since_cut("2024-11-11T12:00:00Z").is_some());
+        assert!(since_cut("5µ").is_none());
+        assert!(since_cut("").is_none());
+    }
 
     #[test]
     fn summarizes_denials_first() {

@@ -52,9 +52,9 @@ Then, once:
 luoto setup
 ```
 
-It checks your container runtime (podman ≥ 5.2 or Docker ≥ 28; `--install` installs podman
-after showing the command), creates luoto's own VM where podman needs one, and gets the
-images. Updates, tab completion and checking a download: [Install details](docs/install.md).
+It checks your container runtime (podman ≥ 5.2 or Docker ≥ 28; on macOS 26 on Apple silicon
+it offers Apple's `container` first; `--install` installs the one picked after showing the
+command), creates luoto's own VM where podman needs one, and gets the images. Updates, tab completion and checking a download: [Install details](docs/install.md).
 
 ## Getting started
 
@@ -198,6 +198,9 @@ and how to let GitHub merge its pull requests.
   10 GB (or a tenth of it) since luoto last said so, `up`, `down`, `luoto run` and the end of
   a shell or agent session say so, with the env's biggest build folders (`target/`,
   `node_modules/`, …); the watcher notifies when free space falls under 10 GB and 3 GB.
+- On Apple's `container` ([Platforms](docs/how-it-works.md#platforms)): an env's egress
+  history shows only while its gate runs, and a volume attaches to one running container at a
+  time, so refilling the tools volume stops the dev container briefly.
 
 ## Development
 

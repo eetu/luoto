@@ -11,11 +11,12 @@ release (`packaging/README.md`). CI runs on pull requests (path-filtered) and we
 ## Layout
 
 ```text
-shared/      types + policy engine (no I/O); presets/, agents/, providers/, editors/ are TOML data
+shared/      types + policy engine (no I/O but `tun`: the tun link, Linux-only, behind its feature;
+             `frame` frames its packets); presets/, agents/, providers/, editors/ are TOML data
 gate/        luoto-gate: explicit proxy, TLS interception, DNS, transparent catch-all, ctl socket
 vault/       luoto-vault: in-memory secrets, per-env bindings, GitHub App token minting
-tools/       `sandbox` helper (status/check/request/relay/mcp/selftest, internal ssh-agent and
-             agent-setup) + init.sh + AGENTS.md
+tools/       `sandbox` helper (status/check/request/relay/mcp/selftest, internal ssh-agent,
+             agent-setup and net) + init.sh + AGENTS.md
 cli/         `luoto` host binary: runtime driver, env lifecycle, commands, `luoto ui` (axum)
 frontend/    SvelteKit SPA embedded into `luoto` (rust-embed of frontend/dist)
 image/       luoto-base dev image
@@ -32,8 +33,8 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
 
 ## Conventions
 
-- The boundary is runtime-agnostic: everything goes through `cli/src/runtime.rs` (podman and
-  docker flavours). Never call a runtime binary elsewhere; never rely on runtime DNS — the dev
+- The boundary is runtime-agnostic: everything goes through `cli/src/runtime.rs` (podman,
+  docker and Apple `container` flavours). Never call a runtime binary elsewhere; never rely on runtime DNS — the dev
   container's resolver and default route are the gate, set by luoto.
 - Adding an ecosystem, agent, model provider or editor is a TOML file in `shared/{presets,
   agents,providers,editors}`, not code. Presets use exact hosts; the preset test rejects
@@ -110,18 +111,34 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   per env, gVisor plus the `luoto-runsc` wrapper (podman keeps a container's runtime path but
   not its flags). The remote podman client can't choose a runtime, so gVisor containers are
   created by podman inside the VM (`podman machine ssh`); every later call uses the connection.
+- On Apple's `container` (`Flavor::Apple`) every container is a VM; there is no luoto VM. The
+  dev container has no NIC: its only path is the tun link to the gate (`shared/src/tun.rs`;
+  `sandbox net` at the dev end, `gate/src/system.rs` `tun_link` at the gate's), whose two
+  published sockets the watcher joins (`tunlink.rs`). Never give it a vmnet network: Apple's
+  are host-only and reach every Mac service listening on all interfaces. The gate is only on
+  the env's NAT network; its vault socket is a broker (`gate/src/uplink.rs`) over links the
+  watcher opens to the gate's published uplink socket and joins to the vault's published
+  socket after a line naming the env (`tunlink::Uplinks`). Apple caps no container's output: a gate writes its events to a capped file in its volume
+  (`LUOTO_EVENTS_FILE`), which luoto reads through `luoto-gate events` (`events::in_file`),
+  and init.sh closes the dev container's output once ready (`LUOTO_OUTPUT=startup`).
 - `disk.rs` reads sizes and free space (podman and docker print them differently; its parsers
   read both) and picks what `luoto prune` removes: this instance's images by repository (an
   unnamed one by podman's names history, or the build stages' `luoto.build` label), never one
   a container uses or either instance runs, never a volume. Sizes walk every volume: never on
   the UI's polls.
 - `watch.rs` is the one background process per config dir; port forwarding (`ports.rs`) goes
-  through `exec … sandbox relay`, never a network path. Its desktop notifications
+  through `exec … sandbox relay`, never a network path; on Apple it keeps the tun links and
+  the gates' vault links. Its desktop notifications
   (`notify.rs`) pass sandbox text to the OS notifier cleaned, capped and as arguments, never
   inside a script.
 - `report.rs` (`doctor --report`) writes nothing that hasn't passed its `Redactor`;
   `uninstall.rs` removes only what this instance (`names::instance`) made.
 - Control of gate/vault is only via the ctl unix socket reached through the runtime's exec.
+- Gates share no network with each other or the vault: a gate reaches the vault on a unix
+  socket of its env's (`luoto_shared::VAULT_SOCKET`), and the vault takes a token only on its
+  own env's channel. On podman and Docker that is `<env>/vault.sock` in the vault's socket
+  volume (`names::vault_sockets`), made by the vault's `Bind` (so `start_gate` binds before
+  the gate starts), and the gate mounts only that folder, read-only.
 - The UI API requires the per-run token; keep Host/Origin checks on any new route.
 - `ui/api.rs` holds no policy logic: its routes call the core the CLI uses (`rules.rs`,
   `init.rs`, `project.rs`, `sync.rs`), so the two can't drift.
@@ -164,12 +181,14 @@ What the CLI asks and prints follows one grammar, whatever the feature:
 
 ## Working on this repo
 
-- A source build is the `luoto-dev` instance (`names::instance`): its own config dirs, vault
-  (10.212.1.0/24), env subnets and ID ranges (`names::env_octets`), `luoto-dev-<env>` names,
+- A source build is the `luoto-dev` instance (`names::instance`): its own config dirs, vault,
+  env subnets and ID ranges (`names::env_octets`), `luoto-dev-<env>` names,
   keychain service and UI port, in the same VM as an installed release, whose envs it never
   touches. `just link-dev` links
   `~/.local/bin/luoto-dev` to the debug build.
-- `just images` builds images (tag `dev`); `luoto-dev setup --build` does the same.
+- `just images` builds images (tag `dev`); `luoto-dev setup --build` does the same. On Apple's
+  `container`, `LUOTO_RUNTIME=container just images`: both size its builder VM (every CPU, half
+  the RAM; its default 2 GB is too small for the workspace).
 - `LUOTO_HOME=<dir>` isolates config/state for experiments (copy `config.toml` in: it names
   luoto's VM and gVisor). `LUOTO_TRACE=1` prints every runtime call with start time and
   duration; each call is a round trip into the VM, so `up` is as fast as its call count.

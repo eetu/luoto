@@ -39,7 +39,8 @@ COPY cli/Cargo.toml cli/Cargo.toml
 COPY integration/Cargo.toml integration/Cargo.toml
 RUN mkdir -p cli/src integration/src && echo "fn main() {}" > cli/src/main.rs && touch integration/src/lib.rs
 RUN cargo build --release --locked -p luoto-gate -p luoto-vault -p luoto-tools && \
-    mkdir -p /out && cp target/release/luoto-gate target/release/luoto-vault target/release/sandbox /out/
+    mkdir -p /out /vault-run/luoto-vault && \
+    cp target/release/luoto-gate target/release/luoto-vault target/release/sandbox /out/
 
 FROM docker.io/library/alpine:3.23 AS certs
 LABEL luoto.build=cache
@@ -54,6 +55,8 @@ CMD ["run"]
 
 FROM scratch AS vault
 COPY --from=build /out/luoto-vault /luoto-vault
+# The vault's sockets for gates: its user's, and so is a new volume mounted here.
+COPY --from=build --chown=65534:65534 /vault-run /run
 USER 65534:65534
 ENTRYPOINT ["/luoto-vault"]
 CMD ["run"]

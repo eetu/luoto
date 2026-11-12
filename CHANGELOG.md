@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.4
+
+- **Apple's `container`:** on macOS 26 on Apple silicon, `luoto setup` offers it first
+  (`--runtime container`; `--install` runs `brew install container`). It runs every container
+  as a VM of its own, so the dev container's boundary is its VM rather than gVisor. It has no
+  network card: its one link goes to its gate through luoto's background process, never to
+  your Mac or your network.
+  `luoto ui`'s setup page offers the same choice; `luoto status`, `init` and the UI's env
+  panel say how the env is isolated there.
+- **Vault:** each gate reaches the vault over a socket of its own env instead of a network
+  shared with the other envs' gates; a running env takes it at its next `up`.
+
 ## 0.4.3 (2026-11-11)
 
 - **Open egress:** `luoto egress open` lets an env reach any HTTP(S) host and port no rule
