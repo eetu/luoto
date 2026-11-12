@@ -814,6 +814,14 @@ fn fmt_request(r: &AccessRequest) -> String {
             "{}, kept in the env's config",
             crate::text::display(&i.describe())
         ),
+        Some(i @ luoto_shared::api::Install::Secret { .. }) => format!(
+            "{}, kept where you say, readable by any code in the env",
+            crate::text::display(&i.describe())
+        ),
+        Some(i @ luoto_shared::api::Install::Var { .. }) => format!(
+            "{}, its value from you, readable by any code in the env",
+            crate::text::display(&i.describe())
+        ),
         Some(i) => format!(
             "install {}, kept in the env's config",
             crate::text::display(&i.describe())
@@ -907,6 +915,21 @@ pub fn approve(
     let ctx = Ctx::load()?;
     let req = rules::request(&ctx, name, id)?;
     println!("request #{id}: {}", fmt_request(&req));
+    // Its value is the answer: where it is kept, asked here, and Esc there declines.
+    if req
+        .install
+        .as_ref()
+        .and_then(luoto_shared::api::Install::variable)
+        .is_some()
+    {
+        if !narrow.is_empty() || ttl.is_some() {
+            bail!("request #{id} asks for a variable: there is no access to narrow or expire");
+        }
+        if !crate::vars::approve(&ctx, name, &req)? {
+            bail!("not approved");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     if !narrow.is_empty() {
         // Before asking: a narrowing that would widen the request is refused here.
         let rule = rules::grant(&req, narrow)?;

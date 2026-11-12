@@ -88,6 +88,11 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   snippet and question in one `impl`. What the team knows of a need is a table named as it
   (`[needs.azure]`, `[needs.custom.<name>]`), offered first; the answer goes in the
   developer's own env file.
+- `vars.rs` owns `[env]` and `[sandbox_secrets]` (`luoto var`): a name lives in one of the
+  two, never one `luoto_shared::luoto_sets`; a project's `needs.sandbox_secrets` and the
+  sandbox's variable requests (`Install::Var` with a suggested plain value, `Install::Secret`
+  by name only) ask through it on a terminal; the UI answers one with a ref or a plain value
+  (`vars::approve_with`), never a secret.
 - Config files carry their format (`version`, 1 when missing); `format.rs` upgrades every
   file in memory before it is parsed, and saving an env file writes the current format,
   keeping the old file beside it. A config change that would break an existing file is a

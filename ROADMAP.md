@@ -40,6 +40,9 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   progress the UI streams).
 - **Azure DevOps:** the `az` CLI (it addresses repos by ID) and Git LFS (served from blob
   storage).
+- **The watcher hands over in place,** once more runs through it: a new luoto takes its open
+  links and forwarded connections (exec with the descriptors kept, the bytes read and not yet
+  written carried along) instead of closing them for its successor to open again.
 
 ## Git over SSH
 

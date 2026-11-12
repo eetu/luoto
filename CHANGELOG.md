@@ -11,6 +11,27 @@
   panel say how the env is isolated there.
 - **Vault:** each gate reaches the vault over a socket of its own env instead of a network
   shared with the other envs' gates; a running env takes it at its next `up`.
+- **`luoto var`:** lists, sets and removes an env's variables. `luoto var set NAME=value`
+  writes a plain value to `[env]`; `luoto var set NAME` asks where a secret is kept and writes
+  its ref to `[sandbox_secrets]` (`--ref` without a terminal); `luoto var rm NAME`. A running
+  env takes the change at once: new shells have it, and open bash, zsh and fish shells reload
+  it at their next prompt. Names luoto sets itself (proxy, CA bundle,
+  `LUOTO_*`) are refused. `luoto ui`'s env panel lists them, and names what luoto sets
+  itself. New guide: [environment variables](docs/guides/env-vars.md).
+- **Variable requests:** code in the env asks for a variable with a plain value, which it may
+  suggest (`sandbox request --var NAME[=VALUE]`, MCP `sandbox_request_var`), or for a secret
+  by name only (`--secret NAME`, `sandbox_request_secret`). `luoto approve <id>` confirms the
+  value, or asks where the secret is kept; `luoto var set NAME` answers either. `luoto ui`
+  accepts one with a value (the suggested one filled in) or a secret's ref, never the secret
+  itself.
+- **macOS notifications** go through `terminal-notifier`, which the Homebrew formula now
+  installs, instead of Script Editor; macOS asks once to allow them. Without it, or until
+  allowed, they come through `osascript` as before. A notification says "has a request",
+  whatever the request is for.
+- **The background watcher follows upgrades:** a new luoto's watcher takes over at once,
+  also after a Homebrew upgrade and while envs run on Apple's `container`, where the old one
+  kept running until every env was down. Forwarded connections close and an env's network
+  pauses for a moment; its connections carry on.
 - **1Password sign-in in place:** when `op` isn't signed in on the terminal (no app
   integration, no `eval $(op signin)` in that shell), luoto offers `op signin` where it is,
   mid-question, keeps the session in memory until it exits, and runs the command again.

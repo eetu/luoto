@@ -330,16 +330,35 @@ fn fish_quote(v: &str) -> String {
     format!("'{}'", v.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
-pub fn write_runtime_env(ctx: &Ctx, env: &str, compiled: &Compiled) -> Result<()> {
-    let vars = runtime_env(ctx, compiled)?;
+/// env.sh and env.fish for `vars`, last the names they export and `sum`: an open shell's prompt
+/// hook (init.sh) reloads them when env.sum differs from its `LUOTO_ENV_SUM`, and unsets the
+/// names its last load exported that these don't.
+fn env_scripts(vars: &BTreeMap<String, String>, sum: &str) -> (String, String) {
     let mut script = String::from("# written by luoto (memory only)\n");
     let mut fish = script.clone();
-    for (k, v) in &vars {
+    let mut names = Vec::new();
+    for (k, v) in vars {
         if k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
             script.push_str(&format!("export {k}={}\n", crate::text::sh_quote(v)));
             fish.push_str(&format!("set -gx {k} {}\n", fish_quote(v)));
+            names.push(k.as_str());
         }
     }
+    script.push_str(&format!(
+        "export LUOTO_ENV_NAMES='{}'\nexport LUOTO_ENV_SUM={sum}\n",
+        names.join(" ")
+    ));
+    fish.push_str(&format!(
+        "set -gx LUOTO_ENV_NAMES {}\nset -gx LUOTO_ENV_SUM {sum}\n",
+        names.join(" ")
+    ));
+    (script, fish)
+}
+
+pub fn write_runtime_env(ctx: &Ctx, env: &str, compiled: &Compiled) -> Result<()> {
+    let vars = runtime_env(ctx, compiled)?;
+    let sum = runtime_env_sum(compiled);
+    let (script, fish) = env_scripts(&vars, &sum);
     // Git's remote rewrites and SSH's pinned host keys (the system configs init.sh writes read
     // them from here), the shells' env and last its fingerprint, in one extraction. The tar
     // goes over stdin, so the secrets in env.sh touch neither argv nor a disk.
@@ -348,7 +367,7 @@ pub fn write_runtime_env(ctx: &Ctx, env: &str, compiled: &Compiled) -> Result<()
         ("ssh_known_hosts", compiled.known_hosts.as_bytes()),
         ("env.fish", fish.as_bytes()),
         ("env.sh", script.as_bytes()),
-        (ENV_SUM, runtime_env_sum(compiled).as_bytes()),
+        (ENV_SUM, sum.as_bytes()),
     ])?;
     ctx.rt.run_stdin(
         [

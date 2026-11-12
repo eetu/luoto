@@ -243,7 +243,24 @@ mod tests {
             }))
             .is_err()
         );
+        let var = |name: &str, value: Option<&str>| Install::Var {
+            name: name.into(),
+            value: value.map(str::to_string),
+        };
+        let secret = |name: &str| Install::Secret { name: name.into() };
+        let v = r.create(ask(secret("DATABASE_URL"))).unwrap();
+        assert_eq!(r.create(ask(secret("DATABASE_URL"))).unwrap().id, v.id);
+        assert!(r.create(ask(var("RUST_LOG", Some("debug")))).is_ok());
+        let long = "x".repeat(luoto_shared::api::MAX_SUGGESTED_VALUE + 1);
         for bad in [
+            var("HTTPS_PROXY", None),
+            secret("SSL_CERT_FILE"),
+            secret("A B"),
+            var("LUOTO_ENV", None),
+            var("1X", None),
+            var("A=B", None),
+            var("A", Some("two\nlines")),
+            var("A", Some(&long)),
             Install::Package {
                 name: "-oDebug::x".into(),
             },

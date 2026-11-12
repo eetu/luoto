@@ -7,6 +7,7 @@
   import ProjectSection from "$lib/components/ProjectSection.svelte";
   import RulesSection from "$lib/components/RulesSection.svelte";
   import SelftestSection from "$lib/components/SelftestSection.svelte";
+  import VariablesSection from "$lib/components/VariablesSection.svelte";
   import WorkspaceSection from "$lib/components/WorkspaceSection.svelte";
   import { act, app } from "$lib/stores/app.svelte";
 
@@ -49,6 +50,7 @@
       <PortsSection />
       <ConnectSection />
       <CredentialsSection />
+      <VariablesSection />
       <RulesSection />
     </div>
   {/key}

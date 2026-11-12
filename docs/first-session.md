@@ -87,7 +87,10 @@ HTTP(S) is a host and port (`sandbox request db.example.com:5432`), which approv
 uninspected tunnel, a risk you confirm. It asks the same way for a system package or a
 toolchain the env should keep (`sandbox request --package postgresql-client`,
 `--tool node@24`): approving installs it and writes it into the env's `[deps] system` or
-`[tools]`, so a recreated container has it too.
+`[tools]`, so a recreated container has it too. A variable the code needs comes with a value
+to confirm (`sandbox request --var RUST_LOG=debug`), or a secret by name only (`--secret
+DATABASE_URL`), for which `luoto approve` asks where it is kept, as `luoto var set` does;
+`luoto ui` takes either ([environment variables](guides/env-vars.md)).
 
 Trying luoto on a project whose needs you don't know yet: `luoto init --open` (or `luoto
 egress open` later) lets the env reach any HTTP(S) host for an hour (`--open=2h`, `--for 2h`

@@ -29,6 +29,41 @@ pub const VAULT_SOCKET: &str = "/run/luoto/vault/vault.sock";
 /// Hostname the sandbox uses for the gate.
 pub const GATE_HOST: &str = "gate";
 
+/// The variables every dev container gets pointing at the gate's proxy.
+pub const PROXY_VARS: [&str; 4] = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"];
+/// The variables every dev container gets naming what bypasses the proxy.
+pub const NO_PROXY_VARS: [&str; 2] = ["NO_PROXY", "no_proxy"];
+/// The variables every dev container gets pointing at the CA bundle with the gate's CA.
+pub const CA_VARS: [&str; 8] = [
+    "SSL_CERT_FILE",
+    "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "PIP_CERT",
+    "CARGO_HTTP_CAINFO",
+    "GIT_SSL_CAINFO",
+    "DENO_CERT",
+];
+
+/// Whether luoto sets variable `name` in every dev container itself (its proxy, CA bundle and
+/// `LUOTO_` names), so a value of the env's own would break it.
+pub fn luoto_sets(name: &str) -> bool {
+    name.starts_with("LUOTO_")
+        || name == "NODE_USE_ENV_PROXY"
+        || PROXY_VARS
+            .iter()
+            .chain(&NO_PROXY_VARS)
+            .chain(&CA_VARS)
+            .any(|v| *v == name)
+}
+
+/// A variable name every shell exports: letters, digits and `_`, not starting with a digit.
+pub fn variable_name(name: &str) -> bool {
+    (1..=128).contains(&name.len())
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 /// `(name, text)` of each built-in TOML file `<dir>/<name>.toml`.
 macro_rules! embed {
     ($dir:literal; $($name:literal),* $(,)?) => {

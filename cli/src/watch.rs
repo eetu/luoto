@@ -5,7 +5,9 @@
 //! refused, from sources that need no one, and the Azure CLI's tokens the vault holds before
 //! they expire; every minute it stops envs that have been idle for
 //! `idle_stop` (see `idle`), and luoto's VM once no env has run for that long. It exits when
-//! nothing is left to watch, or when the luoto binary changes, so a new version starts its own.
+//! nothing is left to watch. A new luoto (its binary rebuilt, or a command run from another,
+//! as after a Homebrew upgrade) takes over: this one closes what runs through it and starts
+//! that one's watcher.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions, TryLockError};
@@ -39,16 +41,28 @@ const AZCLI_FAILED_AGAIN: Duration = Duration::from_secs(300);
 /// How long `stop` waits: past a tick and the slowest round of work in it.
 const STOP_WAIT: Duration = Duration::from_secs(20);
 
-/// Start the watcher in the background; a second one exits at once (it holds a lock).
+/// Start the watcher in the background; a second one exits at once (it holds a lock). The
+/// running one is told which luoto this is, and gives way to it if it isn't that one.
 pub fn spawn(ctx: &Ctx) {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
     let _ = std::fs::create_dir_all(&ctx.paths.data);
+    let _ = std::fs::write(exe_file(&ctx.paths), exe.to_string_lossy().as_bytes());
+    start(&ctx.paths, &exe);
+}
+
+/// Where `spawn` names the luoto the latest command ran from.
+fn exe_file(paths: &Paths) -> PathBuf {
+    paths.data.join("watch.exe")
+}
+
+/// Start `exe watch` in the background, its output to the watcher's log.
+fn start(paths: &Paths, exe: &Path) {
     let Ok(log) = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(ctx.paths.watch_log())
+        .open(paths.watch_log())
     else {
         return;
     };
@@ -124,21 +138,38 @@ pub fn stop(paths: &Paths) -> Result<bool> {
     )
 }
 
-fn exe_stamp() -> Option<SystemTime> {
-    std::env::current_exe()
+/// The luoto that should watch, and when it was built: the one the latest command ran from
+/// (so a Homebrew upgrade's new, differently named binary counts), else this one.
+fn wanted(paths: &Paths) -> Option<(PathBuf, SystemTime)> {
+    let exe = std::fs::read_to_string(exe_file(paths))
         .ok()
-        .and_then(|p| p.metadata().ok())
-        .and_then(|m| m.modified().ok())
+        .map(|s| PathBuf::from(s.trim()))
+        .filter(|p| p.is_file())
+        .or_else(|| std::env::current_exe().ok())?;
+    let built = exe.metadata().ok()?.modified().ok()?;
+    Some((exe, built))
+}
+
+/// Whether `exe` is a luoto that starts.
+fn runs(exe: &Path) -> bool {
+    Command::new(exe)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// The watcher itself (`luoto watch`, started by `spawn`).
 pub fn watch() -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let lock_file = lock_path(&ctx.paths);
-    let Some(_lock) = take_lock(&lock_file)? else {
+    let Some(lock) = take_lock(&lock_file)? else {
         return Ok(ExitCode::SUCCESS);
     };
-    let stamp = exe_stamp();
+    let me = wanted(&ctx.paths);
+    let mut seen = me.clone();
     let mut forwards: HashMap<(String, u16), ports::Forward> = HashMap::new();
     // Apple: each running dev container's tun link, joined to its gate.
     #[cfg(unix)]
@@ -172,10 +203,29 @@ pub fn watch() -> Result<ExitCode> {
         if !lock_file.exists() {
             return Ok(ExitCode::SUCCESS);
         }
-        // A new luoto takes over once nothing is forwarded or linked: leaving now would cut
-        // the connections of a running dev server, or an env's network.
-        if exe_stamp() != stamp && forwards.is_empty() && links.is_empty() {
-            return Ok(ExitCode::SUCCESS);
+        // A new luoto takes over, once its file stayed the same for a tick (a build may still
+        // be writing it) and it starts. What runs through this process closes first: forwarded
+        // connections end, and an env's network on Apple pauses until the new watcher joins
+        // its links again, which its connections outlast.
+        let now = wanted(&ctx.paths);
+        if now != me {
+            if now == seen
+                && let Some((exe, _)) = &now
+                && runs(exe)
+            {
+                println!("{} handing over to {}", Utc::now(), exe.display());
+                drop(forwards);
+                drop(listeners);
+                #[cfg(unix)]
+                {
+                    drop(links);
+                    drop(uplinks);
+                }
+                drop(lock);
+                start(&ctx.paths, exe);
+                return Ok(ExitCode::SUCCESS);
+            }
+            seen = now;
         }
         // An env's network runs through this process: while it links any, a failed look (a
         // config being saved, the runtime busy) waits for the next tick instead of leaving.

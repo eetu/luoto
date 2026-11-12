@@ -14,6 +14,8 @@ Step by step, for a task; the reference is [configuration](../configuration.md),
   from your `az` login or a service principal, with the tokens outside the env.
 - [Cloud APIs](cloud-apis.md): Hetzner, UpCloud, DigitalOcean and Cloudflare for their CLIs
   and terraform, read-only unless the env writes, with the tokens outside the env.
+- [Environment variables](env-vars.md): plain values, secrets the code reads and tokens it
+  never sees, with `luoto var`.
 - [Agent settings](agent-settings.md): model and effort, credentials without the prompt, your
   own settings in every env, commits without AI attribution.
 - [Model servers](model-servers.md): Ollama, LM Studio, MTPLX or any OpenAI- or

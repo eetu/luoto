@@ -17,8 +17,5 @@
         <p class="warn">vault is missing {d.missing_secrets.length} secret(s): unlock it</p>
       {/if}
     {/if}
-    {#if d.sandbox_secrets.length}
-      <p class="warn">exposed to code in the sandbox: {d.sandbox_secrets.join(", ")}</p>
-    {/if}
   </div>
 {/if}

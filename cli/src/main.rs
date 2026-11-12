@@ -50,6 +50,7 @@ mod tunlink;
 mod ui;
 mod uninstall;
 mod upgrade;
+mod vars;
 mod watch;
 mod wizard;
 mod workspace;
@@ -262,6 +263,12 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<RepoCmd>,
     },
+    /// Environment variables for the env's shells: plain values, and secrets code in the env
+    /// reads (refs resolved on this machine at `up`).
+    Var {
+        #[command(subcommand)]
+        action: Option<VarCmd>,
+    },
     /// Copy changed files from the env back to its folder, and its repos copied in from
     /// folders back to theirs (reviewed first).
     Pull {
@@ -457,6 +464,25 @@ enum RepoCmd {
 }
 
 #[derive(Subcommand)]
+enum VarCmd {
+    /// The env's variables: plain values, and secrets by their ref.
+    #[command(visible_alias = "ls")]
+    List,
+    /// Set a variable: `NAME=value` a plain value (it stays in your shell history), `NAME`
+    /// a secret, asking where it is kept, or `NAME --ref <ref>`. A token an HTTP API takes is
+    /// safer under [credentials.custom.<name>]: the gate adds it and the env never sees it.
+    Set {
+        #[arg(value_name = "NAME[=VALUE]")]
+        var: String,
+        /// The secret's ref: op://, keyring:, vault://, env: or file:.
+        #[arg(long = "ref", value_name = "REF")]
+        reference: Option<String>,
+    },
+    /// Remove a variable.
+    Rm { name: String },
+}
+
+#[derive(Subcommand)]
 enum ProjectCmd {
     /// Apply the current luoto.toml after reviewing it.
     Apply {
@@ -631,6 +657,11 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             } => repos::add(&env()?, &source, name.as_deref(), branch.as_deref()),
             RepoCmd::Rm { name } => repos::rm(&env()?, &name),
             RepoCmd::Auth { repo } => repos::auth(&env()?, &repo),
+        },
+        Cmd::Var { action } => match action.unwrap_or(VarCmd::List) {
+            VarCmd::List => vars::list(&env()?),
+            VarCmd::Set { var, reference } => vars::set_cmd(&env()?, &var, reference.as_deref()),
+            VarCmd::Rm { name } => vars::rm_cmd(&env()?, &name),
         },
         Cmd::Pull {
             to,

@@ -1,9 +1,11 @@
 <script lang="ts">
+  import { untrack } from "svelte";
+
   import { api } from "$lib/api";
   import Risks from "$lib/components/Risks.svelte";
   import Segmented from "$lib/components/Segmented.svelte";
   import { act, ago, app, installLabel, requestTarget, say, TTLS } from "$lib/stores/app.svelte";
-  import type { Narrowing } from "$lib/types";
+  import type { Narrowing, VarValue } from "$lib/types";
 
   let { id }: { id: number } = $props();
 
@@ -13,13 +15,47 @@
   // Less than asked: read for a write request, some of its paths. The backend refuses wider.
   let grant = $state<"asked" | "read">("asked");
   let paths = $state("");
+  // A variable request's answer: a secret's ref (the secret stays off this page) or a value.
+  // It opens on what the request asks for; a plain one's suggested value is filled in.
+  const variable = $derived(
+    req?.install?.kind === "var" || req?.install?.kind === "secret" ? req.install : null,
+  );
+  let varKind = $state<"secret" | "plain">("secret");
+  let given = $state("");
+  let givenField = $state<HTMLInputElement>();
+
+  function suggested(): string {
+    const v = untrack(() => variable);
+    return v?.kind === "var" ? (v.value ?? "") : "";
+  }
 
   $effect(() => {
     void id;
     grant = "asked";
     paths = "";
     risks = [];
+    // Polls refresh `req`: only another request starts the answer over.
+    varKind = untrack(() => variable)?.kind === "var" ? "plain" : "secret";
+    given = suggested();
   });
+
+  async function acceptVar() {
+    const env = app.env;
+    if (!env || !req) return;
+    if (!given.trim()) {
+      givenField?.focus();
+      say(varKind === "secret" ? "give the secret's ref first" : "give the value first", true);
+      return;
+    }
+    const shown = req;
+    const value: VarValue =
+      varKind === "secret"
+        ? { kind: "secret", reference: given.trim() }
+        : { kind: "plain", value: given };
+    const done = await act("setting…", () => api.approveVar(env, shown, value));
+    if (done && "installed" in done) say(`#${id} ${done.installed}`);
+    if (done) app.subject = { kind: "env" };
+  }
 
   function narrowing(): Narrowing | undefined {
     const globs = paths.split(/[\s,]+/).filter(Boolean);
@@ -63,8 +99,82 @@
 </script>
 
 <div class="panel">
-  <p class="label">{req?.install ? "install request" : "access request"} #{id}</p>
-  {#if req?.install}
+  <p class="label">
+    {variable?.kind === "secret"
+      ? "secret request"
+      : variable
+        ? "variable request"
+        : req?.install
+          ? "install request"
+          : "access request"} #{id}
+  </p>
+  {#if req && variable}
+    <h2>{installLabel(variable)}</h2>
+    <dl>
+      <dt>kind</dt>
+      <dd>
+        {variable.kind === "secret"
+          ? "secret the code reads as a variable"
+          : "variable with a plain value"}
+      </dd>
+      <dt>filed</dt>
+      <dd>{ago(req.created)}</dd>
+      <dt>status</dt>
+      <dd>{req.status}{req.note ? `: ${req.note}` : ""}</dd>
+    </dl>
+    <div class="untrusted">
+      <p class="label">reason — written by code in the sandbox, not by you</p>
+      <p class="reason">{req.reason}</p>
+    </div>
+    <p class="warn">
+      Any code in the env can read its value and send it where the env's rules allow.
+    </p>
+    {#if req.status === "pending"}
+      <div class="field">
+        <span>give</span>
+        <Segmented
+          label="give"
+          options={[
+            { value: "secret", label: "secret ref" },
+            { value: "plain", label: "plain value" },
+          ]}
+          value={varKind}
+          onchange={(v) => ((varKind = v), (given = v === "plain" ? suggested() : ""))}
+        />
+      </div>
+      <label class="field">
+        <span>{varKind === "secret" ? "ref" : "value"}</span>
+        <input
+          type="text"
+          bind:value={given}
+          bind:this={givenField}
+          autocomplete="off"
+          spellcheck="false"
+          placeholder={varKind === "secret" ? "e.g. op://Vault/item/field" : ""}
+          onkeydown={(e) => e.key === "Enter" && void acceptVar()}
+        />
+      </label>
+      {#if varKind === "secret"}
+        <p class="muted">
+          A ref: <code>op://</code>, <code>keyring:</code>, <code>vault://</code>,
+          <code>env:</code> or <code>file:</code>. luoto reads it on this machine; the secret never
+          passes through this page. To paste a secret into 1Password or the keychain instead, use a
+          terminal: <code>luoto approve -e {app.env} {req.id}</code>
+        </p>
+      {:else}
+        <p class="muted">
+          {suggested() ? "Filled in with the value the sandbox suggests: check it. " : ""}Written
+          into the env's file as it is. For a secret, give its ref instead.
+        </p>
+      {/if}
+      <div class="actions">
+        <button class="btn primary" onclick={() => void acceptVar()} disabled={!!app.busy}
+          >accept</button
+        >
+        <button class="btn" onclick={reject} disabled={!!app.busy}>reject</button>
+      </div>
+    {/if}
+  {:else if req?.install}
     <h2>{installLabel(req.install)}</h2>
     <dl>
       <dt>kind</dt>

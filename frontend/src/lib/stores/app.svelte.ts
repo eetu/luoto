@@ -253,6 +253,8 @@ export function startSync(): () => void {
 export function installLabel(i: Install): string {
   if (i.kind === "package") return i.name;
   if (i.kind === "preset") return `the ${i.name} preset`;
+  if (i.kind === "var") return `the variable ${i.name}`;
+  if (i.kind === "secret") return `the secret ${i.name}`;
   // Backends other than mise's registry and aqua's take anyone's code.
   const backend = i.name.split(":", 2);
   if (backend.length === 2 && backend[0] !== "aqua")

@@ -44,13 +44,13 @@ enum Cmd {
         #[arg(short = 'X', long, default_value = "GET")]
         method: String,
     },
-    /// Ask the user (on the host) to allow a host, or to install a system package or a
-    /// toolchain in the env for good. Only the user can approve.
+    /// Ask the user (on the host) to allow a host, to install a system package or a toolchain
+    /// in the env for good, or to give it a variable. Only the user can approve.
     Request {
         /// Host (`docs.rs`) or URL (`https://docs.rs/serde`); `host:port` for a protocol other
         /// than HTTP(S) (`db.example.com:5432`, not 80 or 443), which the gate can only tunnel
         /// uninspected.
-        #[arg(required_unless_present_any = ["package", "tool", "preset"])]
+        #[arg(required_unless_present_any = ["package", "tool", "preset", "var", "secret"])]
         target: Option<String>,
         /// A system package (apt, apk or dnf) the env should have; approved, it is installed
         /// now and again whenever the container is recreated.
@@ -64,6 +64,15 @@ enum Cmd {
         /// hosts one by one.
         #[arg(long, conflicts_with_all = ["target", "package", "tool", "write", "paths"])]
         preset: Option<String>,
+        /// An environment variable with a plain value the code needs (`RUST_LOG`): the user
+        /// gives or accepts its value on the host, and new shells here get it. `NAME=value`
+        /// suggests the value, which the user sees filled in.
+        #[arg(long, value_name = "NAME[=VALUE]", conflicts_with_all = ["target", "package", "tool", "preset", "secret", "write", "paths"])]
+        var: Option<String>,
+        /// An environment variable holding a secret the code reads (`DATABASE_URL`), by name:
+        /// the user says where it is kept, and new shells here get it.
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["target", "package", "tool", "preset", "var", "write", "paths"])]
+        secret: Option<String>,
         /// Ask for write access (any method) instead of read-only.
         #[arg(long)]
         write: bool,
@@ -127,21 +136,40 @@ fn main() -> ExitCode {
             package,
             tool,
             preset,
+            var,
+            secret,
             write,
             paths,
             reason,
             wait,
             timeout,
-        } => request(
-            target.as_deref(),
-            package,
-            tool.as_deref(),
-            preset,
-            write,
-            paths,
-            &reason,
-            wait.then(|| Duration::from_secs(timeout)),
-        ),
+        } => {
+            let install = package
+                .map(|name| Install::Package { name })
+                .or_else(|| tool.as_deref().map(parse_tool))
+                .or_else(|| preset.map(|name| Install::Preset { name }))
+                .or_else(|| {
+                    var.map(|v| match v.split_once('=') {
+                        Some((name, value)) => Install::Var {
+                            name: name.to_string(),
+                            value: Some(value.to_string()),
+                        },
+                        None => Install::Var {
+                            name: v,
+                            value: None,
+                        },
+                    })
+                })
+                .or_else(|| secret.map(|name| Install::Secret { name }));
+            request(
+                target.as_deref(),
+                install,
+                write,
+                paths,
+                &reason,
+                wait.then(|| Duration::from_secs(timeout)),
+            )
+        }
         Cmd::Relay { port } => relay(port),
         Cmd::Mcp => mcp::serve(),
         Cmd::SshAgent { socket } => ssh_agent::serve(&socket).map(|()| ExitCode::SUCCESS),
@@ -253,6 +281,8 @@ pub fn render_status(s: &SandboxStatus) -> String {
          Not HTTP(S) (a database)? sandbox request <host>:<port> --reason \"…\" --wait\n\
          The user can also grant it on the host: luoto allow -e {} <host> [--write] [--ttl 1h]\n\
          A system package or toolchain to keep: sandbox request --package <name> | --tool node@24 \
+         --reason \"…\" --wait\n\
+         A variable the code needs: sandbox request --var <NAME>[=<value>] | --secret <NAME> \
          --reason \"…\" --wait\n",
         s.env
     ));
@@ -298,7 +328,9 @@ fn approve_hint(env: &str, id: u64) -> String {
 /// What a request asks for, for people.
 fn what(r: &AccessRequest) -> String {
     match (&r.install, r.port) {
-        (Some(i @ Install::Preset { .. }), _) => i.describe(),
+        (Some(i @ (Install::Preset { .. } | Install::Var { .. } | Install::Secret { .. })), _) => {
+            i.describe()
+        }
         (Some(i), _) => format!("install {}", i.describe()),
         (None, Some(port)) => format!("a tunnel to {}:{port}", r.host),
         (None, None) => format!(
@@ -438,13 +470,18 @@ pub fn describe(o: &Outcome) -> String {
     match (r.status, o.waited) {
         (RequestStatus::Approved, _) => match &r.install {
             Some(i) => format!(
-                "Request #{} approved: {}{}",
+                "Request #{} approved: {}{}{}",
                 r.id,
                 i.describe(),
                 r.note
                     .as_ref()
                     .map(|n| format!(" — {n}"))
-                    .unwrap_or_else(|| " is in the env now.".into())
+                    .unwrap_or_else(|| " is in the env now.".into()),
+                if i.variable().is_some() {
+                    "\nA command that doesn't see it loads it with `. /run/luoto/env.sh`."
+                } else {
+                    ""
+                }
             ),
             None => {
                 let to = match r.port {
@@ -479,26 +516,23 @@ pub fn describe(o: &Outcome) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn request(
     target: Option<&str>,
-    package: Option<String>,
-    tool: Option<&str>,
-    preset: Option<String>,
+    install: Option<Install>,
     write: bool,
     paths: Vec<String>,
     reason: &str,
     wait: Option<Duration>,
 ) -> Result<ExitCode> {
-    let o = match (target, package, tool, preset) {
-        (_, Some(name), _, _) => request_install(Install::Package { name }, reason, wait)?,
-        (_, _, Some(t), _) => request_install(parse_tool(t), reason, wait)?,
-        (_, _, _, Some(name)) => request_install(Install::Preset { name }, reason, wait)?,
-        (Some(t), None, None, None) => {
+    let o = match (install, target) {
+        (Some(i), _) => request_install(i, reason, wait)?,
+        (None, Some(t)) => {
             let (host, port) = parse_target(t)?;
             request_access(&host, port, write, paths, reason, wait)?
         }
-        (None, None, None, None) => anyhow::bail!("name a host, --preset, --package or --tool"),
+        (None, None) => {
+            anyhow::bail!("name a host, --preset, --package, --tool, --var or --secret")
+        }
     };
     println!("{}", describe(&o));
     Ok(match (o.request.status, o.waited) {

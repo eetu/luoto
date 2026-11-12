@@ -70,6 +70,8 @@ export type Decision = {
   /** Less than the request asked for. */
   narrow?: Narrowing;
   force?: boolean;
+  /** A variable request's answer: its value, or its secret's ref. */
+  var?: VarValue | null;
 };
 
 export type Detection = {
@@ -106,7 +108,13 @@ export type EnvDetail = {
   gate_status: GateStatus | null;
   credentials: string[];
   missing_secrets: string[];
-  sandbox_secrets: string[];
+  /** The env's own variables (`[env]`, `[sandbox_secrets]`). */
+  variables: EnvVar[];
+  /**
+   * What luoto sets in the env's shells besides them (credentials' placeholders, agents'
+   * settings), by name.
+   */
+  luoto_variables: string[];
   ports: EnvPorts;
   /** How the dev container is separated, as `luoto status` says it. */
   isolation: string;
@@ -149,6 +157,14 @@ export type EnvRow = {
   open: OpenEgress | null;
   error: string | null;
 };
+
+/**
+ * One of the env's variables as the UI lists it: a plain one with its value, a secret with
+ * where it is kept (its ref as `luoto var` shows it), never its value.
+ */
+export type EnvVar =
+  | { kind: "plain"; name: string; value: string }
+  | { kind: "secret"; name: string; kept: string };
 
 export type EventKind =
   /** A DNS lookup from the sandbox (answered locally, never forwarded). */
@@ -212,9 +228,9 @@ export type Injected = {
 };
 
 /**
- * What the sandbox asks to have in the env besides a host: software, or a preset's access.
- * Approved, it joins the env's config (`[deps] system`, `[tools]`, `presets`), so it holds
- * for every container the env gets.
+ * What the sandbox asks to have in the env besides a host: software, a preset's access, or a
+ * variable. Approved, it joins the env's config (`[deps] system`, `[tools]`, `presets`,
+ * `[env]`, `[sandbox_secrets]`), so it holds for every container the env gets.
  */
 export type Install =
   /** A package of the image's package manager (apt, apk or dnf). */
@@ -222,7 +238,14 @@ export type Install =
   /** A toolchain mise installs: `node` and `24`, `cargo:ripgrep` and `latest`. */
   | { kind: "tool"; name: string; version: string }
   /** One of luoto's presets (`npm`, `pypi`, …): the hosts a registry or service needs. */
-  | { kind: "preset"; name: string };
+  | { kind: "preset"; name: string }
+  /** An environment variable with a plain value (`[env]`), which the user gives or accepts. */
+  | { kind: "var"; name: string; value?: string }
+  /**
+   * An environment variable holding a secret (`[sandbox_secrets]`), by name only: the user
+   * says where it is kept, and any code in the env can read it.
+   */
+  | { kind: "secret"; name: string };
 
 /** What running the install printed. */
 export type InstallOutput = {
@@ -559,6 +582,12 @@ export type ToolPin = {
   /** The file that pins it. */
   source: string;
 };
+
+/**
+ * A variable's value as the UI gives it: the value itself, or a secret's ref, never the
+ * secret (pasting one and storing it is the terminal's: `luoto approve`).
+ */
+export type VarValue = { kind: "plain"; value: string } | { kind: "secret"; reference: string };
 
 export type VaultEnvSummary = {
   env: string;

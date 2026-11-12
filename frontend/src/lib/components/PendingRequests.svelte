@@ -96,8 +96,9 @@
           <ShieldQuestion size={16} />
           {#if r.install}
             <span
-              >{r.install.kind === "preset" ? "" : "install "}<b>{installLabel(r.install)}</b> requested
-              from inside the sandbox</span
+              >{r.install.kind === "package" || r.install.kind === "tool" ? "install " : ""}<b
+                >{installLabel(r.install)}</b
+              > requested from inside the sandbox</span
             >
           {:else if r.port}
             <span

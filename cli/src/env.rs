@@ -286,22 +286,13 @@ fn static_dev_env(env: &str, gate_ip: Ipv4Addr) -> Vec<(String, String)> {
         ("LUOTO_GATE_IP".into(), gate_ip.to_string()),
         ("LUOTO_UID".into(), UID.into()),
     ];
-    for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+    for k in luoto_shared::PROXY_VARS {
         v.push((k.into(), proxy.clone()));
     }
-    for k in ["NO_PROXY", "no_proxy"] {
+    for k in luoto_shared::NO_PROXY_VARS {
         v.push((k.into(), no_proxy.clone()));
     }
-    for k in [
-        "SSL_CERT_FILE",
-        "NODE_EXTRA_CA_CERTS",
-        "REQUESTS_CA_BUNDLE",
-        "CURL_CA_BUNDLE",
-        "PIP_CERT",
-        "CARGO_HTTP_CAINFO",
-        "GIT_SSL_CAINFO",
-        "DENO_CERT",
-    ] {
+    for k in luoto_shared::CA_VARS {
         v.push((k.into(), bundle.clone()));
     }
     v.push(("NODE_USE_ENV_PROXY".into(), "1".into()));

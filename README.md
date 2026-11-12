@@ -120,6 +120,7 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | an agent (installed on first run)                                                                    | `luoto agent run claude --yolo`<br>`luoto agent list`                                                                              |
 | another credential for an agent, or a login inside instead                                           | `luoto agent auth claude`                                                                                                          |
 | what the env may do with a repo: fetch it if public, read it, or push                                | `luoto repo auth acme/api`                                                                                                         |
+| environment variables: a plain value, or a secret the code reads                                     | `luoto var set RUST_LOG=debug`<br>`luoto var set DATABASE_URL`<br>`luoto var`                                                      |
 | a dev server in your browser                                                                         | run it: its port is forwarded to localhost here (`luoto status` lists it)<br>`luoto forward 8080:5173` (to another local port)     |
 | your work out: push from the env (with a GitHub, Azure DevOps or SSH credential), or copy files back | `git push`<br>`luoto pull`                                                                                                         |
 | image or config changes applied (volumes are kept)                                                   | `luoto up --recreate`                                                                                                              |
@@ -137,9 +138,10 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 
 Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host> --reason …`
 asks you for access (`<host>:<port>` for a tunnel; `--preset npm` for a registry's hosts at
-once; `--package <name>` or `--tool <tool>@<version>` for software to keep); only you can
-approve, on the host. A new request gets a desktop notification, as does the first denial at
-each host (macOS, where they come from Script Editor, and Linux with `notify-send`). Without
+once; `--package <name>` or `--tool <tool>@<version>` for software to keep; `--var <NAME>=<value>`
+or `--secret <NAME>` for a variable); only you can approve, on the host. A new request gets a desktop notification, as does the first denial at
+each host (macOS through `terminal-notifier`, which Homebrew installs with luoto, else
+`osascript`, whose come from Script Editor; Linux with `notify-send`). Without
 them (turned off, or on Windows), the bell in `luoto ui` gives browser notifications for
 requests.
 

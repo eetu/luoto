@@ -553,7 +553,11 @@ struct EnvDetail {
     gate_status: Option<GateStatus>,
     credentials: Vec<String>,
     missing_secrets: Vec<String>,
-    sandbox_secrets: Vec<String>,
+    /// The env's own variables (`[env]`, `[sandbox_secrets]`).
+    variables: Vec<crate::vars::EnvVar>,
+    /// What luoto sets in the env's shells besides them (credentials' placeholders, agents'
+    /// settings), by name.
+    luoto_variables: Vec<String>,
     ports: ports::EnvPorts,
     /// How the dev container is separated, as `luoto status` says it.
     isolation: String,
@@ -601,7 +605,14 @@ async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
             warnings: p.compiled.warnings.clone(),
             credentials: p.compiled.bindings.keys().cloned().collect(),
             missing_secrets: vault_env.map(|v| v.missing).unwrap_or_default(),
-            sandbox_secrets: p.compiled.sandbox_refs.keys().cloned().collect(),
+            variables: crate::vars::listed(&p.cfg),
+            luoto_variables: p
+                .compiled
+                .dev_env
+                .keys()
+                .filter(|k| !p.cfg.env.contains_key(*k))
+                .cloned()
+                .collect(),
             injections,
             name,
             dev,
@@ -673,6 +684,9 @@ struct Decision {
     narrow: Narrowing,
     #[serde(default)]
     force: bool,
+    /// A variable request's answer: its value, or its secret's ref.
+    #[serde(default)]
+    var: Option<crate::vars::VarValue>,
 }
 
 /// The request with `id`, if it is the one filed at `created`.
@@ -691,6 +705,10 @@ async fn approve(
     blocking(move || {
         let ctx = Ctx::load()?;
         let req = shown(&ctx, &name, id, d.created)?;
+        if let Some(value) = d.var {
+            let installed = crate::vars::approve_with(&ctx, &name, &req, value)?;
+            return Ok(rules::Approved::Installed { installed });
+        }
         rules::approve(&ctx, &name, &req, d.ttl.as_deref(), &d.narrow, d.force)
     })
     .await

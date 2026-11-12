@@ -150,7 +150,8 @@ session in memory until it exits.
 `[sandbox_secrets]` are resolved on your machine at `up` and written to a memory-only file in
 the dev container that every shell loads; they leave with the container. Anything that only
 needs a token in an HTTP header belongs under `[credentials.custom.<name>]` instead, where the
-sandbox never sees it.
+sandbox never sees it. `luoto var` sets and removes both `[env]` and `[sandbox_secrets]`
+([guide](guides/env-vars.md)).
 
 A GitHub App for luoto needs only repository permissions such as Contents and Pull requests;
 luoto refuses Workflows, Actions, Secrets and Administration ([why](../SECURITY.md#what-holds-the-line)).

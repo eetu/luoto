@@ -29,6 +29,7 @@ import type {
   SelftestReport,
   SetupInfo,
   Shown,
+  VarValue,
   VmDisk,
 } from "./types";
 
@@ -129,6 +130,11 @@ export const api = {
       ttl,
       force,
       narrow,
+    }),
+  approveVar: (name: string, req: AccessRequest, value: VarValue) =>
+    request<Approved, Decision>("POST", `${env(name)}/requests/${req.id}/approve`, {
+      created: req.created,
+      var: value,
     }),
   reject: (name: string, req: AccessRequest) =>
     request<AccessRequest, Shown>("POST", `${env(name)}/requests/${req.id}/reject`, {

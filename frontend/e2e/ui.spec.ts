@@ -118,7 +118,8 @@ test("an env cloned from a remote shows where it comes from and pulls only in a 
   const overview = fixture("overview");
   await page.route(
     (url) => url.pathname === "/api/overview",
-    (route) => route.fulfill({ json: { ...overview, envs: [...overview.envs, fixture("remote")] } }),
+    (route) =>
+      route.fulfill({ json: { ...overview, envs: [...overview.envs, fixture("remote")] } }),
   );
   const detail = { ...fixture("env"), name: "api", path: "/home/me/.config/luoto/envs/api.toml" };
   await page.route(
@@ -388,6 +389,74 @@ test("selected requests are approved together, each as it was shown", async ({ p
   expect((sent[1].body as { ttl?: string }).ttl).toBeUndefined();
 });
 
+test("a secret request takes a ref, a variable request its suggested value", async ({ page }) => {
+  await mockApi(page);
+  const created = new Date().toISOString();
+  const asked = { host: "", access: "read", status: "pending", created };
+  const requests = [
+    {
+      ...asked,
+      id: 5,
+      reason: "the migrations read it",
+      install: { kind: "secret", name: "DATABASE_URL" },
+    },
+    {
+      ...asked,
+      id: 6,
+      reason: "more logs",
+      install: { kind: "var", name: "RUST_LOG", value: "debug" },
+    },
+  ];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: requests }),
+  );
+  const sent: { id: string; body: unknown }[] = [];
+  await page.route(
+    (url) => /^\/api\/envs\/web\/requests\/\d+\/approve$/.test(url.pathname),
+    (route, req) => {
+      sent.push({ id: new URL(req.url()).pathname.split("/")[5], body: req.postDataJSON() });
+      return route.fulfill({ json: { installed: "set" } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  await page.getByRole("button", { name: /the secret DATABASE_URL/ }).click();
+  const accept = page.getByRole("button", { name: "accept" });
+  const ref = page.getByRole("textbox", { name: "ref" });
+  await expect(ref).toHaveValue("");
+  await accept.click();
+  await expect(page.getByText("give the secret's ref first")).toBeVisible();
+  await expect(ref).toBeFocused();
+  expect(sent).toHaveLength(0);
+  await ref.fill("op://Dev/db/url");
+  await ref.press("Enter");
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toEqual({
+    id: "5",
+    body: { created, var: { kind: "secret", reference: "op://Dev/db/url" } },
+  });
+
+  await page.getByRole("button", { name: /the variable RUST_LOG/ }).click();
+  await expect(page.getByRole("textbox", { name: "value" })).toHaveValue("debug");
+  await page.getByRole("button", { name: "accept" }).click();
+  await expect.poll(() => sent.length).toBe(2);
+  expect(sent[1]).toEqual({ id: "6", body: { created, var: { kind: "plain", value: "debug" } } });
+});
+
+test("the env panel lists its variables, a secret by where it is kept", async ({ page }) => {
+  await mockApi(page);
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  await expect(page.getByText("RUST_LOG", { exact: true })).toBeVisible();
+  await expect(page.getByText("debug", { exact: true })).toBeVisible();
+  await expect(page.getByText("op://Dev/local-db/url")).toBeVisible();
+  await expect(page.getByText("The secret is readable by any code in the env.")).toBeVisible();
+  await expect(page.getByText("set by luoto: GIT_TERMINAL_PROMPT")).toBeVisible();
+});
+
 test("the env panel links the ports forwarded from the env", async ({ page }) => {
   await mockApi(page);
   await open(page);
@@ -446,15 +515,14 @@ test("a new access request notifies once the user turned notifications on", asyn
     .poll(() => page.evaluate(() => (window as unknown as { shown: string[] }).shown), {
       timeout: 10_000,
     })
-    .toEqual(["luoto: web asks for access"]);
+    .toEqual(["luoto: web has a request"]);
 });
 
 test("with desktop notifications on, the page shows none of its own", async ({ page }) => {
   await mockApi(page);
   await page.route(
     (url) => url.pathname === "/api/overview",
-    (route) =>
-      route.fulfill({ json: { ...fixture("overview"), desktop_notifications: true } }),
+    (route) => route.fulfill({ json: { ...fixture("overview"), desktop_notifications: true } }),
   );
   await open(page);
   const bell = page.getByRole("button", { name: "browser notifications" });
