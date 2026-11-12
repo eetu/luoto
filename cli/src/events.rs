@@ -4,14 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use luoto_shared::events::{Event, EventKind, Intake, Verdict};
 use luoto_shared::policy::{Mute, OPEN_RULE};
 use serde::Serialize;
 
 use crate::names;
-use crate::runtime::Runtime;
+use crate::runtime::{Flavor, Runtime, exec};
 
 /// Parse event lines out of mixed container output (diagnostics on stderr are skipped).
 pub fn parse_lines(text: &str) -> Vec<Event> {
@@ -22,36 +22,104 @@ pub fn parse_lines(text: &str) -> Vec<Event> {
         .collect()
 }
 
-fn logs_args<'a>(container: &'a str, since: Option<&'a str>, follow: bool) -> Vec<&'a str> {
-    let mut args = vec!["logs"];
+/// Whether `container` writes its events to its event file rather than its log: a gate on
+/// Apple, whose logs nothing caps (`luoto-gate events` reads the file).
+pub fn in_file(rt: &Runtime, container: &str) -> bool {
+    rt.flavor == Flavor::Apple && container != names::vault()
+}
+
+fn logs_args(rt: &Runtime, container: &str, since: Option<&str>, follow: bool) -> Vec<String> {
+    if in_file(rt, container) {
+        let mut args = file_args(container, follow, None);
+        if let Some(t) = since.and_then(since_cut) {
+            args.extend(["--since".into(), t.to_rfc3339()]);
+        }
+        return args;
+    }
+    let mut args = vec!["logs".to_string()];
     if follow {
-        args.push("-f");
+        args.push("-f".into());
     }
-    if let Some(s) = since {
-        args.extend(["--since", s]);
+    // Apple's `logs` has no `--since`: its events are cut by their own time (`since_cut`).
+    if let Some(s) = since
+        && rt.flavor != Flavor::Apple
+    {
+        args.extend(["--since".into(), s.into()]);
     }
-    args.push(container);
+    args.push(container.into());
     args
 }
 
-pub fn read(rt: &Runtime, container: &str, since: Option<&str>) -> Result<Vec<Event>> {
-    let _waiting = crate::progress::waiting("reading the gate's log");
-    let out = rt
-        .command()
-        .args(logs_args(container, since, false))
-        .stdin(Stdio::null())
-        .output()
-        .context("read logs")?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push('\n');
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    let mut events = parse_lines(&text);
-    events.sort_by_key(|e| (e.ts, e.seq));
-    Ok(events)
+/// The runtime arguments that print a gate's event file, the last `lines` of it when given.
+pub fn file_args(container: &str, follow: bool, lines: Option<usize>) -> Vec<String> {
+    // As the user the gate drops to, who owns the file: an exec has no capability to read it.
+    let mut args = exec(container)
+        .user("65534:65534")
+        .argv(["luoto-gate", "events"]);
+    if follow {
+        args.push("-f".into());
+    }
+    if let Some(n) = lines {
+        args.extend(["-n".into(), n.to_string()]);
+    }
+    args
+}
+
+/// The time `since` (`30m`, `2h`, `1d`, `45s` ago, Unix seconds, or an RFC 3339 time) names.
+fn since_cut(since: &str) -> Option<DateTime<Utc>> {
+    if let Ok(t) = DateTime::parse_from_rfc3339(since) {
+        return Some(t.with_timezone(&Utc));
+    }
+    if !since.is_empty() && since.bytes().all(|b| b.is_ascii_digit()) {
+        return DateTime::from_timestamp(since.parse().ok()?, 0);
+    }
+    let (n, unit) = since.split_at(since.char_indices().last()?.0);
+    let n: i64 = n.parse().ok()?;
+    let d = match unit {
+        "s" => chrono::Duration::seconds(n),
+        "m" => chrono::Duration::minutes(n),
+        "h" => chrono::Duration::hours(n),
+        "d" => chrono::Duration::days(n),
+        _ => return None,
+    };
+    Some(Utc::now() - d)
+}
+
+/// Whether `e` falls in the window the runtime itself didn't cut (Apple's).
+fn in_window(rt: &Runtime, cut: Option<DateTime<Utc>>, e: &Event) -> bool {
+    rt.flavor != Flavor::Apple || cut.is_none_or(|c| e.ts.is_none_or(|t| t >= c))
 }
 
 pub fn gate_events(rt: &Runtime, env: &str, since: Option<&str>) -> Result<Vec<Event>> {
-    read(rt, &names::gate(env), since)
+    let _waiting = crate::progress::waiting("reading the gate's log");
+    let container = &names::gate(env);
+    let out = rt
+        .command()
+        .args(logs_args(rt, container, since, false))
+        .stdin(Stdio::null())
+        .output()
+        .context("read logs")?;
+    if in_file(rt, container) && !out.status.success() {
+        if rt.container_state(container).as_deref() != Some("running") {
+            bail!(
+                "`{env}`'s gate isn't running, and its events show once it is (`luoto up -e {env}`)"
+            );
+        }
+        bail!(
+            "reading {container}'s events failed: {}",
+            crate::text::display(String::from_utf8_lossy(&out.stderr).trim())
+        );
+    }
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push('\n');
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    let cut = since
+        .filter(|_| rt.flavor == Flavor::Apple)
+        .and_then(since_cut);
+    let mut events = parse_lines(&text);
+    events.retain(|e| in_window(rt, cut, e));
+    events.sort_by_key(|e| (e.ts, e.seq));
+    Ok(events)
 }
 
 /// Follow a container's events, calling `f` for each (stops when `f` returns false).
@@ -63,16 +131,20 @@ pub fn follow(
 ) -> Result<()> {
     let mut child = rt
         .command()
-        .args(logs_args(container, since, true))
+        .args(logs_args(rt, container, since, true))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .context("follow logs")?;
     let stdout = child.stdout.take().context("logs stdout")?;
+    let cut = since
+        .filter(|_| rt.flavor == Flavor::Apple)
+        .and_then(since_cut);
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
         if let Some(ev) = parse_lines(&line).into_iter().next()
+            && in_window(rt, cut, &ev)
             && !f(ev)
         {
             break;
@@ -153,6 +225,11 @@ pub struct HostSummary {
     /// The path of the last denial, for a hint that allows that path, not the host.
     #[serde(skip)]
     pub last_denied_path: Option<String>,
+    /// The method and port of the last denial, to ask the policy about it again.
+    #[serde(skip)]
+    pub last_denied_at: Option<(String, u16)>,
+    /// The rule that allows the last denial now: it was added since, so the denial is history.
+    pub allowed_now: Option<String>,
     pub last_rule: Option<String>,
     pub bytes_up: u64,
     pub bytes_down: u64,
@@ -227,6 +304,7 @@ pub fn summarize(events: &[Event], mutes: &Mutes) -> Vec<HostSummary> {
                 s.last_reason = e.reason.clone();
                 s.last_message = e.message.clone();
                 s.last_denied_path = e.path.clone();
+                s.last_denied_at = e.method.clone().map(|m| (m, e.port.unwrap_or(443)));
                 let write = e
                     .method
                     .as_deref()
@@ -260,6 +338,30 @@ pub fn summarize(events: &[Event], mutes: &Mutes) -> Vec<HostSummary> {
         .collect();
     out.sort_by(|a, b| b.denied.cmp(&a.denied).then(b.last_seen.cmp(&a.last_seen)));
     out
+}
+
+/// Ask `policy` again about each host's last denial: one a rule allows now (an approved
+/// request, an allow since) gets that rule in `allowed_now`. Open egress doesn't count.
+pub fn mark_allowed_now(summaries: &mut [HostSummary], policy: &luoto_shared::policy::Policy) {
+    use luoto_shared::policy::{Decision, RequestInfo};
+    for s in summaries.iter_mut() {
+        let Some((method, port)) = &s.last_denied_at else {
+            continue;
+        };
+        let req = RequestInfo {
+            host: &s.host,
+            port: *port,
+            method,
+            path: s.last_denied_path.as_deref().unwrap_or("/"),
+            websocket: false,
+            content_length: None,
+        };
+        if let Decision::Allow { rule, .. } = policy.decide(&req, Utc::now())
+            && rule != OPEN_RULE
+        {
+            s.allowed_now = Some(rule);
+        }
+    }
 }
 
 /// Where a container's event stream stood when read: the last `seq` of each gate or vault run
@@ -499,6 +601,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn since_reads_ages_unix_seconds_and_times_and_never_panics() {
+        assert_eq!(
+            since_cut("1731360000").map(|t| t.timestamp()),
+            Some(1_731_360_000)
+        );
+        let age = Utc::now() - since_cut("2h").unwrap();
+        assert!((7199..=7201).contains(&age.num_seconds()));
+        assert!(since_cut("2024-11-11T12:00:00Z").is_some());
+        assert!(since_cut("5µ").is_none());
+        assert!(since_cut("").is_none());
+    }
+
+    #[test]
     fn summarizes_denials_first() {
         let text = r#"luoto-gate: some stderr line
 {"seq":1,"run":"r","env":"e","kind":"dns","host":"evil.example","ts":"2026-11-03T10:00:00Z"}
@@ -560,6 +675,32 @@ mod tests {
              `luoto egress keep -e web` keeps them.\n"
         );
         assert_eq!(fmt_opened("web", &[]), "");
+    }
+
+    #[test]
+    fn a_denial_a_rule_allows_now_is_history() {
+        let denied = |host: &str, method: &str| Event {
+            kind: Some(EventKind::Http),
+            host: Some(host.into()),
+            method: Some(method.into()),
+            path: Some("/x".into()),
+            port: Some(443),
+            verdict: Some(Verdict::Deny),
+            ..Default::default()
+        };
+        let evs = [denied("docs.example", "GET"), denied("api.example", "POST")];
+        let mut s = summarize(&evs, &Mutes::default());
+        let cfg: crate::config::EnvConfig = toml::from_str(
+            "[[allow]]\nid = \"r1\"\nhost = \"docs.example\"\n\
+             [[allow]]\nid = \"r2\"\nhost = \"api.example\"\n",
+        )
+        .unwrap();
+        let c = crate::compile::compile("web", &cfg, None, &[]).unwrap();
+        mark_allowed_now(&mut s, &c.policy);
+        let at = |h: &str| s.iter().find(|x| x.host == h).unwrap().allowed_now.clone();
+        // A read rule allows the GET denied before it, not the POST.
+        assert_eq!(at("docs.example").as_deref(), Some("r1"));
+        assert_eq!(at("api.example"), None);
     }
 
     #[test]

@@ -12,8 +12,6 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
 - **Container hardening:** dropped capabilities, `nosuid,nodev` mounts, user namespaces on
   Docker; tunnel rules check the SNI inside the tunnel; client credentials stripped on every
   host.
-- **A VM per env on macOS** with Apple's `container`, once its host-only networks are verified
-  against raw-IP TCP.
 - **gVisor on Linux** installed by `luoto setup --install`.
 - **The process behind a request,** named from outside by gVisor's runtime monitoring.
 - **Malicious and brand-new package versions** refused at registry hosts (OSV `MAL-*`, a
@@ -42,6 +40,11 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   progress the UI streams).
 - **Azure DevOps:** the `az` CLI (it addresses repos by ID) and Git LFS (served from blob
   storage).
+- **Shares on Windows,** where luoto's podman VM mounts no shares folder yet, **and on Linux with
+  SELinux** (Fedora): native podman without gVisor needs the clones relabelled to read them.
+- **The watcher hands over in place,** once more runs through it: a new luoto takes its open
+  links and forwarded connections (exec with the descriptors kept, the bytes read and not yet
+  written carried along) instead of closing them for its successor to open again.
 
 ## Git over SSH
 

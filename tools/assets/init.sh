@@ -19,6 +19,21 @@ pw() { awk -F: -v u="$USER_UID" -v f="$1" '$3==u{print $f; exit}' /etc/passwd 2>
 
 mkdir -p /etc/luoto
 
+# --- tun link: an env without a network card reaches the gate over a socket the host joins --
+if [ "${LUOTO_NET:-}" = tun ]; then
+  LUOTO_GATE_IP="${LUOTO_GATE_IP:-169.254.1.1}"
+  NET_SOCK="${LUOTO_NET_SOCKET:-/run/luoto-net/net.sock}"
+  rm -f "$NET_SOCK"
+  mkdir -p /run/luoto
+  "$T/bin/sandbox" net --socket "$NET_SOCK" </dev/null >/run/luoto/net.log 2>&1 &
+  i=0
+  while [ ! -S "$NET_SOCK" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  if [ ! -S "$NET_SOCK" ]; then
+    log "warning: the tun link did not start; this env has no network"
+    head -c 4096 /run/luoto/net.log >&2
+  fi
+fi
+
 # --- resolver: the gate is the only DNS server -------------------------------------------
 if [ -n "${LUOTO_GATE_IP:-}" ]; then
   if ! grep -q "nameserver ${LUOTO_GATE_IP}\$" /etc/resolv.conf 2>/dev/null; then
@@ -71,6 +86,10 @@ fi
 HOME_DIR="$(pw 6)"
 HOME_DIR="${HOME_DIR:-/home/$USER_NAME}"
 mkdir -p "$HOME_DIR"
+# A new volume on a runtime that formats it (Apple's) is root's and holds an empty lost+found.
+for d in /workspace "$HOME_DIR"; do
+  [ "$(ls -A "$d" 2>/dev/null)" = "lost+found" ] && rmdir "$d/lost+found" 2>/dev/null
+done
 [ "$(stat -c %u "$HOME_DIR" 2>/dev/null)" = "$USER_UID" ] || chown "$USER_UID:$USER_UID" "$HOME_DIR"
 # zsh runs its new-user wizard in a home without zsh files; the image's defaults are enough.
 if have zsh; then
@@ -112,9 +131,42 @@ fi
 # Every shell, login or not: editors' SSH terminals start non-login shells that miss both the
 # container's PATH and profile.d. User-level installs (agents, `npm i -g`, pipx) go on PATH;
 # the per-run env (agent settings, placeholders, sandbox secrets) lives in memory only.
+# An open interactive shell takes what luoto writes later (`luoto var`, an approved request)
+# at its next prompt: vars.sum against the LUOTO_ENV_SUM of its last load, and the names that
+# load exported (LUOTO_ENV_NAMES) but this one doesn't are unset.
 cat >/etc/luoto-shell.sh <<'EOF'
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH"; export PATH ;; esac
 [ -r /run/luoto/env.sh ] && . /run/luoto/env.sh
+__luoto_env() {
+  __luoto_rc=$?
+  if [ -r /run/luoto/vars.sum ] && IFS= read -r __luoto_sum </run/luoto/vars.sum &&
+    [ "$__luoto_sum" != "${LUOTO_ENV_SUM:-}" ]; then
+    __luoto_old=${LUOTO_ENV_NAMES:-}
+    . /run/luoto/env.sh
+    eval "set -- $__luoto_old"
+    for __luoto_n; do
+      case " $LUOTO_ENV_NAMES " in *" $__luoto_n "*) ;; *) unset "$__luoto_n" ;; esac
+    done
+    # A file read half-written lacks its last line, the fingerprint: read again next prompt.
+    if [ "${LUOTO_ENV_SUM:-}" = "$__luoto_sum" ]; then
+      echo "luoto: this shell has the env's variables as changed now" >&2
+    fi
+  fi
+  unset __luoto_sum __luoto_old __luoto_n
+  # The prompt and its other hooks see the last command's status, not this one's.
+  return $__luoto_rc
+}
+case $- in *i*)
+  if [ -n "${ZSH_VERSION:-}" ]; then
+    autoload -Uz add-zsh-hook && add-zsh-hook precmd __luoto_env
+  elif [ -n "${BASH_VERSION:-}" ]; then
+    case ";${PROMPT_COMMAND:-};" in
+      *";__luoto_env;"*) ;;
+      *) PROMPT_COMMAND="__luoto_env${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
+    esac
+  fi
+  ;;
+esac
 EOF
 for rc in /etc/bash.bashrc /etc/bashrc /etc/zsh/zshenv /etc/zshenv; do
   [ -f "$rc" ] && ! grep -q /etc/luoto-shell.sh "$rc" && echo '. /etc/luoto-shell.sh' >>"$rc"
@@ -124,6 +176,20 @@ if [ -d /etc/fish ]; then
   cat >/etc/fish/conf.d/luoto.fish <<'EOF'
 contains -- $HOME/.local/bin $PATH; or set -gx PATH $HOME/.local/bin $PATH
 test -r /run/luoto/env.fish; and source /run/luoto/env.fish
+if status is-interactive
+    function __luoto_env --on-event fish_prompt
+        test -r /run/luoto/vars.sum; or return
+        read -l sum </run/luoto/vars.sum
+        test "$sum" = "$LUOTO_ENV_SUM"; and return
+        set -l old $LUOTO_ENV_NAMES
+        source /run/luoto/env.fish
+        for n in $old
+            contains -- $n $LUOTO_ENV_NAMES; or set -e $n
+        end
+        test "$LUOTO_ENV_SUM" = "$sum"
+        and echo "luoto: this shell has the env's variables as changed now" >&2
+    end
+end
 EOF
 fi
 
@@ -177,6 +243,14 @@ mkdir -p /run/luoto
 echo "$USER_NAME" >/run/luoto/user
 touch /run/luoto/ready
 log "ready (user $USER_NAME, env ${LUOTO_ENV:-?})"
+# A runtime that keeps the container's output uncapped (Apple's) gets nothing more: no process
+# keeps it open, so root in the sandbox can't write to it through /proc either. Its /dev is the
+# VM's, whose consoles the runtime logs uncapped on the host: their nodes go, and the container
+# lacks MKNOD to make them again.
+if [ "${LUOTO_OUTPUT:-}" = startup ]; then
+  rm -f /dev/console /dev/kmsg /dev/hvc[0-9]* /dev/tty[0-9]* /dev/ttyS[0-9]* /dev/ttyAMA[0-9]*
+  exec </dev/null >/dev/null 2>&1
+fi
 
 trap 'exit 0' TERM INT
 while :; do sleep 3600 & wait $!; done

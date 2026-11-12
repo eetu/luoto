@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.4.4 (2026-11-12)
+
+- **Apple's `container`:** on macOS 26 on Apple silicon, `luoto setup` offers it first
+  (`--runtime container`; `--install` runs `brew install container`). It runs every container
+  as a VM of its own, so the dev container's boundary is its VM rather than gVisor. It has no
+  network card: its one link goes to its gate through luoto's background process, never to
+  your Mac or your network.
+  `luoto ui`'s setup page offers the same choice; `luoto status`, `init` and the UI's env
+  panel say how the env is isolated there.
+- **Vault:** each gate reaches the vault over a socket of its own env instead of a network
+  shared with the other envs' gates; a running env takes it at its next `up`.
+- **`luoto var`:** lists, sets and removes an env's variables. `luoto var set NAME=value`
+  writes a plain value to `[env]`; `luoto var set NAME` asks where a secret is kept and writes
+  its ref to `[sandbox_secrets]` (`--ref` without a terminal); `luoto var rm NAME`. A running
+  env takes the change at once: new shells have it, and open bash, zsh and fish shells reload
+  it at their next prompt. Names luoto sets itself (proxy, CA bundle, `LUOTO_*`, the env's
+  credential placeholders) and the shell's own are refused. `luoto ui`'s env panel lists
+  them, and names what luoto sets itself. New guide:
+  [environment variables](docs/guides/env-vars.md).
+- **`luoto share`:** folders of this machine the env reads at `/shares/<name>`, read-only:
+  recordings, datasets, data too large for a repo. `luoto share add <folder>`; `luoto up`
+  and `luoto share sync` bring what changed. The env reads clones, which take no space on
+  APFS, btrfs or XFS until a file changes (a folder on another disk is copied). luoto's
+  podman VM mounts luoto's shares folder read-only, added after a yes and one VM restart.
+  A folder inside your home folder (not home itself, a dot-folder or `~/Library`) or on a
+  disk, never a key folder; only the env's own file names one, and `luoto import` leaves an
+  archive's out. `luoto ui`'s env panel lists each share with what changed on this machine
+  since the last sync, and syncs them. Not on Windows yet.
+- **Variable requests:** code in the env asks for a variable with a plain value, which it may
+  suggest (`sandbox request --var NAME[=VALUE]`, MCP `sandbox_request_var`). `luoto approve
+  <id>` confirms the value, `luoto ui` shows it filled in to check, and `luoto var set` answers
+  it too. Secrets are never requested from inside: you add them with `luoto var set`.
+- **Egress view:** a host a rule allows since it was blocked reads as allowed, its denials as
+  history ("blocked before rule r1"), instead of "partly" with the old denial's text.
+- **`luoto ui`'s vault view:** the vault is a view of its own, every env's credentials in one
+  table: what each is for, where its secret is kept (the ref, never the value), the hosts it
+  goes to, whether the vault holds it, and refs in memory no env uses. A credential shows
+  what else shares its secret and the command that changes it; unlock only while locked, and
+  right-click on the vault for unlock, reload and lock. An env's credentials section lists
+  the same, with an unlock while secrets are missing.
+- **macOS notifications** go through `terminal-notifier`, which the Homebrew formula now
+  installs, instead of Script Editor; macOS asks once to allow them. Without it, or until
+  allowed, they come through `osascript` as before. A notification says "has a request",
+  whatever the request is for.
+- **The background watcher follows upgrades:** a new luoto's watcher takes over at once,
+  also after a Homebrew upgrade and while envs run on Apple's `container`, where the old one
+  kept running until every env was down. Forwarded connections close and an env's network
+  pauses for a moment; its connections carry on.
+- **1Password sign-in in place:** when `op` isn't signed in on the terminal (no app
+  integration, no `eval $(op signin)` in that shell), luoto offers `op signin` where it is,
+  mid-question, keeps the session in memory until it exits, and runs the command again.
+  Without a terminal, the error names both fixes; the app's CLI integration (Settings >
+  Developer) unlocks `op` in every terminal.
+
 ## 0.4.3 (2026-11-11)
 
 - **Open egress:** `luoto egress open` lets an env reach any HTTP(S) host and port no rule

@@ -2,13 +2,14 @@
 //! short-lived values in memory; root secrets stay in the vault.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use chrono::Utc;
-use http::{HeaderName, HeaderValue, Uri, request::Parts};
+use http::{HeaderName, HeaderValue, request::Parts};
 use http_body_util::BodyExt;
 use hyper_util::rt::TokioIo;
 use luoto_shared::api::AgentMessage;
@@ -18,7 +19,7 @@ use luoto_shared::creds::{
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio::net::TcpStream;
+use tokio::net::UnixStream;
 
 use crate::body::full;
 use crate::state::lock;
@@ -35,7 +36,7 @@ struct Cached {
 }
 
 pub struct VaultClient {
-    url: String,
+    socket: PathBuf,
     token: String,
     cache: Mutex<HashMap<String, Cached>>,
     /// Bumped by every flush: a fetch that started before one isn't cached after it, so a
@@ -44,9 +45,9 @@ pub struct VaultClient {
 }
 
 impl VaultClient {
-    pub fn new(url: String, token: String) -> Self {
+    pub fn new(socket: PathBuf, token: String) -> Self {
         VaultClient {
-            url,
+            socket,
             token,
             cache: Mutex::new(HashMap::new()),
             generation: AtomicU64::new(0),
@@ -111,24 +112,24 @@ impl VaultClient {
         req: &Req,
     ) -> Result<Resp, CredentialError> {
         let failed = CredentialError::Failed;
-        let uri: Uri = format!("{}{path}", self.url.trim_end_matches('/'))
-            .parse()
-            .map_err(|e| failed(format!("bad vault url: {e}")))?;
-        let authority = uri
-            .authority()
-            .ok_or_else(|| failed("vault url has no host".into()))?
-            .to_string();
-        let tcp = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&authority))
-            .await
-            .map_err(|_| failed("vault connect timed out".into()))?
-            .map_err(|e| failed(format!("vault unreachable: {e}")))?;
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
+        let stream =
+            tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(&self.socket))
+                .await
+                .map_err(|_| failed("vault connect timed out".into()))?
+                .map_err(|e| match e.kind() {
+                    // The vault serves the env's socket once it is bound: it restarted since.
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+                        CredentialError::NotBound
+                    }
+                    _ => failed(format!("vault unreachable: {e}")),
+                })?;
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
             .await
             .map_err(|e| failed(e.to_string()))?;
         tokio::spawn(conn);
         let body = serde_json::to_vec(req).unwrap_or_default();
-        let req = http::Request::post(uri.path())
-            .header(http::header::HOST, authority)
+        let req = http::Request::post(path)
+            .header(http::header::HOST, "vault")
             .header(
                 http::header::AUTHORIZATION,
                 format!("Bearer {}", self.token),
@@ -139,7 +140,7 @@ impl VaultClient {
         let resp = tokio::time::timeout(Duration::from_secs(20), sender.send_request(req))
             .await
             .map_err(|_| failed("vault request timed out".into()))?
-            .map_err(|e| failed(e.to_string()))?;
+            .map_err(|e| failed(format!("no answer from the vault: {e}")))?;
         let status = resp.status().as_u16();
         let bytes = resp
             .into_body()

@@ -8,6 +8,8 @@
     if (h.dns_only) return { text: "looked up", cls: "dns" };
     if (h.opened > 0) return { text: "open", cls: "open" };
     if (h.tls_rejected) return { text: "pinned?", cls: "mixed" };
+    // What was blocked a rule allows now: the denials are history.
+    if (h.allowed_now) return { text: "allowed", cls: "allowed" };
     if (h.denied > 0 && h.allowed === 0) return { text: "blocked", cls: "blocked" };
     if (h.denied > 0) return { text: "partly", cls: "mixed" };
     return { text: "allowed", cls: "allowed" };
@@ -80,7 +82,9 @@
             <td><span class="chip {d.cls}">{d.text}</span></td>
             <td class="host">
               {h.host}
-              {#if h.denied > 0 && h.last_message}<div class="why">
+              {#if h.allowed_now}<div class="why">
+                  blocked before rule {h.allowed_now}
+                </div>{:else if h.denied > 0 && h.last_message}<div class="why">
                   {h.last_message}
                 </div>{/if}
             </td>

@@ -17,6 +17,7 @@ use crate::config::{EnvConfig, GlobalConfig, Isolation};
 use crate::detect;
 use crate::init::Proposal;
 use crate::prompt::{Ask, menu_help, menu_rows};
+use crate::runtime::Flavor;
 use crate::secrets::{self, OpAccount, OpItem, OpVault};
 use crate::text::{self, display};
 
@@ -89,6 +90,39 @@ pub fn customize(p: &mut Proposal) -> Result<()> {
     pick_agents(&mut p.cfg)?;
     ports(&mut p.cfg)?;
     Ok(())
+}
+
+/// `luoto setup`'s runtime on a Mac that runs Apple's `container`, starting at `current`;
+/// `None` for Esc.
+pub fn pick_runtime(current: Option<Flavor>) -> Result<Option<Flavor>> {
+    let offered = crate::setup::runtime_options(current);
+    let start = offered.iter().position(|o| o.selected).unwrap_or(0);
+    let rows = offered
+        .into_iter()
+        .map(|o| {
+            let label = if o.recommended {
+                format!("{} (recommended)", o.label)
+            } else if o.current {
+                format!("{} (current)", o.label)
+            } else {
+                o.label
+            };
+            (o.runtime.flavor(), label, o.description)
+        })
+        .collect();
+    let options = table(rows, text::columns());
+    let help = menu_help(if current.is_some() {
+        "unchanged"
+    } else {
+        "later"
+    });
+    Ok(Select::new("Run envs on:", options)
+        .with_starting_cursor(start)
+        .with_formatter(&short)
+        .with_help_message(&help)
+        .without_filtering()
+        .ask()?
+        .map(|c| c.value))
 }
 
 fn isolation(p: &mut Proposal) -> Result<()> {

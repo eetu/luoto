@@ -1,10 +1,13 @@
 //! The background watcher: one per config dir, started by `up`, `down` and commands that work
-//! in an env. Every 2 s it forwards the ports running envs listen on (see `ports`) and posts
+//! in an env. Every 2 s it forwards the ports running envs listen on (see `ports`), on Apple
+//! joins their tun links and their gates' links to the vault (see `tunlink`), and posts
 //! desktop notifications (see `notify`); every 30 s it reads again the credentials upstreams
 //! refused, from sources that need no one, and the Azure CLI's tokens the vault holds before
 //! they expire; every minute it stops envs that have been idle for
 //! `idle_stop` (see `idle`), and luoto's VM once no env has run for that long. It exits when
-//! nothing is left to watch, or when the luoto binary changes, so a new version starts its own.
+//! nothing is left to watch. A new luoto (its binary rebuilt, or a command run from another,
+//! as after a Homebrew upgrade) takes over: this one closes what runs through it and starts
+//! that one's watcher.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions, TryLockError};
@@ -38,16 +41,28 @@ const AZCLI_FAILED_AGAIN: Duration = Duration::from_secs(300);
 /// How long `stop` waits: past a tick and the slowest round of work in it.
 const STOP_WAIT: Duration = Duration::from_secs(20);
 
-/// Start the watcher in the background; a second one exits at once (it holds a lock).
+/// Start the watcher in the background; a second one exits at once (it holds a lock). The
+/// running one is told which luoto this is, and gives way to it if it isn't that one.
 pub fn spawn(ctx: &Ctx) {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
     let _ = std::fs::create_dir_all(&ctx.paths.data);
+    let _ = std::fs::write(exe_file(&ctx.paths), exe.to_string_lossy().as_bytes());
+    start(&ctx.paths, &exe);
+}
+
+/// Where `spawn` names the luoto the latest command ran from.
+fn exe_file(paths: &Paths) -> PathBuf {
+    paths.data.join("watch.exe")
+}
+
+/// Start `exe watch` in the background, its output to the watcher's log.
+fn start(paths: &Paths, exe: &Path) {
     let Ok(log) = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(ctx.paths.watch_log())
+        .open(paths.watch_log())
     else {
         return;
     };
@@ -123,22 +138,56 @@ pub fn stop(paths: &Paths) -> Result<bool> {
     )
 }
 
-fn exe_stamp() -> Option<SystemTime> {
-    std::env::current_exe()
+/// The luoto that should watch, and when it was built: the one the latest command ran from
+/// (so a Homebrew upgrade's new, differently named binary counts), else this one.
+fn wanted(paths: &Paths) -> Option<(PathBuf, SystemTime)> {
+    let exe = std::fs::read_to_string(exe_file(paths))
         .ok()
-        .and_then(|p| p.metadata().ok())
-        .and_then(|m| m.modified().ok())
+        .map(|s| PathBuf::from(s.trim()))
+        .filter(|p| p.is_file())
+        .or_else(|| std::env::current_exe().ok())?;
+    let built = exe.metadata().ok()?.modified().ok()?;
+    Some((exe, built))
+}
+
+/// Whether `exe` is a luoto that starts.
+fn runs(exe: &Path) -> bool {
+    Command::new(exe)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// The watcher itself (`luoto watch`, started by `spawn`).
 pub fn watch() -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let lock_file = lock_path(&ctx.paths);
-    let Some(_lock) = take_lock(&lock_file)? else {
+    let Some(lock) = take_lock(&lock_file)? else {
         return Ok(ExitCode::SUCCESS);
     };
-    let stamp = exe_stamp();
+    // When this binary was built, as it started: a rebuild in place is newer.
+    let built = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.metadata().ok())
+        .and_then(|m| m.modified().ok());
+    let mut seen = wanted(&ctx.paths);
     let mut forwards: HashMap<(String, u16), ports::Forward> = HashMap::new();
+    // Apple: each running dev container's tun link, joined to its gate.
+    #[cfg(unix)]
+    let mut links: HashMap<String, crate::tunlink::Link> = HashMap::new();
+    #[cfg(not(unix))]
+    let links: HashMap<String, ()> = HashMap::new();
+    // Apple: each running gate's links to the vault.
+    #[cfg(unix)]
+    let mut uplinks: HashMap<String, crate::tunlink::Uplinks> = HashMap::new();
+    // Apple restarts nothing on its own: a gate seen stopped under a running dev container
+    // (since when, and when it was last started here).
+    let mut gate_down: HashMap<String, (Instant, Option<Instant>)> = HashMap::new();
+    // Apple: one long-lived look at each running dev container's listening ports.
+    let mut listeners: HashMap<String, ports::Listening> = HashMap::new();
     let mut refused: HashSet<(String, u16)> = HashSet::new();
     let mut recorded: Option<BTreeMap<String, ports::Watched>> = None;
     let notices = notify::Notices::default();
@@ -158,20 +207,77 @@ pub fn watch() -> Result<ExitCode> {
         if !lock_file.exists() {
             return Ok(ExitCode::SUCCESS);
         }
-        // A new luoto takes over once nothing is forwarded: leaving now would cut the
-        // connections of a running dev server.
-        if exe_stamp() != stamp && forwards.is_empty() {
+        // A newer luoto takes over (an older one run in between changes nothing), once its file
+        // stayed the same for a tick (a build may still be writing it) and it starts. What runs
+        // through this process closes first: forwarded connections end, and an env's network
+        // on Apple pauses until the new watcher joins its links again, which its connections
+        // outlast.
+        let now = wanted(&ctx.paths);
+        if now == seen
+            && let Some((exe, t)) = &now
+            && built.is_none_or(|b| *t > b)
+            && runs(exe)
+        {
+            println!("{} handing over to {}", Utc::now(), exe.display());
+            drop(forwards);
+            drop(listeners);
+            #[cfg(unix)]
+            {
+                drop(links);
+                drop(uplinks);
+            }
+            drop(lock);
+            start(&ctx.paths, exe);
             return Ok(ExitCode::SUCCESS);
         }
-        let ctx = Ctx::load()?;
-        let states = ctx.rt.states().unwrap_or_default();
+        seen = now;
+        // An env's network runs through this process: while it links any, a failed look (a
+        // config being saved, the runtime busy) waits for the next tick instead of leaving.
+        let ctx = match Ctx::load() {
+            Ok(c) => c,
+            Err(e) if links.is_empty() => return Err(e),
+            Err(_) => continue,
+        };
+        let states = match ctx.rt.states() {
+            Ok(s) => s,
+            Err(_) if !links.is_empty() => continue,
+            Err(_) => Default::default(),
+        };
         if states.vm_stopped {
             return Ok(ExitCode::SUCCESS);
         }
-        let running: Vec<String> = config::list_envs(&ctx.paths)?
+        let envs = match config::list_envs(&ctx.paths) {
+            Ok(e) => e,
+            Err(e) if links.is_empty() => return Err(e),
+            Err(_) => continue,
+        };
+        let running: Vec<String> = envs
             .into_iter()
             .filter(|e| states.running(&names::dev(e)))
             .collect();
+        #[cfg(unix)]
+        if ctx.rt.flavor == crate::runtime::Flavor::Apple {
+            links.retain(|e, _| running.contains(e));
+            for name in &running {
+                links.entry(name.clone()).or_insert_with(|| {
+                    let s = env::link_sockets(&ctx, name);
+                    println!("{} linking `{name}` to its gate", Utc::now());
+                    crate::tunlink::Link::start(s.dev, s.gate)
+                });
+            }
+            uplinks.retain(|e, _| running.contains(e) && states.running(&names::gate(e)));
+            for name in running.iter().filter(|e| states.running(&names::gate(e))) {
+                uplinks.entry(name.clone()).or_insert_with(|| {
+                    let s = env::link_sockets(&ctx, name);
+                    let vault = env::vault_socket(&ctx);
+                    crate::tunlink::Uplinks::start(s.uplink, vault, name.clone())
+                });
+            }
+        }
+        if ctx.rt.flavor == crate::runtime::Flavor::Apple {
+            restart_gates(&ctx, &states, &running, &mut gate_down);
+        }
+        listeners.retain(|e, _| running.contains(e));
         if running.is_empty() {
             forwards.clear();
             refused.clear();
@@ -225,7 +331,17 @@ pub fn watch() -> Result<ExitCode> {
                 continue;
             }
             let dev = names::dev(name);
-            let Some(open) = ports::listening(&ctx.rt, &dev) else {
+            let open = if ctx.rt.flavor == crate::runtime::Flavor::Apple {
+                if listeners.get_mut(name).is_none_or(|l| !l.alive())
+                    && let Some(l) = ports::Listening::start(&ctx.rt, &dev)
+                {
+                    listeners.insert(name.clone(), l);
+                }
+                listeners.get_mut(name).and_then(ports::Listening::current)
+            } else {
+                ports::listening(&ctx.rt, &dev)
+            };
+            let Some(open) = open else {
                 // A failed look (the runtime busy) keeps what is forwarded, and what is taken:
                 // dropping a forward would refuse the next connections.
                 let kept = forwards.keys().chain(refused.iter());
@@ -297,6 +413,44 @@ pub fn watch() -> Result<ExitCode> {
                 Ok(()) => println!("{} stopped `{name}`: idle for {limit:?}", Utc::now()),
                 Err(e) => println!("{} could not stop `{name}`: {e:#}", Utc::now()),
             }
+        }
+    }
+}
+
+/// How long a gate stays stopped under a running dev container before it is started again
+/// (longer than `up` leaves one between creating and starting it), and how often at most.
+const GATE_DOWN_FOR: Duration = Duration::from_secs(5);
+const GATE_RESTART_EVERY: Duration = Duration::from_secs(30);
+
+/// On Apple, where nothing restarts a container that stopped: start the gate of each env whose
+/// dev container runs (`down` stops the dev container first, so that gate stopped on its own).
+/// It serves at once from its state volume, as after podman's own restart.
+fn restart_gates(
+    ctx: &Ctx,
+    states: &crate::runtime::States,
+    running: &[String],
+    gate_down: &mut HashMap<String, (Instant, Option<Instant>)>,
+) {
+    gate_down.retain(|e, _| running.contains(e));
+    for name in running {
+        let gate = names::gate(name);
+        if states.running(&gate) || !states.exists(&gate) {
+            if let Some(d) = gate_down.get_mut(name) {
+                d.0 = Instant::now();
+            }
+            continue;
+        }
+        let (since, last) = gate_down
+            .entry(name.clone())
+            .or_insert((Instant::now(), None));
+        if since.elapsed() < GATE_DOWN_FOR || last.is_some_and(|l| l.elapsed() < GATE_RESTART_EVERY)
+        {
+            continue;
+        }
+        *last = Some(Instant::now());
+        match ctx.rt.run(["start", &gate]) {
+            Ok(_) => println!("{} started the stopped gate of `{name}`", Utc::now()),
+            Err(e) => println!("{} could not start the gate of `{name}`: {e:#}", Utc::now()),
         }
     }
 }

@@ -170,6 +170,8 @@ pub struct Proposal {
     pub project_error: Option<String>,
     /// gVisor is set up, so it is the default isolation.
     pub gvisor: bool,
+    /// The runtime is Apple's `container`: each container a VM of its own.
+    pub apple: bool,
     /// The folder is missing (`make_folder` creates it) or empty: nothing to detect.
     pub new_folder: bool,
     /// How long the env's egress is open from its creation (`--open`).
@@ -287,6 +289,7 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
         project,
         project_error,
         gvisor: global.gvisor.is_some(),
+        apple: crate::setup::configured(&global) == Some(crate::runtime::Flavor::Apple),
         new_folder,
         open: o
             .open
@@ -424,7 +427,10 @@ fn print_proposal(p: &Proposal, specs: &[String], asks: bool) {
         }
         println!("{INDENT}each at /workspace/<name>");
     }
-    println!("  isolation  {}", isolation_text(p.cfg.isolation, p.gvisor));
+    println!(
+        "  isolation  {}",
+        isolation_text(p.apple, p.cfg.isolation, p.gvisor)
+    );
     let presets: Vec<String> = p
         .cfg
         .presets
@@ -507,9 +513,15 @@ fn print_proposal(p: &Proposal, specs: &[String], asks: bool) {
     }
 }
 
-/// How an env is separated from luoto's VM, as `init` and `status` say it.
-pub fn isolation_text(chosen: Option<config::Isolation>, gvisor: bool) -> &'static str {
+/// How an env is separated from luoto's VM, as `init`, `status` and the UI say it. `apple`:
+/// the runtime is Apple's `container`, where `isolation` doesn't apply.
+pub fn isolation_text(
+    apple: bool,
+    chosen: Option<config::Isolation>,
+    gvisor: bool,
+) -> &'static str {
     match chosen {
+        _ if apple => "a VM of its own (Apple's container; `isolation` doesn't apply)",
         Some(config::Isolation::Container) => {
             "container: shares the VM's kernel (builds about 1.6× faster, weaker)"
         }

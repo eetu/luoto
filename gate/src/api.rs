@@ -7,8 +7,8 @@ use chrono::Utc;
 use http::{Method, Request, Response, StatusCode};
 use hyper::body::Incoming;
 use luoto_shared::api::{
-    API_PREFIX, AgentMessage, CheckQuery, CheckResult, MAX_AGENT_MESSAGE, NewAccessRequest,
-    OpenEgress, RuleSummary, SSH_AGENT_PATH, SandboxStatus,
+    API_PREFIX, AgentMessage, CheckQuery, CheckResult, Install, MAX_AGENT_MESSAGE,
+    NewAccessRequest, OpenEgress, RuleSummary, SSH_AGENT_PATH, SandboxStatus,
 };
 use luoto_shared::creds::{CredentialError, SSH_BINDING};
 use luoto_shared::events::{Event, EventKind};
@@ -68,9 +68,10 @@ pub async fn handle(state: Arc<State>, req: Request<Incoming>) -> Response<Body>
                             port: r.port,
                             request_id: Some(r.id),
                             message: Some(r.reason.clone()),
-                            reason: Some(match r.port {
-                                Some(_) => "tunnel".into(),
-                                None => format!("{:?}", r.access).to_lowercase(),
+                            reason: Some(match (r.port, &r.install) {
+                                (Some(_), _) => "tunnel".into(),
+                                (None, Some(Install::Var { .. })) => "var".into(),
+                                (None, _) => format!("{:?}", r.access).to_lowercase(),
                             }),
                             ..Default::default()
                         });

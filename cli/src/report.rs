@@ -251,20 +251,32 @@ fn env_summary(
 /// What a gate or the vault logged of note: lifecycle events (starts, reloads, locks, limits),
 /// errors (upstream failures, refused certificates), and its diagnostic lines.
 fn container_log(rt: &Runtime, container: &str) -> String {
-    let out = match rt
-        .command()
-        .args(["logs", "--tail", LOG_TAIL, container])
-        .stdin(Stdio::null())
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => return format!("(could not read its log: {e})"),
+    let tail = if rt.flavor == crate::runtime::Flavor::Apple {
+        "-n"
+    } else {
+        "--tail"
     };
-    let text = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let mut reads = vec![vec![
+        "logs".to_string(),
+        tail.into(),
+        LOG_TAIL.into(),
+        container.into(),
+    ]];
+    if events::in_file(rt, container) {
+        reads.push(events::file_args(container, false, LOG_TAIL.parse().ok()));
+    }
+    let mut text = String::new();
+    for args in reads {
+        match rt.command().args(&args).stdin(Stdio::null()).output() {
+            Ok(out) => {
+                text.push_str(&String::from_utf8_lossy(&out.stdout));
+                text.push('\n');
+                text.push_str(&String::from_utf8_lossy(&out.stderr));
+                text.push('\n');
+            }
+            Err(e) => return format!("(could not read its log: {e})"),
+        }
+    }
     let (events, diagnostics) = notable(&text);
     let mut s = String::new();
     for e in &events[events.len().saturating_sub(EVENTS)..] {

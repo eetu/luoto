@@ -104,6 +104,9 @@ DATABASE_URL = "op://Dev/local-db/url"
 [env]                         # plain environment variables in the env's shells
 RUST_LOG = "debug"
 
+[shares]                      # folders of this machine the env reads at /shares/<name>
+recordings = "/Users/me/Recordings"   # `luoto share add` writes these
+
 [resources]                   # the dev container's share of the VM; not with gVisor on podman
 cpus = 4
 memory = "8g"
@@ -119,6 +122,8 @@ hosts = ["dl.k8s.io"]         # extra hosts readable only while installs run
 `headless_args`) for every
 env that has that agent; an env's own, and its `luoto.toml`'s, come on top. Credentials go
 only in each env's own file. `notifications = false` there turns desktop notifications off.
+`runtime = "container"` there (`luoto setup` offers it) runs envs on Apple's `container`
+([install.md](install.md)).
 
 A `[[deny]]` beats every allow: a preset's, a rule's, an approved request's. It applies to the
 HTTP(S) the gate reads: a tunnel rule can't cover a denied host, and SSH to
@@ -139,10 +144,32 @@ with their values. The refs it writes name the vault and item by ID, so a rename
 break them. Sources are configured in `~/.config/luoto/config.toml`. `[credentials.azure]`
 reads your `az` login itself, with no ref.
 
+1Password works best with the app's CLI integration on (Settings > Developer > Integrate with
+1Password CLI): `op` then unlocks through the app, with Touch ID, in any terminal. Signed in
+by hand instead, `op` holds its session only in the shell that ran `eval $(op signin)`, for 30
+minutes idle; when luoto finds it signed out, it offers `op signin` in place and keeps the
+session in memory until it exits.
+
 `[sandbox_secrets]` are resolved on your machine at `up` and written to a memory-only file in
 the dev container that every shell loads; they leave with the container. Anything that only
 needs a token in an HTTP header belongs under `[credentials.custom.<name>]` instead, where the
-sandbox never sees it.
+sandbox never sees it. `luoto var` sets and removes both `[env]` and `[sandbox_secrets]`
+([guide](guides/env-vars.md)).
+
+`[shares]` names folders of this machine the env reads at `/shares/<name>`, read-only, for
+data too large for a repo such as recordings or datasets. `luoto share add <folder> [--name
+<name>]` adds one; `luoto share` lists them with what changed since the last sync; `luoto
+share rm <name>` removes one. The env reads clones in `~/.local/share/luoto-shares`, which
+take no space until a file changes on APFS (macOS), btrfs and XFS when the folder is on the
+same disk, and are copies otherwise. Every `luoto up`, and `luoto share sync`, clones again the files that changed (by
+size and modification time) and removes the ones you deleted. A running env sees a share
+added or removed at once; one started before it had any shares needs `luoto up --recreate`
+once. With podman on macOS, luoto's VM mounts the shares folder read-only: the first share
+adds it, after a yes, by restarting the VM (every env in it stops until its next `luoto
+up`). A share is a folder inside your home folder, never home itself, a dot-folder or
+`~/Library`, or on a disk (`/Volumes`, `/mnt`, `/media`, `/srv`), and never a key folder
+(`.ssh`, `.aws`, …) or one inside it; only its plain files are cloned, never what a link in it points to, and
+only the env's own file names one. Not on Windows yet.
 
 A GitHub App for luoto needs only repository permissions such as Contents and Pull requests;
 luoto refuses Workflows, Actions, Secrets and Administration ([why](../SECURITY.md#what-holds-the-line)).

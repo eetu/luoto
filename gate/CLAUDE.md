@@ -31,7 +31,20 @@ sockets, then drops to uid 65534 (`system.rs`).
   raises at start, and idle-based timeouts carried by each connection's `Activity` (response
   head, idle response, tunnel and websocket idle), which the allowing rule's `idle` replaces.
   `events.rs` queues at most 4096 lines for stdout and reports what it drops; `ca.rs` mints a
-  cached leaf again after a day.
+  cached leaf again after a day. With `LUOTO_EVENTS_FILE` (Apple, whose container logs nothing
+  caps) events go to that file instead, turned over to `<file>.1` at half of
+  `LUOTO_EVENTS_MB` (`eventlog.rs`; `luoto-gate events` prints and follows the pair), and
+  stderr stops after 1 MiB a start.
+- With `LUOTO_TUN_SOCKET` (a dev without a network card), `system::tun_link` creates tun0
+  (169.254.1.1, peer 169.254.1.2) and binds that socket as root before any listener; after the
+  drop a thread runs `luoto_shared::tun::serve`, and the redirects apply to tun0 unchanged.
+  Only IPv4 from 169.254.1.2 reaches tun0 (the pump checks, an INPUT rule backs it), and the
+  gate refuses to start with forwarding on.
+- `creds.rs` asks the vault over HTTP on the env's unix socket (`LUOTO_VAULT_SOCKET`, by
+  default `luoto_shared::VAULT_SOCKET`) with the env's token; a missing or refusing socket is
+  an unbound env. With `LUOTO_VAULT_UPLINK` (Apple) `uplink.rs` serves that socket itself,
+  pairing each connection with an idle link the host opened to the uplink socket (both bound
+  as root before the drop); with none within 8 s the call fails closed.
 - `ctl.rs` unix socket; `state.rs` persists policy/CA/vault settings in the state volume so a
   restarted gate serves at once; secrets are never persisted.
 - `test-hooks` feature (integration tests only): `LUOTO_TEST_RESOLVE` maps names to local

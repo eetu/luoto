@@ -113,9 +113,11 @@ pub enum RequestStatus {
     Rejected,
 }
 
-/// What the sandbox asks to have in the env besides a host: software, or a preset's access.
-/// Approved, it joins the env's config (`[deps] system`, `[tools]`, `presets`), so it holds
-/// for every container the env gets.
+/// What the sandbox asks to have in the env besides a host: software, a preset's access, or a
+/// variable with a plain value. Approved, it joins the env's config (`[deps] system`,
+/// `[tools]`, `presets`, `[env]`), so it holds for every container the env gets. A secret is
+/// never asked for from inside: the user adds one (`luoto var set NAME`), so the sandbox never
+/// chooses which of theirs it gets.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Install {
@@ -125,7 +127,32 @@ pub enum Install {
     Tool { name: String, version: String },
     /// One of luoto's presets (`npm`, `pypi`, …): the hosts a registry or service needs.
     Preset { name: String },
+    /// An environment variable with a plain value (`[env]`), which the user gives or accepts.
+    Var {
+        name: String,
+        /// The value the sandbox suggests, which the user sees filled in and can change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+    },
 }
+
+impl Install {
+    /// The variable a request for one names.
+    pub fn variable(&self) -> Option<&str> {
+        match self {
+            Install::Var { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+}
+
+/// Characters that reorder or hide text where it is shown: a suggested value can't carry them.
+fn hides_text(c: char) -> bool {
+    matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{061c}' | '\u{feff}')
+}
+
+/// The longest plain value a variable request may suggest.
+pub const MAX_SUGGESTED_VALUE: usize = 1000;
 
 impl Install {
     /// Names a package manager or mise takes as they are: no options, spaces or shell.
@@ -151,6 +178,21 @@ impl Install {
                 "`{name}` is not a preset (known: {})",
                 crate::presets::names().collect::<Vec<_>>().join(", ")
             )),
+            Install::Var { name, .. } => match crate::variable_refused(name) {
+                Some(why) => Err(why),
+                None => match self {
+                    Install::Var { value: Some(v), .. }
+                        if v.len() > MAX_SUGGESTED_VALUE
+                            || v.chars().any(|c| c.is_control() || hides_text(c)) =>
+                    {
+                        Err(format!(
+                            "a suggested value is one line of at most {MAX_SUGGESTED_VALUE} \
+                             bytes of plain text"
+                        ))
+                    }
+                    _ => Ok(()),
+                },
+            },
             _ => Ok(()),
         }
     }
@@ -168,6 +210,11 @@ impl Install {
                 _ => format!("{name} {version} (mise)"),
             },
             Install::Preset { name } => format!("the {name} preset"),
+            Install::Var { name, value: None } => format!("the variable {name}"),
+            Install::Var {
+                name,
+                value: Some(v),
+            } => format!("the variable {name}={v} (a plain value it suggests)"),
         }
     }
 }

@@ -19,6 +19,7 @@ use crate::config::{
 };
 use crate::env::{Ctx, UID};
 use crate::prompt::{Ask, menu_help};
+use crate::runtime::exec;
 use crate::state::EnvState;
 use crate::text::{self, display, sh_quote};
 use crate::wizard::{Mode, Question, Step};
@@ -503,17 +504,10 @@ pub fn listed(ctx: &Ctx, env: &str) -> Result<Vec<Listed>> {
 /// Which of `names` the workspace has a file or folder for.
 fn present(ctx: &Ctx, env: &str, names: &[&str]) -> Result<BTreeSet<String>> {
     let dev = names::dev(env);
-    let mut args = vec![
-        "exec",
-        "-u",
-        UID,
-        dev.as_str(),
-        "sh",
-        "-c",
+    let args = exec(&dev).user(UID).sh_with(
         r#"for d; do { [ -e "/workspace/$d" ] || [ -L "/workspace/$d" ]; } && printf '%s\n' "$d"; done; true"#,
-        "sh",
-    ];
-    args.extend_from_slice(names);
+        names,
+    );
     let out = ctx.rt.run(&args).context("look for the repos in the env")?;
     Ok(out
         .lines()
@@ -612,11 +606,7 @@ fn own_entries(ctx: &Ctx, env: &str, ws: &Workspace) -> BTreeSet<String> {
     }
     let dev = names::dev(env);
     ctx.rt
-        .run([
-            "exec",
-            "-u",
-            UID,
-            dev.as_str(),
+        .run(exec(&dev).user(UID).argv([
             "git",
             "-c",
             "core.fsmonitor=false",
@@ -626,7 +616,7 @@ fn own_entries(ctx: &Ctx, env: &str, ws: &Workspace) -> BTreeSet<String> {
             "-z",
             "--name-only",
             "HEAD",
-        ])
+        ]))
         .unwrap_or_default()
         .split('\0')
         .filter(|n| !n.is_empty())
@@ -690,18 +680,10 @@ pub fn clone_workspace(
     let status = crate::progress::step(&what, || {
         quiet_git(
             ctx,
-            &[
-                "exec",
-                "-u",
-                UID,
-                "-w",
-                "/",
-                dev.as_str(),
-                "sh",
-                "-c",
-                connect::LOGIN,
-                &script,
-            ],
+            &exec(&dev)
+                .user(UID)
+                .cwd("/")
+                .argv(["sh", "-c", connect::LOGIN, &script]),
         )
     })?;
     if status.code() == Some(3) {
@@ -738,7 +720,7 @@ fn clone_failed(env: &str, url: &str, ok: bool, locked: bool) -> Result<()> {
 /// Run git `args` in the env ([`crate::progress::git`]): its output carries the remote's
 /// messages and the sandbox's own text, so it reaches the terminal escaped, and only with
 /// `--verbose` or, its errors, when the clone fails.
-fn quiet_git(ctx: &Ctx, args: &[&str]) -> Result<std::process::ExitStatus> {
+fn quiet_git(ctx: &Ctx, args: &[String]) -> Result<std::process::ExitStatus> {
     crate::progress::git(&ctx.rt, args)
 }
 
@@ -812,17 +794,7 @@ pub fn unpushed(ctx: &Ctx, env: &str, repos: &BTreeSet<String>) -> Result<Vec<Un
     let dirs: Vec<String> = std::iter::once("/workspace".to_string())
         .chain(repos.iter().map(|r| format!("/workspace/{r}")))
         .collect();
-    let mut args = vec![
-        "exec",
-        "-u",
-        UID,
-        dev.as_str(),
-        "sh",
-        "-c",
-        UNPUSHED_SCRIPT,
-        "sh",
-    ];
-    args.extend(dirs.iter().map(String::as_str));
+    let args = exec(&dev).user(UID).sh_with(UNPUSHED_SCRIPT, &dirs);
     let out = ctx.rt.run_limited(&args, STATUS_LIMIT, STATUS_CAP)?;
     Ok(parse_unpushed(&out, &dirs))
 }
@@ -918,18 +890,10 @@ fn clone(
     let status = crate::progress::step(&what, || {
         quiet_git(
             ctx,
-            &[
-                "exec",
-                "-u",
-                UID,
-                "-w",
-                "/workspace",
-                dev.as_str(),
-                "sh",
-                "-c",
-                connect::LOGIN,
-                &script,
-            ],
+            &exec(&dev)
+                .user(UID)
+                .cwd("/workspace")
+                .argv(["sh", "-c", connect::LOGIN, &script]),
         )
     })?;
     clone_failed(env, url, status.success(), locked)
@@ -947,9 +911,7 @@ x=$(git rev-parse --git-path info/exclude) || exit 0
 mkdir -p "$(dirname "$x")"
 for d; do grep -qxF "/$d/" "$x" 2>/dev/null || printf '/%s/\n' "$d" >> "$x"; done"#;
     let dev = names::dev(env);
-    let mut args = vec!["exec", "-u", UID, dev.as_str(), "sh", "-c", SCRIPT, "sh"];
-    args.extend_from_slice(added);
-    ctx.rt.run(&args)?;
+    ctx.rt.run(exec(&dev).user(UID).sh_with(SCRIPT, added))?;
     Ok(())
 }
 

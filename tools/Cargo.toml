@@ -11,7 +11,7 @@ name = "sandbox"
 path = "src/main.rs"
 
 [dependencies]
-luoto-shared.workspace = true
+luoto-shared = { workspace = true, features = ["tun"] }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

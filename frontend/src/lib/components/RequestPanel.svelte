@@ -1,5 +1,8 @@
 <script lang="ts">
+  import { untrack } from "svelte";
+
   import { api } from "$lib/api";
+  import CopyCommand from "$lib/components/CopyCommand.svelte";
   import Risks from "$lib/components/Risks.svelte";
   import Segmented from "$lib/components/Segmented.svelte";
   import { act, ago, app, installLabel, requestTarget, say, TTLS } from "$lib/stores/app.svelte";
@@ -13,13 +16,42 @@
   // Less than asked: read for a write request, some of its paths. The backend refuses wider.
   let grant = $state<"asked" | "read">("asked");
   let paths = $state("");
+  // A variable request's value: the one the sandbox suggests is filled in, to check.
+  const variable = $derived(req?.install?.kind === "var" ? req.install : null);
+  const suggestion = $derived(variable?.value ?? null);
+  // What the env has under that name now, from its own file.
+  const current = $derived(app.detail?.variables.find((v) => v.name === variable?.name) ?? null);
+  let given = $state("");
+  let givenField = $state<HTMLInputElement>();
 
   $effect(() => {
     void id;
     grant = "asked";
     paths = "";
     risks = [];
+    // Polls refresh `req`: only another request starts the value over.
+    given = untrack(() => suggestion) ?? "";
   });
+
+  /** Show the next pending request, else the env. */
+  function onward() {
+    const next = app.pending.find((r) => r.id !== id);
+    app.subject = next ? { kind: "request", id: next.id } : { kind: "env" };
+  }
+
+  async function approveVar() {
+    const env = app.env;
+    if (!env || !req) return;
+    if (!given.trim()) {
+      givenField?.focus();
+      say("give the value first", true);
+      return;
+    }
+    const shown = req;
+    const done = await act("setting…", () => api.approveVar(env, shown, given));
+    if (done && "installed" in done) say(`#${id} ${done.installed}`);
+    if (done) onward();
+  }
 
   function narrowing(): Narrowing | undefined {
     const globs = paths.split(/[\s,]+/).filter(Boolean);
@@ -35,7 +67,7 @@
       const shown = req;
       const done = await act(label, () => api.approve(env, shown));
       if (done && "installed" in done) say(`#${id} ${done.installed}`);
-      if (done) app.subject = { kind: "env" };
+      if (done) onward();
       return;
     }
     const host = req.host;
@@ -58,13 +90,70 @@
     if (!env || !req) return;
     const shown = req;
     const ok = await act("rejecting…", () => api.reject(env, shown), `rejected #${id}`);
-    if (ok) app.subject = { kind: "env" };
+    if (ok) onward();
   }
 </script>
 
 <div class="panel">
-  <p class="label">{req?.install ? "install request" : "access request"} #{id}</p>
-  {#if req?.install}
+  <p class="label">
+    {variable ? "variable request" : req?.install ? "install request" : "access request"} #{id}
+  </p>
+  {#if req && variable}
+    <h2>{installLabel(variable)}</h2>
+    <dl>
+      <dt>kind</dt>
+      <dd>variable with a plain value</dd>
+      <dt>now</dt>
+      <dd>
+        {#if !current}<span class="muted">not set</span>
+        {:else if current.kind === "plain"}{current.value}
+        {:else}<span class="muted">secret from</span> {current.kept}{/if}
+      </dd>
+      <dt>filed</dt>
+      <dd>{ago(req.created)}</dd>
+      <dt>status</dt>
+      <dd>{req.status}{req.note ? `: ${req.note}` : ""}</dd>
+    </dl>
+    <div class="untrusted">
+      <p class="label">reason — written by code in the sandbox, not by you</p>
+      <p class="reason">{req.reason}</p>
+    </div>
+    {#if suggestion !== null}
+      <div class="untrusted">
+        <p class="label">value it suggests — written by code in the sandbox</p>
+        <p class="reason">{suggestion}</p>
+      </div>
+    {/if}
+    {#if current?.kind === "secret"}
+      <p class="warn">Approved, this plain value replaces the secret from {current.kept}.</p>
+    {/if}
+    {#if req.status === "pending"}
+      <label class="field">
+        <span>value</span>
+        <input
+          type="text"
+          bind:value={given}
+          bind:this={givenField}
+          autocomplete="off"
+          spellcheck="false"
+          onkeydown={(e) => e.key === "Enter" && void approveVar()}
+        />
+      </label>
+      <p class="muted">
+        {suggestion !== null && given === suggestion
+          ? "Filled in with the value it suggests. "
+          : ""}Written into the env's file as it is, and any code in the env can read it. A secret
+        you add yourself, on a terminal:
+      </p>
+      <CopyCommand cmd={`luoto var set -e ${app.env} ${variable.name}`} />
+      <div class="actions">
+        <button class="btn primary" onclick={() => void approveVar()} disabled={!!app.busy}
+          >approve</button
+        >
+        <button class="btn" onclick={reject} disabled={!!app.busy}>reject</button>
+      </div>
+    {/if}
+  {:else if req?.install}
     <h2>{installLabel(req.install)}</h2>
     <dl>
       <dt>kind</dt>

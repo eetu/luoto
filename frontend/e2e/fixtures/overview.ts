@@ -18,7 +18,7 @@ export default {
   ],
   "desktop_notifications": false,
   "instance": "luoto",
-  "runtime": "podman version 6.1.4",
+  "runtime": "podman 6.1.4, in luoto's VM",
   "vault": {
     "envs": [{ "bindings": [], "env": "web", "missing": [] }],
     "loaded_refs": [],

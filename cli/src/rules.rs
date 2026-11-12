@@ -242,7 +242,8 @@ pub enum Approved {
 }
 
 /// Approve a pending request: an access request becomes a rule, narrowed by `narrow` and
-/// failing with [`Risks`] unless `force`; an install request installs.
+/// failing with [`Risks`] unless `force`; an install request installs. A request for a
+/// variable is refused: only a terminal asks for its value (`vars::approve`).
 pub fn approve(
     ctx: &Ctx,
     name: &str,
@@ -251,6 +252,9 @@ pub fn approve(
     narrow: &Narrowing,
     force: bool,
 ) -> Result<Approved> {
+    if let Some(var) = req.install.as_ref().and_then(Install::variable) {
+        bail!(crate::vars::needs_terminal(name, req.id, var));
+    }
     if req.install.is_some() {
         if !narrow.is_empty() {
             bail!(
@@ -330,7 +334,7 @@ fn approve_install(ctx: &Ctx, name: &str, req: &AccessRequest) -> Result<String>
     match install {
         Install::Package { name } => f.add_system_package(name)?,
         Install::Tool { name, version } => f.set_in_table("tools", name, version)?,
-        Install::Preset { .. } => {}
+        Install::Preset { .. } | Install::Var { .. } => {}
     }
     let result = (|| {
         let p = crate::env::plan(ctx, name)?;

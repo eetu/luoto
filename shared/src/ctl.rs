@@ -23,8 +23,8 @@ pub enum GateCtl {
         cert_pem: String,
         key_pem: String,
     },
+    /// The token the gate shows the vault on its env's socket ([`crate::VAULT_SOCKET`]).
     SetVault {
-        url: String,
         token: String,
     },
     Requests,

@@ -1,8 +1,9 @@
 //! Disk use: what each env's volumes and containers take, how full the disk holding them is
 //! (luoto's VM on macOS and Windows, the runtime's storage on Linux), and `luoto prune`, which
 //! removes this instance's superseded images and gives the VM's freed space back to the host.
-//! Podman and docker print sizes differently; the parsers here read both. Sizes take the
-//! runtime a walk of every volume, so they are read when asked for, never on a poll.
+//! Podman and docker print sizes differently; the parsers here read both. Apple's volumes and
+//! containers are files on this machine, measured by their metadata. Sizes take a walk of
+//! every volume, so they are read when asked for, never on a poll.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::process::ExitCode;
@@ -18,7 +19,7 @@ use crate::notify::Note;
 use crate::paths::{Paths, write_private};
 use crate::prompt::confirm;
 use crate::release::{self, repo_of};
-use crate::runtime::{Flavor, Runtime};
+use crate::runtime::{Flavor, Runtime, exec};
 use crate::{config, machine, names, text};
 
 /// Under this much free space `doctor`, `up` and the UI warn. An upgrade pulls a whole new set
@@ -118,7 +119,92 @@ impl Sizes {
 /// Every volume's and container's size, from one `system df -v`: both runtimes print it only
 /// as tables (podman refuses `--format` with `-v`; docker's JSON has the same rounded sizes).
 pub fn sizes(rt: &Runtime) -> Result<Sizes> {
+    if rt.flavor == Flavor::Apple {
+        return apple_sizes(rt);
+    }
     Ok(parse_df(&rt.run(["system", "df", "-v"])?))
+}
+
+/// Apple's volumes and containers are disk images on this machine: each takes the blocks its
+/// files have allocated (a volume's file is sparse, as big as its 512 GiB capacity). Only
+/// their metadata is read.
+fn apple_sizes(rt: &Runtime) -> Result<Sizes> {
+    let mut s = Sizes::default();
+    for (name, file) in parse_apple_volumes(&rt.run(["volume", "list", "--format", "json"])?)? {
+        s.volumes.insert(name, allocated(&file));
+    }
+    // A container's folder holds its root disk, init disk and kernel, named by its id.
+    let containers = apple_root(rt)?.join("containers");
+    for entry in std::fs::read_dir(&containers)
+        .with_context(|| format!("read {}", containers.display()))?
+        .flatten()
+    {
+        if let Some(name) = entry.file_name().to_str() {
+            s.containers
+                .insert(name.to_string(), allocated(&entry.path()));
+        }
+    }
+    Ok(s)
+}
+
+/// Where Apple's `container` keeps its images, containers and volumes on this machine.
+fn apple_root(rt: &Runtime) -> Result<std::path::PathBuf> {
+    let v: Value = serde_json::from_str(rt.run(["system", "status", "--format", "json"])?.trim())
+        .context("`container system status` JSON")?;
+    v["paths"]["appRoot"]
+        .as_str()
+        .map(std::path::PathBuf::from)
+        .context("`container system status` names no app root")
+}
+
+/// The bytes the files at `path` have allocated on disk, a folder's walked without following
+/// links.
+fn allocated(path: &std::path::Path) -> u64 {
+    let Ok(m) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if m.is_dir() {
+        return std::fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| allocated(&e.path()))
+            .sum();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if m.is_file() { m.blocks() * 512 } else { 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        if m.is_file() { m.len() } else { 0 }
+    }
+}
+
+/// The size and free space of the filesystem holding `path`.
+#[cfg(unix)]
+fn fs_space(path: &std::path::Path) -> Option<Space> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `c` is a NUL-terminated path and `st` a statvfs that the call fills.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    let block = st.f_frsize as u64;
+    let size = st.f_blocks as u64 * block;
+    let free = (st.f_bavail as u64 * block).min(size);
+    (size > 0).then_some(Space {
+        size,
+        used: size - free,
+        free,
+    })
+}
+
+#[cfg(not(unix))]
+fn fs_space(_: &std::path::Path) -> Option<Space> {
+    None
 }
 
 /// Each env's disk use, from one walk of the runtime's storage.
@@ -140,6 +226,8 @@ pub fn by_env(ctx: &Ctx) -> Result<BTreeMap<String, EnvDisk>> {
 pub fn place(rt: &Runtime) -> &'static str {
     if machine::is_luoto(rt.connection.as_deref()) {
         "luoto's VM"
+    } else if rt.flavor == Flavor::Apple {
+        "this Mac's disk"
     } else {
         "the runtime's disk"
     }
@@ -147,7 +235,8 @@ pub fn place(rt: &Runtime) -> &'static str {
 
 /// The disk holding the runtime's storage: podman reports its graph root's filesystem (in
 /// luoto's VM, the VM's disk); docker only its folder, which is on this machine's disk on
-/// Linux. None where that folder is elsewhere (Docker Desktop's VM, a remote engine).
+/// Linux; Apple's is the filesystem of its app root. None where that folder is elsewhere
+/// (Docker Desktop's VM, a remote engine).
 pub fn space(rt: &Runtime) -> Result<Option<Space>> {
     match rt.flavor {
         Flavor::Podman => Ok(parse_info(&rt.run(["info", "--format", "json"])?)),
@@ -163,6 +252,7 @@ pub fn space(rt: &Runtime) -> Result<Option<Space>> {
                 .context("df")?;
             Ok(parse_df_pk(&String::from_utf8_lossy(&out.stdout)))
         }
+        Flavor::Apple => Ok(fs_space(&apple_root(rt)?)),
         Flavor::Docker => Ok(None),
     }
 }
@@ -359,17 +449,7 @@ fn build_dirs(rt: &Runtime, env: &str) -> Vec<String> {
     let dev = names::dev(env);
     let script = build_dirs_script();
     let out = rt.run_limited(
-        [
-            "exec",
-            "-u",
-            env::UID,
-            dev.as_str(),
-            "sh",
-            "-c",
-            outer.as_str(),
-            "sh",
-            script.as_str(),
-        ],
+        exec(&dev).user(env::UID).sh_with(&outer, [&script]),
         std::time::Duration::from_secs(BUILD_DIRS_SECS + 3),
         64 * 1024,
     );
@@ -556,7 +636,12 @@ pub struct Usage {
 }
 
 pub fn usage(rt: &Runtime) -> Result<Usage> {
-    Ok(parse_usage(&rt.run(["system", "df", "--format", "json"])?))
+    let out = rt.run(["system", "df", "--format", "json"])?;
+    Ok(if rt.flavor == Flavor::Apple {
+        parse_apple_usage(&out)
+    } else {
+        parse_usage(&out)
+    })
 }
 
 /// An image, as `luoto prune` judges it.
@@ -745,11 +830,15 @@ fn images(rt: &Runtime) -> Result<Vec<Image>> {
             ])?;
             Ok(parse_docker_images(&rows, &cache))
         }
+        Flavor::Apple => parse_apple_images(&rt.run(["image", "list", "--format", "json"])?),
     }
 }
 
 /// The ids of the images every container (any instance's, anyone's) was created from.
 fn in_use(rt: &Runtime) -> Result<BTreeSet<String>> {
+    if rt.flavor == Flavor::Apple {
+        return parse_apple_in_use(&rt.run(["ls", "-a", "--format", "json"])?);
+    }
     let ids: Vec<String> = lines(&rt.run(["ps", "-a", "-q", "--no-trunc"])?)
         .map(String::from)
         .collect();
@@ -766,6 +855,18 @@ fn in_use(rt: &Runtime) -> Result<BTreeSet<String>> {
 /// The ids of the images `refs` name; one call, or one each when an image is missing.
 fn ids_of(rt: &Runtime, refs: &BTreeSet<String>) -> BTreeSet<String> {
     fn inspect<'a>(rt: &Runtime, refs: impl Iterator<Item = &'a String>) -> Result<String> {
+        if rt.flavor == Flavor::Apple {
+            let mut args: Vec<String> = ["image", "inspect"].map(String::from).into();
+            args.extend(refs.cloned());
+            let v: Value = serde_json::from_str(rt.run(args)?.trim()).context("image JSON")?;
+            return Ok(v
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|i| i["id"].as_str())
+                .map(|id| format!("{id}\n"))
+                .collect());
+        }
         let mut args: Vec<String> = ["image", "inspect", "--format", "{{.Id}}"]
             .map(String::from)
             .into();
@@ -785,6 +886,11 @@ fn ids_of(rt: &Runtime, refs: &BTreeSet<String>) -> BTreeSet<String> {
 /// `rmi` of each image: by its names (an image with several can't go by id), else its id.
 /// Never forced, so an image a container uses stays whatever the plan said. The errors.
 fn remove(rt: &Runtime, images: &[Image]) -> Vec<String> {
+    let rmi: &[&str] = if rt.flavor == Flavor::Apple {
+        &["image", "delete"]
+    } else {
+        &["rmi"]
+    };
     let refs: Vec<String> = images
         .iter()
         .flat_map(|i| {
@@ -797,7 +903,7 @@ fn remove(rt: &Runtime, images: &[Image]) -> Vec<String> {
         .collect();
     refs.chunks(50)
         .filter_map(|chunk| {
-            let mut args = vec!["rmi".to_string()];
+            let mut args: Vec<String> = rmi.iter().map(|s| s.to_string()).collect();
             args.extend(chunk.iter().cloned());
             rt.run(args).err().map(|e| format!("{e:#}"))
         })
@@ -1165,6 +1271,82 @@ fn parse_docker_images(rows: &str, cache: &str) -> Vec<Image> {
         }
     }
     by_id.into_values().collect()
+}
+
+/// `volume list --format json` of Apple's: each volume's name and its disk image's path.
+fn parse_apple_volumes(text: &str) -> Result<Vec<(String, std::path::PathBuf)>> {
+    let v: Value = serde_json::from_str(text.trim()).context("volume list JSON")?;
+    Ok(v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| {
+            let c = &o["configuration"];
+            Some((
+                c["name"].as_str()?.to_string(),
+                c["source"].as_str()?.into(),
+            ))
+        })
+        .collect())
+}
+
+/// Apple's `system df --format json`: one object, its kinds by key.
+fn parse_apple_usage(text: &str) -> Usage {
+    let v: Value = serde_json::from_str(text.trim()).unwrap_or_default();
+    let kind = |k: &str| Kind {
+        count: v[k]["total"].as_u64().unwrap_or(0),
+        size: v[k]["sizeInBytes"].as_u64().unwrap_or(0),
+        reclaimable: v[k]["reclaimable"].as_u64().unwrap_or(0),
+    };
+    Usage {
+        images: kind("images"),
+        containers: kind("containers"),
+        volumes: kind("volumes"),
+    }
+}
+
+/// Apple's `image list --format json`: an entry per name, so one image per id here, its size
+/// its variants' (compressed) sizes.
+fn parse_apple_images(text: &str) -> Result<Vec<Image>> {
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let v: Value = serde_json::from_str(text.trim()).context("image list JSON")?;
+    let mut by_id: BTreeMap<String, Image> = BTreeMap::new();
+    for o in v.as_array().into_iter().flatten() {
+        let Some(id) = o["id"].as_str().map(bare_id) else {
+            continue;
+        };
+        let variants: Vec<&Value> = o["variants"].as_array().into_iter().flatten().collect();
+        let img = by_id.entry(id.clone()).or_insert_with(|| Image {
+            id,
+            build_cache: variants
+                .iter()
+                .any(|v| v["config"]["config"]["Labels"].get(LABEL_BUILD).is_some()),
+            created: o["configuration"]["creationDate"]
+                .as_str()
+                .and_then(|d| DateTime::parse_from_rfc3339(d).ok())
+                .map_or(0, |d| d.timestamp()),
+            size: variants.iter().filter_map(|v| v["size"].as_u64()).sum(),
+            ..Default::default()
+        });
+        if let Some(name) = o["configuration"]["name"].as_str()
+            && !img.names.iter().any(|n| n == name)
+        {
+            img.names.push(name.to_string());
+        }
+    }
+    Ok(by_id.into_values().collect())
+}
+
+/// The ids of the images Apple's containers (`ls -a --format json`) were created from.
+fn parse_apple_in_use(text: &str) -> Result<BTreeSet<String>> {
+    let v: Value = serde_json::from_str(text.trim()).context("container list JSON")?;
+    Ok(v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["configuration"]["image"]["descriptor"]["digest"].as_str())
+        .map(bare_id)
+        .collect())
 }
 
 #[cfg(test)]
@@ -1650,5 +1832,74 @@ CACHE ID   CACHE TYPE   SIZE      CREATED   LAST USED   USAGE     SHARED
         assert_eq!(g["ghcr.io/eetu/luoto-gate"], (2, 2_000));
         assert_eq!(g["localhost/luoto-gate (superseded builds)"], (1, 1_000));
         assert_eq!(g["build cache"], (1, 1_000));
+    }
+
+    #[test]
+    fn apple_listings_give_usage_volumes_and_images() {
+        let df = r#"{"containers":{"active":0,"reclaimable":4336214016,"sizeInBytes":4336214016,"total":4},
+            "images":{"active":4,"reclaimable":1568169984,"sizeInBytes":3393437696,"total":14},
+            "volumes":{"active":4,"reclaimable":0,"sizeInBytes":160038912,"total":4}}"#;
+        let u = parse_apple_usage(df);
+        assert_eq!(
+            u.images,
+            Kind {
+                count: 14,
+                size: 3_393_437_696,
+                reclaimable: 1_568_169_984
+            }
+        );
+        assert_eq!(u.containers.size, 4_336_214_016);
+        assert_eq!(u.volumes.count, 4);
+
+        let vols = r#"[{"configuration":{"driver":"local","format":"ext4","labels":{"luoto.role":"work"},"name":"luoto-dev-ae-work","sizeInBytes":549755813888,"source":"/Users/u/Library/Application Support/com.apple.container/volumes/luoto-dev-ae-work/volume.img"},"id":"luoto-dev-ae-work"}]"#;
+        assert_eq!(
+            parse_apple_volumes(vols).unwrap(),
+            [(
+                "luoto-dev-ae-work".to_string(),
+                "/Users/u/Library/Application Support/com.apple.container/volumes/luoto-dev-ae-work/volume.img".into()
+            )]
+        );
+
+        let imgs = r#"[{"configuration":{"creationDate":"2026-11-11T21:34:59Z","name":"localhost/luoto-gate:apple"},"id":"f9a3","variants":[{"config":{"config":{"Labels":{"io.buildah.version":"1.45.2"}}},"platform":{"architecture":"arm64"},"size":8149647}]},
+            {"configuration":{"creationDate":"2026-11-11T21:34:59Z","name":"localhost/luoto-gate:dev"},"id":"f9a3","variants":[{"config":{"config":{}},"size":8149647}]},
+            {"configuration":{"creationDate":"2026-11-11T21:05:48Z","name":"localhost/luoto-gate:tun"},"id":"ea33","variants":[{"config":{"config":{"Labels":{"luoto.build":"gate"}}},"size":8172138},{"config":{},"size":100}]}]"#;
+        let images = parse_apple_images(imgs).unwrap();
+        assert_eq!(images.len(), 2);
+        let tun = images.iter().find(|i| i.id == "ea33").unwrap();
+        assert_eq!(tun.names, ["localhost/luoto-gate:tun"]);
+        assert!(tun.build_cache);
+        assert_eq!(tun.size, 8_172_238);
+        let dev = images.iter().find(|i| i.id == "f9a3").unwrap();
+        assert_eq!(
+            dev.names,
+            ["localhost/luoto-gate:apple", "localhost/luoto-gate:dev"]
+        );
+        assert_eq!(dev.created, 1_794_432_899);
+        assert!(!dev.build_cache);
+
+        let ls = r#"[{"configuration":{"id":"luoto-dev-ae-gate","image":{"descriptor":{"digest":"sha256:f9a3"},"reference":"localhost/luoto-gate:dev"}},"id":"luoto-dev-ae-gate"}]"#;
+        let used = parse_apple_in_use(ls).unwrap();
+        assert_eq!(used, set(&["f9a3"]));
+        // What a container uses stays; the superseded tag goes.
+        let own = set(&["localhost/luoto-gate"]);
+        let p = select(images, &own, true, &BTreeSet::new(), &used, i64::MAX);
+        assert_eq!(p.remove.len(), 1);
+        assert_eq!(p.remove[0].id, "ea33");
+        assert_eq!(p.kept, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allocated_counts_blocks_not_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let sparse = std::fs::File::create(dir.path().join("volume.img")).unwrap();
+        sparse.set_len(1 << 30).unwrap();
+        std::fs::write(dir.path().join("config.json"), vec![1u8; 10_000]).unwrap();
+        let n = allocated(dir.path());
+        assert!(n >= 10_000, "{n}");
+        assert!(n < 1 << 20, "a sparse file counts what it holds: {n}");
+        assert_eq!(allocated(&dir.path().join("missing")), 0);
+        let s = fs_space(dir.path()).unwrap();
+        assert!(s.size > 0 && s.free <= s.size && s.used == s.size - s.free);
     }
 }

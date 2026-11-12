@@ -238,7 +238,7 @@ impl Need {
             Need::Provider(n) => ask_provider(ctx, mode, env, n, own),
             Need::Custom { name, host } => ask_custom(ctx, mode, env, name, host.as_deref(), own),
             Need::Azure { subscriptions } => ask_azure(ctx, mode, env, own, subscriptions),
-            Need::Secret(n) => ask_secret(ctx, mode, env, n, own),
+            Need::Secret(n) => crate::vars::ask(ctx, mode, env, n, own),
         }
     }
 }
@@ -595,47 +595,6 @@ fn write_azure(ctx: &Ctx, env: &str, ids: &[String]) -> Result<bool> {
             ("subscription", ids.join(", ")),
             ("token", "from your `az` login here (`az login`)".into()),
         ],
-    );
-    Ok(true)
-}
-
-fn ask_secret(ctx: &Ctx, mode: Mode, env: &str, name: &str, own: &EnvConfig) -> Result<bool> {
-    println!(
-        "{}",
-        text::wrap(
-            &format!(
-                "`{}` goes into the env as the secret itself, for the project's code, so any \
-                 code there can read it.",
-                display(name)
-            ),
-            "",
-            text::columns()
-        )
-    );
-    let label = format!("`{}`", display(name));
-    let acct = format!("sandbox.{name}");
-    let title = format!("luoto sandbox {name}");
-    let help = crate::prompt::menu_help(mode.esc());
-    let ask = crate::wizard::SecretAsk {
-        label: &label,
-        acct: &acct,
-        title: &title,
-        later: mode == Mode::Missing,
-        known: &[],
-        current: own.sandbox_secrets.get(name).map(String::as_str),
-        help: &help,
-        kind: None,
-    };
-    let crate::wizard::Step::Got(crate::wizard::Secret::Ref(r)) =
-        crate::wizard::secret(&ask, &ctx.global)?
-    else {
-        return Ok(false);
-    };
-    EnvFile::load(&ctx.paths, env)?.set_in_table("sandbox_secrets", name, &r)?;
-    summary(
-        env,
-        &format!("sandbox secret {}", display(name)),
-        vec![("credential", crate::secrets::shown_ref(&r))],
     );
     Ok(true)
 }

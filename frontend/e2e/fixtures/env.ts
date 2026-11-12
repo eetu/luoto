@@ -235,7 +235,6 @@ export default {
       "access": "read"
     }
   ],
-  "injections": [],
   "denies": 0,
   "warnings": [],
   "dev": "running",
@@ -248,7 +247,11 @@ export default {
     "pending_requests": 0
   },
   "credentials": [],
-  "missing_secrets": [],
-  "sandbox_secrets": [],
-  "ports": { "published": [], "forwarded": [5173], "taken": [3000] }
+  "variables": [
+    { "kind": "plain", "name": "RUST_LOG", "value": "debug" },
+    { "kind": "secret", "name": "DATABASE_URL", "kept": "op://Dev/local-db/url" }
+  ],
+  "luoto_variables": ["GIT_TERMINAL_PROMPT"],
+  "ports": { "published": [], "forwarded": [5173], "taken": [3000] },
+  "isolation": "gVisor: its own user-space kernel (builds about 1.6× slower)"
 } satisfies EnvDetail;

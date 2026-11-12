@@ -4,6 +4,7 @@
 //! reaches the OS's notifier as an argument, never inside a script.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -180,7 +181,7 @@ fn clean(s: &str) -> String {
 }
 
 /// `read access to docs.rs: <reason>`, `a tunnel to db.example.com:5432: <reason>`; a request
-/// without a host asks for software or a preset.
+/// without a host asks for a variable (reason `var`), software or a preset.
 fn describe_request(ev: &Event) -> String {
     let what = match (ev.host.as_deref().filter(|h| !h.is_empty()), ev.port) {
         (Some(host), Some(port)) => format!("a tunnel to {}:{port}", clean(host)),
@@ -192,6 +193,7 @@ fn describe_request(ev: &Event) -> String {
             };
             format!("{access} access to {}", clean(host))
         }
+        (None, _) if ev.reason.as_deref() == Some("var") => "a variable".to_string(),
         (None, _) => "software or a preset".to_string(),
     };
     match clean(ev.message.as_deref().unwrap_or_default()) {
@@ -202,8 +204,8 @@ fn describe_request(ev: &Event) -> String {
 
 fn requests_note(env: &str, reqs: &Batch) -> Note {
     let title = match reqs.len() {
-        1 => format!("{}: {env} asks for access", names::instance()),
-        n => format!("{}: {env} has {n} new access requests", names::instance()),
+        1 => format!("{}: {env} has a request", names::instance()),
+        n => format!("{}: {env} has {n} new requests", names::instance()),
     };
     Note {
         title,
@@ -314,12 +316,31 @@ fn post(n: &Note) -> std::io::Result<bool> {
     let Some(mut cmd) = notifier(std::env::consts::OS, n) else {
         return Ok(false);
     };
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    std::thread::spawn(move || child.wait());
+    let quiet = |c: &mut Command| {
+        c.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    };
+    let mut child = quiet(&mut cmd)?;
+    // terminal-notifier fails when macOS hasn't let it notify: osascript's then shows it.
+    let fallback = (std::env::consts::OS == "macos" && cmd.get_program() != "osascript")
+        .then(|| notifier_with("macos", n, None))
+        .flatten();
+    std::thread::spawn(move || {
+        if let (Ok(status), Some(mut osa)) = (child.wait(), fallback)
+            && !status.success()
+        {
+            println!(
+                "{} terminal-notifier may not notify (System Settings > Notifications > \
+                 terminal-notifier); shown through osascript",
+                Utc::now()
+            );
+            if let Ok(mut c) = quiet(&mut osa) {
+                let _ = c.wait();
+            }
+        }
+    });
     Ok(true)
 }
 
@@ -337,9 +358,46 @@ pub fn desktop(on: Option<bool>) -> bool {
         }
 }
 
+/// terminal-notifier, where Homebrew puts it: the watcher's PATH may lack Homebrew's.
+fn terminal_notifier() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .chain(["/opt/homebrew/bin".into(), "/usr/local/bin".into()])
+        .map(|d| d.join("terminal-notifier"))
+        .find(|p| p.is_file())
+}
+
+/// `text` as a value terminal-notifier reads as text: macOS parses its options, where a value
+/// starting with `-` could be read as another option and one starting with `(`, `{`, `<` or a
+/// quote as a property list.
+fn plain_value(text: &str) -> String {
+    if text.starts_with(['-', '(', '{', '<', '"', '\'', '[', '\\']) {
+        format!("\u{2060}{text}")
+    } else {
+        text.to_string()
+    }
+}
+
 fn notifier(os: &str, n: &Note) -> Option<Command> {
-    match os {
-        "macos" => {
+    notifier_with(os, n, terminal_notifier())
+}
+
+fn notifier_with(os: &str, n: &Note, mac: Option<PathBuf>) -> Option<Command> {
+    match (os, mac) {
+        ("macos", Some(tn)) => {
+            let mut c = Command::new(tn);
+            c.args([
+                "-title",
+                &plain_value(&n.title),
+                "-message",
+                &plain_value(&n.body),
+                // A newer one of the same title replaces it.
+                "-group",
+                &n.title,
+            ]);
+            Some(c)
+        }
+        ("macos", None) => {
             let mut c = Command::new("osascript");
             c.args([
                 "-e",
@@ -353,7 +411,7 @@ fn notifier(os: &str, n: &Note) -> Option<Command> {
             ]);
             Some(c)
         }
-        "linux" => {
+        ("linux", _) => {
             let body = n
                 .body
                 .replace('&', "&amp;")
@@ -485,7 +543,7 @@ mod tests {
     #[test]
     fn the_text_reaches_the_notifier_as_arguments() {
         let n = Note {
-            title: "luoto: web asks for access".into(),
+            title: "luoto: web has a request".into(),
             body: "read access to x\" & do shell script \"id: <b>".into(),
         };
         let args = |c: Command| -> Vec<String> {
@@ -493,9 +551,22 @@ mod tests {
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect()
         };
-        let mac = args(notifier("macos", &n).unwrap());
+        let mac = args(notifier_with("macos", &n, None).unwrap());
         assert_eq!(mac.last().unwrap(), &n.body);
         assert!(mac.iter().filter(|a| a.contains("do shell script")).count() == 1);
+        let tn = notifier_with(
+            "macos",
+            &n,
+            Some("/opt/homebrew/bin/terminal-notifier".into()),
+        );
+        let tn = args(tn.unwrap());
+        assert_eq!(tn[..4], ["-title", &n.title, "-message", &n.body]);
+        let sly = Note {
+            title: "t".into(),
+            body: "-execute id".into(),
+        };
+        let tn = args(notifier_with("macos", &sly, Some("tn".into())).unwrap());
+        assert_eq!(tn[3], "\u{2060}-execute id");
         let linux = args(notifier("linux", &n).unwrap());
         assert_eq!(
             linux.last().unwrap(),

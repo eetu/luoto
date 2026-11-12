@@ -11,6 +11,7 @@ mod compile;
 mod complete;
 mod config;
 mod connect;
+mod credentials;
 mod ctl;
 mod deps;
 mod detect;
@@ -40,14 +41,18 @@ mod rules;
 mod runtime;
 mod secrets;
 mod setup;
+mod shares;
 mod ssh;
 mod state;
 mod sync;
 mod text;
 mod transfer;
+#[cfg(unix)]
+mod tunlink;
 mod ui;
 mod uninstall;
 mod upgrade;
+mod vars;
 mod watch;
 mod wizard;
 mod workspace;
@@ -260,6 +265,18 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<RepoCmd>,
     },
+    /// Environment variables for the env's shells: plain values, and secrets code in the env
+    /// reads (refs resolved on this machine at `up`).
+    Var {
+        #[command(subcommand)]
+        action: Option<VarCmd>,
+    },
+    /// Folders of this machine the env reads at /shares/<name>, read-only: data too large for a
+    /// repo (recordings, datasets).
+    Share {
+        #[command(subcommand)]
+        action: Option<ShareCmd>,
+    },
     /// Copy changed files from the env back to its folder, and its repos copied in from
     /// folders back to theirs (reviewed first).
     Pull {
@@ -455,6 +472,52 @@ enum RepoCmd {
 }
 
 #[derive(Subcommand)]
+enum ShareCmd {
+    /// The env's shares, and which changed since the last sync.
+    #[command(visible_alias = "ls")]
+    List,
+    /// Share a folder: the env reads it at /shares/<name>, read-only, as of its last sync.
+    Add {
+        /// A folder inside your home folder (not a secret one such as ~/.ssh), or on a disk.
+        folder: String,
+        /// Its name (default: the folder's own, made lowercase).
+        #[arg(long)]
+        name: Option<String>,
+        /// Restart luoto's VM without asking, if it needs the shares folder first.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Bring the env's shares up to date now (`luoto up` does too).
+    Sync {
+        name: Option<String>,
+        /// Restart luoto's VM without asking, if it needs the shares folder first.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Stop sharing a folder.
+    Rm { name: String },
+}
+
+#[derive(Subcommand)]
+enum VarCmd {
+    /// The env's variables: plain values, and secrets by their ref.
+    #[command(visible_alias = "ls")]
+    List,
+    /// Set a variable: `NAME=value` a plain value (it stays in your shell history), `NAME`
+    /// a secret, asking where it is kept, or `NAME --ref <ref>`. A token an HTTP API takes is
+    /// safer under [credentials.custom.<name>]: the gate adds it and the env never sees it.
+    Set {
+        #[arg(value_name = "NAME[=VALUE]")]
+        var: String,
+        /// The secret's ref: op://, keyring:, vault://, env: or file:.
+        #[arg(long = "ref", value_name = "REF")]
+        reference: Option<String>,
+    },
+    /// Remove a variable.
+    Rm { name: String },
+}
+
+#[derive(Subcommand)]
 enum ProjectCmd {
     /// Apply the current luoto.toml after reviewing it.
     Apply {
@@ -629,6 +692,19 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             } => repos::add(&env()?, &source, name.as_deref(), branch.as_deref()),
             RepoCmd::Rm { name } => repos::rm(&env()?, &name),
             RepoCmd::Auth { repo } => repos::auth(&env()?, &repo),
+        },
+        Cmd::Share { action } => match action.unwrap_or(ShareCmd::List) {
+            ShareCmd::List => shares::list(&env()?),
+            ShareCmd::Add { folder, name, yes } => {
+                shares::add(&env()?, &folder, name.as_deref(), yes)
+            }
+            ShareCmd::Sync { name, yes } => shares::sync_cmd(&env()?, name.as_deref(), yes),
+            ShareCmd::Rm { name } => shares::rm(&env()?, &name),
+        },
+        Cmd::Var { action } => match action.unwrap_or(VarCmd::List) {
+            VarCmd::List => vars::list(&env()?),
+            VarCmd::Set { var, reference } => vars::set_cmd(&env()?, &var, reference.as_deref()),
+            VarCmd::Rm { name } => vars::rm_cmd(&env()?, &name),
         },
         Cmd::Pull {
             to,

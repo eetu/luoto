@@ -52,9 +52,9 @@ Then, once:
 luoto setup
 ```
 
-It checks your container runtime (podman ≥ 5.2 or Docker ≥ 28; `--install` installs podman
-after showing the command), creates luoto's own VM where podman needs one, and gets the
-images. Updates, tab completion and checking a download: [Install details](docs/install.md).
+It checks your container runtime (podman ≥ 5.2 or Docker ≥ 28; on macOS 26 on Apple silicon
+it offers Apple's `container` first; `--install` installs the one picked after showing the
+command), creates luoto's own VM where podman needs one, and gets the images. Updates, tab completion and checking a download: [Install details](docs/install.md).
 
 ## Getting started
 
@@ -120,6 +120,8 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | an agent (installed on first run)                                                                    | `luoto agent run claude --yolo`<br>`luoto agent list`                                                                              |
 | another credential for an agent, or a login inside instead                                           | `luoto agent auth claude`                                                                                                          |
 | what the env may do with a repo: fetch it if public, read it, or push                                | `luoto repo auth acme/api`                                                                                                         |
+| environment variables: a plain value, or a secret the code reads                                     | `luoto var set RUST_LOG=debug`<br>`luoto var set DATABASE_URL`<br>`luoto var`                                                      |
+| a folder of this machine the env reads, read-only (recordings, datasets)                             | `luoto share add ~/Recordings`<br>`luoto share sync`                                                                               |
 | a dev server in your browser                                                                         | run it: its port is forwarded to localhost here (`luoto status` lists it)<br>`luoto forward 8080:5173` (to another local port)     |
 | your work out: push from the env (with a GitHub, Azure DevOps or SSH credential), or copy files back | `git push`<br>`luoto pull`                                                                                                         |
 | image or config changes applied (volumes are kept)                                                   | `luoto up --recreate`                                                                                                              |
@@ -137,9 +139,10 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 
 Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host> --reason …`
 asks you for access (`<host>:<port>` for a tunnel; `--preset npm` for a registry's hosts at
-once; `--package <name>` or `--tool <tool>@<version>` for software to keep); only you can
-approve, on the host. A new request gets a desktop notification, as does the first denial at
-each host (macOS, where they come from Script Editor, and Linux with `notify-send`). Without
+once; `--package <name>` or `--tool <tool>@<version>` for software to keep; `--var <NAME>=<value>`
+for a plain variable); only you can approve, on the host. A new request gets a desktop notification, as does the first denial at
+each host (macOS through `terminal-notifier`, which Homebrew installs with luoto, else
+`osascript`, whose come from Script Editor; Linux with `notify-send`). Without
 them (turned off, or on Windows), the bell in `luoto ui` gives browser notifications for
 requests.
 
@@ -198,6 +201,9 @@ and how to let GitHub merge its pull requests.
   10 GB (or a tenth of it) since luoto last said so, `up`, `down`, `luoto run` and the end of
   a shell or agent session say so, with the env's biggest build folders (`target/`,
   `node_modules/`, …); the watcher notifies when free space falls under 10 GB and 3 GB.
+- On Apple's `container` ([Platforms](docs/how-it-works.md#platforms)): an env's egress
+  history shows only while its gate runs, and a volume attaches to one running container at a
+  time, so refilling the tools volume stops the dev container briefly.
 
 ## Development
 

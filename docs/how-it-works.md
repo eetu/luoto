@@ -51,7 +51,8 @@ flowchart TB
 
 | host                                  | runtimes                                               | boundary                                                                                                                                                                                      |
 | ------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| macOS                                 | podman (recommended), Docker Desktop, OrbStack, Colima | podman: luoto's own VM, with none of your folders mounted, and gVisor. Docker: its VM, which shares your folders, and plain containers                                                        |
+| macOS                                 | podman (recommended), Docker Desktop, OrbStack, Colima | podman: luoto's own VM, with only your shares mounted, and gVisor.      Docker: its VM, which shares your folders, and plain containers                                                        |
+| macOS 26 (Apple silicon)              | Apple's `container`                                    | a VM per container, the dev one with no network card: its only link is to its gate (below)                                                                                                    |
 | Windows (not yet verified end to end) | podman (Hyper-V or WSL2), Docker Desktop               | as on macOS; a WSL2 VM can still see `C:\` (`luoto doctor` reports it), so prefer Hyper-V                                                                                                     |
 | Linux                                 | rootless podman (recommended), Docker                  | no VM. podman: gVisor when `runsc` is installed (`luoto setup` finds it). Docker: plain containers, or gVisor registered with Docker and `oci_runtime = "runsc"` under an env's `[resources]` |
 
@@ -73,3 +74,20 @@ builds; it shares the VM's kernel, so an exploit from inside reaches the VM
 
 Podman on macOS runs one VM at a time, so luoto's replaces your default podman machine while
 you use luoto: `luoto up` asks before switching.
+
+On Apple's `container` (`runtime = "container"`, [install.md](install.md)), every container
+is a lightweight VM of its own, so the dev container's boundary is its VM's kernel and
+`isolation` has nothing to choose. The dev VM has no network card. Its one interface is a tun
+device whose packets travel over a unix socket published to your Mac, which luoto's background
+process joins to the gate's; the gate takes them into a tun device of its own, where the same
+policy, proxy, DNS and catch-all apply (the gate is 169.254.1.1 and the dev container
+169.254.1.2 in every env). Apple's host-only networks would let a container reach every
+service listening on all of your Mac's interfaces, so the dev VM is on none. While the
+background process isn't running, the env is cut off; `luoto up` starts it. The gate is on
+the env's NAT network only. It reaches the vault the same way: the background process keeps a
+few connections open to a socket the gate publishes and joins each, when the gate uses it, to
+the vault's published socket under the env's name. What doesn't run there is under Limits in
+the [README](../README.md#limits).
+
+With podman and Docker, each gate mounts one folder of the vault's socket volume, its env's,
+and asks the vault over the socket in it; gates share no network with each other or the vault.

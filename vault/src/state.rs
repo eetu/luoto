@@ -111,14 +111,13 @@ impl Vault {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn env_for_token(&self, token: &str) -> Option<String> {
+    /// Whether `token` is the one `env` was bound with.
+    pub fn token_is(&self, env: &str, token: &str) -> bool {
         let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-        let inner = self.lock();
-        inner
+        self.lock()
             .envs
-            .iter()
-            .find(|(_, e)| bool::from(e.token_sha256.ct_eq(&hash)))
-            .map(|(name, _)| name.clone())
+            .get(env)
+            .is_some_and(|e| bool::from(e.token_sha256.ct_eq(&hash)))
     }
 
     pub async fn issue(

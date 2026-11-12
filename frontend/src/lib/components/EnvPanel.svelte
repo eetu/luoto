@@ -7,6 +7,8 @@
   import ProjectSection from "$lib/components/ProjectSection.svelte";
   import RulesSection from "$lib/components/RulesSection.svelte";
   import SelftestSection from "$lib/components/SelftestSection.svelte";
+  import SharesSection from "$lib/components/SharesSection.svelte";
+  import VariablesSection from "$lib/components/VariablesSection.svelte";
   import WorkspaceSection from "$lib/components/WorkspaceSection.svelte";
   import { act, app } from "$lib/stores/app.svelte";
 
@@ -22,6 +24,7 @@
       <p class="muted small">
         dev {d.dev}, gate {d.gate}{d.gate_status ? `, ${d.gate_status.rules} rules` : ""}
       </p>
+      <p class="muted small">isolation: {d.isolation}</p>
       <div class="actions">
         {#if d.dev === "running"}
           <button
@@ -43,11 +46,13 @@
       {#each d.warnings as w, n (n)}<p class="warn">{w}</p>{/each}
 
       <WorkspaceSection />
+      <SharesSection />
       <DiskSection />
       <ProjectSection />
       <PortsSection />
       <ConnectSection />
       <CredentialsSection />
+      <VariablesSection />
       <RulesSection />
     </div>
   {/key}

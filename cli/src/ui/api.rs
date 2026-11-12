@@ -23,8 +23,7 @@ use super::Ui;
 use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx, UpOptions};
 use crate::{
-    commands, ctl, detect, disk, egress, events, init, names, ports, project, rules, setup, sync,
-    workspace,
+    ctl, detect, disk, egress, events, init, names, ports, project, rules, setup, sync, workspace,
 };
 
 pub struct ApiError(StatusCode, Value);
@@ -87,7 +86,9 @@ pub fn routes() -> Router<Ui> {
             get(project_status).post(project_action),
         )
         .route("/envs/{name}/pull", get(pull_plan).post(pull_apply))
+        .route("/envs/{name}/shares", get(shares_view).post(shares_sync))
         .route("/envs/{name}/{action}", post(env_action))
+        .route("/vault", get(vault_view))
         .route("/vault/{action}", post(vault_action))
         .route("/stream", get(stream))
 }
@@ -175,10 +176,7 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
         Ok(Overview {
             instance: names::instance(),
             desktop_notifications: crate::notify::desktop(ctx.global.notifications),
-            runtime: ctx
-                .rt
-                .version()
-                .unwrap_or_else(|_| ctx.rt.name().to_string()),
+            runtime: setup::runtime_line(&ctx.rt),
             envs,
             vault,
         })
@@ -233,6 +231,8 @@ async fn meta() -> Json<Meta> {
 struct SetupInfo {
     detection: setup::Detection,
     recommendation: setup::Recommendation,
+    /// The choice between Apple's `container` and podman, where Apple's can run.
+    runtimes: Option<setup::RuntimeOffer>,
     /// The gate, vault and tools images are there.
     images_ok: bool,
 }
@@ -241,6 +241,9 @@ async fn setup_info() -> ApiResult<SetupInfo> {
     blocking(|| {
         let d = setup::detect();
         let r = setup::recommend(&d);
+        let paths = crate::paths::Paths::get()?;
+        let current = setup::configured(&config::load_global(&paths)?);
+        let runtimes = setup::offer(&d, setup::probe_apple(), current);
         let images_ok = Ctx::load()
             .map(|ctx| {
                 ["gate", "vault", "tools"]
@@ -251,6 +254,7 @@ async fn setup_info() -> ApiResult<SetupInfo> {
         Ok(SetupInfo {
             detection: d,
             recommendation: r,
+            runtimes,
             images_ok,
         })
     })
@@ -258,7 +262,13 @@ async fn setup_info() -> ApiResult<SetupInfo> {
     .map(Json)
 }
 
-/// What running the recommended install printed.
+#[derive(Deserialize)]
+struct InstallRuntime {
+    /// The runtime chosen; the recommended one when missing.
+    runtime: Option<setup::RuntimeChoice>,
+}
+
+/// What running the install printed.
 #[derive(Serialize)]
 struct InstallOutput {
     ok: bool,
@@ -266,12 +276,9 @@ struct InstallOutput {
     output: String,
 }
 
-async fn setup_install() -> ApiResult<InstallOutput> {
-    blocking(|| {
-        let r = setup::recommend(&setup::detect());
-        let Some(cmd) = r.install else {
-            anyhow::bail!("nothing to install");
-        };
+async fn setup_install(Json(i): Json<InstallRuntime>) -> ApiResult<InstallOutput> {
+    blocking(move || {
+        let cmd = setup::install_command(i.runtime)?;
         if cmd[0] == "sudo" {
             anyhow::bail!(
                 "this needs your password — run it in a terminal: {}",
@@ -470,28 +477,8 @@ async fn project_action(
     .map(Json)
 }
 
-/// Every folder a pull writes, and one digest over them that applying checks.
-#[derive(Serialize)]
-struct PullPlans {
-    plans: Vec<workspace::PullPlan>,
-    digest: String,
-}
-
-fn pull_plans(ctx: &Ctx, name: &str) -> anyhow::Result<PullPlans> {
-    let plans = commands::pull_targets(ctx, name, None, None)?
-        .iter()
-        .map(|t| workspace::plan_pull(ctx, name, t, false))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let digest = plans
-        .iter()
-        .map(|p| p.digest.as_str())
-        .collect::<Vec<_>>()
-        .join(":");
-    Ok(PullPlans { plans, digest })
-}
-
-async fn pull_plan(Path(name): Path<String>) -> ApiResult<PullPlans> {
-    blocking(move || pull_plans(&Ctx::load()?, &name))
+async fn pull_plan(Path(name): Path<String>) -> ApiResult<workspace::PullPlans> {
+    blocking(move || workspace::pull_plans(&Ctx::load()?, &name))
         .await
         .map(Json)
 }
@@ -503,35 +490,13 @@ struct PullApply {
     include_risky: bool,
 }
 
-#[derive(Serialize)]
-struct Pulled {
-    written: usize,
-    skipped: usize,
-}
-
-async fn pull_apply(Path(name): Path<String>, Json(a): Json<PullApply>) -> ApiResult<Pulled> {
-    blocking(move || {
-        let ctx = Ctx::load()?;
-        let all = pull_plans(&ctx, &name)?;
-        if all.digest != a.digest {
-            anyhow::bail!("the env's files changed since you reviewed them; review again");
-        }
-        let (mut written, mut skipped) = (0, 0);
-        for plan in &all.plans {
-            let (w, s) = workspace::apply_pull(plan, a.include_risky)?;
-            written += w;
-            skipped += s;
-        }
-        Ok(Pulled { written, skipped })
-    })
-    .await
-    .map(Json)
-}
-
-#[derive(Serialize)]
-struct Injected {
-    host: String,
-    binding: String,
+async fn pull_apply(
+    Path(name): Path<String>,
+    Json(a): Json<PullApply>,
+) -> ApiResult<workspace::Pulled> {
+    blocking(move || workspace::apply_pulls(&Ctx::load()?, &name, &a.digest, a.include_risky))
+        .await
+        .map(Json)
 }
 
 #[derive(Serialize)]
@@ -539,16 +504,21 @@ struct EnvDetail {
     name: String,
     path: String,
     rules: Vec<CompiledRule>,
-    injections: Vec<Injected>,
     denies: usize,
     warnings: Vec<String>,
     dev: String,
     gate: String,
     gate_status: Option<GateStatus>,
-    credentials: Vec<String>,
-    missing_secrets: Vec<String>,
-    sandbox_secrets: Vec<String>,
+    /// Its vault bindings, with where each is kept and where it goes.
+    credentials: Vec<crate::credentials::Credential>,
+    /// The env's own variables (`[env]`, `[sandbox_secrets]`).
+    variables: Vec<crate::vars::EnvVar>,
+    /// What luoto sets in the env's shells besides them (credentials' placeholders, agents'
+    /// settings), by name.
+    luoto_variables: Vec<String>,
     ports: ports::EnvPorts,
+    /// How the dev container is separated, as `luoto status` says it.
+    isolation: String,
 }
 
 async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
@@ -559,35 +529,30 @@ async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
         let gate_status = (gate == "running")
             .then(|| ctl::gate_status(&ctx.rt, &name).ok())
             .flatten();
-        let vault_env = ctl::vault_status(&ctx.rt)
-            .ok()
-            .and_then(|v| v.envs.into_iter().find(|e| e.env == name));
-        let mut injections: Vec<Injected> = p
-            .compiled
-            .policy
-            .injections
-            .iter()
-            .map(|i| Injected {
-                host: i.host.clone(),
-                binding: i.binding.clone(),
-            })
-            .collect();
-        injections.dedup_by(|a, b| a.host == b.host && a.binding == b.binding);
+        let vault = ctl::vault_status(&ctx.rt).ok();
         let ports = if dev == "running" {
             ports::of_env(&ctx.paths, &name, &p.cfg.ports, gate == "running")
         } else {
             ports::EnvPorts::default()
         };
+        let isolation = init::isolation_text(
+            ctx.rt.flavor == crate::runtime::Flavor::Apple,
+            p.cfg.isolation,
+            ctx.global.gvisor.is_some(),
+        )
+        .into();
         Ok(EnvDetail {
             ports,
+            isolation,
             path: p.path.display().to_string(),
             rules: p.compiled.policy.rules.clone(),
             denies: p.compiled.policy.denies.len(),
             warnings: p.compiled.warnings.clone(),
-            credentials: p.compiled.bindings.keys().cloned().collect(),
-            missing_secrets: vault_env.map(|v| v.missing).unwrap_or_default(),
-            sandbox_secrets: p.compiled.sandbox_refs.keys().cloned().collect(),
-            injections,
+            credentials: crate::credentials::of(&name, &p.cfg, &p.compiled, vault.as_ref()),
+            variables: crate::vars::listed(&p.cfg),
+            luoto_variables: crate::vars::luoto_names(&p.compiled, &p.cfg)
+                .into_iter()
+                .collect(),
             name,
             dev,
             gate,
@@ -596,6 +561,18 @@ async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
     })
     .await
     .map(Json)
+}
+
+async fn shares_view(Path(name): Path<String>) -> ApiResult<crate::shares::SharesView> {
+    blocking(move || crate::shares::view(&Ctx::load()?, &name))
+        .await
+        .map(Json)
+}
+
+async fn shares_sync(Path(name): Path<String>) -> ApiResult<crate::shares::SyncedShares> {
+    blocking(move || crate::shares::sync_for_ui(&Ctx::load()?, &name))
+        .await
+        .map(Json)
 }
 
 #[derive(Deserialize)]
@@ -613,10 +590,16 @@ async fn egress(
 ) -> ApiResult<Vec<events::HostSummary>> {
     let since = Utc::now() - TimeDelta::minutes(q.minutes.unwrap_or(1440));
     blocking(move || {
-        let mutes = env::mutes(&Ctx::load()?, &name)?;
+        let ctx = Ctx::load()?;
+        let mutes = env::mutes(&ctx, &name)?;
         let mut evs = ui.store.query(&name, since, None, 50_000);
         mutes.hide(&mut evs);
-        Ok(events::summarize(&evs, &mutes))
+        let mut hosts = events::summarize(&evs, &mutes);
+        // A config that doesn't compile only leaves the denials as they were.
+        if let Ok(p) = env::plan(&ctx, &name) {
+            events::mark_allowed_now(&mut hosts, &p.compiled.policy);
+        }
+        Ok(hosts)
     })
     .await
     .map(Json)
@@ -658,6 +641,9 @@ struct Decision {
     narrow: Narrowing,
     #[serde(default)]
     force: bool,
+    /// A variable request's answer: its plain value.
+    #[serde(default)]
+    var: Option<String>,
 }
 
 /// The request with `id`, if it is the one filed at `created`.
@@ -676,6 +662,10 @@ async fn approve(
     blocking(move || {
         let ctx = Ctx::load()?;
         let req = shown(&ctx, &name, id, d.created)?;
+        if let Some(value) = d.var {
+            let installed = crate::vars::approve_with(&ctx, &name, &req, value)?;
+            return Ok(rules::Approved::Installed { installed });
+        }
         rules::approve(&ctx, &name, &req, d.ttl.as_deref(), &d.narrow, d.force)
     })
     .await
@@ -757,6 +747,50 @@ async fn env_action(Path((name, action)): Path<(String, String)>) -> ApiResult<V
             other => anyhow::bail!("unknown action `{other}`"),
         }
         Ok(json!({ "ok": true }))
+    })
+    .await
+    .map(Json)
+}
+
+/// The vault across envs: its state, every env's credentials, and what it holds that none
+/// uses.
+#[derive(Serialize)]
+struct VaultView {
+    /// None: the vault isn't running.
+    status: Option<VaultStatus>,
+    credentials: Vec<crate::credentials::Credential>,
+    unused: Vec<String>,
+    /// Envs whose config doesn't compile, and why.
+    errors: Vec<String>,
+}
+
+async fn vault_view() -> ApiResult<VaultView> {
+    blocking(|| {
+        let ctx = Ctx::load()?;
+        let status = ctl::vault_status(&ctx.rt).ok();
+        let mut credentials = Vec::new();
+        let mut errors = Vec::new();
+        for name in crate::config::list_envs(&ctx.paths)? {
+            match env::plan(&ctx, &name) {
+                Ok(p) => credentials.extend(crate::credentials::of(
+                    &name,
+                    &p.cfg,
+                    &p.compiled,
+                    status.as_ref(),
+                )),
+                Err(e) => errors.push(format!("{name}: {e:#}")),
+            }
+        }
+        let unused = status
+            .as_ref()
+            .map(|v| crate::credentials::unused(v, &credentials))
+            .unwrap_or_default();
+        Ok(VaultView {
+            status,
+            credentials,
+            unused,
+            errors,
+        })
     })
     .await
     .map(Json)

@@ -37,29 +37,19 @@ pub fn vault() -> String {
     format!("{}-vault", instance())
 }
 
-pub fn vault_net() -> String {
-    vault()
-}
-
 pub fn vault_out_net() -> String {
     format!("{}-vault-out", instance())
 }
 
-/// The vault network's third octet: each instance's vault has its own /24.
-fn vault_octet() -> u8 {
-    if crate::release::pinned() { 0 } else { 1 }
+/// The volume of the vault's sockets, a folder per env; each gate mounts its env's.
+pub fn vault_sockets() -> String {
+    format!("{}-vault-sock", instance())
 }
 
-pub fn vault_subnet() -> String {
-    format!("10.212.{}.0/24", vault_octet())
-}
-
-pub fn vault_gw() -> String {
-    format!("10.212.{}.1", vault_octet())
-}
-
-pub fn vault_ip() -> Ipv4Addr {
-    Ipv4Addr::new(10, 212, vault_octet(), 2)
+/// The network luoto 0.4.3 and earlier attach every gate and the vault to, removed once
+/// nothing is attached to it.
+pub fn old_vault_net() -> String {
+    vault()
 }
 
 pub const LABEL_ENV: &str = "luoto.env";
@@ -128,7 +118,9 @@ pub fn named_by(inst: &str, name: &str, env: &str, role: &str) -> bool {
     match role {
         "vault" => {
             env.is_empty()
-                && (name == format!("{inst}-vault") || name == format!("{inst}-vault-out"))
+                && ["", "-out", "-sock"]
+                    .iter()
+                    .any(|s| name == format!("{inst}-vault{s}"))
         }
         _ if env.is_empty() => false,
         "dev" => name == base,
@@ -160,6 +152,7 @@ mod tests {
             (volume("web", "gate"), "web", "gate"),
             (vault(), "", "vault"),
             (vault_out_net(), "", "vault"),
+            (vault_sockets(), "", "vault"),
         ] {
             assert!(named_by(instance(), &name, env, role), "{name}");
             assert!(!named_by(other_instance(), &name, env, role), "{name}");

@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail};
 use crate::config::EnvConfig;
 use crate::env::{Ctx, UID};
 use crate::names;
+use crate::runtime::exec;
 
 /// Into the dev user's `home`. Returns how many files from the home folder were copied.
 pub fn apply(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str, quiet: bool) -> usize {
@@ -108,18 +109,11 @@ fn set_shell(ctx: &Ctx, env: &str, shell: &str) -> Result<Option<String>> {
     let out = ctx
         .rt
         .command()
-        .args([
-            "exec",
-            "-u",
-            "0",
-            &names::dev(env),
-            "sh",
-            "-c",
-            SET_SHELL,
-            "sh",
-            shell,
-            UID,
-        ])
+        .args(
+            exec(&names::dev(env))
+                .user("0")
+                .sh_with(SET_SHELL, [shell, UID]),
+        )
         .output()
         .context("run the runtime")?;
     match out.status.code() {
@@ -148,20 +142,15 @@ fn git_identity(ctx: &Ctx, env: &str) -> Result<()> {
     if name.is_none() && email.is_none() {
         return Ok(());
     }
-    ctx.rt.run([
-        "exec",
-        "-u",
-        "0",
-        &names::dev(env),
-        "sh",
-        "-c",
+    ctx.rt.run(exec(&names::dev(env)).user("0").sh_with(
         r#"command -v git >/dev/null || exit 0
 [ -z "$1" ] || git config --system user.name "$1"
 [ -z "$2" ] || git config --system user.email "$2""#,
-        "sh",
-        name.as_deref().unwrap_or(""),
-        email.as_deref().unwrap_or(""),
-    ])?;
+        [
+            name.as_deref().unwrap_or(""),
+            email.as_deref().unwrap_or(""),
+        ],
+    ))?;
     Ok(())
 }
 
@@ -223,19 +212,12 @@ fn copy_home(ctx: &Ctx, env: &str, home: &str) -> Result<usize> {
     let mut child = ctx
         .rt
         .command()
-        .args([
-            "exec",
-            "-i",
-            "-u",
-            UID,
-            &names::dev(env),
-            "tar",
-            "-x",
-            "-f",
-            "-",
-            "-C",
-            home,
-        ])
+        .args(
+            exec(&names::dev(env))
+                .stdin()
+                .user(UID)
+                .argv(["tar", "-x", "-f", "-", "-C", home]),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

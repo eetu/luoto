@@ -35,7 +35,8 @@ env's name and its current rules.
   feature branches to one GitHub repository). Protected branches, tags, workflow files and
   GitHub Actions are off-limits.
 - **Files.** Only this container exists; the project is in `/workspace`, and related
-  repositories the user added are folders in it, each with its own git remote. `/workspace` and
+  repositories the user added are folders in it, each with its own git remote. Folders
+  the user shared from their machine are under `/shares`, read-only. `/workspace` and
   your home directory persist; the rest of the container's filesystem is reset when luoto
   recreates it. `/workspace` may exist only here (an env cloned from a remote has no copy on
   the user's machine), so push work to keep it: what isn't pushed is lost with the env.
@@ -82,6 +83,17 @@ completing it stays with the user:
 
       sandbox request --package postgresql-client --reason "<why>" --wait
       sandbox request --tool node@24 --reason "<why>" --wait
+
+- An environment variable the code needs and the env lacks is the user's to give. A plain
+  one (a log level, a setting the user told you) you may request, suggesting its value (MCP:
+  `sandbox_request_var`). Approved, shells have it from their next prompt; a command that
+  doesn't see it loads it with `. /run/luoto/env.sh` first. A secret (a password, a token, a
+  connection string with credentials) you never request and never ask for in the chat: tell
+  the user its name and that they add it on the host with `luoto var set -e <env> NAME`. A
+  token that only goes in a header to one HTTP API is better as a luoto credential the gate
+  adds outside the sandbox: suggest that instead.
+
+      sandbox request --var RUST_LOG=debug --reason "<why>" --wait
 
 ## When something is blocked
 

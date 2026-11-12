@@ -72,11 +72,8 @@ export const noticeRequests = (envs: EnvRow[], instance: string, desktop: boolea
   if (document.visibilityState === "visible" && document.hasFocus()) return;
   for (const env of envs) {
     if (env.pending <= (before[env.name] ?? 0)) continue;
-    const n = new Notification(`${instance}: ${env.name} asks for access`, {
-      body:
-        env.pending === 1
-          ? "an access request waits for you"
-          : `${env.pending} access requests wait for you`,
+    const n = new Notification(`${instance}: ${env.name} has a request`, {
+      body: env.pending === 1 ? "a request waits for you" : `${env.pending} requests wait for you`,
       tag: `requests-${env.name}`,
     });
     n.onclick = () => {

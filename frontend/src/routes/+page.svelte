@@ -12,6 +12,7 @@
   import RequestPanel from "$lib/components/RequestPanel.svelte";
   import SetupView from "$lib/components/SetupView.svelte";
   import VaultPanel from "$lib/components/VaultPanel.svelte";
+  import VaultView from "$lib/components/VaultView.svelte";
   import Wordmark from "$lib/components/Wordmark.svelte";
   import { noticeRequests, notifications, toggleNotifications } from "$lib/notify.svelte";
   import { app, startSync } from "$lib/stores/app.svelte";
@@ -35,9 +36,12 @@
     return startSync();
   });
 
-  // Escape ladder for the page: a subject falls back to the env.
+  // Escape ladder for the page: a credential falls back to the vault, a host or request to
+  // the env.
   function onKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape" && !showNew && app.subject.kind !== "env") {
+    if (e.key !== "Escape" || showNew) return;
+    if (app.subject.kind === "credential") app.subject = { kind: "vault" };
+    else if (app.subject.kind === "host" || app.subject.kind === "request") {
       app.subject = { kind: "env" };
     }
   }
@@ -88,16 +92,18 @@
       <main class="center"><p class="muted pad">connecting…</p></main>
     {:else if !hasEnvs}
       <main class="center"><SetupView onNew={() => (showNew = true)} /></main>
+    {:else if app.view === "vault"}
+      <main class="center"><VaultView /></main>
     {:else}
       <main class="center"><EgressView /></main>
     {/if}
-    {#if hasEnvs || app.subject.kind === "vault"}
+    {#if hasEnvs || app.view === "vault"}
       <aside class="subject">
         {#if app.subject.kind === "host"}
           <HostPanel host={app.subject.host} />
         {:else if app.subject.kind === "request"}
           <RequestPanel id={app.subject.id} />
-        {:else if app.subject.kind === "vault"}
+        {:else if app.subject.kind === "vault" || app.subject.kind === "credential"}
           <VaultPanel />
         {:else}
           <EnvPanel />

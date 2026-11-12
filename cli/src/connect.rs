@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use luoto_shared::profiles::{self, Editor, EditorSetting};
 
 use crate::env::{Ctx, UID};
+use crate::runtime::exec;
 use crate::state::EnvState;
 use crate::{names, ssh};
 
@@ -44,23 +45,17 @@ fn terminal_env() -> Vec<String> {
 pub fn exec_login(ctx: &Ctx, name: &str, inner: &str) -> Result<ExitCode> {
     ensure_running(ctx, name)?;
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let mut args: Vec<String> = vec!["exec".into(), "-i".into()];
+    let mut e = exec(&names::dev(name)).stdin();
     if tty {
-        args.push("-t".into());
+        e = e.tty();
     }
-    args.extend(["-u".into(), UID.into(), "-w".into(), "/workspace".into()]);
+    e = e.user(UID).cwd("/workspace");
     if tty {
-        for e in terminal_env() {
-            args.extend(["-e".into(), e]);
+        for var in terminal_env() {
+            e = e.env(&var);
         }
     }
-    args.extend([
-        names::dev(name),
-        "sh".into(),
-        "-c".into(),
-        LOGIN.into(),
-        inner.into(),
-    ]);
+    let args = e.argv(["sh", "-c", LOGIN, inner]);
     let status = ctx.rt.interactive(&args)?;
     // A session (a shell, an agent) is where builds fill the disk.
     if tty {
@@ -213,12 +208,7 @@ pub fn ssh_proxy(name: &str) -> Result<ExitCode> {
     let status = ctx
         .rt
         .command()
-        .args([
-            "exec",
-            "-i",
-            "-u",
-            "0",
-            &names::dev(name),
+        .args(exec(&names::dev(name)).stdin().user("0").argv([
             "/usr/sbin/sshd",
             "-i",
             "-e",
@@ -236,7 +226,7 @@ pub fn ssh_proxy(name: &str) -> Result<ExitCode> {
             "PasswordAuthentication=no",
             "-o",
             "KbdInteractiveAuthentication=no",
-        ])
+        ]))
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::null())

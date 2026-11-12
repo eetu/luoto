@@ -25,6 +25,7 @@ use crate::detect::{self, DEPTH, Detected, IDIOMATIC_TOOLS, SKIP_DIRS};
 use crate::env::{Ctx, UID};
 use crate::logs::InstallLog;
 use crate::prompt::confirm;
+use crate::runtime::{Exec, exec};
 use crate::workspace::{self, Oversize};
 use crate::{events, names, sync};
 
@@ -167,17 +168,7 @@ fn workspace_files(ctx: &Ctx, dev: &str) -> Vec<String> {
     );
     let mut files: Vec<String> = ctx
         .rt
-        .run([
-            "exec",
-            "-u",
-            UID,
-            "-w",
-            "/workspace",
-            dev,
-            "sh",
-            "-c",
-            &script,
-        ])
+        .run(exec(dev).user(UID).cwd("/workspace").sh(&script))
         .unwrap_or_default()
         .lines()
         // git lists a repository in the folder as `name/`; its files come from its own git.
@@ -251,20 +242,16 @@ impl<'a> Env<'a> {
         let out = self
             .ctx
             .rt
-            .run(["exec", &self.dev, "sh", "-c", PROBE, MISE_CONF, MARKER])?;
+            .run(exec(&self.dev).argv(["sh", "-c", PROBE, MISE_CONF, MARKER]))?;
         Ok(Probe::parse(out.as_bytes()))
     }
 
-    /// `exec` as the dev user in `cwd`, with `extra` exec flags, running `argv`.
-    fn exec_user<'b>(&'b self, cwd: &'b str, extra: &[&'b str], argv: &[&'b str]) -> Vec<&'b str> {
-        let mut a = vec!["exec", "-u", UID, "-w", cwd, "-e", &self.home_env];
-        a.extend_from_slice(extra);
-        a.push(&self.dev);
-        a.extend_from_slice(argv);
-        a
+    /// `exec` as the dev user in `cwd`, with the dev user's home.
+    fn exec_user(&self, cwd: &str) -> Exec {
+        exec(&self.dev).user(UID).cwd(cwd).env(&self.home_env)
     }
 
-    fn step(&self, args: &[&str], what: &str) -> Result<()> {
+    fn step(&self, args: &[String], what: &str) -> Result<()> {
         let status = self.log.run(&self.ctx.rt, args)?;
         if !status.success() {
             self.log.note(&format!("{what} failed ({status})"));
@@ -298,11 +285,9 @@ impl<'a> Env<'a> {
         let mut out = Vec::new();
         let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
         for dir in self.project_dirs() {
-            let text = self.ctx.rt.run(self.exec_user(
-                &dir,
-                &["-e", "MISE_OFFLINE=1"],
-                &["mise", "ls", "--current", "--missing", "--json"],
-            ))?;
+            let ls = ["mise", "ls", "--current", "--missing", "--json"];
+            let offline = self.exec_user(&dir).env("MISE_OFFLINE=1");
+            let text = self.ctx.rt.run(offline.argv(ls))?;
             let v: serde_json::Map<String, serde_json::Value> =
                 serde_json::from_str(text.trim()).context("parse `mise ls` output")?;
             let mut tools = Vec::new();
@@ -327,11 +312,9 @@ impl<'a> Env<'a> {
             }
         }
         if !configured.is_empty() {
-            let text = self.ctx.rt.run(self.exec_user(
-                "/workspace",
-                &["-e", "MISE_OFFLINE=1"],
-                &["mise", "ls", "--installed", "--json"],
-            ))?;
+            let ls = ["mise", "ls", "--installed", "--json"];
+            let offline = self.exec_user("/workspace").env("MISE_OFFLINE=1");
+            let text = self.ctx.rt.run(offline.argv(ls))?;
             let installed: serde_json::Map<String, serde_json::Value> =
                 serde_json::from_str(text.trim()).context("parse `mise ls` output")?;
             let absent: Vec<String> = configured
@@ -356,17 +339,12 @@ impl<'a> Env<'a> {
 
     fn write_mise_conf(&self, conf: &str) -> Result<()> {
         self.ctx.rt.run_stdin(
-            [
-                "exec",
-                "-i",
-                "-u",
-                "0",
-                &self.dev,
+            exec(&self.dev).stdin().user("0").argv([
                 "sh",
                 "-c",
                 r#"mkdir -p "${0%/*}" && cat >"$0""#,
                 MISE_CONF,
-            ],
+            ]),
             conf.as_bytes(),
         )?;
         Ok(())
@@ -408,14 +386,13 @@ impl Job {
 
 fn run_job(e: &Env, d: &Deps, job: &mut Job) -> Result<()> {
     if job.system {
-        let mut args = vec!["exec", "-u", "0", &e.dev, "sh", "-c", SYSTEM, "sh"];
-        args.extend(d.system.iter().map(String::as_str));
+        let args = exec(&e.dev).user("0").sh_with(SYSTEM, &d.system);
         e.step(&args, "system packages")?;
         job.system = false;
     }
     while let Some((dir, _)) = job.tools.first().cloned() {
         e.step(
-            &e.exec_user(&dir, &[], &["mise", "install", "--yes"]),
+            &e.exec_user(&dir).argv(["mise", "install", "--yes"]),
             &format!("mise install in {dir}"),
         )?;
         job.tools.remove(0);
@@ -423,7 +400,7 @@ fn run_job(e: &Env, d: &Deps, job: &mut Job) -> Result<()> {
     if job.run {
         for cmd in &d.run {
             e.step(
-                &e.exec_user(e.home, &[], &["sh", "-c", LOGIN, cmd]),
+                &e.exec_user(e.home).argv(["sh", "-c", LOGIN, cmd]),
                 &format!("`{cmd}`"),
             )?;
         }
@@ -497,7 +474,7 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
     if !due && missing.is_empty() {
         if !packages && marker.is_some() {
             ctx.rt
-                .run(["exec", "-u", "0", &e.dev, "rm", "-f", MARKER])?;
+                .run(exec(&e.dev).user("0").argv(["rm", "-f", MARKER]))?;
         }
         return Ok(());
     }
@@ -579,18 +556,11 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
         hosts.extend(denied);
     }
     if due {
-        ctx.rt.run([
-            "exec",
-            "-u",
-            "0",
-            &e.dev,
-            "sh",
-            "-c",
-            r#"mkdir -p "${1%/*}" && echo "$2" >"$1""#,
-            "sh",
-            MARKER,
-            &want,
-        ])?;
+        ctx.rt.run(
+            exec(&e.dev)
+                .user("0")
+                .sh_with(r#"mkdir -p "${1%/*}" && echo "$2" >"$1""#, [MARKER, &want]),
+        )?;
     }
     println!("installed");
     e.log.note("installed");

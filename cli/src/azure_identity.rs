@@ -19,6 +19,7 @@ use serde::Deserialize;
 
 use crate::config::AzureCred;
 use crate::env::{Ctx, UID};
+use crate::runtime::exec;
 use crate::text::display;
 use crate::{connect, names};
 
@@ -333,16 +334,11 @@ pub fn login_in_env(ctx: &Ctx, env: &str, c: &AzureCred) {
     );
     let dev = names::dev(env);
     let run = crate::progress::wait("signing in to Azure in the env", || {
-        ctx.rt.run([
-            "exec",
-            "-u",
-            UID,
-            dev.as_str(),
-            "sh",
-            "-c",
-            connect::LOGIN,
-            &script,
-        ])
+        ctx.rt.run(
+            exec(&dev)
+                .user(UID)
+                .argv(["sh", "-c", connect::LOGIN, &script]),
+        )
     });
     if let Err(e) = run {
         eprintln!(

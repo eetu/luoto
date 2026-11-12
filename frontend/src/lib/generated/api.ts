@@ -27,6 +27,14 @@ export type AccessRequest = {
   install?: Install;
 };
 
+/** What Apple's `container` lacks before setup can use it. */
+export type AppleNeed = {
+  /** The oldest version luoto runs on. */
+  min: string;
+  /** The command that installs or upgrades it; `None` without Homebrew. */
+  install: string[] | null;
+};
+
 /** What approving a request did. */
 export type Approved =
   /** The rule an access request became. */
@@ -52,6 +60,30 @@ export type CreatedEnv = {
   name: string;
 };
 
+export type CredState =
+  /** The vault holds its secret. */
+  | "loaded"
+  /** The vault runs unlocked but lacks it: `luoto vault unlock` reads it. */
+  | "missing"
+  /** The vault is locked (after a restart): `luoto vault unlock`. */
+  | "locked"
+  /** The env isn't registered with the vault yet: `luoto up`. */
+  | "not_up";
+
+export type Credential = {
+  env: string;
+  binding: string;
+  /** What it is for, for people: `GitHub token for acme/api`, `anthropic oauth_token, for claude`. */
+  what: string;
+  /** Where its secret is kept, as `luoto` shows refs. */
+  kept: string;
+  /** Where the gate adds it; an SSH key's, the hosts it logs in to. */
+  hosts: string[];
+  state: CredState;
+  /** The command that changes it; none for kinds only the env's own file sets. */
+  change: string | null;
+};
+
 export type Decision = {
   /**
    * When the request shown was filed: the gate numbers requests anew when it restarts, so
@@ -62,6 +94,8 @@ export type Decision = {
   /** Less than the request asked for. */
   narrow?: Narrowing;
   force?: boolean;
+  /** A variable request's answer: its plain value. */
+  var?: string | null;
 };
 
 export type Detection = {
@@ -90,16 +124,23 @@ export type EnvDetail = {
   name: string;
   path: string;
   rules: CompiledRule[];
-  injections: Injected[];
   denies: number;
   warnings: string[];
   dev: string;
   gate: string;
   gate_status: GateStatus | null;
-  credentials: string[];
-  missing_secrets: string[];
-  sandbox_secrets: string[];
+  /** Its vault bindings, with where each is kept and where it goes. */
+  credentials: Credential[];
+  /** The env's own variables (`[env]`, `[sandbox_secrets]`). */
+  variables: EnvVar[];
+  /**
+   * What luoto sets in the env's shells besides them (credentials' placeholders, agents'
+   * settings), by name.
+   */
+  luoto_variables: string[];
   ports: EnvPorts;
+  /** How the dev container is separated, as `luoto status` says it. */
+  isolation: string;
 };
 
 /** One env's disk use. */
@@ -139,6 +180,14 @@ export type EnvRow = {
   open: OpenEgress | null;
   error: string | null;
 };
+
+/**
+ * One of the env's variables as the UI lists it: a plain one with its value, a secret with
+ * where it is kept (its ref as `luoto var` shows it), never its value.
+ */
+export type EnvVar =
+  | { kind: "plain"; name: string; value: string }
+  | { kind: "secret"; name: string; kept: string };
 
 export type EventKind =
   /** A DNS lookup from the sandbox (answered locally, never forwarded). */
@@ -187,6 +236,8 @@ export type HostSummary = {
   top_paths: [string, number][];
   last_reason: string | null;
   last_message: string | null;
+  /** The rule that allows the last denial now: it was added since, so the denial is history. */
+  allowed_now: string | null;
   last_rule: string | null;
   bytes_up: number;
   bytes_down: number;
@@ -196,15 +247,12 @@ export type HostSummary = {
   tls_rejected: boolean;
 };
 
-export type Injected = {
-  host: string;
-  binding: string;
-};
-
 /**
- * What the sandbox asks to have in the env besides a host: software, or a preset's access.
- * Approved, it joins the env's config (`[deps] system`, `[tools]`, `presets`), so it holds
- * for every container the env gets.
+ * What the sandbox asks to have in the env besides a host: software, a preset's access, or a
+ * variable with a plain value. Approved, it joins the env's config (`[deps] system`,
+ * `[tools]`, `presets`, `[env]`), so it holds for every container the env gets. A secret is
+ * never asked for from inside: the user adds one (`luoto var set NAME`), so the sandbox never
+ * chooses which of theirs it gets.
  */
 export type Install =
   /** A package of the image's package manager (apt, apk or dnf). */
@@ -212,13 +260,20 @@ export type Install =
   /** A toolchain mise installs: `node` and `24`, `cargo:ripgrep` and `latest`. */
   | { kind: "tool"; name: string; version: string }
   /** One of luoto's presets (`npm`, `pypi`, …): the hosts a registry or service needs. */
-  | { kind: "preset"; name: string };
+  | { kind: "preset"; name: string }
+  /** An environment variable with a plain value (`[env]`), which the user gives or accepts. */
+  | { kind: "var"; name: string; value?: string };
 
-/** What running the recommended install printed. */
+/** What running the install printed. */
 export type InstallOutput = {
   ok: boolean;
   command: string;
   output: string;
+};
+
+export type InstallRuntime = {
+  /** The runtime chosen; the recommended one when missing. */
+  runtime?: RuntimeChoice | null;
 };
 
 export type Intake = "proxy" | "transparent" | "dns";
@@ -475,12 +530,41 @@ export type Rule = {
   idle?: string;
 };
 
+export type RuntimeChoice = "container" | "podman";
+
 export type RuntimeInfo = {
   name: string;
   version: [number, number, number] | null;
   version_ok: boolean;
   reachable: boolean;
   detail: string;
+};
+
+/** Setup's choice of runtime where Apple's `container` runs, and what each choice needs. */
+export type RuntimeOffer = {
+  options: RuntimeOption[];
+  /** Apple's container; `None` when it isn't installed. */
+  apple: RuntimeInfo | null;
+  apple_need: AppleNeed | null;
+  /** What `--runtime podman` recommends. */
+  podman: Recommendation;
+};
+
+/**
+ * A runtime setup offers where Apple's `container` runs: its menu row in a terminal, its
+ * choice in the UI.
+ */
+export type RuntimeOption = {
+  runtime: RuntimeChoice;
+  label: string;
+  description: string;
+  recommended: boolean;
+  /** config.toml names it. */
+  current: boolean;
+  /** Where the choice starts: the current runtime, else the recommended one. */
+  selected: boolean;
+  /** The command that sets it up. */
+  setup: string;
 };
 
 export type SelftestCheck = {
@@ -497,8 +581,29 @@ export type SelftestReport = {
 export type SetupInfo = {
   detection: Detection;
   recommendation: Recommendation;
+  /** The choice between Apple's `container` and podman, where Apple's can run. */
+  runtimes: RuntimeOffer | null;
   /** The gate, vault and tools images are there. */
   images_ok: boolean;
+};
+
+/** A share as it stands: its folder's files, and how many differ from the env's clones. */
+export type ShareStatus = {
+  name: string;
+  folder: string;
+  files: number;
+  bytes: number;
+  /** Files changed, added or removed in the folder since the last sync. */
+  changed: number;
+  /** Why it can't be synced (the folder gone, or refused); none when it can. */
+  error: string | null;
+};
+
+/** An env's shares as the UI shows them. */
+export type SharesView = {
+  shares: ShareStatus[];
+  /** What the env still needs to read them: the command that gives it. */
+  fix: string | null;
 };
 
 export type Shown = {
@@ -506,6 +611,12 @@ export type Shown = {
 };
 
 export type Source = "gate" | "vault";
+
+/** What a sync from the UI did: a line per share, for people. */
+export type SyncedShares = {
+  said: string[];
+  failed: boolean;
+};
 
 export type ToolPin = {
   tool: string;
@@ -527,6 +638,19 @@ export type VaultStatus = {
   locked: boolean;
   loaded_refs: string[];
   envs: VaultEnvSummary[];
+};
+
+/**
+ * The vault across envs: its state, every env's credentials, and what it holds that none
+ * uses.
+ */
+export type VaultView = {
+  /** None: the vault isn't running. */
+  status: VaultStatus | null;
+  credentials: Credential[];
+  unused: string[];
+  /** Envs whose config doesn't compile, and why. */
+  errors: string[];
 };
 
 export type Verdict = "allow" | "deny";

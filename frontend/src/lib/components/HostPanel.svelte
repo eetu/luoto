@@ -46,17 +46,26 @@
         Something in the sandbox looked this name up but never connected. Nothing left the sandbox.
       </p>
     {/if}
-    {#if summary.last_message && summary.denied > 0}
-      <p class="why">{summary.last_message}</p>
-    {/if}
-    {#if opened}
+    {#if summary.allowed_now}
+      <!-- What was blocked a rule allows now: the denials are history, not the state. -->
       <p class="muted small">
-        {summary.opened} let through by open egress: no rule allows it, and it closes with the window
+        allowed now by rule <code>{summary.allowed_now}</code>, blocked {summary.denied === 1
+          ? "once"
+          : `${summary.denied} times`} before it
       </p>
-    {:else if summary.last_rule}
-      <p class="muted small">
-        allowed by rule <code>{summary.last_rule}</code>
-      </p>
+    {:else}
+      {#if summary.last_message && summary.denied > 0}
+        <p class="why">{summary.last_message}</p>
+      {/if}
+      {#if opened}
+        <p class="muted small">
+          {summary.opened} let through by open egress: no rule allows it, and it closes with the window
+        </p>
+      {:else if summary.last_rule}
+        <p class="muted small">
+          allowed by rule <code>{summary.last_rule}</code>
+        </p>
+      {/if}
     {/if}
   {/if}
 

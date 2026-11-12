@@ -10,6 +10,7 @@ import type {
   EnvDisk,
   HostSummary,
   InstallOutput,
+  InstallRuntime,
   LuotoEvent,
   Meta,
   Narrowing,
@@ -24,9 +25,13 @@ import type {
   PullPlans,
   Reloaded,
   Rule,
+  RuntimeChoice,
   SelftestReport,
   SetupInfo,
+  SharesView,
   Shown,
+  SyncedShares,
+  VaultView,
   VmDisk,
 } from "./types";
 
@@ -102,7 +107,8 @@ export const api = {
   overview: () => request<Overview>("GET", "/overview"),
   meta: () => request<Meta>("GET", "/meta"),
   setup: () => request<SetupInfo>("GET", "/setup"),
-  setupInstall: () => request<InstallOutput>("POST", "/setup/install", {}),
+  setupInstall: (runtime: RuntimeChoice | null) =>
+    request<InstallOutput, InstallRuntime>("POST", "/setup/install", { runtime }),
   createEnv: (body: NewEnv) => request<CreatedEnv, NewEnv>("POST", "/envs", body),
   detect: (body: NewEnv) => request<Proposal, NewEnv>("POST", "/detect", body),
   env: (name: string) => request<EnvDetail>("GET", env(name)),
@@ -127,6 +133,11 @@ export const api = {
       force,
       narrow,
     }),
+  approveVar: (name: string, req: AccessRequest, value: string) =>
+    request<Approved, Decision>("POST", `${env(name)}/requests/${req.id}/approve`, {
+      created: req.created,
+      var: value,
+    }),
   reject: (name: string, req: AccessRequest) =>
     request<AccessRequest, Shown>("POST", `${env(name)}/requests/${req.id}/reject`, {
       created: req.created,
@@ -144,8 +155,11 @@ export const api = {
       digest,
       include_risky: includeRisky,
     }),
+  shares: (name: string) => request<SharesView>("GET", `${env(name)}/shares`),
+  syncShares: (name: string) => request<SyncedShares>("POST", `${env(name)}/shares`, {}),
   vault: (action: "unlock" | "lock") => request<unknown>("POST", `/vault/${action}`, {}),
   reloadVault: () => request<Reloaded>("POST", "/vault/reload", {}),
+  vaultView: () => request<VaultView>("GET", "/vault"),
 };
 
 /** Follow the live event stream (fetch-based SSE, so the token can travel in a header). */

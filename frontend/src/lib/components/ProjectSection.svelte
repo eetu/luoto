@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from "$lib/api";
+  import CopyCommand from "$lib/components/CopyCommand.svelte";
   import LabelledLines from "$lib/components/LabelledLines.svelte";
   import { act, app } from "$lib/stores/app.svelte";
 
@@ -64,7 +65,8 @@
       {/if}
     {/if}
     {#if status.needs.length > 0}
-      <p class="small muted">credentials it needs (add them with <code>luoto edit</code>):</p>
+      <p class="small muted">what it needs only you add, asked in a terminal:</p>
+      <CopyCommand cmd={`luoto project needs -e ${app.env}`} />
       <pre class="needs">{status.needs.join("\n\n")}</pre>
     {/if}
   </div>

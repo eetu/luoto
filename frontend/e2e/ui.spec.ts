@@ -1,8 +1,28 @@
 import { expect, test } from "@playwright/test";
 
+import egressHosts from "./fixtures/egress";
 import { fixture, mockApi } from "./mock";
 
 const open = (page: import("@playwright/test").Page) => page.goto(`/#token=${"ab".repeat(16)}`);
+
+test("a host a rule allows since it was blocked reads as allowed", async ({ page }) => {
+  await mockApi(page);
+  const [blocked] = egressHosts;
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/egress",
+    (route) =>
+      route.fulfill({ json: [{ ...blocked, allowed: 1, last_rule: "r1", allowed_now: "r1" }] }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  const row = page.getByRole("row", { name: /example\.com/ });
+  await expect(row).toContainText("allowed");
+  await expect(row).toContainText("blocked before rule r1");
+  await expect(row).not.toContainText("no rule allows");
+  await row.click();
+  await expect(page.getByText("allowed now by rule r1, blocked once before it")).toBeVisible();
+});
 
 test("a blocked host is allowed from the egress view", async ({ page }) => {
   const writes = await mockApi(page);
@@ -118,7 +138,8 @@ test("an env cloned from a remote shows where it comes from and pulls only in a 
   const overview = fixture("overview");
   await page.route(
     (url) => url.pathname === "/api/overview",
-    (route) => route.fulfill({ json: { ...overview, envs: [...overview.envs, fixture("remote")] } }),
+    (route) =>
+      route.fulfill({ json: { ...overview, envs: [...overview.envs, fixture("remote")] } }),
   );
   const detail = { ...fixture("env"), name: "api", path: "/home/me/.config/luoto/envs/api.toml" };
   await page.route(
@@ -388,6 +409,135 @@ test("selected requests are approved together, each as it was shown", async ({ p
   expect((sent[1].body as { ttl?: string }).ttl).toBeUndefined();
 });
 
+test("a variable request takes a value, the one it suggests filled in", async ({ page }) => {
+  await mockApi(page);
+  const created = new Date().toISOString();
+  const asked = { host: "", access: "read", status: "pending", created };
+  const requests = [
+    { ...asked, id: 5, reason: "the app reads it", install: { kind: "var", name: "APP_MODE" } },
+    {
+      ...asked,
+      id: 6,
+      reason: "more logs",
+      install: { kind: "var", name: "RUST_LOG", value: "debug" },
+    },
+  ];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: requests }),
+  );
+  const sent: { id: string; body: unknown }[] = [];
+  await page.route(
+    (url) => /^\/api\/envs\/web\/requests\/\d+\/approve$/.test(url.pathname),
+    (route, req) => {
+      sent.push({ id: new URL(req.url()).pathname.split("/")[5], body: req.postDataJSON() });
+      return route.fulfill({ json: { installed: "set" } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  // A variable request takes a value of its own: none is ticked for a batch.
+  await expect(page.getByRole("checkbox", { name: "select all" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: /the variable APP_MODE/ }).click();
+  const value = page.getByRole("textbox", { name: "value" });
+  await expect(value).toHaveValue("");
+  await page.getByRole("button", { name: "approve" }).click();
+  await expect(page.getByText("give the value first")).toBeVisible();
+  await expect(value).toBeFocused();
+  expect(sent).toHaveLength(0);
+  await value.fill("staging");
+  await value.press("Enter");
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toEqual({ id: "5", body: { created, var: "staging" } });
+
+  // On to the next request, its suggested value filled in and shown as the sandbox's.
+  await expect(page.getByText("variable request #6")).toBeVisible();
+  await expect(value).toHaveValue("debug");
+  await expect(page.getByText("value it suggests — written by code in the sandbox")).toBeVisible();
+  await page.getByRole("button", { name: "approve" }).click();
+  await expect.poll(() => sent.length).toBe(2);
+  expect(sent[1]).toEqual({ id: "6", body: { created, var: "debug" } });
+});
+
+test("the env panel lists its variables, a secret by where it is kept", async ({ page }) => {
+  await mockApi(page);
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  await expect(page.getByText("RUST_LOG", { exact: true })).toBeVisible();
+  await expect(page.getByText("debug", { exact: true })).toBeVisible();
+  await expect(page.getByText("op://Dev/local-db/url")).toBeVisible();
+  await expect(page.getByText("Any code in the env can read them.")).toBeVisible();
+  await expect(page.getByText("set by luoto: GIT_TERMINAL_PROMPT")).toBeVisible();
+});
+
+test("the env panel shows its shares, what changed on this machine, and syncs them", async ({
+  page,
+}) => {
+  const writes = await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/shares",
+    async (route, req) => {
+      if (req.method() === "POST") {
+        writes.push({ method: "POST", path: "/api/envs/web/shares", body: null });
+        await route.fulfill({
+          json: {
+            said: ["share recordings: 1 file(s) updated; 3 file(s), 1.5 GB in all"],
+            failed: false,
+          },
+        });
+        return;
+      }
+      const synced = writes.some((w) => w.path === "/api/envs/web/shares");
+      const view = fixture("shares");
+      if (synced) view.shares[0].changed = 0;
+      await route.fulfill({ json: view });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  await expect(page.getByText("/shares/recordings")).toBeVisible();
+  await expect(page.getByText("1 changed on this machine since the last sync")).toBeVisible();
+  await page.getByRole("button", { name: "sync", exact: true }).click();
+  await expect(page.getByText("3 files, 1.5 GB, up to date")).toBeVisible();
+  await expect(page.getByText("share recordings: 1 file(s) updated")).toBeVisible();
+});
+
+test("the vault is a view of every env's credentials, each with how to change it", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: "no secrets in use" }).click();
+
+  // The surface is the vault now, not the env's egress.
+  await expect(page.getByRole("heading", { name: "vault", exact: true })).toBeVisible();
+  await expect(page.getByText("web egress")).toHaveCount(0);
+  const github = page.getByRole("row", { name: /github/ });
+  await expect(github).toContainText("keyring:luoto/github-pat");
+  await expect(page.getByRole("row", { name: /custom\.billing/ })).toContainText("missing");
+  await expect(page.getByRole("row", { name: /op:\/\/Old\/retired/ })).toContainText("unused");
+
+  await github.click();
+  await expect(page.getByText("web: github")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /luoto repo auth -e web acme\/web/ }),
+  ).toBeVisible();
+  await page.getByRole("row", { name: /custom\.billing/ }).click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: /Copy change command/ })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await expect(page.getByText("Pick a credential")).toBeVisible();
+
+  // Picking the env brings its egress and panel back.
+  await page.getByRole("button", { name: /^web/ }).click();
+  await expect(page.getByRole("heading", { name: "vault", exact: true })).toHaveCount(0);
+  await expect(page.getByText("set by luoto: GIT_TERMINAL_PROMPT")).toBeVisible();
+});
+
 test("the env panel links the ports forwarded from the env", async ({ page }) => {
   await mockApi(page);
   await open(page);
@@ -446,15 +596,14 @@ test("a new access request notifies once the user turned notifications on", asyn
     .poll(() => page.evaluate(() => (window as unknown as { shown: string[] }).shown), {
       timeout: 10_000,
     })
-    .toEqual(["luoto: web asks for access"]);
+    .toEqual(["luoto: web has a request"]);
 });
 
 test("with desktop notifications on, the page shows none of its own", async ({ page }) => {
   await mockApi(page);
   await page.route(
     (url) => url.pathname === "/api/overview",
-    (route) =>
-      route.fulfill({ json: { ...fixture("overview"), desktop_notifications: true } }),
+    (route) => route.fulfill({ json: { ...fixture("overview"), desktop_notifications: true } }),
   );
   await open(page);
   const bell = page.getByRole("button", { name: "browser notifications" });
@@ -505,4 +654,71 @@ test("a nearly full VM disk is flagged beside the envs, with what frees it", asy
   await expect(page.getByText(/nearly full, and a full disk stops every env/)).toBeVisible();
   await expect(page.getByText(/41 superseded image\(s\), up to 18\.3 GB/)).toBeVisible();
   await expect(page.getByText("luoto prune", { exact: true })).toBeVisible();
+});
+
+test("first setup on a Mac offers Apple's container first and installs the chosen runtime", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/overview",
+    (route) => route.fulfill({ json: { ...fixture("overview"), envs: [] } }),
+  );
+  const installs: unknown[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/setup/install",
+    (route, req) => {
+      installs.push(req.postDataJSON());
+      return route.fulfill({ json: { ok: true, command: "brew install container", output: "" } });
+    },
+  );
+  await open(page);
+
+  const apple = page.getByRole("radio", { name: /Apple's container/ });
+  const podman = page.getByRole("radio", { name: /podman/ });
+  await expect(apple).toBeChecked();
+  await expect(page.getByText("every container is a VM of its own")).toBeVisible();
+  await expect(page.getByText("luoto needs Apple's container 1.7.1 or later")).toBeVisible();
+  await expect(page.getByText("brew install container")).toBeVisible();
+  await expect(page.getByText("luoto setup --runtime container")).toBeVisible();
+
+  await podman.check();
+  await expect(page.getByText(/^use the installed podman/)).toBeVisible();
+  await expect(page.getByText("luoto setup --runtime podman")).toBeVisible();
+  await expect(page.getByRole("button", { name: "install…" })).toHaveCount(0);
+
+  await apple.check();
+  await page.getByRole("button", { name: "install…" }).click();
+  await page.getByRole("button", { name: "run it" }).click();
+  await expect.poll(() => installs).toEqual([{ runtime: "container" }]);
+});
+
+test("on Apple's container the status bar and the env say each container is its own VM", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/overview",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...fixture("overview"),
+          runtime: "Apple's container 1.7.1: each container its own VM",
+        },
+      }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/envs/web",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...fixture("env"),
+          isolation: "a VM of its own (Apple's container; `isolation` doesn't apply)",
+        },
+      }),
+  );
+  await open(page);
+  await expect(page.getByText("Apple's container 1.7.1: each container its own VM")).toBeVisible();
+  await page.getByRole("button", { name: /^web/ }).click();
+  await expect(page.getByText(/isolation: a VM of its own \(Apple's container/)).toBeVisible();
 });

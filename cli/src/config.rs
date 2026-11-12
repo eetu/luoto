@@ -18,7 +18,7 @@ pub struct GlobalConfig {
     /// The config format (`format.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
-    /// `podman` or `docker` (or a path to either).
+    /// `podman`, `docker` or `container` (Apple's), or a path to one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     /// Podman connection / Docker context to use (e.g. the dedicated `luoto` machine).
@@ -560,6 +560,10 @@ pub struct EnvConfig {
     /// Plain env vars for the dev container.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Folders of this machine the env reads at `/shares/<name>`, never writes (`luoto share`,
+    /// `shares.rs`). Only the env's own file names them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shares: BTreeMap<String, String>,
     /// Transparent catch-all for tools that ignore the proxy settings (default on).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transparent: Option<bool>,
@@ -922,6 +926,7 @@ impl EnvFile {
         let up = crate::format::upgrade(&path, text)?;
         let cfg: EnvConfig =
             toml::from_str(&up.text).with_context(|| format!("parse {}", path.display()))?;
+        crate::shares::check_config(&cfg.shares).with_context(|| path.display().to_string())?;
         let doc: DocumentMut = up
             .text
             .parse()
@@ -1539,7 +1544,6 @@ impl EnvFile {
         self.save()
     }
 
-    /// Set `key = value` in the top-level table `table`, creating the table if needed.
     /// Set `values` in the table at `path` (`["credentials", "custom", "stripe"]`), made where
     /// missing, its other keys kept.
     pub fn set_in_tables(
@@ -1568,6 +1572,7 @@ impl EnvFile {
         self.save()
     }
 
+    /// Set `key = value` in the top-level table `table`, creating the table if needed.
     pub fn set_in_table(&mut self, table: &str, key: &str, value: &str) -> Result<()> {
         if !self.doc.contains_key(table) {
             self.doc[table] = toml_edit::table();
@@ -1577,6 +1582,53 @@ impl EnvFile {
             .with_context(|| format!("`{table}` is not a table"))?
             .insert(key, toml_edit::value(value));
         self.save()
+    }
+
+    /// Set variable `name` in `[env]` (a plain value) or `[sandbox_secrets]` (a ref), and drop
+    /// it from the other: a name lives in one of the two.
+    pub fn set_var(&mut self, secret: bool, name: &str, value: &str) -> Result<()> {
+        let (to, from) = if secret {
+            ("sandbox_secrets", "env")
+        } else {
+            ("env", "sandbox_secrets")
+        };
+        self.take_key(from, name)?;
+        self.set_in_table(to, name, value)
+    }
+
+    /// Remove `key` from the top-level table `table`, and the table once empty; whether it had
+    /// the key.
+    pub fn remove_from_table(&mut self, table: &str, key: &str) -> Result<bool> {
+        let had = self.take_key(table, key)?;
+        if had {
+            self.save()?;
+        }
+        Ok(had)
+    }
+
+    /// Remove variable `name` from `[env]` and `[sandbox_secrets]`; whether either had it.
+    pub fn remove_var(&mut self, name: &str) -> Result<bool> {
+        let had = self.take_key("env", name)? | self.take_key("sandbox_secrets", name)?;
+        if had {
+            self.save()?;
+        }
+        Ok(had)
+    }
+
+    /// Remove `key` from the top-level table `table`, and the table once empty; whether it had
+    /// the key. Not saved.
+    fn take_key(&mut self, table: &str, key: &str) -> Result<bool> {
+        let Some(item) = self.doc.get_mut(table) else {
+            return Ok(false);
+        };
+        let t = item
+            .as_table_like_mut()
+            .with_context(|| format!("`{table}` is not a table"))?;
+        let had = t.remove(key).is_some();
+        if had && t.is_empty() {
+            self.doc.remove(table);
+        }
+        Ok(had)
     }
 
     /// Add a package to `[deps] system`.

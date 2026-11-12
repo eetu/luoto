@@ -33,7 +33,6 @@ pub fn write<T>(l: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 
 #[derive(Serialize, Deserialize)]
 pub struct VaultSettings {
-    pub url: String,
     pub token: String,
 }
 
@@ -67,7 +66,7 @@ impl State {
             _ => None,
         };
         let vault = read_json::<VaultSettings>(&dir.join("vault.json"))?
-            .map(|v| Arc::new(VaultClient::new(v.url, v.token)));
+            .map(|v| Arc::new(VaultClient::new(cfg.vault_socket.clone(), v.token)));
         let client_tls = Arc::new(upstream_tls(&cfg, None)?);
         let host_tls = cfg
             .upstream_cas
@@ -80,7 +79,7 @@ impl State {
             })
             .collect::<Result<_>>()?;
         Ok(Arc::new(State {
-            events: Emitter::new(cfg.env.clone()),
+            events: Emitter::new(&cfg)?,
             conns: Conns::new(cfg.limits.conns),
             policy: RwLock::new(Arc::new(policy)),
             ca: RwLock::new(ca),
@@ -131,13 +130,14 @@ impl State {
         Ok(())
     }
 
-    pub fn set_vault(&self, url: String, token: String) -> Result<()> {
-        let settings = VaultSettings { url, token };
+    pub fn set_vault(&self, token: String) -> Result<()> {
+        let settings = VaultSettings { token };
         write_private(
             &self.cfg.state_dir.join("vault.json"),
             serde_json::to_vec(&settings)?.as_slice(),
         )?;
-        *write(&self.vault) = Some(Arc::new(VaultClient::new(settings.url, settings.token)));
+        let client = VaultClient::new(self.cfg.vault_socket.clone(), settings.token);
+        *write(&self.vault) = Some(Arc::new(client));
         Ok(())
     }
 
