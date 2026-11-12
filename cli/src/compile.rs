@@ -26,9 +26,32 @@ use crate::config::{
 };
 use crate::{azure, azure_identity, model_servers};
 
+/// What part of the config made a binding: how `credentials.rs` tells people what it is for
+/// and what changes it, never by reading the binding's name.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Origin {
+    /// `[credentials.github]`, the n-th (from 0) of its list.
+    GitHub(usize),
+    /// `[[credentials.git]]`, the n-th (from 0).
+    Git(usize),
+    AzureDevops,
+    Ssh,
+    /// `[credentials.azure]`, for one audience (`arm`, `graph`, …).
+    Azure(String),
+    Custom(String),
+    ModelServer(String),
+    /// A model provider's credential of one kind (`anthropic`, `oauth_token`).
+    Provider {
+        provider: String,
+        kind: String,
+    },
+}
+
 pub struct Compiled {
     pub policy: Policy,
     pub bindings: BTreeMap<String, BindingSpec>,
+    /// Where each binding came from, by binding.
+    pub origins: BTreeMap<String, Origin>,
     /// Refs exposed to the sandbox as env vars (`sandbox_secrets`), resolved at `up`.
     pub sandbox_refs: BTreeMap<String, String>,
     /// Placeholder and agent env vars for processes in the sandbox.
@@ -66,6 +89,7 @@ struct Builder {
     body_denies: Vec<BodyDeny>,
     injections: Vec<Injection>,
     bindings: BTreeMap<String, BindingSpec>,
+    origins: BTreeMap<String, Origin>,
     dev_env: BTreeMap<String, String>,
     warnings: Vec<String>,
     /// `url.<base>.insteadOf` pairs, as (base, prefix it replaces).
@@ -78,6 +102,12 @@ struct Builder {
 }
 
 impl Builder {
+    fn bind(&mut self, name: impl Into<String>, spec: BindingSpec, origin: Origin) {
+        let name = name.into();
+        self.origins.insert(name.clone(), origin);
+        self.bindings.insert(name, spec);
+    }
+
     fn rule(&mut self, id: String, origin: &str, mut rule: Rule) {
         rule.id = None;
         self.rules.push(CompiledRule {
@@ -273,6 +303,7 @@ pub fn compile(
     Ok(Compiled {
         policy,
         bindings: b.bindings,
+        origins: b.origins,
         sandbox_refs: cfg.sandbox_secrets.clone(),
         dev_env: b.dev_env,
         git_config: git_config(&b.rewrites),
@@ -457,10 +488,14 @@ fn compile_provider(
             );
         };
         let binding = format!("{pname}.{kind}");
-        b.bindings.insert(
+        b.bind(
             binding.clone(),
             BindingSpec::Static {
                 secret_ref: secret_ref.clone(),
+            },
+            Origin::Provider {
+                provider: pname.to_string(),
+                kind: kind.to_string(),
             },
         );
         for (host, paths, access) in p.hosts(write) {
@@ -513,11 +548,12 @@ fn compile_custom(b: &mut Builder, cname: &str, c: &CustomCred) -> Result<()> {
             )
         })?;
     let binding = format!("custom.{cname}");
-    b.bindings.insert(
+    b.bind(
         binding.clone(),
         BindingSpec::Static {
             secret_ref: c.secret.clone(),
         },
+        Origin::Custom(cname.to_string()),
     );
     b.injections.push(Injection {
         binding,
@@ -668,12 +704,13 @@ fn compile_ssh(b: &mut Builder, c: Option<&SshCred>) -> Result<(Vec<String>, Str
             b.rewrites.push((base.clone(), from.to_string()));
         }
     }
-    b.bindings.insert(
-        SSH_BINDING.into(),
+    b.bind(
+        SSH_BINDING,
         BindingSpec::SshAgent {
             key_ref: c.key.clone(),
             host_keys: lines.clone(),
         },
+        Origin::Ssh,
     );
     Ok((hosts, lines.join("\n") + "\n"))
 }
@@ -753,7 +790,7 @@ fn compile_github(b: &mut Builder, creds: &[GithubCred]) -> Result<Option<Github
         } else {
             format!("github-{}", i + 1)
         };
-        let write = compile_github_one(b, gh, &name, i == graphql)?;
+        let write = compile_github_one(b, gh, &name, i, i == graphql)?;
         for (o, r) in gh
             .repos
             .iter()
@@ -839,6 +876,7 @@ fn compile_github_one(
     b: &mut Builder,
     gh: &GithubCred,
     name: &str,
+    index: usize,
     graphql: bool,
 ) -> Result<Vec<String>> {
     if gh.repos.is_empty() && gh.read_repos.is_empty() {
@@ -885,25 +923,33 @@ fn compile_github_one(
                 api_base: gh.api_base.clone().unwrap_or_else(default_github_api),
             };
             if !repos.is_empty() {
-                b.bindings
-                    .insert(name.into(), app(&repos, permissions.clone()));
+                b.bind(
+                    name,
+                    app(&repos, permissions.clone()),
+                    Origin::GitHub(index),
+                );
             }
             if !read_repos.is_empty() {
                 let read = permissions
                     .keys()
                     .map(|k| (k.clone(), "read".to_string()))
                     .collect();
-                b.bindings.insert(read_name.clone(), app(&read_repos, read));
+                b.bind(
+                    read_name.clone(),
+                    app(&read_repos, read),
+                    Origin::GitHub(index),
+                );
             }
         }
         (None, None, Some(token)) => {
             // One token: its scope at GitHub decides what GraphQL can write; the gate keeps
             // git and REST writes to `repos`.
-            b.bindings.insert(
-                name.into(),
+            b.bind(
+                name,
                 BindingSpec::Static {
                     secret_ref: token.clone(),
                 },
+                Origin::GitHub(index),
             );
         }
         _ => {
@@ -1042,11 +1088,12 @@ fn compile_model_servers(b: &mut Builder, cfg: &EnvConfig) -> Result<()> {
             b.plain_http_credentials.push(host.clone());
         }
         let binding = format!("model_server.{name}");
-        b.bindings.insert(
+        b.bind(
             binding.clone(),
             BindingSpec::Static {
                 secret_ref: token.clone(),
             },
+            Origin::ModelServer(name.clone()),
         );
         let header = s
             .header
@@ -1213,11 +1260,12 @@ fn compile_git(
             .collect();
         let id = format!("git-{}", i + 1);
         if let Some(token) = &c.token {
-            b.bindings.insert(
+            b.bind(
                 id.clone(),
                 BindingSpec::Static {
                     secret_ref: token.clone(),
                 },
+                Origin::Git(i),
             );
             // Forges read repository paths in any case.
             b.injections.push(Injection {
@@ -1348,7 +1396,8 @@ fn compile_azure_identity(b: &mut Builder, c: &AzureCred) -> Result<AzureIdentit
             b.azcli
                 .insert(binding.clone(), spec.secret_ref().to_string());
         }
-        b.bindings.insert(binding.clone(), spec);
+        let short = binding.trim_start_matches("azure-").to_string();
+        b.bind(binding.clone(), spec, Origin::Azure(short));
         identity.audiences.insert(aud, binding.clone());
         let methods = match &access {
             Access::Level(AccessLevel::Write) => Vec::new(),
@@ -1497,11 +1546,12 @@ fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Ve
     };
     let (writable, readable) = (parse(&c.repos)?, parse(&c.read_repos)?);
     let repos: Vec<azure::Repo> = writable.iter().chain(&readable).cloned().collect();
-    b.bindings.insert(
-        "azure_devops".into(),
+    b.bind(
+        "azure_devops",
         BindingSpec::Static {
             secret_ref: c.token.clone(),
         },
+        Origin::AzureDevops,
     );
     let paths: Vec<String> = writable
         .iter()

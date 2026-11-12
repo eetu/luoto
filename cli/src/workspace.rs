@@ -14,6 +14,7 @@ use crate::config::{self, EnvFile, Workspace};
 use crate::env::{Ctx, UID};
 use crate::names;
 use crate::paths::Paths;
+use crate::runtime::exec;
 
 /// Heavy or machine-specific directories skipped when copying in either direction
 /// (`.terraform` holds the host platform's provider binaries; `terraform init` in the env
@@ -324,17 +325,10 @@ pub fn read_files(
     };
     let limit_arg = limit.to_string();
     let dev = names::dev(env);
-    let mut args = vec![
-        "exec",
-        "-u",
-        UID,
-        dev.as_str(),
-        "sh",
-        "-c",
-        READ_FILES,
-        &limit_arg,
-    ];
-    args.extend(rels.iter().map(String::as_str));
+    let mut args = exec(&dev)
+        .user(UID)
+        .argv(["sh", "-c", READ_FILES, &limit_arg]);
+    args.extend(rels.iter().cloned());
     let out = ctx
         .rt
         .command()
@@ -527,18 +521,18 @@ fn walk(
 pub fn push(ctx: &Ctx, env: &str, src: &Path, sub: Option<&str>) -> Result<usize> {
     let list = copy_list(src)?;
     let dev = names::dev(env);
-    let mut args = vec!["exec", "-i", "-u", UID, dev.as_str()];
-    match sub {
-        None => args.extend(["tar", "-x", "-f", "-", "-C", "/workspace"]),
+    let e = exec(&dev).stdin().user(UID);
+    let args = match sub {
+        None => e.argv(["tar", "-x", "-f", "-", "-C", "/workspace"]),
         // Into a hidden folder first, moved into place only once the whole archive is in, so
         // a copy cut short leaves no half-filled repo for the next `up` to take as done.
-        Some(name) => args.extend([
+        Some(name) => e.argv([
             "sh",
             "-c",
             r#"t="/workspace/.$0.luoto-copy"; rm -rf "$t" && mkdir "$t" && tar -x -f - -C "$t" && mv "$t" "/workspace/$0""#,
             name,
         ]),
-    }
+    };
     let mut child = ctx
         .rt
         .command()
@@ -760,16 +754,9 @@ pub fn plan_pull(ctx: &Ctx, env: &str, target: &PullTarget, include_git: bool) -
         Some(name) => format!("/workspace/{name}"),
         None => "/workspace".to_string(),
     };
-    let mut args = vec![
-        "exec".to_string(),
-        "-u".into(),
-        UID.into(),
-        names::dev(env),
-        "tar".into(),
-        "-c".into(),
-        "-f".into(),
-        "-".into(),
-    ];
+    let mut args = exec(&names::dev(env))
+        .user(UID)
+        .argv(["tar", "-c", "-f", "-"]);
     for d in COPY_SKIP {
         args.push(format!("--exclude={d}"));
     }
@@ -1062,6 +1049,48 @@ pub fn describe(plan: &PullPlan, w: &mut impl Write) -> std::io::Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// Every folder a pull writes, and one digest over them that applying checks.
+#[derive(serde::Serialize)]
+pub struct PullPlans {
+    pub plans: Vec<PullPlan>,
+    pub digest: String,
+}
+
+/// What a pull of every folder would write.
+pub fn pull_plans(ctx: &Ctx, name: &str) -> Result<PullPlans> {
+    let plans = crate::commands::pull_targets(ctx, name, None, None)?
+        .iter()
+        .map(|t| plan_pull(ctx, name, t, false))
+        .collect::<Result<Vec<_>>>()?;
+    let digest = plans
+        .iter()
+        .map(|p| p.digest.as_str())
+        .collect::<Vec<_>>()
+        .join(":");
+    Ok(PullPlans { plans, digest })
+}
+
+#[derive(serde::Serialize)]
+pub struct Pulled {
+    pub written: usize,
+    pub skipped: usize,
+}
+
+/// Pull every folder, if what it would write is still what `digest` reviewed.
+pub fn apply_pulls(ctx: &Ctx, name: &str, digest: &str, include_risky: bool) -> Result<Pulled> {
+    let all = pull_plans(ctx, name)?;
+    if all.digest != digest {
+        bail!("the env's files changed since you reviewed them; review again");
+    }
+    let (mut written, mut skipped) = (0, 0);
+    for plan in &all.plans {
+        let (w, s) = apply_pull(plan, include_risky)?;
+        written += w;
+        skipped += s;
+    }
+    Ok(Pulled { written, skipped })
 }
 
 #[cfg(test)]

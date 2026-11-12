@@ -17,6 +17,7 @@ use crate::config::{EnvConfig, EnvFile, ModelServer, ProviderValue};
 use crate::connect::exec_login;
 use crate::env::{self, Ctx, UID};
 use crate::logs::InstallLog;
+use crate::runtime::exec;
 use crate::state::EnvState;
 use crate::text::sh_quote;
 use crate::wizard::{Answer, Mode};
@@ -95,17 +96,7 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
                 || {
                     log.run(
                         &ctx.rt,
-                        [
-                            "exec",
-                            "-u",
-                            UID,
-                            "-w",
-                            "/workspace",
-                            &dev,
-                            "sh",
-                            "-lc",
-                            &script,
-                        ],
+                        exec(&dev).user(UID).cwd("/workspace").login_sh(&script),
                     )
                 },
             )
@@ -373,7 +364,7 @@ pub fn ensure(ctx: &Ctx, env_name: &str, agents: &[String], quiet: bool) -> Resu
     // A login shell, for the PATH agents install to (~/.local/bin, mise shims).
     let out = ctx
         .rt
-        .run(["exec", "-u", UID, dev.as_str(), "sh", "-lc", &script])
+        .run(exec(&dev).user(UID).login_sh(&script))
         .context("look for the env's agents")?;
     let missing: Vec<&str> = out.lines().map(str::trim).collect();
     let cfg = EnvFile::load(&ctx.paths, env_name)?.cfg;
@@ -616,14 +607,9 @@ fn register(
     a: &profiles::Agent,
     sets: &[profiles::JsonSet],
 ) -> Result<()> {
-    let mut args = vec![
-        "exec".to_string(),
-        "-u".into(),
-        UID.into(),
-        names::dev(env_name),
-        "/opt/luoto/bin/sandbox".into(),
-        "agent-setup".into(),
-    ];
+    let mut args = exec(&names::dev(env_name))
+        .user(UID)
+        .argv(["/opt/luoto/bin/sandbox", "agent-setup"]);
     if let Some(kind) = &a.mcp {
         args.push("--mcp".into());
         args.push(kind.clone());
@@ -1058,20 +1044,12 @@ pub fn headless(
     let gate_at_start =
         events::gate_events(&ctx.rt, env_name, Some(&since)).map(|evs| events::Mark::of(&evs));
     let mut cmd = ctx.rt.command();
-    cmd.args([
-        "exec",
-        "-u",
-        UID,
-        "-w",
-        "/workspace",
-        "-e",
-        &mark,
-        dev.as_str(),
+    cmd.args(exec(&dev).user(UID).cwd("/workspace").env(&mark).argv([
         "sh",
         "-c",
         crate::connect::LOGIN,
         &script,
-    ])
+    ]))
     .stdin(Stdio::null());
     // The agent's output is the sandbox's text: written as it is, never run, and escaped on a
     // terminal, where its escape sequences could otherwise drive it.
@@ -1198,9 +1176,8 @@ pub fn headless(
 /// Send `signal` to the processes of the run `mark` names in the env's dev container. As the
 /// dev user: root there lacks CAP_SYS_PTRACE, so it can't read another user's environ.
 fn signal_run(ctx: &Ctx, dev: &str, mark: &str, signal: &str) {
-    ctx.rt.succeeds([
-        "exec", "-u", UID, dev, "sh", "-c", SIGNAL_RUN, "sh", signal, mark,
-    ]);
+    ctx.rt
+        .succeeds(exec(dev).user(UID).sh_with(SIGNAL_RUN, [signal, mark]));
 }
 
 /// Write the agent's answer to `path` when given (the rest to stderr should that fail), else

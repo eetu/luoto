@@ -560,6 +560,10 @@ pub struct EnvConfig {
     /// Plain env vars for the dev container.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Folders of this machine the env reads at `/shares/<name>`, never writes (`luoto share`,
+    /// `shares.rs`). Only the env's own file names them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shares: BTreeMap<String, String>,
     /// Transparent catch-all for tools that ignore the proxy settings (default on).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transparent: Option<bool>,
@@ -922,6 +926,7 @@ impl EnvFile {
         let up = crate::format::upgrade(&path, text)?;
         let cfg: EnvConfig =
             toml::from_str(&up.text).with_context(|| format!("parse {}", path.display()))?;
+        crate::shares::check_config(&cfg.shares).with_context(|| path.display().to_string())?;
         let doc: DocumentMut = up
             .text
             .parse()
@@ -1589,6 +1594,16 @@ impl EnvFile {
         };
         self.take_key(from, name)?;
         self.set_in_table(to, name, value)
+    }
+
+    /// Remove `key` from the top-level table `table`, and the table once empty; whether it had
+    /// the key.
+    pub fn remove_from_table(&mut self, table: &str, key: &str) -> Result<bool> {
+        let had = self.take_key(table, key)?;
+        if had {
+            self.save()?;
+        }
+        Ok(had)
     }
 
     /// Remove variable `name` from `[env]` and `[sandbox_secrets]`; whether either had it.

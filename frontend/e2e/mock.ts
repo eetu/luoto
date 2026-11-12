@@ -11,6 +11,7 @@ import project from "./fixtures/project";
 import remote from "./fixtures/remote";
 import requests from "./fixtures/requests";
 import setup from "./fixtures/setup";
+import shares from "./fixtures/shares";
 import vault from "./fixtures/vault";
 
 // Fixtures are real `luoto ui` responses (env renamed to `web`), each checked against its
@@ -27,6 +28,7 @@ const fixtures = {
   remote,
   requests,
   setup,
+  shares,
   vault,
 };
 
@@ -46,6 +48,7 @@ const routes: Route[] = [
   { method: "GET", path: /^\/api\/envs\/web\/egress$/, body: () => fixture("egress") },
   { method: "GET", path: /^\/api\/envs\/web\/requests$/, body: () => fixture("requests") },
   { method: "GET", path: /^\/api\/envs\/web\/project$/, body: () => fixture("project") },
+  { method: "GET", path: /^\/api\/envs\/web\/shares$/, body: () => fixture("shares") },
   {
     method: "POST",
     path: /^\/api\/envs\/web\/rules$/,

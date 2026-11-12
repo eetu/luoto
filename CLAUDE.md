@@ -105,6 +105,14 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   `Policy.plain_http_credentials`). How an agent uses one is data (`[model_server]` in
   `shared/agents`); `agents::configure` writes it, and removes what a gone server had.
 - `personal.rs` data only flows host → sandbox, on every `up`.
+- `shares.rs` owns `[shares]`: folders of this machine an env reads at `/shares/<name>`.
+  They are cloned (`std::fs::copy`) into `shares::root()/<instance>/<env>/<name>` at `up` and
+  `luoto share sync` (what changed by size and mtime; no link followed), and that env folder
+  is bound read-only into the dev container; nothing is written through a link among the
+  clones. luoto's podman VM mounts only that root, read-only (`machine::ensure_shares`: asked,
+  one VM restart). Only the env's own file names one (`import` drops an archive's);
+  `shares::checked` (inside home but not home or app data, or on a disk; never a key folder)
+  runs at every sync.
 - `archive.rs` is the file `luoto export` writes and `luoto import` reads (`transfer.rs`):
   untrusted input, so every entry is decoded, checked and written anew. Volume contents move
   only through a container in the env's user namespace (`env::dev_id_map`), never onto the
@@ -112,8 +120,8 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
 - `ssh.rs` owns `<config>/ssh_config`; never edit the user's `~/.ssh/config`.
 - Secret values never touch disk or argv: host resolves refs and pipes them over `exec -i`
   stdin to the vault. Per-run env for the sandbox goes to its `/run/luoto` tmpfs.
-- `machine.rs` owns luoto's podman VM on macOS/Windows: no host mounts, a subordinate ID range
-  per env, gVisor plus the `luoto-runsc` wrapper (podman keeps a container's runtime path but
+- `machine.rs` owns luoto's podman VM on macOS/Windows: no host mounts but the shares root
+  (read-only, once a share needs it), a subordinate ID range per env, gVisor plus the `luoto-runsc` wrapper (podman keeps a container's runtime path but
   not its flags). The remote podman client can't choose a runtime, so gVisor containers are
   created by podman inside the VM (`podman machine ssh`); every later call uses the connection.
 - On Apple's `container` (`Flavor::Apple`) every container is a VM; there is no luoto VM. The

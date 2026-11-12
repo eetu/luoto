@@ -41,6 +41,7 @@ mod rules;
 mod runtime;
 mod secrets;
 mod setup;
+mod shares;
 mod ssh;
 mod state;
 mod sync;
@@ -270,6 +271,12 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<VarCmd>,
     },
+    /// Folders of this machine the env reads at /shares/<name>, read-only: data too large for a
+    /// repo (recordings, datasets).
+    Share {
+        #[command(subcommand)]
+        action: Option<ShareCmd>,
+    },
     /// Copy changed files from the env back to its folder, and its repos copied in from
     /// folders back to theirs (reviewed first).
     Pull {
@@ -462,6 +469,33 @@ enum RepoCmd {
         /// The repo's name in the workspace, or its path on the forge (`acme/api`).
         repo: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ShareCmd {
+    /// The env's shares, and which changed since the last sync.
+    #[command(visible_alias = "ls")]
+    List,
+    /// Share a folder: the env reads it at /shares/<name>, read-only, as of its last sync.
+    Add {
+        /// A folder inside your home folder (not a secret one such as ~/.ssh), or on a disk.
+        folder: String,
+        /// Its name (default: the folder's own, made lowercase).
+        #[arg(long)]
+        name: Option<String>,
+        /// Restart luoto's VM without asking, if it needs the shares folder first.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Bring the env's shares up to date now (`luoto up` does too).
+    Sync {
+        name: Option<String>,
+        /// Restart luoto's VM without asking, if it needs the shares folder first.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Stop sharing a folder.
+    Rm { name: String },
 }
 
 #[derive(Subcommand)]
@@ -658,6 +692,14 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             } => repos::add(&env()?, &source, name.as_deref(), branch.as_deref()),
             RepoCmd::Rm { name } => repos::rm(&env()?, &name),
             RepoCmd::Auth { repo } => repos::auth(&env()?, &repo),
+        },
+        Cmd::Share { action } => match action.unwrap_or(ShareCmd::List) {
+            ShareCmd::List => shares::list(&env()?),
+            ShareCmd::Add { folder, name, yes } => {
+                shares::add(&env()?, &folder, name.as_deref(), yes)
+            }
+            ShareCmd::Sync { name, yes } => shares::sync_cmd(&env()?, name.as_deref(), yes),
+            ShareCmd::Rm { name } => shares::rm(&env()?, &name),
         },
         Cmd::Var { action } => match action.unwrap_or(VarCmd::List) {
             VarCmd::List => vars::list(&env()?),

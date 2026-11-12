@@ -19,7 +19,7 @@ use crate::notify::Note;
 use crate::paths::{Paths, write_private};
 use crate::prompt::confirm;
 use crate::release::{self, repo_of};
-use crate::runtime::{Flavor, Runtime};
+use crate::runtime::{Flavor, Runtime, exec};
 use crate::{config, machine, names, text};
 
 /// Under this much free space `doctor`, `up` and the UI warn. An upgrade pulls a whole new set
@@ -449,17 +449,7 @@ fn build_dirs(rt: &Runtime, env: &str) -> Vec<String> {
     let dev = names::dev(env);
     let script = build_dirs_script();
     let out = rt.run_limited(
-        [
-            "exec",
-            "-u",
-            env::UID,
-            dev.as_str(),
-            "sh",
-            "-c",
-            outer.as_str(),
-            "sh",
-            script.as_str(),
-        ],
+        exec(&dev).user(env::UID).sh_with(&outer, [&script]),
         std::time::Duration::from_secs(BUILD_DIRS_SECS + 3),
         64 * 1024,
     );

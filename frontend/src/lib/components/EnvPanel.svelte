@@ -7,6 +7,7 @@
   import ProjectSection from "$lib/components/ProjectSection.svelte";
   import RulesSection from "$lib/components/RulesSection.svelte";
   import SelftestSection from "$lib/components/SelftestSection.svelte";
+  import SharesSection from "$lib/components/SharesSection.svelte";
   import VariablesSection from "$lib/components/VariablesSection.svelte";
   import WorkspaceSection from "$lib/components/WorkspaceSection.svelte";
   import { act, app } from "$lib/stores/app.svelte";
@@ -45,6 +46,7 @@
       {#each d.warnings as w, n (n)}<p class="warn">{w}</p>{/each}
 
       <WorkspaceSection />
+      <SharesSection />
       <DiskSection />
       <ProjectSection />
       <PortsSection />

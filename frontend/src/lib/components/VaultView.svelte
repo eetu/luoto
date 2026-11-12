@@ -68,7 +68,7 @@
         label: "Copy change command",
         run: () => c.change && copyText(c.change),
         disabled: !c.change,
-        hint: c.change ? undefined : "in the env's file: luoto edit",
+        hint: c.change ? undefined : "no command yet: the env's own file",
       },
       { label: "Copy where it is kept", run: () => copyText(c.kept) },
       { label: `Show ${c.env}'s egress`, run: () => void selectEnv(c.env) },

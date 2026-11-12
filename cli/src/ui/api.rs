@@ -23,8 +23,7 @@ use super::Ui;
 use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx, UpOptions};
 use crate::{
-    commands, ctl, detect, disk, egress, events, init, names, ports, project, rules, setup, sync,
-    workspace,
+    ctl, detect, disk, egress, events, init, names, ports, project, rules, setup, sync, workspace,
 };
 
 pub struct ApiError(StatusCode, Value);
@@ -87,6 +86,7 @@ pub fn routes() -> Router<Ui> {
             get(project_status).post(project_action),
         )
         .route("/envs/{name}/pull", get(pull_plan).post(pull_apply))
+        .route("/envs/{name}/shares", get(shares_view).post(shares_sync))
         .route("/envs/{name}/{action}", post(env_action))
         .route("/vault", get(vault_view))
         .route("/vault/{action}", post(vault_action))
@@ -477,28 +477,8 @@ async fn project_action(
     .map(Json)
 }
 
-/// Every folder a pull writes, and one digest over them that applying checks.
-#[derive(Serialize)]
-struct PullPlans {
-    plans: Vec<workspace::PullPlan>,
-    digest: String,
-}
-
-fn pull_plans(ctx: &Ctx, name: &str) -> anyhow::Result<PullPlans> {
-    let plans = commands::pull_targets(ctx, name, None, None)?
-        .iter()
-        .map(|t| workspace::plan_pull(ctx, name, t, false))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let digest = plans
-        .iter()
-        .map(|p| p.digest.as_str())
-        .collect::<Vec<_>>()
-        .join(":");
-    Ok(PullPlans { plans, digest })
-}
-
-async fn pull_plan(Path(name): Path<String>) -> ApiResult<PullPlans> {
-    blocking(move || pull_plans(&Ctx::load()?, &name))
+async fn pull_plan(Path(name): Path<String>) -> ApiResult<workspace::PullPlans> {
+    blocking(move || workspace::pull_plans(&Ctx::load()?, &name))
         .await
         .map(Json)
 }
@@ -510,29 +490,13 @@ struct PullApply {
     include_risky: bool,
 }
 
-#[derive(Serialize)]
-struct Pulled {
-    written: usize,
-    skipped: usize,
-}
-
-async fn pull_apply(Path(name): Path<String>, Json(a): Json<PullApply>) -> ApiResult<Pulled> {
-    blocking(move || {
-        let ctx = Ctx::load()?;
-        let all = pull_plans(&ctx, &name)?;
-        if all.digest != a.digest {
-            anyhow::bail!("the env's files changed since you reviewed them; review again");
-        }
-        let (mut written, mut skipped) = (0, 0);
-        for plan in &all.plans {
-            let (w, s) = workspace::apply_pull(plan, a.include_risky)?;
-            written += w;
-            skipped += s;
-        }
-        Ok(Pulled { written, skipped })
-    })
-    .await
-    .map(Json)
+async fn pull_apply(
+    Path(name): Path<String>,
+    Json(a): Json<PullApply>,
+) -> ApiResult<workspace::Pulled> {
+    blocking(move || workspace::apply_pulls(&Ctx::load()?, &name, &a.digest, a.include_risky))
+        .await
+        .map(Json)
 }
 
 #[derive(Serialize)]
@@ -597,6 +561,18 @@ async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
     })
     .await
     .map(Json)
+}
+
+async fn shares_view(Path(name): Path<String>) -> ApiResult<crate::shares::SharesView> {
+    blocking(move || crate::shares::view(&Ctx::load()?, &name))
+        .await
+        .map(Json)
+}
+
+async fn shares_sync(Path(name): Path<String>) -> ApiResult<crate::shares::SyncedShares> {
+    blocking(move || crate::shares::sync_for_ui(&Ctx::load()?, &name))
+        .await
+        .map(Json)
 }
 
 #[derive(Deserialize)]

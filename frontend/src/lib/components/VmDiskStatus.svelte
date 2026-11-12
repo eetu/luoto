@@ -1,8 +1,7 @@
 <script lang="ts">
-  import Copy from "@lucide/svelte/icons/copy";
-  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
-
-  import { app, copyText, diskSize, refreshVmDisk } from "$lib/stores/app.svelte";
+  import CopyCommand from "$lib/components/CopyCommand.svelte";
+  import SectionHead from "$lib/components/SectionHead.svelte";
+  import { app, diskSize, refreshVmDisk } from "$lib/stores/app.svelte";
 
   // The disk every env lives on: a full one stops them all, so a low one is flagged here,
   // with the command that frees luoto's superseded images.
@@ -16,15 +15,8 @@
   }
 </script>
 
-<div class="head">
-  <p class="label">disk</p>
-  <button
-    class="refresh"
-    aria-label="read disk space again"
-    title="read again"
-    disabled={busy}
-    onclick={() => void refresh()}><RefreshCw size={12} /></button
-  >
+<div class="top">
+  <SectionHead label="disk" what="read disk space again" {busy} onrefresh={() => void refresh()} />
 </div>
 {#if v}
   <div class="disk" title={v.place}>
@@ -42,37 +34,14 @@
       <p class="small muted">
         {v.prunable} superseded image(s), up to {diskSize(v.prunable_bytes)}:
       </p>
-      <button class="cmd" title="copy" onclick={() => copyText("luoto prune")}
-        ><code>luoto prune</code><Copy size={12} /></button
-      >
+      <CopyCommand cmd="luoto prune" />
     {/if}
   </div>
 {/if}
 
 <style>
-  .head {
-    display: flex;
-    gap: 6px;
-    align-items: baseline;
+  .top {
     margin-top: 22px;
-  }
-
-  .refresh {
-    display: inline-flex;
-    padding: 2px;
-    border: none;
-    border-radius: var(--halo-radius);
-    background: none;
-    color: var(--halo-text-muted);
-  }
-
-  .refresh:hover:not([disabled]) {
-    color: var(--halo-accent);
-  }
-
-  .refresh[disabled] {
-    opacity: 0.5;
-    cursor: default;
   }
 
   .disk {

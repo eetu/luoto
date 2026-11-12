@@ -104,6 +104,9 @@ DATABASE_URL = "op://Dev/local-db/url"
 [env]                         # plain environment variables in the env's shells
 RUST_LOG = "debug"
 
+[shares]                      # folders of this machine the env reads at /shares/<name>
+recordings = "/Users/me/Recordings"   # `luoto share add` writes these
+
 [resources]                   # the dev container's share of the VM; not with gVisor on podman
 cpus = 4
 memory = "8g"
@@ -152,6 +155,21 @@ the dev container that every shell loads; they leave with the container. Anythin
 needs a token in an HTTP header belongs under `[credentials.custom.<name>]` instead, where the
 sandbox never sees it. `luoto var` sets and removes both `[env]` and `[sandbox_secrets]`
 ([guide](guides/env-vars.md)).
+
+`[shares]` names folders of this machine the env reads at `/shares/<name>`, read-only, for
+data too large for a repo such as recordings or datasets. `luoto share add <folder> [--name
+<name>]` adds one; `luoto share` lists them with what changed since the last sync; `luoto
+share rm <name>` removes one. The env reads clones in `~/.local/share/luoto-shares`, which
+take no space until a file changes on APFS (macOS), btrfs and XFS when the folder is on the
+same disk, and are copies otherwise. Every `luoto up`, and `luoto share sync`, clones again the files that changed (by
+size and modification time) and removes the ones you deleted. A running env sees a share
+added or removed at once; one started before it had any shares needs `luoto up --recreate`
+once. With podman on macOS, luoto's VM mounts the shares folder read-only: the first share
+adds it, after a yes, by restarting the VM (every env in it stops until its next `luoto
+up`). A share is a folder inside your home folder, never home itself, a dot-folder or
+`~/Library`, or on a disk (`/Volumes`, `/mnt`, `/media`, `/srv`), and never a key folder
+(`.ssh`, `.aws`, …) or one inside it; only its plain files are cloned, never what a link in it points to, and
+only the env's own file names one. Not on Windows yet.
 
 A GitHub App for luoto needs only repository permissions such as Contents and Pull requests;
 luoto refuses Workflows, Actions, Secrets and Administration ([why](../SECURITY.md#what-holds-the-line)).

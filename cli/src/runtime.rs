@@ -46,6 +46,8 @@ pub struct RunSpec {
     /// One folder of a volume, read-only, as (volume, folder, target); podman, and Docker 26 or
     /// later ([`Runtime::mounts_folders`]).
     pub folder_mounts: Vec<(String, String, String)>,
+    /// Folders of this machine (or, for luoto's VM, of the VM), read-only, as (folder, target).
+    pub binds: Vec<(String, String)>,
     pub ports: Vec<(u16, u16)>,
     pub labels: Vec<(String, String)>,
     pub cap_drop_all: bool,
@@ -801,6 +803,12 @@ impl Runtime {
                 format!("type=volume,source={volume},target={dst},{subpath}={folder},ro"),
             ]);
         }
+        for (src, dst) in &spec.binds {
+            a.extend([
+                "--mount".into(),
+                format!("type=bind,source={src},target={dst},readonly"),
+            ]);
+        }
         for (host, cont) in &spec.ports {
             a.extend(["-p".into(), format!("127.0.0.1:{host}:{cont}")]);
         }
@@ -952,7 +960,7 @@ impl Runtime {
     /// Whether `script` succeeds in a login `sh` as `user` in `container` (the login PATH:
     /// mise shims, ~/.local/bin).
     pub fn exec_sh(&self, container: &str, user: &str, script: &str) -> bool {
-        self.succeeds(["exec", "-u", user, container, "sh", "-lc", script])
+        self.succeeds(exec(container).user(user).login_sh(script))
     }
 
     /// Run `script` with `sh -c` as `user` in `container`, `input` on its stdin; its stdout.
@@ -963,10 +971,87 @@ impl Runtime {
         script: &str,
         input: &[u8],
     ) -> Result<String> {
-        self.run_stdin(
-            ["exec", "-i", "-u", user, container, "sh", "-c", script],
-            input,
+        self.run_stdin(exec(container).stdin().user(user).sh(script), input)
+    }
+}
+
+/// One `exec` into a container, so that its flags are written only here. It ends in what runs
+/// (`sh`, `sh_with`, `login_sh`, `argv`), which gives the arguments `Runtime::run`, `run_stdin`,
+/// `succeeds`, `run_limited` and `command().args` take.
+#[derive(Debug, Clone)]
+pub struct Exec {
+    args: Vec<String>,
+    container: String,
+}
+
+pub fn exec(container: &str) -> Exec {
+    Exec {
+        args: vec!["exec".into()],
+        container: container.into(),
+    }
+}
+
+impl Exec {
+    fn flag(mut self, flag: &str, value: Option<&str>) -> Self {
+        self.args.push(flag.into());
+        self.args.extend(value.map(str::to_string));
+        self
+    }
+
+    pub fn user(self, user: &str) -> Self {
+        self.flag("-u", Some(user))
+    }
+
+    pub fn cwd(self, dir: &str) -> Self {
+        self.flag("-w", Some(dir))
+    }
+
+    /// One `NAME=value` in the process's environment.
+    pub fn env(self, var: &str) -> Self {
+        self.flag("-e", Some(var))
+    }
+
+    /// Keep stdin open (`-i`).
+    pub fn stdin(self) -> Self {
+        self.flag("-i", None)
+    }
+
+    pub fn tty(self) -> Self {
+        self.flag("-t", None)
+    }
+
+    /// Run `argv` as it is.
+    pub fn argv<S: AsRef<str>>(mut self, argv: impl IntoIterator<Item = S>) -> Vec<String> {
+        self.args.push(self.container);
+        self.args
+            .extend(argv.into_iter().map(|a| a.as_ref().to_string()));
+        self.args
+    }
+
+    /// `script` in `sh -c`.
+    pub fn sh(self, script: &str) -> Vec<String> {
+        self.argv(["sh", "-c", script])
+    }
+
+    /// `script` in `sh -c`, `args` its `$1`, `$2`, … (`$0` is `sh`): values never pasted into
+    /// the script.
+    pub fn sh_with<S: AsRef<str>>(
+        self,
+        script: &str,
+        args: impl IntoIterator<Item = S>,
+    ) -> Vec<String> {
+        let args: Vec<String> = args.into_iter().map(|a| a.as_ref().to_string()).collect();
+        self.argv(
+            ["sh", "-c", script, "sh"]
+                .into_iter()
+                .map(str::to_string)
+                .chain(args),
         )
+    }
+
+    /// `script` in a login `sh` (`sh -lc`: the login PATH, with mise shims and ~/.local/bin).
+    pub fn login_sh(self, script: &str) -> Vec<String> {
+        self.argv(["sh", "-lc", script])
     }
 }
 
@@ -995,6 +1080,12 @@ fn apple_run_args(spec: &RunSpec, create_only: bool) -> Vec<String> {
                 "type=volume,source={volume},target={dst}{}",
                 if *ro { ",readonly" } else { "" }
             ),
+        ]);
+    }
+    for (src, dst) in &spec.binds {
+        a.extend([
+            "--mount".into(),
+            format!("type=bind,source={src},target={dst},readonly"),
         ]);
     }
     for (host, cont) in &spec.ports {

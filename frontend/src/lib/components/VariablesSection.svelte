@@ -1,7 +1,6 @@
 <script lang="ts">
-  import Copy from "@lucide/svelte/icons/copy";
-
-  import { app, copyText } from "$lib/stores/app.svelte";
+  import CopyCommand from "$lib/components/CopyCommand.svelte";
+  import { app } from "$lib/stores/app.svelte";
 
   const d = $derived(app.detail);
 </script>
@@ -14,9 +13,7 @@
         none of your own; a plain one, or a secret luoto asks where it is kept:
       </p>
       {#each [`luoto var set -e ${d.name} NAME=value`, `luoto var set -e ${d.name} NAME`] as cmd (cmd)}
-        <button class="cmd" onclick={() => copyText(cmd)} title="copy"
-          ><code>{cmd}</code><Copy size={12} /></button
-        >
+        <CopyCommand {cmd} />
       {/each}
     {:else}
       <dl>
@@ -53,10 +50,5 @@
     margin: 0;
     min-width: 0;
     overflow-wrap: anywhere;
-  }
-
-  .cmd {
-    width: 100%;
-    margin-bottom: 4px;
   }
 </style>

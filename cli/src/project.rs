@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use crate::config::{Deps, EnvConfig, EnvFile, Repo, extend_unique};
 use crate::env::{Ctx, UpOptions};
 use crate::paths::write_private;
+use crate::runtime::exec;
 use crate::text::display;
 use crate::workspace::{self, Oversize};
 use crate::{deps, names, sync};
@@ -73,6 +74,12 @@ pub fn parse(text: &str) -> Result<ProjectConfig> {
                  list what the project needs under [needs]"
             );
         }
+    }
+    if table.contains_key("shares") {
+        bail!(
+            "luoto.toml can't hold `shares`: which folders of a machine an env reads is each \
+             developer's own (`luoto share add`)"
+        );
     }
     if table.contains_key("mute") {
         bail!(
@@ -237,16 +244,9 @@ pub fn write_env(ctx: &Ctx, env: &str, text: &str) -> Result<()> {
     let dev = names::dev(env);
     ctx.rt
         .run_stdin(
-            [
-                "exec",
-                "-i",
-                "-u",
-                crate::env::UID,
-                dev.as_str(),
-                "sh",
-                "-c",
+            exec(&dev).stdin().user(crate::env::UID).sh(
                 r#"t=$(mktemp /workspace/.luoto.toml.XXXXXX) && cat >"$t" && chmod 644 "$t" && mv -f "$t" /workspace/luoto.toml || { rm -f "$t"; exit 1; }"#,
-            ],
+            ),
             text.as_bytes(),
         )
         .with_context(|| format!("write /workspace/{FILE} in env `{env}`"))?;

@@ -1,5 +1,5 @@
 //! luoto's own podman machine on macOS and Windows (Linux runs containers natively): a VM with
-//! none of your folders mounted, a subordinate ID range large enough to give every env's dev
+//! none of your folders mounted but luoto's shares folder (read-only), a subordinate ID range large enough to give every env's dev
 //! container its own, and gVisor for the dev containers. Podman runs one machine at a time, so
 //! starting luoto's stops whichever other machine is running, after asking.
 
@@ -414,17 +414,157 @@ fn write_wrapper(bin: &str) -> Result<()> {
     Ok(())
 }
 
-/// Host folders mounted into the machine (none, for luoto's own).
+/// Host folders mounted into the machine, but luoto's read-only shares folder.
 pub fn host_mounts(bin: &str) -> Result<Vec<String>> {
-    let out = ssh(bin, "findmnt -rn -o TARGET,FSTYPE")?;
-    Ok(out
+    let out = ssh(bin, "findmnt -rn -o TARGET,FSTYPE,OPTIONS")?;
+    Ok(foreign_mounts(&out))
+}
+
+/// The host folders among `findmnt -rn -o TARGET,FSTYPE,OPTIONS` lines, but the shares
+/// folder mounted read-only.
+fn foreign_mounts(findmnt: &str) -> Vec<String> {
+    findmnt
         .lines()
-        .filter_map(|l| l.split_once(' '))
-        .filter(|(_, fs)| {
+        .filter_map(|l| {
+            let mut f = l.split(' ');
+            Some((f.next()?, f.next()?, f.next().unwrap_or("")))
+        })
+        .filter(|(_, fs, _)| {
             matches!(*fs, "virtiofs" | "9p" | "v9fs" | "drvfs") || fs.starts_with("fuse.sshfs")
         })
-        .map(|(t, _)| t.to_string())
-        .collect())
+        .filter(|(t, _, opts)| !(*t == SHARES_IN_VM && opts.split(',').any(|o| o == "ro")))
+        .map(|(t, _, _)| t.to_string())
+        .collect()
+}
+
+/// The one folder of the host the machine mounts, read-only: the shares (`shares.rs`), as
+/// its tag and where it is inside.
+pub const SHARES_TAG: &str = "luoto-shares";
+pub const SHARES_IN_VM: &str = "/var/mnt/luoto-shares";
+
+/// The machine's config file, which podman reads at every start.
+fn config_file(bin: &str) -> Option<PathBuf> {
+    let out = Command::new(bin)
+        .args(["machine", "inspect", NAME])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    let dir = PathBuf::from(v.as_array()?.first()?["ConfigDir"]["Path"].as_str()?);
+    let file = format!("{NAME}.json");
+    std::iter::once(dir.join(&file))
+        .chain(
+            std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path().join(&file)),
+        )
+        .find(|p| p.is_file())
+}
+
+/// Whether the machine's config attaches the shares folder.
+pub fn has_shares(bin: &str) -> bool {
+    config_file(bin)
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .is_some_and(|v| shares_entry(&v).is_some())
+}
+
+fn shares_entry(config: &Value) -> Option<&Value> {
+    config["Mounts"]
+        .as_array()?
+        .iter()
+        .find(|m| m["Tag"] == SHARES_TAG)
+}
+
+/// `config` with the shares folder `root` attached, read-only. Refused unless it has the
+/// shape luoto knows (a `Mounts` list), so another podman's format isn't guessed at.
+fn with_shares(mut config: Value, root: &Path) -> Result<Value> {
+    if shares_entry(&config).is_some() {
+        return Ok(config);
+    }
+    let source = root.to_string_lossy().into_owned();
+    let mounts = config
+        .get_mut("Mounts")
+        .and_then(Value::as_array_mut)
+        .context(
+            "luoto's VM config has no `Mounts` list: this podman keeps its folders elsewhere",
+        )?;
+    mounts.push(serde_json::json!({
+        "OriginalInput": format!("{source}:{SHARES_IN_VM}:ro"),
+        "ReadOnly": true,
+        "Source": source,
+        "Tag": SHARES_TAG,
+        "Target": SHARES_IN_VM,
+        "Type": "virtiofs",
+        "VSockNumber": null,
+    }));
+    Ok(config)
+}
+
+/// Attach the shares folder `root` to the stopped machine: podman attaches what its config
+/// names at every start, and has no command that adds a folder later.
+pub fn add_shares(bin: &str, root: &Path) -> Result<()> {
+    let path = config_file(bin).context("luoto's VM config file not found")?;
+    let config: Value = serde_json::from_slice(&std::fs::read(&path)?)
+        .with_context(|| format!("read {}", path.display()))?;
+    let config = with_shares(config, root)?;
+    // Whole or not at all: a half-written file would leave podman unable to start the VM.
+    let tmp = path.with_extension("json.luoto");
+    std::fs::write(&tmp, serde_json::to_vec(&config)?)
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .with_context(|| format!("write {}", path.display()))
+}
+
+/// Mount the attached shares folder inside the running machine, read-only and for containers
+/// to read (SELinux), at every boot: a systemd unit, written once.
+pub fn mount_shares(bin: &str) -> Result<()> {
+    ssh(
+        bin,
+        &format!(
+            "set -e; u=$(systemd-escape --path --suffix=mount {SHARES_IN_VM}); \
+             f=/etc/systemd/system/$u; \
+             want='[Unit]\nDescription=luoto shares\n[Mount]\nWhat={SHARES_TAG}\nWhere={SHARES_IN_VM}\nType=virtiofs\nOptions=ro,nodev,nosuid,noexec,context=system_u:object_r:container_file_t:s0\n[Install]\nWantedBy=multi-user.target'; \
+             if [ \"$(cat \"$f\" 2>/dev/null)\" != \"$(printf \"$want\")\" ]; then \
+               sudo mkdir -p {SHARES_IN_VM}; printf \"$want\\n\" | sudo tee \"$f\" >/dev/null; \
+               sudo systemctl daemon-reload; \
+             fi; \
+             sudo systemctl enable --now \"$u\" >/dev/null 2>&1"
+        ),
+    )
+    .map(drop)
+    .context("mount the shares folder in luoto's VM")
+}
+
+/// Give the stopped or running machine the shares folder `root`: attached, the machine
+/// restarted (every env in it stops), and mounted. `yes`, or a yes on the terminal, allows
+/// the restart; without either, the error names `again`, the command with `--yes`.
+pub fn ensure_shares(bin: &str, root: &Path, yes: bool, again: &str) -> Result<()> {
+    if has_shares(bin) {
+        if running(bin) {
+            mount_shares(bin)?;
+        }
+        return Ok(());
+    }
+    let ok = yes
+        || crate::prompt::confirm(
+            "Shares need one read-only folder of this machine in luoto's VM. Adding it restarts \
+             the VM: every env in it stops until its next `luoto up`. Add it?",
+        );
+    if !ok {
+        bail!(
+            "luoto's VM has no shares folder yet: `{again}` adds it (a VM restart, which stops \
+             every env in it)"
+        );
+    }
+    std::fs::create_dir_all(root)?;
+    if running(bin) {
+        stop(bin)?;
+    }
+    add_shares(bin, root)?;
+    start(bin, yes)?;
+    mount_shares(bin)
 }
 
 #[cfg(test)]
@@ -437,6 +577,39 @@ mod tests {
         let status = "FIELD   VALUE\nstatus  running\nclient.version  1.7.1\n";
         assert!(super::apple_service_running(status));
         assert!(!super::apple_service_running("status  stopped\n"));
+    }
+
+    #[test]
+    fn only_the_read_only_shares_folder_may_be_mounted() {
+        let ro = format!("{} virtiofs ro,nosuid,nodev,noexec", super::SHARES_IN_VM);
+        let rw = format!("{} virtiofs rw,nosuid", super::SHARES_IN_VM);
+        let other = "/Users virtiofs ro";
+        assert!(super::foreign_mounts(&format!("/ xfs rw\n{ro}")).is_empty());
+        assert_eq!(super::foreign_mounts(&rw), [super::SHARES_IN_VM]);
+        assert_eq!(super::foreign_mounts(other), ["/Users"]);
+    }
+
+    #[test]
+    fn the_shares_folder_joins_the_config_once_and_only_one_luoto_knows() {
+        let root = std::path::Path::new("/Users/someone/.local/share/luoto-shares");
+        let cfg = serde_json::json!({"Mounts": [], "Name": "luoto"});
+        let once = super::with_shares(cfg, root).unwrap();
+        let twice = super::with_shares(once.clone(), root).unwrap();
+        assert_eq!(once, twice);
+        let m = &once["Mounts"][0];
+        assert_eq!(
+            (
+                m["Tag"].as_str(),
+                m["Target"].as_str(),
+                m["ReadOnly"].as_bool()
+            ),
+            (
+                Some(super::SHARES_TAG),
+                Some(super::SHARES_IN_VM),
+                Some(true)
+            )
+        );
+        assert!(super::with_shares(serde_json::json!({"Name": "luoto"}), root).is_err());
     }
 
     #[test]

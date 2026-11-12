@@ -80,7 +80,7 @@ export type Credential = {
   /** Where the gate adds it; an SSH key's, the hosts it logs in to. */
   hosts: string[];
   state: CredState;
-  /** The command that changes it; none: the env's own file does (`luoto edit`). */
+  /** The command that changes it; none for kinds only the env's own file sets. */
   change: string | null;
 };
 
@@ -587,11 +587,36 @@ export type SetupInfo = {
   images_ok: boolean;
 };
 
+/** A share as it stands: its folder's files, and how many differ from the env's clones. */
+export type ShareStatus = {
+  name: string;
+  folder: string;
+  files: number;
+  bytes: number;
+  /** Files changed, added or removed in the folder since the last sync. */
+  changed: number;
+  /** Why it can't be synced (the folder gone, or refused); none when it can. */
+  error: string | null;
+};
+
+/** An env's shares as the UI shows them. */
+export type SharesView = {
+  shares: ShareStatus[];
+  /** What the env still needs to read them: the command that gives it. */
+  fix: string | null;
+};
+
 export type Shown = {
   created: string;
 };
 
 export type Source = "gate" | "vault";
+
+/** What a sync from the UI did: a line per share, for people. */
+export type SyncedShares = {
+  said: string[];
+  failed: boolean;
+};
 
 export type ToolPin = {
   tool: string;

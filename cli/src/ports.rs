@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::env::UID;
 use crate::paths::{Paths, write_private};
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, exec};
 
 /// Ports the watcher forwards on its own: above the privileged ones, below Linux's ephemeral
 /// range (where servers asking for any free port land, editors' remote servers among them).
@@ -97,7 +97,7 @@ pub fn url(port: u16) -> String {
 /// TCP ports something listens on in the env's dev container; None if that can't be asked.
 pub fn listening(rt: &Runtime, dev: &str) -> Option<BTreeSet<u16>> {
     let out = rt
-        .run(["exec", dev, "cat", "/proc/net/tcp", "/proc/net/tcp6"])
+        .run(exec(dev).argv(["cat", "/proc/net/tcp", "/proc/net/tcp6"]))
         .ok()?;
     Some(parse_listening(&out))
 }
@@ -122,7 +122,7 @@ impl Listening {
         );
         let mut child = rt
             .command()
-            .args(["exec", dev, "sh", "-c", &script])
+            .args(exec(dev).sh(&script))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -258,16 +258,12 @@ fn accept(l: &TcpListener, stop: &AtomicBool, rt: &Runtime, dev: &str, port: u16
 fn relay(rt: &Runtime, dev: &str, port: u16, stream: TcpStream) -> Result<()> {
     let mut child = rt
         .command()
-        .args([
-            "exec",
-            "-i",
-            "-u",
-            UID,
-            dev,
-            "sandbox",
-            "relay",
-            &port.to_string(),
-        ])
+        .args(
+            exec(dev)
+                .stdin()
+                .user(UID)
+                .argv(["sandbox", "relay", &port.to_string()]),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

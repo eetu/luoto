@@ -22,7 +22,7 @@ use crate::config::{self, EnvConfig, EnvFile};
 use crate::env::{self, Ctx};
 use crate::paths::{Paths, write_private};
 use crate::prompt::confirm;
-use crate::runtime::{Flavor, Runtime};
+use crate::runtime::{Flavor, Runtime, exec};
 use crate::state::{self, EnvState};
 use crate::text::display;
 use crate::{ca, disk, names, project, repos, workspace};
@@ -99,7 +99,7 @@ impl<'a> VolumeBox<'a> {
             // Apple formats a new volume with an empty lost+found, which isn't the env's.
             if write {
                 let rmdir = format!("rmdir {MOUNT}/lost+found 2>/dev/null; true");
-                ctx.rt.run(["exec", &name, "sh", "-c", &rmdir])?;
+                ctx.rt.run(exec(&name).sh(&rmdir))?;
             }
         }
         Ok(b)
@@ -108,19 +108,21 @@ impl<'a> VolumeBox<'a> {
     /// The runtime's arguments that run `cmd` with the volume at [`MOUNT`], `input` on its
     /// stdin when asked.
     fn args(&self, input: bool, cmd: Vec<String>) -> Vec<String> {
-        let mut a: Vec<String> = match &self.helper {
+        match &self.helper {
             Some(h) => {
-                let mut a = vec!["exec".to_string()];
+                let mut e = exec(h);
                 if input {
-                    a.push("-i".into());
+                    e = e.stdin();
                 }
-                a.push(h.clone());
+                e.argv(cmd)
+            }
+            None => {
+                let mut a =
+                    volume_container(self.rt, &self.image, &self.vol, self.id_map, self.write);
+                a.extend(cmd);
                 a
             }
-            None => volume_container(self.rt, &self.image, &self.vol, self.id_map, self.write),
-        };
-        a.extend(cmd);
-        a
+        }
     }
 }
 
@@ -758,6 +760,16 @@ fn summary(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) -> Vec<String>
             _ => {}
         }
     }
+    // Folders of the machine it came from: never shared here (`import` drops them).
+    if !cfg.shares.is_empty() {
+        line(
+            "shares",
+            format!(
+                "{} of the machine it came from, left out (`luoto share add` here)",
+                cfg.shares.len()
+            ),
+        );
+    }
     let refs = secret_refs(&head.config);
     let az = cfg
         .credentials
@@ -996,7 +1008,7 @@ pub fn import(file: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
         bail!("env `{name}` exists here: `--name` imports it under another name");
     }
     // In the current format; an older one is upgraded as it is read.
-    let cfg = EnvFile::parse(cfg_path.clone(), &head.config).context("its config")?;
+    let mut cfg = EnvFile::parse(cfg_path.clone(), &head.config).context("its config")?;
     // Its folders are text until the yes: nothing here looks one up.
     repos::check(&cfg.cfg.workspace).context("its config")?;
     repos::check_folders_text(&cfg.cfg.workspace).context("its config")?;
@@ -1006,6 +1018,9 @@ pub fn import(file: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
     if !yes && !confirm(&format!("Import it as `{name}`?")) {
         bail!("nothing imported (`--yes` imports without asking)");
     }
+    // Which folders of a machine an env reads is that machine's own.
+    cfg.doc.remove("shares");
+    cfg.cfg.shares.clear();
     env::ensure_vm(&ctx)?;
     clear_leftovers(&ctx, &name)?;
     if let Ok(Some(s)) = disk::space(&ctx.rt)

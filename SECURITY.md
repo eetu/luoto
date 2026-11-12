@@ -121,8 +121,17 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   spelling, names that collide by case, and paths and symlinks that leave the folder. A
   pulled `.gitignore` decides what later copies leave out, so review its changes. `pull`
   never writes into your home folder or a folder that holds it. With podman on macOS and Windows, envs run only in
-  luoto's own VM, which mounts none of your folders (`luoto doctor` checks), so an escape
-  doesn't reach your home directory.
+  luoto's own VM, which mounts none of your folders but luoto's shares folder, read-only
+  (`luoto doctor` checks), so an escape reaches what you shared, not your home directory.
+- **Shared folders** (`luoto share`). A folder you share is cloned into luoto's shares
+  folder and the env's clones are mounted read-only at `/shares`, readable by any code
+  there; nothing flows back, and a change in the folder arrives only with a sync. Only its
+  plain files are cloned, never what a link in it points to. Only the env's own file names
+  one (never a `luoto.toml`, and `luoto import` leaves an archive's out), checked again at
+  every sync: a folder inside your home folder but not home itself, a dot-folder or
+  `~/Library`, or on a disk (`/Volumes`, `/mnt`, `/media`, `/srv`), and never a key folder
+  (`.ssh`, `.aws`, …) or one inside it. luoto's podman VM mounts the whole shares folder, so an escape from one env into
+  the VM reads every env's shares.
 - **Repositories cloned inside** (`luoto init <remote>`). The env's workspace is cloned in the
   env, through the gate, as the unprivileged user, with nothing on the host: git brings no
   hooks, submodules aren't fetched and LFS files stay pointers, and `.gitattributes` filters

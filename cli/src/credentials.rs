@@ -9,7 +9,7 @@ use luoto_shared::creds::SSH_BINDING;
 use luoto_shared::ctl::VaultStatus;
 use serde::Serialize;
 
-use crate::compile::Compiled;
+use crate::compile::{Compiled, Origin};
 use crate::config::EnvConfig;
 
 #[derive(Debug, Clone, Serialize)]
@@ -23,7 +23,7 @@ pub struct Credential {
     /// Where the gate adds it; an SSH key's, the hosts it logs in to.
     pub hosts: Vec<String>,
     pub state: CredState,
-    /// The command that changes it; none: the env's own file does (`luoto edit`).
+    /// The command that changes it; none for kinds only the env's own file sets.
     pub change: Option<String>,
     #[serde(skip)]
     secret_ref: String,
@@ -79,7 +79,10 @@ pub fn of(
             };
             hosts.sort();
             hosts.dedup();
-            let (what, change) = describe(env, cfg, binding);
+            let (what, change) = match compiled.origins.get(binding) {
+                Some(o) => describe(env, cfg, binding, o),
+                None => (binding.clone(), None),
+            };
             Credential {
                 env: env.to_string(),
                 binding: binding.clone(),
@@ -106,74 +109,69 @@ pub fn unused(vault: &VaultStatus, credentials: &[Credential]) -> Vec<String> {
         .collect()
 }
 
-/// What `binding` is for, and the command that changes it, from the config that made it.
-fn describe(env: &str, cfg: &EnvConfig, binding: &str) -> (String, Option<String>) {
+/// What a binding is for, and the command that changes it, from the config that made it.
+fn describe(
+    env: &str,
+    cfg: &EnvConfig,
+    binding: &str,
+    origin: &Origin,
+) -> (String, Option<String>) {
     let repo_auth = |repo: Option<&String>| {
         repo.map(|r| format!("luoto repo auth -e {env} {}", crate::text::display(r)))
     };
     let creds = &cfg.credentials;
-    // `github`, `github-read`, `github-2`, `github-2-read`: the GitHub credential's index.
-    if let Some(rest) = binding.strip_prefix("github") {
-        let rest = rest.strip_suffix("-read").unwrap_or(rest);
-        let i = match rest.strip_prefix('-') {
-            None if rest.is_empty() => Some(0),
-            Some(n) => n.parse::<usize>().ok().map(|n| n - 1),
-            None => None,
-        };
-        if let Some(gh) = i.and_then(|i| creds.github.0.get(i)) {
+    let unknown = || (binding.to_string(), None);
+    match origin {
+        Origin::GitHub(i) => {
+            let Some(gh) = creds.github.0.get(*i) else {
+                return unknown();
+            };
             let repos: Vec<&String> = gh.repos.iter().chain(&gh.read_repos).collect();
             let kind = if gh.app_id.is_some() { "App" } else { "token" };
-            return (
+            (
                 format!("GitHub {kind} for {}", list(&repos)),
                 repo_auth(repos.first().copied()),
-            );
+            )
+        }
+        Origin::Git(i) => {
+            let Some(g) = creds.git.get(*i) else {
+                return unknown();
+            };
+            let repos: Vec<&String> = g.repos.iter().chain(&g.read_repos).collect();
+            (
+                format!("git token for {} ({})", g.host, list(&repos)),
+                repo_auth(repos.first().copied()),
+            )
+        }
+        Origin::AzureDevops => {
+            let Some(a) = &creds.azure_devops else {
+                return unknown();
+            };
+            let repos: Vec<&String> = a.repos.iter().chain(&a.read_repos).collect();
+            (
+                format!("Azure DevOps token for {}", list(&repos)),
+                repo_auth(repos.first().copied()),
+            )
+        }
+        Origin::Ssh => ("SSH key, signed with in the vault".into(), None),
+        Origin::Azure(aud) => (format!("Azure identity ({aud})"), None),
+        Origin::Custom(name) => (format!("custom credential {name}"), None),
+        Origin::ModelServer(name) => (format!("model server {name}'s token"), None),
+        Origin::Provider { provider, kind } => {
+            // An agent's provider: `luoto agent auth` asks again.
+            let agent = cfg.agents.names().find(|a| {
+                luoto_shared::profiles::agent(a)
+                    .is_some_and(|p| p.providers.iter().any(|x| x == provider))
+            });
+            match agent {
+                Some(a) => (
+                    format!("{provider} {kind}, for {a}"),
+                    Some(format!("luoto agent auth -e {env} {a}")),
+                ),
+                None => (format!("{provider} {kind}"), None),
+            }
         }
     }
-    if let Some(n) = binding.strip_prefix("git-")
-        && let Some(g) = n.parse::<usize>().ok().and_then(|n| creds.git.get(n - 1))
-    {
-        let repos: Vec<&String> = g.repos.iter().chain(&g.read_repos).collect();
-        return (
-            format!("git token for {} ({})", g.host, list(&repos)),
-            repo_auth(repos.first().copied()),
-        );
-    }
-    if binding == "azure_devops"
-        && let Some(a) = &creds.azure_devops
-    {
-        let repos: Vec<&String> = a.repos.iter().chain(&a.read_repos).collect();
-        return (
-            format!("Azure DevOps token for {}", list(&repos)),
-            repo_auth(repos.first().copied()),
-        );
-    }
-    if binding == SSH_BINDING {
-        return ("SSH key, signed with in the vault".into(), None);
-    }
-    if let Some(aud) = binding.strip_prefix("azure-") {
-        return (format!("Azure identity ({aud})"), None);
-    }
-    if let Some(name) = binding.strip_prefix("custom.") {
-        return (format!("custom credential {name}"), None);
-    }
-    if let Some(name) = binding.strip_prefix("model_server.") {
-        return (format!("model server {name}'s token"), None);
-    }
-    if let Some((provider, kind)) = binding.split_once('.') {
-        // An agent's provider: `luoto agent auth` asks again.
-        let agent = cfg.agents.names().find(|a| {
-            luoto_shared::profiles::agent(a)
-                .is_some_and(|p| p.providers.iter().any(|x| x == provider))
-        });
-        return match agent {
-            Some(a) => (
-                format!("{provider} {kind}, for {a}"),
-                Some(format!("luoto agent auth -e {env} {a}")),
-            ),
-            None => (format!("{provider} {kind}"), None),
-        };
-    }
-    (binding.to_string(), None)
 }
 
 fn list(items: &[&String]) -> String {
@@ -209,6 +207,10 @@ secret = "op://Dev/billing/key"
         )
         .unwrap();
         let c = crate::compile::compile("web", &cfg, None, &[]).unwrap();
+        assert!(
+            c.bindings.keys().eq(c.origins.keys()),
+            "every binding has its origin"
+        );
         let vault = VaultStatus {
             version: "x".into(),
             started: chrono::Utc::now(),

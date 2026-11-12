@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.4
+## 0.4.4 (2026-11-12)
 
 - **Apple's `container`:** on macOS 26 on Apple silicon, `luoto setup` offers it first
   (`--runtime container`; `--install` runs `brew install container`). It runs every container
@@ -19,6 +19,15 @@
   credential placeholders) and the shell's own are refused. `luoto ui`'s env panel lists
   them, and names what luoto sets itself. New guide:
   [environment variables](docs/guides/env-vars.md).
+- **`luoto share`:** folders of this machine the env reads at `/shares/<name>`, read-only:
+  recordings, datasets, data too large for a repo. `luoto share add <folder>`; `luoto up`
+  and `luoto share sync` bring what changed. The env reads clones, which take no space on
+  APFS, btrfs or XFS until a file changes (a folder on another disk is copied). luoto's
+  podman VM mounts luoto's shares folder read-only, added after a yes and one VM restart.
+  A folder inside your home folder (not home itself, a dot-folder or `~/Library`) or on a
+  disk, never a key folder; only the env's own file names one, and `luoto import` leaves an
+  archive's out. `luoto ui`'s env panel lists each share with what changed on this machine
+  since the last sync, and syncs them. Not on Windows yet.
 - **Variable requests:** code in the env asks for a variable with a plain value, which it may
   suggest (`sandbox request --var NAME[=VALUE]`, MCP `sandbox_request_var`). `luoto approve
   <id>` confirms the value, `luoto ui` shows it filled in to check, and `luoto var set` answers

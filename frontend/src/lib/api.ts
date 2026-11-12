@@ -28,7 +28,9 @@ import type {
   RuntimeChoice,
   SelftestReport,
   SetupInfo,
+  SharesView,
   Shown,
+  SyncedShares,
   VaultView,
   VmDisk,
 } from "./types";
@@ -153,6 +155,8 @@ export const api = {
       digest,
       include_risky: includeRisky,
     }),
+  shares: (name: string) => request<SharesView>("GET", `${env(name)}/shares`),
+  syncShares: (name: string) => request<SyncedShares>("POST", `${env(name)}/shares`, {}),
   vault: (action: "unlock" | "lock") => request<unknown>("POST", `/vault/${action}`, {}),
   reloadVault: () => request<Reloaded>("POST", "/vault/reload", {}),
   vaultView: () => request<VaultView>("GET", "/vault"),

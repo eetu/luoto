@@ -5,7 +5,7 @@ use luoto_shared::ctl::{CtlResponse, GateCtl, GateStatus, VaultCtl, VaultStatus}
 use serde::de::DeserializeOwned;
 
 use crate::names;
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, exec};
 
 fn call<T: DeserializeOwned>(
     rt: &Runtime,
@@ -13,8 +13,7 @@ fn call<T: DeserializeOwned>(
     argv: &[&str],
     body: String,
 ) -> Result<T> {
-    let mut args = vec!["exec", "-i", container];
-    args.extend_from_slice(argv);
+    let args = exec(container).stdin().argv(argv);
     let out = match rt.run_stdin(&args, format!("{body}\n").as_bytes()) {
         Ok(o) => o,
         Err(e) => {

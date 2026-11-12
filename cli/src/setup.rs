@@ -672,7 +672,8 @@ fn podman_ready(
 
     let rt = Runtime::from_config(global)?;
     if rt.flavor == Flavor::Podman && machine::supported() {
-        // Envs run in luoto's own VM: none of your folders, an ID range per env, gVisor.
+        // Envs run in luoto's own VM: none of your folders but the shares folder once you share
+        // one, an ID range per env, gVisor.
         if !machine::exists(&rt.bin) {
             let memory = machine::host_memory_mib().map_or(4096, |m| (m / 4).clamp(4096, 16_384));
             let cpus = u32::try_from(d.cpus / 2).unwrap_or(2).max(2);
@@ -681,6 +682,9 @@ fn podman_ready(
         machine::start(&rt.bin, o.yes)?;
         let mounts = crate::progress::wait("checking luoto's VM", || {
             machine::prepare(&rt.bin)?;
+            if machine::has_shares(&rt.bin) {
+                machine::mount_shares(&rt.bin)?;
+            }
             machine::host_mounts(&rt.bin)
         })?;
         if !mounts.is_empty() {
@@ -852,9 +856,14 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
             return Ok(true);
         }
         match crate::progress::wait("checking luoto's VM", || machine::host_mounts(&ctx.rt.bin)) {
-            Ok(m) if m.is_empty() => {
-                out.say("VM: luoto's own, none of your folders mounted".into())
-            }
+            Ok(m) if m.is_empty() => out.say(
+                if machine::has_shares(&ctx.rt.bin) {
+                    "VM: luoto's own, none of your folders mounted but the shares folder, read-only"
+                } else {
+                    "VM: luoto's own, none of your folders mounted"
+                }
+                .into(),
+            ),
             Ok(m) => {
                 ok = false;
                 out.say(format!(

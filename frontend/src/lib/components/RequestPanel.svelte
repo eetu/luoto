@@ -1,20 +1,11 @@
 <script lang="ts">
-  import Copy from "@lucide/svelte/icons/copy";
   import { untrack } from "svelte";
 
   import { api } from "$lib/api";
+  import CopyCommand from "$lib/components/CopyCommand.svelte";
   import Risks from "$lib/components/Risks.svelte";
   import Segmented from "$lib/components/Segmented.svelte";
-  import {
-    act,
-    ago,
-    app,
-    copyText,
-    installLabel,
-    requestTarget,
-    say,
-    TTLS,
-  } from "$lib/stores/app.svelte";
+  import { act, ago, app, installLabel, requestTarget, say, TTLS } from "$lib/stores/app.svelte";
   import type { Narrowing } from "$lib/types";
 
   let { id }: { id: number } = $props();
@@ -154,12 +145,7 @@
           : ""}Written into the env's file as it is, and any code in the env can read it. A secret
         you add yourself, on a terminal:
       </p>
-      <button
-        class="cmd"
-        onclick={() => copyText(`luoto var set -e ${app.env} ${variable.name}`)}
-        title="copy"
-        ><code>luoto var set -e {app.env} {variable.name}</code><Copy size={12} /></button
-      >
+      <CopyCommand cmd={`luoto var set -e ${app.env} ${variable.name}`} />
       <div class="actions">
         <button class="btn primary" onclick={() => void approveVar()} disabled={!!app.busy}
           >approve</button

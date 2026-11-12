@@ -116,6 +116,12 @@ impl Plan {
                 paths.data.clone(),
                 "env state and CAs, luoto's SSH key, events and logs",
             ),
+            (
+                crate::shares::root()
+                    .map(|r| r.join(inst))
+                    .unwrap_or_default(),
+                "the clones of shared folders",
+            ),
         ]
         .into_iter()
         .filter(|(p, _)| p.exists())

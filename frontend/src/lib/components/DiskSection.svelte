@@ -1,6 +1,5 @@
 <script lang="ts">
-  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
-
+  import SectionHead from "$lib/components/SectionHead.svelte";
   import { app, diskSize, loadEnvDisk } from "$lib/stores/app.svelte";
 
   // One read measures every env, so it happens when an env panel first shows and on refresh.
@@ -12,16 +11,12 @@
 </script>
 
 <div class="section">
-  <div class="head">
-    <p class="label">disk</p>
-    <button
-      class="refresh"
-      aria-label="measure disk use again"
-      title="measure again (the runtime walks every volume)"
-      disabled={app.envDiskBusy}
-      onclick={() => void loadEnvDisk()}><RefreshCw size={12} /></button
-    >
-  </div>
+  <SectionHead
+    label="disk"
+    what="measure disk use again"
+    busy={app.envDiskBusy}
+    onrefresh={() => void loadEnvDisk()}
+  />
   {#if app.envDiskBusy && !sizes}
     <p class="small muted">measuring…</p>
   {:else if app.envDiskError}
@@ -42,30 +37,6 @@
 </div>
 
 <style>
-  .head {
-    display: flex;
-    gap: 6px;
-    align-items: baseline;
-  }
-
-  .refresh {
-    display: inline-flex;
-    padding: 2px;
-    border: none;
-    border-radius: var(--halo-radius);
-    background: none;
-    color: var(--halo-text-muted);
-  }
-
-  .refresh:hover:not([disabled]) {
-    color: var(--halo-accent);
-  }
-
-  .refresh[disabled] {
-    opacity: 0.5;
-    cursor: default;
-  }
-
   .parts {
     display: grid;
     grid-template-columns: max-content max-content;

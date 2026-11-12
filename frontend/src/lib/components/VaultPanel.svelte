@@ -1,7 +1,6 @@
 <script lang="ts">
-  import Copy from "@lucide/svelte/icons/copy";
-
-  import { app, copyText, openVault, selectEnv } from "$lib/stores/app.svelte";
+  import CopyCommand from "$lib/components/CopyCommand.svelte";
+  import { app, openVault, selectEnv } from "$lib/stores/app.svelte";
 
   const v = $derived(app.vault);
   const status = $derived(v?.status ?? null);
@@ -24,7 +23,6 @@
     credentials: v?.credentials.length ?? 0,
     missing: v?.credentials.filter((c) => c.state === "missing").length ?? 0,
   });
-  const change = $derived(cred ? (cred.change ?? `luoto edit -e ${cred.env}`) : "");
 </script>
 
 <div class="panel">
@@ -55,10 +53,11 @@
     </div>
     <div class="section">
       <p class="label">change it</p>
-      <button class="cmd" onclick={() => copyText(change)} title="copy"
-        ><code>{change}</code><Copy size={12} /></button
-      >
-      {#if !cred.change}<p class="muted small">in the env's own file, under [credentials]</p>{/if}
+      {#if cred.change}
+        <CopyCommand cmd={cred.change} />
+      {:else}
+        <p class="muted small">no command yet: it is in the env's own file, under [credentials]</p>
+      {/if}
     </div>
     <div class="actions">
       <button class="btn" onclick={() => void selectEnv(cred.env)}>show {cred.env}'s egress</button>
@@ -92,10 +91,6 @@
     margin: 0;
     font-size: 15px;
     word-break: break-all;
-  }
-
-  .cmd {
-    width: 100%;
   }
 
   .err {

@@ -16,7 +16,7 @@ use crate::compile::{Compiled, compile};
 use crate::config::{self, EnvConfig, EnvFile, GlobalConfig, Isolation};
 use crate::events::Mutes;
 use crate::paths::Paths;
-use crate::runtime::{Flavor, RunSpec, Runtime};
+use crate::runtime::{Flavor, RunSpec, Runtime, exec};
 use crate::state::{self, EnvState};
 use crate::{
     azure, ca, ctl, deps, machine, names, personal, project, repos, secrets, ssh, sync, workspace,
@@ -628,6 +628,15 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     if repos != state.repos {
         EnvState::update(&ctx.paths, env, |s| s.repos = repos)?;
     }
+    // Shared folders: what changed in them since the last sync is cloned in again.
+    for s in crate::shares::sync(ctx, env, &p.cfg, None) {
+        if s.worth_saying() {
+            crate::progress::say(|| println!("{}", s.said()));
+        }
+    }
+    if let Some(cmd) = crate::shares::needs(ctx, env, &p.cfg) {
+        crate::progress::say(|| println!("the env can't read its shares yet: `{cmd}`"));
+    }
     // New clones bring files of their own: the presets and toolchains they suggest, offered
     // as `luoto init` offers a folder's.
     let mut install = true;
@@ -1076,10 +1085,36 @@ fn start_gate(
 fn dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &str) -> Result<RunSpec> {
     let rt = &ctx.rt;
     let cfg = &p.cfg;
-    let a = names::addrs(state.octet);
+    // What every runtime's dev container has: its volumes, its shares (read-only at /shares;
+    // shares added later appear without a restart) and init.sh as root.
+    let base = RunSpec {
+        name: names::dev(env),
+        image: p.image.clone(),
+        mounts: vec![
+            (names::volume(env, "work"), "/workspace".into(), false),
+            (names::volume(env, "home"), state.home().into(), false),
+            (names::volume(env, "tools"), "/opt/luoto".into(), true),
+        ],
+        binds: crate::shares::mount_source(ctx, env, cfg)?
+            .into_iter()
+            .map(|src| (src, crate::shares::IN_ENV.to_string()))
+            .collect(),
+        tmpfs: vec!["/run/luoto:rw,mode=755,size=4m".into()],
+        entrypoint: Some("/opt/luoto/init.sh".into()),
+        user: Some("0:0".into()),
+        // init.sh comes from the tools image and runs only at container start, so a new
+        // tools image makes the container's spec stale.
+        labels: [
+            labels(env, "dev"),
+            vec![("luoto.tools".into(), tools_id.into())],
+        ]
+        .concat(),
+        ..Default::default()
+    };
     if rt.flavor == Flavor::Apple {
-        return Ok(apple_dev_spec(ctx, env, p, state, tools_id));
+        return Ok(apple_dev_spec(ctx, env, cfg, base));
     }
+    let a = names::addrs(state.octet);
     let gvisor = cfg.isolation(&ctx.global) == Isolation::Gvisor;
     let runsc = if gvisor {
         Some(ctx.global.gvisor.clone().context(
@@ -1094,21 +1129,11 @@ fn dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &str) ->
         });
     }
     Ok(RunSpec {
-        name: names::dev(env),
-        image: p.image.clone(),
         hostname: Some(env.into()),
         networks: vec![(names::internal_net(env), Some(a.dev))],
         dns: vec![a.gate.to_string()],
         add_hosts: vec![(luoto_shared::GATE_HOST.into(), a.gate.to_string())],
         env: static_dev_env(env, a.gate),
-        mounts: vec![
-            (names::volume(env, "work"), "/workspace".into(), false),
-            (names::volume(env, "home"), state.home().into(), false),
-            (names::volume(env, "tools"), "/opt/luoto".into(), true),
-        ],
-        tmpfs: vec!["/run/luoto:rw,mode=755,size=4m".into()],
-        entrypoint: Some("/opt/luoto/init.sh".into()),
-        user: Some("0:0".into()),
         memory: cfg.resources.memory.clone().filter(|_| !gvisor),
         cpus: cfg.resources.cpus.filter(|_| !gvisor),
         oci_runtime: runsc,
@@ -1119,23 +1144,15 @@ fn dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &str) ->
             Vec::new()
         },
         id_map: dev_id_map(rt, state.octet),
-        // init.sh comes from the tools image and runs only at container start, so a new
-        // tools image makes the container's spec stale.
-        labels: [
-            labels(env, "dev"),
-            vec![("luoto.tools".into(), tools_id.into())],
-        ]
-        .concat(),
         log_mb: Some(DEV_LOG_MB),
-        ..Default::default()
+        ..base
     })
 }
 
 /// The dev container on Apple: a VM of its own, which is the isolation `isolation = "gvisor"`
 /// asks for, so the setting (and an OCI runtime) has nothing to choose there. No network: its
 /// only link is the tun device `sandbox` makes on the published socket.
-fn apple_dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &str) -> RunSpec {
-    let cfg = &p.cfg;
+fn apple_dev_spec(ctx: &Ctx, env: &str, cfg: &EnvConfig, base: RunSpec) -> RunSpec {
     let dev_sock = link_sockets(ctx, env).dev;
     let gate_ip: Ipv4Addr = APPLE_GATE_IP.parse().unwrap_or(Ipv4Addr::UNSPECIFIED);
     let mut env_vars = static_dev_env(env, gate_ip);
@@ -1144,16 +1161,9 @@ fn apple_dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &s
     // Apple keeps the container's output uncapped: init.sh closes it once ready.
     env_vars.push(("LUOTO_OUTPUT".into(), "startup".into()));
     RunSpec {
-        name: names::dev(env),
-        image: p.image.clone(),
         networks: vec![("none".into(), None)],
         dns: vec![APPLE_GATE_IP.into()],
         env: env_vars,
-        mounts: vec![
-            (names::volume(env, "work"), "/workspace".into(), false),
-            (names::volume(env, "home"), state.home().into(), false),
-            (names::volume(env, "tools"), "/opt/luoto".into(), true),
-        ],
         published_sockets: vec![(dev_sock.display().to_string(), APPLE_DEV_SOCKET.into())],
         // The VM's console is logged uncapped on the host: the kernel writes to it only what
         // stops it, and keeps no audit trail (with none, sudo stays quiet without AUDIT_WRITE).
@@ -1177,9 +1187,6 @@ fn apple_dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &s
         ]
         .map(String::from)
         .to_vec(),
-        tmpfs: vec!["/run/luoto:rw,mode=755,size=4m".into()],
-        entrypoint: Some("/opt/luoto/init.sh".into()),
-        user: Some("0:0".into()),
         memory: Some(
             cfg.resources
                 .memory
@@ -1187,12 +1194,7 @@ fn apple_dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &s
                 .unwrap_or_else(|| APPLE_DEV_MEMORY.into()),
         ),
         cpus: cfg.resources.cpus,
-        labels: [
-            labels(env, "dev"),
-            vec![("luoto.tools".into(), tools_id.into())],
-        ]
-        .concat(),
-        ..Default::default()
+        ..base
     }
 }
 
@@ -1261,7 +1263,7 @@ fn start_dev(
         ])?;
     }
     wait_until(Duration::from_secs(90), || {
-        rt.succeeds(["exec", &names::dev(env), "test", "-f", "/run/luoto/ready"])
+        rt.succeeds(exec(&names::dev(env)).argv(["test", "-f", "/run/luoto/ready"]))
             .then_some(())
     })
     .with_context(|| {
@@ -1294,7 +1296,7 @@ fn after_start(
     // includes, so only a plain POSIX user name is kept.
     let reported = ctx
         .rt
-        .run(["exec", &names::dev(env), "cat", "/run/luoto/user"])
+        .run(exec(&names::dev(env)).argv(["cat", "/run/luoto/user"]))
         .ok()
         .map(|u| u.trim().to_string());
     let user = reported
@@ -1369,15 +1371,10 @@ impl SelftestReport {
 }
 
 pub fn selftest(ctx: &Ctx, env: &str, probe: Option<&str>) -> Result<SelftestReport> {
-    let mut args: Vec<String> = vec![
-        "exec".into(),
-        "-u".into(),
-        UID.into(),
-        names::dev(env),
-        "/opt/luoto/bin/sandbox".into(),
-        "selftest".into(),
-        "--json".into(),
-    ];
+    let mut args =
+        exec(&names::dev(env))
+            .user(UID)
+            .argv(["/opt/luoto/bin/sandbox", "selftest", "--json"]);
     if let Some(p) = probe {
         args.push("--probe".into());
         args.push(p.into());
@@ -1455,6 +1452,7 @@ pub fn remove(ctx: &Ctx, env: &str) -> Result<()> {
     if state.exists() {
         std::fs::remove_dir_all(&state)?;
     }
+    crate::shares::forget(env);
     Ok(())
 }
 

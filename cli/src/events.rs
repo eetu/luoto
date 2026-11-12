@@ -11,7 +11,7 @@ use luoto_shared::policy::{Mute, OPEN_RULE};
 use serde::Serialize;
 
 use crate::names;
-use crate::runtime::{Flavor, Runtime};
+use crate::runtime::{Flavor, Runtime, exec};
 
 /// Parse event lines out of mixed container output (diagnostics on stderr are skipped).
 pub fn parse_lines(text: &str) -> Vec<Event> {
@@ -53,16 +53,9 @@ fn logs_args(rt: &Runtime, container: &str, since: Option<&str>, follow: bool) -
 /// The runtime arguments that print a gate's event file, the last `lines` of it when given.
 pub fn file_args(container: &str, follow: bool, lines: Option<usize>) -> Vec<String> {
     // As the user the gate drops to, who owns the file: an exec has no capability to read it.
-    let mut args: Vec<String> = [
-        "exec",
-        "-u",
-        "65534:65534",
-        container,
-        "luoto-gate",
-        "events",
-    ]
-    .map(String::from)
-    .into();
+    let mut args = exec(container)
+        .user("65534:65534")
+        .argv(["luoto-gate", "events"]);
     if follow {
         args.push("-f".into());
     }

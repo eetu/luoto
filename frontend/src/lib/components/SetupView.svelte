@@ -1,8 +1,7 @@
 <script lang="ts">
-  import Copy from "@lucide/svelte/icons/copy";
-
   import { api } from "$lib/api";
-  import { act, copyText, errorText, say } from "$lib/stores/app.svelte";
+  import CopyCommand from "$lib/components/CopyCommand.svelte";
+  import { act, errorText, say } from "$lib/stores/app.svelte";
   import type { RuntimeChoice, SetupInfo } from "$lib/types";
 
   // First run: what this machine has, what luoto recommends, and the one confirmed step to
@@ -146,9 +145,7 @@
 
       {#if option && (!ready || !option.current)}
         <p class="small finish">then, in a terminal:</p>
-        <button class="cmd" title="copy" onclick={() => copyText(option.setup)}
-          ><code>{option.setup}</code><Copy size={12} /></button
-        >
+        <CopyCommand cmd={option.setup} />
       {/if}
     </div>
 

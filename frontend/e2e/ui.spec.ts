@@ -472,6 +472,39 @@ test("the env panel lists its variables, a secret by where it is kept", async ({
   await expect(page.getByText("set by luoto: GIT_TERMINAL_PROMPT")).toBeVisible();
 });
 
+test("the env panel shows its shares, what changed on this machine, and syncs them", async ({
+  page,
+}) => {
+  const writes = await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/shares",
+    async (route, req) => {
+      if (req.method() === "POST") {
+        writes.push({ method: "POST", path: "/api/envs/web/shares", body: null });
+        await route.fulfill({
+          json: {
+            said: ["share recordings: 1 file(s) updated; 3 file(s), 1.5 GB in all"],
+            failed: false,
+          },
+        });
+        return;
+      }
+      const synced = writes.some((w) => w.path === "/api/envs/web/shares");
+      const view = fixture("shares");
+      if (synced) view.shares[0].changed = 0;
+      await route.fulfill({ json: view });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  await expect(page.getByText("/shares/recordings")).toBeVisible();
+  await expect(page.getByText("1 changed on this machine since the last sync")).toBeVisible();
+  await page.getByRole("button", { name: "sync", exact: true }).click();
+  await expect(page.getByText("3 files, 1.5 GB, up to date")).toBeVisible();
+  await expect(page.getByText("share recordings: 1 file(s) updated")).toBeVisible();
+});
+
 test("the vault is a view of every env's credentials, each with how to change it", async ({
   page,
 }) => {

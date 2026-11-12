@@ -14,6 +14,7 @@ use crate::azure_identity::{self, AZCLI};
 use crate::compile::Compiled;
 use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx, Plan};
+use crate::runtime::exec;
 use crate::state::EnvState;
 use crate::{ctl, names, secrets};
 
@@ -129,12 +130,7 @@ pub fn reapply(ctx: &Ctx, env: &str) -> Result<Option<Plan>> {
     load_secrets(ctx, &p.compiled.vault_refs(), &format!("`{env}`"), false)?;
     let applied = ctx
         .rt
-        .run([
-            "exec",
-            &names::dev(env),
-            "cat",
-            &format!("{RUN_DIR}/{ENV_SUM}"),
-        ])
+        .run(exec(&names::dev(env)).argv(["cat", &format!("{RUN_DIR}/{ENV_SUM}")]))
         .unwrap_or_default();
     if applied.trim() != runtime_env_sum(&p.compiled) {
         write_runtime_env(ctx, env, &p.compiled)?;
@@ -383,20 +379,10 @@ pub fn write_runtime_env(ctx: &Ctx, env: &str, compiled: &Compiled) -> Result<()
         (ENV_SUM, runtime_env_sum(compiled).as_bytes()),
     ])?;
     ctx.rt.run_stdin(
-        [
-            "exec",
-            "-i",
-            "-u",
-            "0",
-            &names::dev(env),
-            "tar",
-            "-x",
-            "-m",
-            "-f",
-            "-",
-            "-C",
-            RUN_DIR,
-        ],
+        exec(&names::dev(env))
+            .stdin()
+            .user("0")
+            .argv(["tar", "-x", "-m", "-f", "-", "-C", RUN_DIR]),
         &tar,
     )?;
     Ok(())
