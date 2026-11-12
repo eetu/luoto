@@ -22,6 +22,10 @@ jobs:
   # Which areas a pull request touches; each job below runs only for its own. Docs (README,
   # docs/, other markdown), LICENSE and packaging/ run nothing but ci-gate. A scheduled or
   # manual run runs every job.
+  #
+  # Frontend, Integration and E2E also skip when they already passed on these very inputs:
+  # each saves a marker keyed by a hash of the files its filter names, and a later push to
+  # the pull request that leaves them as they were finds it. The weekly run ignores markers.
   changes:
     name: Changes
     runs-on: ubuntu-latest
@@ -29,10 +33,22 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      frontend: ${{ github.event_name != 'pull_request' || steps.filter.outputs.frontend }}
+      frontend: >-
+        ${{ github.event_name != 'pull_request'
+        || (steps.filter.outputs.frontend == 'true' && steps.frontend.outputs.cache-hit != 'true') }}
       rust: ${{ github.event_name != 'pull_request' || steps.filter.outputs.rust }}
-      integration: ${{ github.event_name != 'pull_request' || steps.filter.outputs.integration }}
-      e2e: ${{ github.event_name != 'pull_request' || steps.filter.outputs.e2e }}
+      integration: >-
+        ${{ github.event_name != 'pull_request'
+        || (steps.filter.outputs.integration == 'true'
+        && steps.integration.outputs.cache-hit != 'true') }}
+      e2e: >-
+        ${{ github.event_name != 'pull_request'
+        || (steps.filter.outputs.e2e == 'true'
+        && (steps.e2e-podman.outputs.cache-hit != 'true'
+        || steps.e2e-docker.outputs.cache-hit != 'true')) }}
+      frontend-key: ${{ steps.keys.outputs.frontend }}
+      integration-key: ${{ steps.keys.outputs.integration }}
+      e2e-key: ${{ steps.keys.outputs.e2e }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -74,6 +90,51 @@ jobs:
               - tools/**
               - image/**
               - Containerfile
+      # The same files as the filters above, hashed: a job's marker key.
+      - id: keys
+        if: github.event_name == 'pull_request'
+        run: |
+          {
+            echo "frontend=passed-frontend-$FRONTEND"
+            echo "integration=passed-integration-$INTEGRATION"
+            echo "e2e=passed-e2e-$E2E"
+          } >>"$GITHUB_OUTPUT"
+        env:
+          FRONTEND: ${{ hashFiles('.github/workflows/ci.yaml', 'frontend/**') }}
+          INTEGRATION: >-
+            ${{ hashFiles('.github/workflows/ci.yaml', 'Cargo.toml', 'Cargo.lock', 'shared/**',
+            'gate/**', 'vault/**', 'integration/**') }}
+          E2E: >-
+            ${{ hashFiles('.github/workflows/ci.yaml', 'Cargo.toml', 'Cargo.lock', 'shared/**',
+            'gate/**', 'vault/**', 'cli/**', 'tools/**', 'image/**', 'Containerfile') }}
+      - id: frontend
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .passed
+          key: ${{ steps.keys.outputs.frontend }}
+          lookup-only: true
+      - id: integration
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .passed
+          key: ${{ steps.keys.outputs.integration }}
+          lookup-only: true
+      - id: e2e-podman
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .passed
+          key: ${{ steps.keys.outputs.e2e }}-podman
+          lookup-only: true
+      - id: e2e-docker
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .passed
+          key: ${{ steps.keys.outputs.e2e }}-docker
+          lookup-only: true
 
   frontend:
     name: Frontend
@@ -94,6 +155,14 @@ jobs:
           yarn format
           yarn typecheck
           yarn build
+      - name: Remember the pass
+        if: github.event_name == 'pull_request'
+        run: mkdir -p .passed && echo ok >.passed/ok
+      - if: github.event_name == 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .passed
+          key: ${{ needs.changes.outputs.frontend-key }}
 
   rust:
     name: Rust (${{ matrix.os }})
@@ -154,6 +223,14 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test -p luoto-integration -- --ignored --test-threads=1
+      - name: Remember the pass
+        if: github.event_name == 'pull_request'
+        run: mkdir -p .passed && echo ok >.passed/ok
+      - if: github.event_name == 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .passed
+          key: ${{ needs.changes.outputs.integration-key }}
 
   e2e:
     name: E2E (${{ matrix.runtime }})
@@ -255,6 +332,14 @@ jobs:
           check 403 --noproxy '*' https://example.com/
           $L egress -e ci
           exit $fail
+      - name: Remember the pass
+        if: github.event_name == 'pull_request'
+        run: mkdir -p .passed && echo ok >.passed/ok
+      - if: github.event_name == 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .passed
+          key: ${{ needs.changes.outputs.e2e-key }}-${{ matrix.runtime }}
       - name: Gate networking, when a check failed
         if: failure()
         run: |
