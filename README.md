@@ -139,7 +139,7 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host> --reason …`
 asks you for access (`<host>:<port>` for a tunnel; `--preset npm` for a registry's hosts at
 once; `--package <name>` or `--tool <tool>@<version>` for software to keep; `--var <NAME>=<value>`
-or `--secret <NAME>` for a variable); only you can approve, on the host. A new request gets a desktop notification, as does the first denial at
+for a plain variable); only you can approve, on the host. A new request gets a desktop notification, as does the first denial at
 each host (macOS through `terminal-notifier`, which Homebrew installs with luoto, else
 `osascript`, whose come from Script Editor; Linux with `notify-send`). Without
 them (turned off, or on Windows), the bell in `luoto ui` gives browser notifications for

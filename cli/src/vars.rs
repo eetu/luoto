@@ -2,7 +2,7 @@
 //! values; `[sandbox_secrets]` holds refs, resolved on this machine at `up` and readable by
 //! any code in the env. A name lives in one of the two.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
@@ -57,16 +57,46 @@ pub fn of(cfg: &EnvConfig) -> BTreeMap<String, Value> {
 
 /// What is wrong with `name` as a variable of the env's.
 pub fn check_name(name: &str) -> Result<()> {
-    if !luoto_shared::variable_name(name) {
-        bail!(
-            "`{}` is not a variable name (letters, digits and `_`, not starting with a digit)",
-            display(name)
-        );
+    match luoto_shared::variable_refused(name) {
+        Some(why) => bail!("{}", display(&why)),
+        None => Ok(()),
     }
-    if luoto_shared::luoto_sets(name) {
-        bail!("luoto sets `{name}` in every env itself (its proxy, CA bundle or own names)");
+}
+
+/// What luoto sets in the env's shells besides its own variables: credentials' placeholders
+/// and agents' settings. A value of the env's own in their place would replace a placeholder,
+/// and could put the real secret where the gate keeps it out.
+pub fn luoto_names(compiled: &crate::compile::Compiled, cfg: &EnvConfig) -> BTreeSet<String> {
+    compiled
+        .dev_env
+        .keys()
+        .filter(|k| !cfg.env.contains_key(*k))
+        .cloned()
+        .collect()
+}
+
+/// [`check_name`], and that luoto sets no `name` of its own in `env`.
+fn check_free(ctx: &Ctx, env: &str, name: &str) -> Result<()> {
+    check_name(name)?;
+    let p = crate::env::plan(ctx, env)?;
+    if luoto_names(&p.compiled, &p.cfg).contains(name) {
+        bail!("luoto sets `{name}` in `{env}` itself, for one of its credentials or agents");
     }
     Ok(())
+}
+
+/// What setting `name` to `value` replaces in the other table, for people.
+fn replaces(cfg: &EnvConfig, name: &str, value: &Value) -> Option<String> {
+    match value {
+        Value::Plain(_) => cfg
+            .sandbox_secrets
+            .get(name)
+            .map(|r| format!("the secret from {}", crate::secrets::shown_ref(r))),
+        Value::Secret(_) => cfg
+            .env
+            .get(name)
+            .map(|v| format!("the plain value `{}`", display(v))),
+    }
 }
 
 /// Set `name` to `value` in the env's file, out of the other table if it was there.
@@ -84,6 +114,7 @@ pub fn set(paths: &Paths, env: &str, name: &str, value: &Value) -> Result<()> {
 
 /// Ask where the secret `name` is kept and write its ref; whether it wrote one.
 pub fn ask(ctx: &Ctx, mode: Mode, env: &str, name: &str, own: &EnvConfig) -> Result<bool> {
+    check_free(ctx, env, name)?;
     println!(
         "{}",
         text::wrap(
@@ -96,8 +127,9 @@ pub fn ask(ctx: &Ctx, mode: Mode, env: &str, name: &str, own: &EnvConfig) -> Res
         )
     );
     let label = format!("`{}`", display(name));
-    let acct = format!("sandbox.{name}");
-    let title = format!("luoto sandbox {name}");
+    // The env's own: the same name in another env never offers this one's.
+    let acct = format!("sandbox.{env}.{name}");
+    let title = format!("luoto {env} {name}");
     let help = crate::prompt::menu_help(mode.esc());
     let ask = crate::wizard::SecretAsk {
         label: &label,
@@ -115,12 +147,13 @@ pub fn ask(ctx: &Ctx, mode: Mode, env: &str, name: &str, own: &EnvConfig) -> Res
         return Ok(false);
     };
     let value = Value::Secret(r);
+    let was = replaces(own, name, &value);
     set(&ctx.paths, env, name, &value)?;
-    summary(env, name, &value);
+    summary(env, name, &value, was);
     Ok(true)
 }
 
-fn summary(env: &str, name: &str, value: &Value) {
+fn summary(env: &str, name: &str, value: &Value, replaced: Option<String>) {
     let (title, row, change) = match value {
         Value::Plain(v) => (
             format!("variable {name}"),
@@ -133,29 +166,29 @@ fn summary(env: &str, name: &str, value: &Value) {
             format!("luoto var set -e {env} {name}"),
         ),
     };
-    println!(
-        "{}",
-        crate::prompt::summary(&title, &[row, ("change it", change)])
-    );
+    let mut rows = vec![row];
+    if let Some(r) = replaced {
+        rows.push(("replaces", r));
+    }
+    rows.push(("change it", change));
+    println!("{}", crate::prompt::summary(&title, &rows));
 }
 
 /// Apply the env's variables to it if it runs (new shells there see them, without what was
-/// `removed`); a variable set resolves the sandbox's pending requests for it. What happened,
-/// for people.
+/// `removed`); a variable set resolves the sandbox's pending requests for it, whether or not
+/// it applied. What happened, for people.
 fn applied(ctx: &Ctx, env: &str, name: &str, removed: bool) -> String {
-    let (running, line) = match crate::sync::reapply(ctx, env) {
-        Ok(Some(_)) if removed => (
-            true,
-            format!("shells in `{env}` drop it at their next prompt; running programs keep it"),
-        ),
-        Ok(Some(_)) => (
-            true,
-            format!("shells in `{env}` have it at their next prompt; running programs don't"),
-        ),
-        Ok(None) => (false, format!("applies on `luoto up -e {env}`")),
-        Err(e) => (false, format!("applies on `luoto up -e {env}` ({e:#})")),
+    let line = match crate::sync::reapply(ctx, env) {
+        Ok(Some(_)) if removed => {
+            format!("shells in `{env}` drop it at their next prompt; running programs keep it")
+        }
+        Ok(Some(_)) => {
+            format!("shells in `{env}` have it at their next prompt; running programs don't")
+        }
+        Ok(None) => format!("applies on `luoto up -e {env}`"),
+        Err(e) => format!("applies on `luoto up -e {env}` ({e:#})"),
     };
-    if running && !removed {
+    if !removed {
         resolve_requests(ctx, env, name, &line);
     }
     line
@@ -184,13 +217,11 @@ fn resolve_requests(ctx: &Ctx, env: &str, name: &str, note: &str) {
     }
 }
 
-/// Why a request for variable `name` waits for a terminal, and the commands that answer it.
+/// Why a request for variable `name` takes a value, and the commands that give it.
 pub fn needs_terminal(env: &str, id: u64, name: &str) -> String {
     format!(
-        "request #{id} asks for the variable `{}`, whose value only you give: `luoto approve -e \
-         {env} {id}` on a terminal, or `luoto var set -e {env} {}=<value>` (`{} --ref <ref>` \
-         for a secret)",
-        display(name),
+        "request #{id} asks for the variable `{}`, whose value you give: `luoto approve -e \
+         {env} {id}` on a terminal, `luoto ui`, or `luoto var set -e {env} {}=<value>`",
         display(name),
         display(name)
     )
@@ -208,73 +239,53 @@ fn requested(req: &AccessRequest) -> Result<&str> {
     Ok(name)
 }
 
-/// `luoto approve` of the sandbox's request for a variable: a plain one's value (the one it
-/// suggests, confirmed, or typed), a secret's place, asked as `luoto var set NAME` asks;
-/// whether it was set.
+/// `luoto approve` of the sandbox's request for a variable: the plain value it suggests,
+/// confirmed, or one typed; whether it was set.
 pub fn approve(ctx: &Ctx, env: &str, req: &AccessRequest) -> Result<bool> {
     use crate::prompt::Ask;
     let name = requested(req)?;
+    check_free(ctx, env, name)?;
     if !crate::prompt::interactive() {
         bail!(needs_terminal(env, req.id, name));
     }
-    match &req.install {
-        Some(Install::Var { value, .. }) => {
-            let value = match value {
-                Some(v) => {
-                    let q = format!("Set {name}={} (a plain value)?", display(v));
-                    if !crate::prompt::confirm(&q) {
-                        return Ok(false);
-                    }
-                    v.clone()
-                }
-                None => {
-                    let help = crate::prompt::menu_help("not approved");
-                    let Some(v) = inquire::Text::new(&format!("Value of {name}:"))
-                        .with_help_message(&help)
-                        .ask()?
-                    else {
-                        return Ok(false);
-                    };
-                    v
-                }
-            };
-            let value = Value::Plain(value);
-            set(&ctx.paths, env, name, &value)?;
-            summary(env, name, &value);
-        }
-        _ => {
-            let own = EnvFile::load(&ctx.paths, env)?.cfg;
-            if !ask(ctx, Mode::Change, env, name, &own)? {
+    let own = EnvFile::load(&ctx.paths, env)?.cfg;
+    let instead = replaces(&own, name, &Value::Plain(String::new()))
+        .map(|r| format!(", in place of {r}"))
+        .unwrap_or_default();
+    let value = match &req.install {
+        Some(Install::Var { value: Some(v), .. }) => {
+            let q = format!("Set {name}={} (a plain value{instead})?", display(v));
+            if !crate::prompt::confirm(&q) {
                 return Ok(false);
             }
+            v.clone()
         }
-    }
+        _ => {
+            let help = crate::prompt::menu_help("not approved");
+            let Some(v) = inquire::Text::new(&format!("Value of {name}{instead}:"))
+                .with_help_message(&help)
+                .ask()?
+            else {
+                return Ok(false);
+            };
+            v
+        }
+    };
+    let value = Value::Plain(value);
+    let was = replaces(&own, name, &value);
+    set(&ctx.paths, env, name, &value)?;
+    summary(env, name, &value, was);
     finish(ctx, env, name, false);
     Ok(true)
 }
 
-/// A variable's value as the UI gives it: the value itself, or a secret's ref, never the
-/// secret (pasting one and storing it is the terminal's: `luoto approve`).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum VarValue {
-    Plain { value: String },
-    Secret { reference: String },
-}
-
-/// Approve the sandbox's request for a variable with `value`; what happened, for people.
-pub fn approve_with(ctx: &Ctx, env: &str, req: &AccessRequest, value: VarValue) -> Result<String> {
+/// Approve the sandbox's request for a variable with the plain `value` the UI gives; what
+/// happened, for people.
+pub fn approve_with(ctx: &Ctx, env: &str, req: &AccessRequest, value: String) -> Result<String> {
     let name = requested(req)?;
-    let value = match value {
-        VarValue::Plain { value } => Value::Plain(value),
-        VarValue::Secret { reference } => Value::Secret(reference.trim().to_string()),
-    };
-    set(&ctx.paths, env, name, &value)?;
-    let what = match &value {
-        Value::Plain(_) => format!("{name} set"),
-        Value::Secret(r) => format!("{name} set from {}", crate::secrets::shown_ref(r)),
-    };
-    Ok(format!("{what}; {}", applied(ctx, env, name, false)))
+    check_free(ctx, env, name)?;
+    set(&ctx.paths, env, name, &Value::Plain(value))?;
+    Ok(format!("{name} set; {}", applied(ctx, env, name, false)))
 }
 
 /// `luoto var list`.
@@ -307,7 +318,7 @@ pub fn set_cmd(env: &str, var: &str, reference: Option<&str>) -> Result<ExitCode
         Some((n, v)) => (n, Some(v)),
         None => (var, None),
     };
-    check_name(name)?;
+    check_free(&ctx, env, name)?;
     let value = match (plain, reference) {
         (Some(_), Some(_)) => bail!("`{name}=…` sets a plain value and --ref a secret: give one"),
         (Some(v), None) => Value::Plain(v.to_string()),
@@ -325,8 +336,9 @@ pub fn set_cmd(env: &str, var: &str, reference: Option<&str>) -> Result<ExitCode
             return Ok(ExitCode::SUCCESS);
         }
     };
+    let was = replaces(&EnvFile::load(&ctx.paths, env)?.cfg, name, &value);
     set(&ctx.paths, env, name, &value)?;
-    summary(env, name, &value);
+    summary(env, name, &value, was);
     finish(&ctx, env, name, false);
     Ok(ExitCode::SUCCESS)
 }

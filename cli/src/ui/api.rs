@@ -606,12 +606,8 @@ async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
             credentials: p.compiled.bindings.keys().cloned().collect(),
             missing_secrets: vault_env.map(|v| v.missing).unwrap_or_default(),
             variables: crate::vars::listed(&p.cfg),
-            luoto_variables: p
-                .compiled
-                .dev_env
-                .keys()
-                .filter(|k| !p.cfg.env.contains_key(*k))
-                .cloned()
+            luoto_variables: crate::vars::luoto_names(&p.compiled, &p.cfg)
+                .into_iter()
                 .collect(),
             injections,
             name,
@@ -639,10 +635,16 @@ async fn egress(
 ) -> ApiResult<Vec<events::HostSummary>> {
     let since = Utc::now() - TimeDelta::minutes(q.minutes.unwrap_or(1440));
     blocking(move || {
-        let mutes = env::mutes(&Ctx::load()?, &name)?;
+        let ctx = Ctx::load()?;
+        let mutes = env::mutes(&ctx, &name)?;
         let mut evs = ui.store.query(&name, since, None, 50_000);
         mutes.hide(&mut evs);
-        Ok(events::summarize(&evs, &mutes))
+        let mut hosts = events::summarize(&evs, &mutes);
+        // A config that doesn't compile only leaves the denials as they were.
+        if let Ok(p) = env::plan(&ctx, &name) {
+            events::mark_allowed_now(&mut hosts, &p.compiled.policy);
+        }
+        Ok(hosts)
     })
     .await
     .map(Json)
@@ -684,9 +686,9 @@ struct Decision {
     narrow: Narrowing,
     #[serde(default)]
     force: bool,
-    /// A variable request's answer: its value, or its secret's ref.
+    /// A variable request's answer: its plain value.
     #[serde(default)]
-    var: Option<crate::vars::VarValue>,
+    var: Option<String>,
 }
 
 /// The request with `id`, if it is the one filed at `created`.

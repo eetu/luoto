@@ -269,11 +269,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   package or toolchain the gate has checked to be a plain name; approving it runs that
   package's install scripts as root inside the env (still the sandbox), and its downloads take
   the env's usual presets and install windows. A variable request names a variable and may
-  suggest a plain value; a secret request names only the variable, so the sandbox never
-  chooses which of your secrets it gets. Only you answer either, on a terminal or in `luoto
-  ui` (a ref or a plain value, never a secret through the page); whatever you give becomes
-  readable by all code in the env, so a name like `AWS_SECRET_ACCESS_KEY` is code asking for
-  your credentials.
+  suggest a plain value, which you confirm or change; it can't ask for a secret, or name one
+  luoto sets in the env (a credential's placeholder, an agent's settings) or the shell's own.
+  Secrets you add yourself (`luoto var set`), so the sandbox never chooses which of yours it
+  gets, nor when.
 - **Env archives.** A `luoto export` file holds the env's whole workspace and home: work not
   pushed, files the sandbox wrote, shell history and agents' logins, which work from it. It is
   written readable only by you; keep it as a secret and delete it once imported. Importing

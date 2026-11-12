@@ -71,7 +71,6 @@ pub async fn handle(state: Arc<State>, req: Request<Incoming>) -> Response<Body>
                             reason: Some(match (r.port, &r.install) {
                                 (Some(_), _) => "tunnel".into(),
                                 (None, Some(Install::Var { .. })) => "var".into(),
-                                (None, Some(Install::Secret { .. })) => "secret".into(),
                                 (None, _) => format!("{:?}", r.access).to_lowercase(),
                             }),
                             ..Default::default()

@@ -114,8 +114,10 @@ pub enum RequestStatus {
 }
 
 /// What the sandbox asks to have in the env besides a host: software, a preset's access, or a
-/// variable. Approved, it joins the env's config (`[deps] system`, `[tools]`, `presets`,
-/// `[env]`, `[sandbox_secrets]`), so it holds for every container the env gets.
+/// variable with a plain value. Approved, it joins the env's config (`[deps] system`,
+/// `[tools]`, `presets`, `[env]`), so it holds for every container the env gets. A secret is
+/// never asked for from inside: the user adds one (`luoto var set NAME`), so the sandbox never
+/// chooses which of theirs it gets.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Install {
@@ -132,19 +134,21 @@ pub enum Install {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value: Option<String>,
     },
-    /// An environment variable holding a secret (`[sandbox_secrets]`), by name only: the user
-    /// says where it is kept, and any code in the env can read it.
-    Secret { name: String },
 }
 
 impl Install {
     /// The variable a request for one names.
     pub fn variable(&self) -> Option<&str> {
         match self {
-            Install::Var { name, .. } | Install::Secret { name } => Some(name),
+            Install::Var { name, .. } => Some(name),
             _ => None,
         }
     }
+}
+
+/// Characters that reorder or hide text where it is shown: a suggested value can't carry them.
+fn hides_text(c: char) -> bool {
+    matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{061c}' | '\u{feff}')
 }
 
 /// The longest plain value a variable request may suggest.
@@ -174,24 +178,21 @@ impl Install {
                 "`{name}` is not a preset (known: {})",
                 crate::presets::names().collect::<Vec<_>>().join(", ")
             )),
-            Install::Var { name, .. } | Install::Secret { name } if !crate::variable_name(name) => {
-                Err(format!(
-                    "`{name}` is not a variable name (letters, digits and `_`, not starting \
-                     with a digit)"
-                ))
-            }
-            Install::Var { name, .. } | Install::Secret { name } if crate::luoto_sets(name) => {
-                Err(format!(
-                    "luoto sets `{name}` in every env itself (its proxy, CA bundle or own names)"
-                ))
-            }
-            Install::Var { value: Some(v), .. }
-                if v.len() > MAX_SUGGESTED_VALUE || v.chars().any(char::is_control) =>
-            {
-                Err(format!(
-                    "a suggested value is one line of at most {MAX_SUGGESTED_VALUE} bytes"
-                ))
-            }
+            Install::Var { name, .. } => match crate::variable_refused(name) {
+                Some(why) => Err(why),
+                None => match self {
+                    Install::Var { value: Some(v), .. }
+                        if v.len() > MAX_SUGGESTED_VALUE
+                            || v.chars().any(|c| c.is_control() || hides_text(c)) =>
+                    {
+                        Err(format!(
+                            "a suggested value is one line of at most {MAX_SUGGESTED_VALUE} \
+                             bytes of plain text"
+                        ))
+                    }
+                    _ => Ok(()),
+                },
+            },
             _ => Ok(()),
         }
     }
@@ -214,7 +215,6 @@ impl Install {
                 name,
                 value: Some(v),
             } => format!("the variable {name}={v} (a plain value it suggests)"),
-            Install::Secret { name } => format!("the secret {name}"),
         }
     }
 }

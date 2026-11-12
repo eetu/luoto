@@ -84,15 +84,15 @@ completing it stays with the user:
       sandbox request --tool node@24 --reason "<why>" --wait
 
 - An environment variable the code needs and the env lacks is the user's to give. A plain
-  one (a log level, a setting the user told you) you may suggest a value for (MCP:
-  `sandbox_request_var`); a secret (a `DATABASE_URL`, a key the code reads itself) you ask
-  for by name only (MCP: `sandbox_request_secret`), never for its value in the chat.
-  Approved, shells have it from their next prompt; a command that doesn't see it loads it with
-  `. /run/luoto/env.sh` first. A token that only goes in a header to one HTTP API is better
-  as a luoto credential the gate adds outside the sandbox: suggest that to the user instead.
+  one (a log level, a setting the user told you) you may request, suggesting its value (MCP:
+  `sandbox_request_var`). Approved, shells have it from their next prompt; a command that
+  doesn't see it loads it with `. /run/luoto/env.sh` first. A secret (a password, a token, a
+  connection string with credentials) you never request and never ask for in the chat: tell
+  the user its name and that they add it on the host with `luoto var set -e <env> NAME`. A
+  token that only goes in a header to one HTTP API is better as a luoto credential the gate
+  adds outside the sandbox: suggest that instead.
 
       sandbox request --var RUST_LOG=debug --reason "<why>" --wait
-      sandbox request --secret DATABASE_URL --reason "<why>" --wait
 
 ## When something is blocked
 

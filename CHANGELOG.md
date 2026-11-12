@@ -15,15 +15,17 @@
   writes a plain value to `[env]`; `luoto var set NAME` asks where a secret is kept and writes
   its ref to `[sandbox_secrets]` (`--ref` without a terminal); `luoto var rm NAME`. A running
   env takes the change at once: new shells have it, and open bash, zsh and fish shells reload
-  it at their next prompt. Names luoto sets itself (proxy, CA bundle,
-  `LUOTO_*`) are refused. `luoto ui`'s env panel lists them, and names what luoto sets
-  itself. New guide: [environment variables](docs/guides/env-vars.md).
+  it at their next prompt. Names luoto sets itself (proxy, CA bundle, `LUOTO_*`, the env's
+  credential placeholders) and the shell's own are refused. `luoto ui`'s env panel lists
+  them, and names what luoto sets itself. New guide:
+  [environment variables](docs/guides/env-vars.md).
 - **Variable requests:** code in the env asks for a variable with a plain value, which it may
-  suggest (`sandbox request --var NAME[=VALUE]`, MCP `sandbox_request_var`), or for a secret
-  by name only (`--secret NAME`, `sandbox_request_secret`). `luoto approve <id>` confirms the
-  value, or asks where the secret is kept; `luoto var set NAME` answers either. `luoto ui`
-  accepts one with a value (the suggested one filled in) or a secret's ref, never the secret
-  itself.
+  suggest (`sandbox request --var NAME[=VALUE]`, MCP `sandbox_request_var`). `luoto approve
+  <id>` confirms the value, `luoto ui` shows it filled in to check, and `luoto var set` answers
+  it too. Secrets are never requested from inside: you add them with `luoto var set`.
+- **Egress view:** a host a rule allows since it was blocked reads as allowed, its denials as
+  history ("blocked before rule r1"), instead of "partly" with the old denial's text.
+- **`luoto ui`:** picking the env shown after the vault brings its panel back.
 - **macOS notifications** go through `terminal-notifier`, which the Homebrew formula now
   installs, instead of Script Editor; macOS asks once to allow them. Without it, or until
   allowed, they come through `osascript` as before. A notification says "has a request",

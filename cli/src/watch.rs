@@ -168,8 +168,12 @@ pub fn watch() -> Result<ExitCode> {
     let Some(lock) = take_lock(&lock_file)? else {
         return Ok(ExitCode::SUCCESS);
     };
-    let me = wanted(&ctx.paths);
-    let mut seen = me.clone();
+    // When this binary was built, as it started: a rebuild in place is newer.
+    let built = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.metadata().ok())
+        .and_then(|m| m.modified().ok());
+    let mut seen = wanted(&ctx.paths);
     let mut forwards: HashMap<(String, u16), ports::Forward> = HashMap::new();
     // Apple: each running dev container's tun link, joined to its gate.
     #[cfg(unix)]
@@ -203,30 +207,30 @@ pub fn watch() -> Result<ExitCode> {
         if !lock_file.exists() {
             return Ok(ExitCode::SUCCESS);
         }
-        // A new luoto takes over, once its file stayed the same for a tick (a build may still
-        // be writing it) and it starts. What runs through this process closes first: forwarded
-        // connections end, and an env's network on Apple pauses until the new watcher joins
-        // its links again, which its connections outlast.
+        // A newer luoto takes over (an older one run in between changes nothing), once its file
+        // stayed the same for a tick (a build may still be writing it) and it starts. What runs
+        // through this process closes first: forwarded connections end, and an env's network
+        // on Apple pauses until the new watcher joins its links again, which its connections
+        // outlast.
         let now = wanted(&ctx.paths);
-        if now != me {
-            if now == seen
-                && let Some((exe, _)) = &now
-                && runs(exe)
+        if now == seen
+            && let Some((exe, t)) = &now
+            && built.is_none_or(|b| *t > b)
+            && runs(exe)
+        {
+            println!("{} handing over to {}", Utc::now(), exe.display());
+            drop(forwards);
+            drop(listeners);
+            #[cfg(unix)]
             {
-                println!("{} handing over to {}", Utc::now(), exe.display());
-                drop(forwards);
-                drop(listeners);
-                #[cfg(unix)]
-                {
-                    drop(links);
-                    drop(uplinks);
-                }
-                drop(lock);
-                start(&ctx.paths, exe);
-                return Ok(ExitCode::SUCCESS);
+                drop(links);
+                drop(uplinks);
             }
-            seen = now;
+            drop(lock);
+            start(&ctx.paths, exe);
+            return Ok(ExitCode::SUCCESS);
         }
+        seen = now;
         // An env's network runs through this process: while it links any, a failed look (a
         // config being saved, the runtime busy) waits for the next tick instead of leaving.
         let ctx = match Ctx::load() {

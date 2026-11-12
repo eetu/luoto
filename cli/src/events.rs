@@ -232,6 +232,11 @@ pub struct HostSummary {
     /// The path of the last denial, for a hint that allows that path, not the host.
     #[serde(skip)]
     pub last_denied_path: Option<String>,
+    /// The method and port of the last denial, to ask the policy about it again.
+    #[serde(skip)]
+    pub last_denied_at: Option<(String, u16)>,
+    /// The rule that allows the last denial now: it was added since, so the denial is history.
+    pub allowed_now: Option<String>,
     pub last_rule: Option<String>,
     pub bytes_up: u64,
     pub bytes_down: u64,
@@ -306,6 +311,7 @@ pub fn summarize(events: &[Event], mutes: &Mutes) -> Vec<HostSummary> {
                 s.last_reason = e.reason.clone();
                 s.last_message = e.message.clone();
                 s.last_denied_path = e.path.clone();
+                s.last_denied_at = e.method.clone().map(|m| (m, e.port.unwrap_or(443)));
                 let write = e
                     .method
                     .as_deref()
@@ -339,6 +345,30 @@ pub fn summarize(events: &[Event], mutes: &Mutes) -> Vec<HostSummary> {
         .collect();
     out.sort_by(|a, b| b.denied.cmp(&a.denied).then(b.last_seen.cmp(&a.last_seen)));
     out
+}
+
+/// Ask `policy` again about each host's last denial: one a rule allows now (an approved
+/// request, an allow since) gets that rule in `allowed_now`. Open egress doesn't count.
+pub fn mark_allowed_now(summaries: &mut [HostSummary], policy: &luoto_shared::policy::Policy) {
+    use luoto_shared::policy::{Decision, RequestInfo};
+    for s in summaries.iter_mut() {
+        let Some((method, port)) = &s.last_denied_at else {
+            continue;
+        };
+        let req = RequestInfo {
+            host: &s.host,
+            port: *port,
+            method,
+            path: s.last_denied_path.as_deref().unwrap_or("/"),
+            websocket: false,
+            content_length: None,
+        };
+        if let Decision::Allow { rule, .. } = policy.decide(&req, Utc::now())
+            && rule != OPEN_RULE
+        {
+            s.allowed_now = Some(rule);
+        }
+    }
 }
 
 /// Where a container's event stream stood when read: the last `seq` of each gate or vault run
@@ -652,6 +682,32 @@ mod tests {
              `luoto egress keep -e web` keeps them.\n"
         );
         assert_eq!(fmt_opened("web", &[]), "");
+    }
+
+    #[test]
+    fn a_denial_a_rule_allows_now_is_history() {
+        let denied = |host: &str, method: &str| Event {
+            kind: Some(EventKind::Http),
+            host: Some(host.into()),
+            method: Some(method.into()),
+            path: Some("/x".into()),
+            port: Some(443),
+            verdict: Some(Verdict::Deny),
+            ..Default::default()
+        };
+        let evs = [denied("docs.example", "GET"), denied("api.example", "POST")];
+        let mut s = summarize(&evs, &Mutes::default());
+        let cfg: crate::config::EnvConfig = toml::from_str(
+            "[[allow]]\nid = \"r1\"\nhost = \"docs.example\"\n\
+             [[allow]]\nid = \"r2\"\nhost = \"api.example\"\n",
+        )
+        .unwrap();
+        let c = crate::compile::compile("web", &cfg, None, &[]).unwrap();
+        mark_allowed_now(&mut s, &c.policy);
+        let at = |h: &str| s.iter().find(|x| x.host == h).unwrap().allowed_now.clone();
+        // A read rule allows the GET denied before it, not the POST.
+        assert_eq!(at("docs.example").as_deref(), Some("r1"));
+        assert_eq!(at("api.example"), None);
     }
 
     #[test]

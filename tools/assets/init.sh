@@ -132,25 +132,29 @@ fi
 # container's PATH and profile.d. User-level installs (agents, `npm i -g`, pipx) go on PATH;
 # the per-run env (agent settings, placeholders, sandbox secrets) lives in memory only.
 # An open interactive shell takes what luoto writes later (`luoto var`, an approved request)
-# at its next prompt: env.sum against the LUOTO_ENV_SUM of its last load, and the names that
+# at its next prompt: vars.sum against the LUOTO_ENV_SUM of its last load, and the names that
 # load exported (LUOTO_ENV_NAMES) but this one doesn't are unset.
 cat >/etc/luoto-shell.sh <<'EOF'
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH"; export PATH ;; esac
 [ -r /run/luoto/env.sh ] && . /run/luoto/env.sh
 __luoto_env() {
-  [ -r /run/luoto/env.sum ] || return 0
-  IFS= read -r __luoto_sum </run/luoto/env.sum
-  if [ "$__luoto_sum" != "${LUOTO_ENV_SUM:-}" ]; then
+  __luoto_rc=$?
+  if [ -r /run/luoto/vars.sum ] && IFS= read -r __luoto_sum </run/luoto/vars.sum &&
+    [ "$__luoto_sum" != "${LUOTO_ENV_SUM:-}" ]; then
     __luoto_old=${LUOTO_ENV_NAMES:-}
     . /run/luoto/env.sh
-    export LUOTO_ENV_SUM="$__luoto_sum"
     eval "set -- $__luoto_old"
     for __luoto_n; do
       case " $LUOTO_ENV_NAMES " in *" $__luoto_n "*) ;; *) unset "$__luoto_n" ;; esac
     done
-    echo "luoto: this shell has the env's variables as changed now" >&2
+    # A file read half-written lacks its last line, the fingerprint: read again next prompt.
+    if [ "${LUOTO_ENV_SUM:-}" = "$__luoto_sum" ]; then
+      echo "luoto: this shell has the env's variables as changed now" >&2
+    fi
   fi
   unset __luoto_sum __luoto_old __luoto_n
+  # The prompt and its other hooks see the last command's status, not this one's.
+  return $__luoto_rc
 }
 case $- in *i*)
   if [ -n "${ZSH_VERSION:-}" ]; then
@@ -174,16 +178,16 @@ contains -- $HOME/.local/bin $PATH; or set -gx PATH $HOME/.local/bin $PATH
 test -r /run/luoto/env.fish; and source /run/luoto/env.fish
 if status is-interactive
     function __luoto_env --on-event fish_prompt
-        test -r /run/luoto/env.sum; or return
-        read -l sum </run/luoto/env.sum
+        test -r /run/luoto/vars.sum; or return
+        read -l sum </run/luoto/vars.sum
         test "$sum" = "$LUOTO_ENV_SUM"; and return
         set -l old $LUOTO_ENV_NAMES
         source /run/luoto/env.fish
-        set -gx LUOTO_ENV_SUM $sum
         for n in $old
             contains -- $n $LUOTO_ENV_NAMES; or set -e $n
         end
-        echo "luoto: this shell has the env's variables as changed now" >&2
+        test "$LUOTO_ENV_SUM" = "$sum"
+        and echo "luoto: this shell has the env's variables as changed now" >&2
     end
 end
 EOF

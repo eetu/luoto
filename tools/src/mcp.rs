@@ -18,9 +18,10 @@ const INSTRUCTIONS: &str = "You are inside a luoto sandbox: network egress is fi
 policy only the user controls from the host, and real credentials never enter the sandbox. \
 Use sandbox_status to see what is allowed, sandbox_check before relying on a URL, and \
 sandbox_request_access when access is genuinely needed, sandbox_request_install for a \
-system package or toolchain the env should keep, and sandbox_request_var or \
-sandbox_request_secret for an environment variable the code needs — then tell the user what \
-you requested and why. Never try to work around a block.";
+system package or toolchain the env should keep, and sandbox_request_var for an environment \
+variable with a plain value the code needs — then tell the user what you requested and why. \
+A secret the code needs, the user adds on the host (`luoto var set`): tell them its name, \
+never ask for its value. Never try to work around a block.";
 
 fn tools() -> Value {
     json!([
@@ -82,26 +83,12 @@ fn tools() -> Value {
         },
         {
             "name": "sandbox_request_var",
-            "description": "Ask the user to give this env an environment variable with a plain value the code needs, such as a log level or a setting the user told you. Not for secrets: use sandbox_request_secret. Approved, shells here have it from their next prompt; a command that doesn't see it loads it with `. /run/luoto/env.sh`.",
+            "description": "Ask the user to give this env an environment variable with a plain value the code needs, such as a log level or a setting the user told you. Approved, shells here have it from their next prompt; a command that doesn't see it loads it with `. /run/luoto/env.sh`. Never for a secret (a password, a token, a connection string with credentials), and never ask for one in the chat: tell the user to add it on the host with `luoto var set -e <env> NAME`, which asks where it is kept. A token that only goes in a header to one HTTP API is better set up as a luoto credential, which the gate adds outside the sandbox: suggest that instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Variable name, e.g. RUST_LOG"},
                     "value": {"type": "string", "description": "The value to suggest, which the user sees filled in and can change"},
-                    "reason": {"type": "string", "description": "Why this is needed, shown to the user"},
-                    "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 900, "default": 0, "description": "Wait this long for the user's decision"}
-                },
-                "required": ["name", "reason"],
-                "additionalProperties": false
-            }
-        },
-        {
-            "name": "sandbox_request_secret",
-            "description": "Ask the user to give this env a secret the code reads as an environment variable, such as DATABASE_URL, by name only: the user says where it is kept, on the host, and approved, shells here have it from their next prompt (a command that doesn't see it loads it with `. /run/luoto/env.sh`). Never ask for the secret in the chat. Any code in the env can read it, so ask only for what the code must read itself; a token that only goes in a header to one HTTP API is better set up by the user as a luoto credential, which the gate adds outside the sandbox: suggest that instead.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Variable name, e.g. DATABASE_URL"},
                     "reason": {"type": "string", "description": "Why this is needed, shown to the user"},
                     "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 900, "default": 0, "description": "Wait this long for the user's decision"}
                 },
@@ -198,15 +185,10 @@ fn call(name: &str, args: &Value) -> Value {
                 Err(e) => text(format!("request refused: {e:#}"), true),
             })
         }
-        "sandbox_request_var" | "sandbox_request_secret" => {
-            let var_name = args["name"].as_str().unwrap_or_default().to_string();
-            let var = if name == "sandbox_request_secret" {
-                luoto_shared::api::Install::Secret { name: var_name }
-            } else {
-                luoto_shared::api::Install::Var {
-                    name: var_name,
-                    value: args["value"].as_str().map(str::to_string),
-                }
+        "sandbox_request_var" => {
+            let var = luoto_shared::api::Install::Var {
+                name: args["name"].as_str().unwrap_or_default().to_string(),
+                value: args["value"].as_str().map(str::to_string),
             };
             let reason = args["reason"].as_str().unwrap_or_default();
             let wait = args["wait_seconds"].as_u64().unwrap_or(0).min(900);

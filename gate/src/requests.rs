@@ -247,15 +247,16 @@ mod tests {
             name: name.into(),
             value: value.map(str::to_string),
         };
-        let secret = |name: &str| Install::Secret { name: name.into() };
-        let v = r.create(ask(secret("DATABASE_URL"))).unwrap();
-        assert_eq!(r.create(ask(secret("DATABASE_URL"))).unwrap().id, v.id);
+        let v = r.create(ask(var("DATABASE_URL", None))).unwrap();
+        assert_eq!(r.create(ask(var("DATABASE_URL", None))).unwrap().id, v.id);
         assert!(r.create(ask(var("RUST_LOG", Some("debug")))).is_ok());
         let long = "x".repeat(luoto_shared::api::MAX_SUGGESTED_VALUE + 1);
         for bad in [
             var("HTTPS_PROXY", None),
-            secret("SSL_CERT_FILE"),
-            secret("A B"),
+            var("SSL_CERT_FILE", None),
+            var("UID", None),
+            var("A", Some("x\u{202e}y")),
+            var("A B", None),
             var("LUOTO_ENV", None),
             var("1X", None),
             var("A=B", None),

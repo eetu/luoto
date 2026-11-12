@@ -334,7 +334,7 @@ fn approve_install(ctx: &Ctx, name: &str, req: &AccessRequest) -> Result<String>
     match install {
         Install::Package { name } => f.add_system_package(name)?,
         Install::Tool { name, version } => f.set_in_table("tools", name, version)?,
-        Install::Preset { .. } | Install::Var { .. } | Install::Secret { .. } => {}
+        Install::Preset { .. } | Install::Var { .. } => {}
     }
     let result = (|| {
         let p = crate::env::plan(ctx, name)?;

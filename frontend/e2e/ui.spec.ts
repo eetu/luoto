@@ -1,8 +1,28 @@
 import { expect, test } from "@playwright/test";
 
+import egressHosts from "./fixtures/egress";
 import { fixture, mockApi } from "./mock";
 
 const open = (page: import("@playwright/test").Page) => page.goto(`/#token=${"ab".repeat(16)}`);
+
+test("a host a rule allows since it was blocked reads as allowed", async ({ page }) => {
+  await mockApi(page);
+  const [blocked] = egressHosts;
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/egress",
+    (route) =>
+      route.fulfill({ json: [{ ...blocked, allowed: 1, last_rule: "r1", allowed_now: "r1" }] }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  const row = page.getByRole("row", { name: /example\.com/ });
+  await expect(row).toContainText("allowed");
+  await expect(row).toContainText("blocked before rule r1");
+  await expect(row).not.toContainText("no rule allows");
+  await row.click();
+  await expect(page.getByText("allowed now by rule r1, blocked once before it")).toBeVisible();
+});
 
 test("a blocked host is allowed from the egress view", async ({ page }) => {
   const writes = await mockApi(page);
@@ -389,17 +409,12 @@ test("selected requests are approved together, each as it was shown", async ({ p
   expect((sent[1].body as { ttl?: string }).ttl).toBeUndefined();
 });
 
-test("a secret request takes a ref, a variable request its suggested value", async ({ page }) => {
+test("a variable request takes a value, the one it suggests filled in", async ({ page }) => {
   await mockApi(page);
   const created = new Date().toISOString();
   const asked = { host: "", access: "read", status: "pending", created };
   const requests = [
-    {
-      ...asked,
-      id: 5,
-      reason: "the migrations read it",
-      install: { kind: "secret", name: "DATABASE_URL" },
-    },
+    { ...asked, id: 5, reason: "the app reads it", install: { kind: "var", name: "APP_MODE" } },
     {
       ...asked,
       id: 6,
@@ -421,28 +436,28 @@ test("a secret request takes a ref, a variable request its suggested value", asy
   );
   await open(page);
   await page.getByRole("button", { name: /^web/ }).click();
+  // A variable request takes a value of its own: none is ticked for a batch.
+  await expect(page.getByRole("checkbox", { name: "select all" })).toHaveCount(0);
 
-  await page.getByRole("button", { name: /the secret DATABASE_URL/ }).click();
-  const accept = page.getByRole("button", { name: "accept" });
-  const ref = page.getByRole("textbox", { name: "ref" });
-  await expect(ref).toHaveValue("");
-  await accept.click();
-  await expect(page.getByText("give the secret's ref first")).toBeVisible();
-  await expect(ref).toBeFocused();
+  await page.getByRole("button", { name: /the variable APP_MODE/ }).click();
+  const value = page.getByRole("textbox", { name: "value" });
+  await expect(value).toHaveValue("");
+  await page.getByRole("button", { name: "approve" }).click();
+  await expect(page.getByText("give the value first")).toBeVisible();
+  await expect(value).toBeFocused();
   expect(sent).toHaveLength(0);
-  await ref.fill("op://Dev/db/url");
-  await ref.press("Enter");
+  await value.fill("staging");
+  await value.press("Enter");
   await expect.poll(() => sent.length).toBe(1);
-  expect(sent[0]).toEqual({
-    id: "5",
-    body: { created, var: { kind: "secret", reference: "op://Dev/db/url" } },
-  });
+  expect(sent[0]).toEqual({ id: "5", body: { created, var: "staging" } });
 
-  await page.getByRole("button", { name: /the variable RUST_LOG/ }).click();
-  await expect(page.getByRole("textbox", { name: "value" })).toHaveValue("debug");
-  await page.getByRole("button", { name: "accept" }).click();
+  // On to the next request, its suggested value filled in and shown as the sandbox's.
+  await expect(page.getByText("variable request #6")).toBeVisible();
+  await expect(value).toHaveValue("debug");
+  await expect(page.getByText("value it suggests — written by code in the sandbox")).toBeVisible();
+  await page.getByRole("button", { name: "approve" }).click();
   await expect.poll(() => sent.length).toBe(2);
-  expect(sent[1]).toEqual({ id: "6", body: { created, var: { kind: "plain", value: "debug" } } });
+  expect(sent[1]).toEqual({ id: "6", body: { created, var: "debug" } });
 });
 
 test("the env panel lists its variables, a secret by where it is kept", async ({ page }) => {
@@ -453,7 +468,18 @@ test("the env panel lists its variables, a secret by where it is kept", async ({
   await expect(page.getByText("RUST_LOG", { exact: true })).toBeVisible();
   await expect(page.getByText("debug", { exact: true })).toBeVisible();
   await expect(page.getByText("op://Dev/local-db/url")).toBeVisible();
-  await expect(page.getByText("The secret is readable by any code in the env.")).toBeVisible();
+  await expect(page.getByText("Any code in the env can read them.")).toBeVisible();
+  await expect(page.getByText("set by luoto: GIT_TERMINAL_PROMPT")).toBeVisible();
+});
+
+test("after the vault, picking the env shown brings its panel back", async ({ page }) => {
+  await mockApi(page);
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: "no secrets in use" }).click();
+  await expect(page.getByText("bindings per env")).toBeVisible();
+  await page.getByRole("button", { name: /^web/ }).click();
+  await expect(page.getByText("bindings per env")).toHaveCount(0);
   await expect(page.getByText("set by luoto: GIT_TERMINAL_PROMPT")).toBeVisible();
 });
 

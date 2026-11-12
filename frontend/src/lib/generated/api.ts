@@ -70,8 +70,8 @@ export type Decision = {
   /** Less than the request asked for. */
   narrow?: Narrowing;
   force?: boolean;
-  /** A variable request's answer: its value, or its secret's ref. */
-  var?: VarValue | null;
+  /** A variable request's answer: its plain value. */
+  var?: string | null;
 };
 
 export type Detection = {
@@ -213,6 +213,8 @@ export type HostSummary = {
   top_paths: [string, number][];
   last_reason: string | null;
   last_message: string | null;
+  /** The rule that allows the last denial now: it was added since, so the denial is history. */
+  allowed_now: string | null;
   last_rule: string | null;
   bytes_up: number;
   bytes_down: number;
@@ -229,8 +231,10 @@ export type Injected = {
 
 /**
  * What the sandbox asks to have in the env besides a host: software, a preset's access, or a
- * variable. Approved, it joins the env's config (`[deps] system`, `[tools]`, `presets`,
- * `[env]`, `[sandbox_secrets]`), so it holds for every container the env gets.
+ * variable with a plain value. Approved, it joins the env's config (`[deps] system`,
+ * `[tools]`, `presets`, `[env]`), so it holds for every container the env gets. A secret is
+ * never asked for from inside: the user adds one (`luoto var set NAME`), so the sandbox never
+ * chooses which of theirs it gets.
  */
 export type Install =
   /** A package of the image's package manager (apt, apk or dnf). */
@@ -240,12 +244,7 @@ export type Install =
   /** One of luoto's presets (`npm`, `pypi`, …): the hosts a registry or service needs. */
   | { kind: "preset"; name: string }
   /** An environment variable with a plain value (`[env]`), which the user gives or accepts. */
-  | { kind: "var"; name: string; value?: string }
-  /**
-   * An environment variable holding a secret (`[sandbox_secrets]`), by name only: the user
-   * says where it is kept, and any code in the env can read it.
-   */
-  | { kind: "secret"; name: string };
+  | { kind: "var"; name: string; value?: string };
 
 /** What running the install printed. */
 export type InstallOutput = {
@@ -582,12 +581,6 @@ export type ToolPin = {
   /** The file that pins it. */
   source: string;
 };
-
-/**
- * A variable's value as the UI gives it: the value itself, or a secret's ref, never the
- * secret (pasting one and storing it is the terminal's: `luoto approve`).
- */
-export type VarValue = { kind: "plain"; value: string } | { kind: "secret"; reference: string };
 
 export type VaultEnvSummary = {
   env: string;

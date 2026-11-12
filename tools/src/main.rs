@@ -50,7 +50,7 @@ enum Cmd {
         /// Host (`docs.rs`) or URL (`https://docs.rs/serde`); `host:port` for a protocol other
         /// than HTTP(S) (`db.example.com:5432`, not 80 or 443), which the gate can only tunnel
         /// uninspected.
-        #[arg(required_unless_present_any = ["package", "tool", "preset", "var", "secret"])]
+        #[arg(required_unless_present_any = ["package", "tool", "preset", "var"])]
         target: Option<String>,
         /// A system package (apt, apk or dnf) the env should have; approved, it is installed
         /// now and again whenever the container is recreated.
@@ -66,13 +66,10 @@ enum Cmd {
         preset: Option<String>,
         /// An environment variable with a plain value the code needs (`RUST_LOG`): the user
         /// gives or accepts its value on the host, and new shells here get it. `NAME=value`
-        /// suggests the value, which the user sees filled in.
-        #[arg(long, value_name = "NAME[=VALUE]", conflicts_with_all = ["target", "package", "tool", "preset", "secret", "write", "paths"])]
+        /// suggests the value, which the user sees filled in. Not for a secret: the user adds
+        /// one on the host (`luoto var set NAME`).
+        #[arg(long, value_name = "NAME[=VALUE]", conflicts_with_all = ["target", "package", "tool", "preset", "write", "paths"])]
         var: Option<String>,
-        /// An environment variable holding a secret the code reads (`DATABASE_URL`), by name:
-        /// the user says where it is kept, and new shells here get it.
-        #[arg(long, value_name = "NAME", conflicts_with_all = ["target", "package", "tool", "preset", "var", "write", "paths"])]
-        secret: Option<String>,
         /// Ask for write access (any method) instead of read-only.
         #[arg(long)]
         write: bool,
@@ -137,7 +134,6 @@ fn main() -> ExitCode {
             tool,
             preset,
             var,
-            secret,
             write,
             paths,
             reason,
@@ -159,8 +155,7 @@ fn main() -> ExitCode {
                             value: None,
                         },
                     })
-                })
-                .or_else(|| secret.map(|name| Install::Secret { name }));
+                });
             request(
                 target.as_deref(),
                 install,
@@ -282,9 +277,9 @@ pub fn render_status(s: &SandboxStatus) -> String {
          The user can also grant it on the host: luoto allow -e {} <host> [--write] [--ttl 1h]\n\
          A system package or toolchain to keep: sandbox request --package <name> | --tool node@24 \
          --reason \"…\" --wait\n\
-         A variable the code needs: sandbox request --var <NAME>[=<value>] | --secret <NAME> \
-         --reason \"…\" --wait\n",
-        s.env
+         A plain variable the code needs: sandbox request --var <NAME>[=<value>] --reason \"…\" \
+         --wait (a secret: ask the user to run luoto var set -e {} <NAME> on the host)\n",
+        s.env, s.env
     ));
     out
 }
@@ -328,9 +323,7 @@ fn approve_hint(env: &str, id: u64) -> String {
 /// What a request asks for, for people.
 fn what(r: &AccessRequest) -> String {
     match (&r.install, r.port) {
-        (Some(i @ (Install::Preset { .. } | Install::Var { .. } | Install::Secret { .. })), _) => {
-            i.describe()
-        }
+        (Some(i @ (Install::Preset { .. } | Install::Var { .. })), _) => i.describe(),
         (Some(i), _) => format!("install {}", i.describe()),
         (None, Some(port)) => format!("a tunnel to {}:{port}", r.host),
         (None, None) => format!(
@@ -531,7 +524,7 @@ fn request(
             request_access(&host, port, write, paths, reason, wait)?
         }
         (None, None) => {
-            anyhow::bail!("name a host, --preset, --package, --tool, --var or --secret")
+            anyhow::bail!("name a host, --preset, --package, --tool or --var")
         }
     };
     println!("{}", describe(&o));

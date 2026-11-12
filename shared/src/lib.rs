@@ -57,6 +57,50 @@ pub fn luoto_sets(name: &str) -> bool {
             .any(|v| *v == name)
 }
 
+/// Variables a shell owns: setting one breaks it (zsh stops reading the file that exports
+/// `UID`, bash refuses its read-only ones, fish its `status`).
+const SHELL_OWNS: [&str; 22] = [
+    "UID",
+    "EUID",
+    "GID",
+    "EGID",
+    "PPID",
+    "USERNAME",
+    "USER",
+    "LOGNAME",
+    "HOME",
+    "SHELL",
+    "PATH",
+    "PWD",
+    "OLDPWD",
+    "SHLVL",
+    "IFS",
+    "HOSTNAME",
+    "TERM",
+    "status",
+    "pipestatus",
+    "argv",
+    "fish_pid",
+    "version",
+];
+
+/// Why the env's own variable can't be named `name`, if it can't.
+pub fn variable_refused(name: &str) -> Option<String> {
+    if !variable_name(name) {
+        Some(format!(
+            "`{name}` is not a variable name (letters, digits and `_`, not starting with a digit)"
+        ))
+    } else if luoto_sets(name) {
+        Some(format!(
+            "luoto sets `{name}` in every env itself (its proxy, CA bundle or own names)"
+        ))
+    } else if SHELL_OWNS.contains(&name) {
+        Some(format!("`{name}` is the shell's own"))
+    } else {
+        None
+    }
+}
+
 /// A variable name every shell exports: letters, digits and `_`, not starting with a digit.
 pub fn variable_name(name: &str) -> bool {
     (1..=128).contains(&name.len())

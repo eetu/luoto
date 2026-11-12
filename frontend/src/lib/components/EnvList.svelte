@@ -69,6 +69,7 @@
     <button
       class="row"
       class:selected={app.env === env.name && app.subject.kind !== "vault"}
+      class:shown={app.env === env.name && app.subject.kind === "vault"}
       onclick={() => void selectEnv(env.name)}
       oncontextmenu={(e) => menu(e, env)}
       title={env.error ?? `${env.name}: dev ${env.dev}, gate ${env.gate}`}
@@ -144,6 +145,11 @@
   .row.selected {
     border-color: var(--halo-accent);
     background: var(--halo-accent-soft);
+  }
+
+  /* The env whose egress the surface shows while the vault is the subject. */
+  .row.shown {
+    border-color: var(--halo-border);
   }
 
   .name {

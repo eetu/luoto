@@ -194,7 +194,6 @@ fn describe_request(ev: &Event) -> String {
             format!("{access} access to {}", clean(host))
         }
         (None, _) if ev.reason.as_deref() == Some("var") => "a variable".to_string(),
-        (None, _) if ev.reason.as_deref() == Some("secret") => "a secret".to_string(),
         (None, _) => "software or a preset".to_string(),
     };
     match clean(ev.message.as_deref().unwrap_or_default()) {

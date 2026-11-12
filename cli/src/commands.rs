@@ -814,12 +814,8 @@ fn fmt_request(r: &AccessRequest) -> String {
             "{}, kept in the env's config",
             crate::text::display(&i.describe())
         ),
-        Some(i @ luoto_shared::api::Install::Secret { .. }) => format!(
-            "{}, kept where you say, readable by any code in the env",
-            crate::text::display(&i.describe())
-        ),
         Some(i @ luoto_shared::api::Install::Var { .. }) => format!(
-            "{}, its value from you, readable by any code in the env",
+            "{}, a plain value from you, readable by any code in the env",
             crate::text::display(&i.describe())
         ),
         Some(i) => format!(

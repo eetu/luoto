@@ -90,9 +90,9 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   developer's own env file.
 - `vars.rs` owns `[env]` and `[sandbox_secrets]` (`luoto var`): a name lives in one of the
   two, never one `luoto_shared::luoto_sets`; a project's `needs.sandbox_secrets` and the
-  sandbox's variable requests (`Install::Var` with a suggested plain value, `Install::Secret`
-  by name only) ask through it on a terminal; the UI answers one with a ref or a plain value
-  (`vars::approve_with`), never a secret.
+  sandbox's variable requests (`Install::Var`, a plain value it may suggest; never a secret)
+  ask through it, on a terminal or in the UI (`vars::approve_with`). It refuses the names luoto
+  sets in the env (`vars::luoto_names`) and the shell's own (`luoto_shared::variable_refused`).
 - Config files carry their format (`version`, 1 when missing); `format.rs` upgrades every
   file in memory before it is parsed, and saving an env file writes the current format,
   keeping the old file beside it. A config change that would break an existing file is a

@@ -4,10 +4,12 @@
   import { api } from "$lib/api";
   import { act, ago, app, installLabel, requestTarget, say, TTLS } from "$lib/stores/app.svelte";
 
-  // Requests ticked for one decision; ids no longer pending drop out.
+  // Requests ticked for one decision; ids no longer pending drop out. A variable request takes
+  // a value, given on its own panel, so it is never ticked.
   let picked = $state<number[]>([]);
   let ttl = $state(60);
-  const chosen = $derived(app.pending.filter((r) => picked.includes(r.id)));
+  const batchable = $derived(app.pending.filter((r) => r.install?.kind !== "var"));
+  const chosen = $derived(batchable.filter((r) => picked.includes(r.id)));
   const accessChosen = $derived(chosen.some((r) => !r.install));
 
   function pick(id: number, on: boolean) {
@@ -50,14 +52,14 @@
 
 {#if app.pending.length > 0}
   <div class="requests">
-    {#if app.pending.length > 1}
+    {#if batchable.length > 1}
       <div class="batch">
         <label class="all">
           <input
             type="checkbox"
-            checked={chosen.length === app.pending.length}
-            indeterminate={chosen.length > 0 && chosen.length < app.pending.length}
-            onchange={(e) => (picked = e.currentTarget.checked ? app.pending.map((r) => r.id) : [])}
+            checked={chosen.length === batchable.length}
+            indeterminate={chosen.length > 0 && chosen.length < batchable.length}
+            onchange={(e) => (picked = e.currentTarget.checked ? batchable.map((r) => r.id) : [])}
           />
           {chosen.length > 0 ? `${chosen.length} selected` : "select all"}
         </label>
@@ -84,11 +86,14 @@
         class="request halo-card"
         class:selected={app.subject.kind === "request" && app.subject.id === r.id}
       >
-        {#if app.pending.length > 1}
+        {#if batchable.length > 1}
+          {@const takesValue = r.install?.kind === "var"}
           <input
             type="checkbox"
             aria-label="select request #{r.id}"
-            checked={picked.includes(r.id)}
+            title={takesValue ? "needs a value: open it to give one" : undefined}
+            disabled={takesValue}
+            checked={!takesValue && picked.includes(r.id)}
             onchange={(e) => pick(r.id, e.currentTarget.checked)}
           />
         {/if}

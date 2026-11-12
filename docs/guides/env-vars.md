@@ -43,16 +43,15 @@ A repository's `luoto.toml` can name the secrets its code needs (`[needs] sandbo
 
 ## When the code asks
 
-An agent in the env can ask for a variable: a plain one with a value it suggests
-(`sandbox request --var RUST_LOG=debug`, MCP `sandbox_request_var`), or a secret by name
-only (`sandbox request --secret DATABASE_URL`, MCP `sandbox_request_secret`).
-`luoto approve <id>` shows the suggested value to confirm, or asks where the secret is kept;
-`luoto var set` answers either. `luoto ui` opens on the kind asked for, with the suggested
-value filled in, and accepts a plain value or a secret's ref; a secret itself never goes
-through the page, so pasting one into 1Password or the keychain is the terminal's.
+An agent in the env can ask for a plain variable, with a value it suggests (`sandbox request
+--var RUST_LOG=debug`, MCP `sandbox_request_var`). `luoto approve <id>` shows the value to
+confirm, `luoto ui` shows it filled in to check or change, and `luoto var set NAME=value`
+answers it too. Read the name and the value, not the reason: the value is the sandbox's.
 
-Read the name and the value, not the reason: code asking for `AWS_SECRET_ACCESS_KEY` is
-asking for your credentials, and a suggested value is the sandbox's.
+A secret is never requested from inside: an agent that needs one names it, and you add it
+with `luoto var set`, choosing which of yours it gets. Names luoto sets in the env itself
+(a credential's placeholder such as `GH_TOKEN`, an agent's settings) and the shell's own
+(`UID`, `PATH`) can't be set, by a request or by you.
 
 ## Tokens the code never sees
 
@@ -82,5 +81,6 @@ reload it at their next prompt (saying so), unsetting a removed one. A program a
 keeps what it started with, and so may a command an agent runs without a prompt: `.
 /run/luoto/env.sh` loads the current ones. Otherwise it applies at the next `luoto up`.
 
-luoto refuses names it sets itself in every env: the proxy variables, the CA bundle ones
-(`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, …) and `LUOTO_*`.
+luoto refuses names it sets itself: the proxy variables, the CA bundle ones
+(`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, …), `LUOTO_*`, and in an env its credentials'
+placeholders and agents' settings; and the shell's own (`UID`, `PATH`, `HOME`, …).

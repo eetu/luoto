@@ -16,7 +16,7 @@ SvelteKit (runes) SPA, adapter-static to `dist/`, embedded into `luoto` by rust-
 - Text written by the sandbox (request reasons) is rendered as plain text in an
   "untrusted" block — never as HTML, never pre-filled into commands, never in a browser
   notification (`notify.svelte.ts`). The one field it fills is a variable request's plain
-  value, said to be the sandbox's; never a ref or anything of a secret request.
+  value, shown beside it as the sandbox's.
 - `yarn validate` = typecheck + lint + format. Vendored yarn: `node .yarn/releases/yarn-*.cjs`.
 - Glyph: the islet outline is the accent (orange stroke over currentColor waves) instead of the
   family's warm dot, which read as a figure above the islet. Still exactly one accent element.
