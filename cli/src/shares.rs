@@ -324,12 +324,25 @@ fn clone_file(src: &Path, dst: &Path, rel: &str, mtime: SystemTime) -> Result<()
         Err(_) => {}
     }
     std::fs::copy(src.join(rel), &to).with_context(|| format!("clone {rel}"))?;
+    // Writable to its owner (a copy keeps a read-only source's mode), as setting its time
+    // needs on Windows.
     #[cfg(unix)]
-    {
+    let perms = {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o644))?;
-    }
-    std::fs::File::open(&to)?.set_modified(mtime)?;
+        std::fs::Permissions::from_mode(0o644)
+    };
+    #[cfg(not(unix))]
+    #[allow(clippy::permissions_set_readonly_false)] // Windows: clears only the read-only flag
+    let perms = {
+        let mut p = std::fs::metadata(&to)?.permissions();
+        p.set_readonly(false);
+        p
+    };
+    std::fs::set_permissions(&to, perms)?;
+    std::fs::File::options()
+        .write(true)
+        .open(&to)?
+        .set_modified(mtime)?;
     Ok(())
 }
 
