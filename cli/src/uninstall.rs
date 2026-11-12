@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::paths::Paths;
 use crate::prompt::confirm;
@@ -255,7 +255,14 @@ impl Plan {
                 ("volumes", &i.volumes, &|n| {
                     rt.run(["volume", "rm", n]).map(drop)
                 }),
-                ("images", &i.images, &|n| rt.run(["rmi", n]).map(drop)),
+                ("images", &i.images, &|n| {
+                    let rm: &[&str] = if rt.flavor == Flavor::Apple {
+                        &["image", "rm"]
+                    } else {
+                        &["rmi"]
+                    };
+                    rt.run(rm.iter().copied().chain([n])).map(drop)
+                }),
             ] {
                 if !list.is_empty() {
                     report(what, each(list, rm));
@@ -387,14 +394,18 @@ fn inventory(paths: &Paths, envs: &[String]) -> Result<Inventory, String> {
     let containers = sorted(Kind::Container)?;
     let networks = sorted(Kind::Network)?;
     let volumes = sorted(Kind::Volume)?;
-    let listing = rt
-        .run([
+    let listing = if rt.flavor == Flavor::Apple {
+        rt.run(["image", "list", "--format", "json"])
+            .map(|j| apple_image_listing(&j))
+    } else {
+        rt.run([
             "images",
             "--digests",
             "--format",
             "{{.Repository}}\t{{.Tag}}\t{{.Digest}}",
         ])
-        .map_err(|e| format!("{e:#}"))?;
+    }
+    .map_err(|e| format!("{e:#}"))?;
     let images = image_refs(&listing, &repos());
     let theirs = containers.theirs + volumes.theirs;
     let vm = if in_vm {
@@ -475,6 +486,14 @@ struct Obj {
 }
 
 fn objects(rt: &Runtime, kind: Kind) -> Result<Vec<Obj>> {
+    if rt.flavor == Flavor::Apple {
+        let list: &[&str] = match kind {
+            Kind::Container => &["ls", "-a", "--format", "json"],
+            Kind::Network => &["network", "list", "--format", "json"],
+            Kind::Volume => &["volume", "ls", "--format", "json"],
+        };
+        return parse_apple_objects(&rt.run(list)?);
+    }
     let (list, inspect, labels): (&[&str], &[&str], &str) = match kind {
         Kind::Container => (
             &["ps", "-a", "--format", "{{.Names}}"],
@@ -532,6 +551,54 @@ fn parse_objects(text: &str) -> Vec<Obj> {
             })
         })
         .collect()
+}
+
+/// Apple's `ls --format json` of containers, networks or volumes: each has its `id` and its
+/// `configuration.labels`.
+fn parse_apple_objects(json: &str) -> Result<Vec<Obj>> {
+    let v: serde_json::Value = serde_json::from_str(json).context("listing JSON")?;
+    let label = |o: &serde_json::Value, k: &str| {
+        o["configuration"]["labels"][k]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    };
+    Ok(v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| {
+            let name = o["id"].as_str().filter(|n| !n.is_empty())?;
+            Some(Obj {
+                name: name.to_string(),
+                env: label(o, names::LABEL_ENV),
+                role: label(o, names::LABEL_ROLE),
+            })
+        })
+        .collect())
+}
+
+/// Apple's `image list --format json` as the (repository, tag, digest) lines `image_refs`
+/// reads.
+fn apple_image_listing(json: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| {
+            let name = i["configuration"]["name"].as_str()?;
+            let digest = i["configuration"]["descriptor"]["digest"]
+                .as_str()
+                .unwrap_or("");
+            // The tag follows the last `:` after the last `/` (a registry may carry a port).
+            let slash = name.rfind('/').map_or(0, |p| p + 1);
+            let (repo, tag) = match name[slash..].rfind(':') {
+                Some(p) => (&name[..slash + p], &name[slash + p + 1..]),
+                None => (name, ""),
+            };
+            Some(format!("{repo}\t{tag}\t{digest}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -687,6 +754,30 @@ fn remove_binary_hint(exe: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apple_listings_give_names_labels_and_image_refs() {
+        let objs = parse_apple_objects(
+            r#"[{"configuration":{"labels":{"luoto.env":"ae","luoto.role":"work"},"name":"luoto-dev-ae-work"},"id":"luoto-dev-ae-work"},
+                {"configuration":{"labels":{"com.apple.container.resource.role":"builtin"}},"id":"default"}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            objs,
+            vec![
+                obj("luoto-dev-ae-work", "ae", "work"),
+                obj("default", "", "")
+            ]
+        );
+        let listing = apple_image_listing(
+            r#"[{"configuration":{"name":"localhost/luoto-gate:dev","descriptor":{"digest":"sha256:ab"}}},
+                {"configuration":{"name":"reg.example:5000/luoto-base","descriptor":{"digest":"sha256:cd"}}}]"#,
+        );
+        assert_eq!(
+            listing,
+            "localhost/luoto-gate\tdev\tsha256:ab\nreg.example:5000/luoto-base\t\tsha256:cd"
+        );
+    }
 
     fn obj(name: &str, env: &str, role: &str) -> Obj {
         Obj {

@@ -2,6 +2,15 @@
 
 ## 0.4.4
 
+- **Apple's `container`:** on macOS 26 on Apple silicon, `luoto setup` offers it first
+  (`--runtime container`; `--install` runs `brew install container`). It runs every container
+  as a VM of its own, so the dev container's boundary is its VM rather than gVisor. It has no
+  network card: its one link goes to its gate through luoto's background process, never to
+  your Mac or your network.
+  `luoto ui`'s setup page offers the same choice; `luoto status`, `init` and the UI's env
+  panel say how the env is isolated there.
+- **Vault:** each gate reaches the vault over a socket of its own env instead of a network
+  shared with the other envs' gates; a running env takes it at its next `up`.
 - **1Password sign-in in place:** when `op` isn't signed in on the terminal (no app
   integration, no `eval $(op signin)` in that shell), luoto offers `op signin` where it is,
   mid-question, keeps the session in memory until it exits, and runs the command again.

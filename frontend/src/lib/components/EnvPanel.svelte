@@ -22,6 +22,7 @@
       <p class="muted small">
         dev {d.dev}, gate {d.gate}{d.gate_status ? `, ${d.gate_status.rules} rules` : ""}
       </p>
+      <p class="muted small">isolation: {d.isolation}</p>
       <div class="actions">
         {#if d.dev === "running"}
           <button

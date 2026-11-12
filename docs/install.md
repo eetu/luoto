@@ -15,6 +15,15 @@ The images it replaced stay in luoto's VM until `luoto prune` removes them (`up`
 they take).
 What each release changed is in [CHANGELOG.md](../CHANGELOG.md).
 
+On macOS 26 or later on Apple silicon, `luoto setup` offers Apple's
+[`container`](https://github.com/apple/container) (1.7.1 or later) first, where every container
+is a VM of its own; podman stays the other choice. Without a terminal, setup keeps the runtime
+`config.toml` names, or picks `container` for a new one; `luoto setup --runtime podman` (or
+`container`) chooses. `--install` runs `brew install container`; setup then starts its service
+(`container system start --enable-kernel-install`, whose first start downloads its kernel) and
+pulls the release's images with `container image pull`. What differs there:
+[Platforms](how-it-works.md#platforms).
+
 `luoto uninstall` lists what it removes and asks once: every env's containers and volumes,
 the vault, luoto's images and keychain entries, its config and data folders, and luoto's VM
 unless a source build uses it or anything else is in it. The binary stays:

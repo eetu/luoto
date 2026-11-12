@@ -84,6 +84,43 @@ pub fn install_redirects(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// The gate's end of the tun link: tun0 up with the gate's address, and the socket the host
+/// joins to the dev's bound. Served by `luoto_shared::tun::serve`.
+pub fn tun_link(socket: &Path) -> Result<(std::fs::File, std::os::unix::net::UnixListener)> {
+    use luoto_shared::tun;
+    // The sandbox writes whole packets into this link: the gate must never route them on.
+    for f in [
+        "/proc/sys/net/ipv4/ip_forward",
+        "/proc/sys/net/ipv6/conf/all/forwarding",
+    ] {
+        let v = std::fs::read_to_string(f).unwrap_or_default();
+        if !v.trim().is_empty() && v.trim() != "0" {
+            bail!("forwarding is on in the gate ({f}); the tun link needs it off");
+        }
+    }
+    let dev = tun::create(tun::NAME, tun::GATE_ADDR, tun::DEV_ADDR).context("create tun0")?;
+    // The pump passes only the dev's address; the first rule holds if it ever didn't. What the
+    // redirects send on is addressed to the gate's tun end, so nothing else of the gate's (its
+    // egress address) answers the sandbox.
+    for rule in [
+        format!("-A INPUT -i {} ! -s {} -j DROP", tun::NAME, tun::DEV_ADDR),
+        format!("-A INPUT -i {} ! -d {} -j DROP", tun::NAME, tun::GATE_ADDR),
+    ] {
+        let out = Command::new("iptables")
+            .args(rule.split_whitespace())
+            .output()
+            .context("run iptables (is it installed in the gate image?)")?;
+        if !out.status.success() {
+            bail!(
+                "iptables {rule}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+    let listener = tun::listen(socket).with_context(|| format!("bind {}", socket.display()))?;
+    Ok((dev, listener))
+}
+
 pub fn chown_tree(dir: &Path, uid: u32) -> Result<()> {
     std::os::unix::fs::chown(dir, Some(uid), Some(uid))
         .with_context(|| format!("chown {}", dir.display()))?;

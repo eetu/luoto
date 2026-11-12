@@ -27,6 +27,14 @@ export type AccessRequest = {
   install?: Install;
 };
 
+/** What Apple's `container` lacks before setup can use it. */
+export type AppleNeed = {
+  /** The oldest version luoto runs on. */
+  min: string;
+  /** The command that installs or upgrades it; `None` without Homebrew. */
+  install: string[] | null;
+};
+
 /** What approving a request did. */
 export type Approved =
   /** The rule an access request became. */
@@ -100,6 +108,8 @@ export type EnvDetail = {
   missing_secrets: string[];
   sandbox_secrets: string[];
   ports: EnvPorts;
+  /** How the dev container is separated, as `luoto status` says it. */
+  isolation: string;
 };
 
 /** One env's disk use. */
@@ -214,11 +224,16 @@ export type Install =
   /** One of luoto's presets (`npm`, `pypi`, …): the hosts a registry or service needs. */
   | { kind: "preset"; name: string };
 
-/** What running the recommended install printed. */
+/** What running the install printed. */
 export type InstallOutput = {
   ok: boolean;
   command: string;
   output: string;
+};
+
+export type InstallRuntime = {
+  /** The runtime chosen; the recommended one when missing. */
+  runtime?: RuntimeChoice | null;
 };
 
 export type Intake = "proxy" | "transparent" | "dns";
@@ -475,12 +490,41 @@ export type Rule = {
   idle?: string;
 };
 
+export type RuntimeChoice = "container" | "podman";
+
 export type RuntimeInfo = {
   name: string;
   version: [number, number, number] | null;
   version_ok: boolean;
   reachable: boolean;
   detail: string;
+};
+
+/** Setup's choice of runtime where Apple's `container` runs, and what each choice needs. */
+export type RuntimeOffer = {
+  options: RuntimeOption[];
+  /** Apple's container; `None` when it isn't installed. */
+  apple: RuntimeInfo | null;
+  apple_need: AppleNeed | null;
+  /** What `--runtime podman` recommends. */
+  podman: Recommendation;
+};
+
+/**
+ * A runtime setup offers where Apple's `container` runs: its menu row in a terminal, its
+ * choice in the UI.
+ */
+export type RuntimeOption = {
+  runtime: RuntimeChoice;
+  label: string;
+  description: string;
+  recommended: boolean;
+  /** config.toml names it. */
+  current: boolean;
+  /** Where the choice starts: the current runtime, else the recommended one. */
+  selected: boolean;
+  /** The command that sets it up. */
+  setup: string;
 };
 
 export type SelftestCheck = {
@@ -497,6 +541,8 @@ export type SelftestReport = {
 export type SetupInfo = {
   detection: Detection;
   recommendation: Recommendation;
+  /** The choice between Apple's `container` and podman, where Apple's can run. */
+  runtimes: RuntimeOffer | null;
   /** The gate, vault and tools images are there. */
   images_ok: boolean;
 };

@@ -73,30 +73,69 @@ pub fn show(
 fn gate(name: &str, follow: bool, lines: Option<usize>) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let gate = names::gate(name);
-    if ctx.rt.container_state(&gate).is_none() {
+    let Some(state) = ctx.rt.container_state(&gate) else {
         if machine::stopped(&ctx.rt) {
             bail!("luoto's VM is stopped, and the gate's log is in it (`luoto up -e {name}`)");
         }
         bail!("`{name}` has no gate yet (`luoto up -e {name}` starts it)");
+    };
+    let in_file = crate::events::in_file(&ctx.rt, &gate);
+    if in_file && state != "running" {
+        eprintln!("the gate isn't running: its events show once it is (`luoto up -e {name}`)");
     }
     let mut args = vec!["logs".to_string()];
     if follow {
         args.push("-f".into());
     }
     if let Some(n) = lines {
-        args.extend(["--tail".into(), n.to_string()]);
+        let flag = if ctx.rt.flavor == crate::runtime::Flavor::Apple {
+            "-n"
+        } else {
+            "--tail"
+        };
+        args.extend([flag.into(), n.to_string()]);
     }
-    args.push(gate);
+    args.push(gate.clone());
     let out = Output::new();
-    let status = ctx
-        .rt
-        .stream(&args, &|is_err, b| out.push(usize::from(is_err), b))?;
+    let log = || {
+        ctx.rt
+            .stream(&args, &|is_err, b| out.push(usize::from(is_err), b))
+    };
+    if !in_file || state != "running" {
+        let status = log()?;
+        let closed = !out.finish();
+        return Ok(exit(status.success() || closed));
+    }
+    // The diagnostics are in the container's log, the events in their file.
+    let events = crate::events::file_args(&gate, follow, lines);
+    let file = || {
+        ctx.rt
+            .stream(&events, &|is_err, b| out.push(2 + usize::from(is_err), b))
+    };
+    let (log, file) = if follow {
+        std::thread::scope(|s| {
+            let log = s.spawn(log);
+            let file = file();
+            (
+                log.join()
+                    .unwrap_or_else(|_| bail!("reading the log failed")),
+                file,
+            )
+        })
+    } else {
+        (log(), file())
+    };
+    let ok = log?.success() & file?.success();
     let closed = !out.finish();
-    Ok(if status.success() || closed {
+    Ok(exit(ok || closed))
+}
+
+fn exit(ok: bool) -> ExitCode {
+    if ok {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
-    })
+    }
 }
 
 /// `paths` shown as one log, oldest first; with `follow`, then what is added to the last.
@@ -198,10 +237,10 @@ fn render(line: &[u8], escape: bool) -> Vec<u8> {
     out
 }
 
-/// Lines from up to two streams (a command's stdout and stderr) to stdout, each as it ends.
+/// Lines from up to four streams (two commands' stdout and stderr) to stdout, each as it ends.
 struct Output {
     escape: bool,
-    streams: Mutex<[Lines; 2]>,
+    streams: Mutex<[Lines; 4]>,
 }
 
 impl Output {

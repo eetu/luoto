@@ -32,6 +32,18 @@ pub struct Config {
     /// Drop to this uid/gid after binding sockets (Linux).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub run_as: Option<u32>,
+    /// Reach the sandbox over a tun link whose packets come framed on this unix socket,
+    /// instead of a shared network (an env whose dev has no network card; Linux).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub tun_socket: Option<PathBuf>,
+    /// The env's socket to the vault ([`luoto_shared::VAULT_SOCKET`]).
+    pub vault_socket: PathBuf,
+    /// Apple: serve `vault_socket` here, over connections the host opens to this socket and
+    /// joins to the vault (`uplink.rs`).
+    pub vault_uplink: Option<PathBuf>,
+    /// Events go to this file (`eventlog.rs`) instead of stdout, kept under `events_mb`.
+    pub events_file: Option<PathBuf>,
+    pub events_mb: u64,
     pub limits: Limits,
     #[cfg(feature = "test-hooks")]
     pub test_resolve: Vec<(String, SocketAddr)>,
@@ -95,6 +107,17 @@ impl Config {
                 .map(|v| v.parse())
                 .transpose()
                 .context("LUOTO_RUN_AS")?,
+            tun_socket: var("LUOTO_TUN_SOCKET").map(PathBuf::from),
+            vault_socket: PathBuf::from(
+                var("LUOTO_VAULT_SOCKET").unwrap_or_else(|| luoto_shared::VAULT_SOCKET.into()),
+            ),
+            vault_uplink: var("LUOTO_VAULT_UPLINK").map(PathBuf::from),
+            events_file: var("LUOTO_EVENTS_FILE").map(PathBuf::from),
+            events_mb: var("LUOTO_EVENTS_MB")
+                .map(|v| v.parse())
+                .transpose()
+                .context("LUOTO_EVENTS_MB")?
+                .unwrap_or(50),
             #[cfg(not(feature = "test-hooks"))]
             limits: Limits::default(),
             #[cfg(feature = "test-hooks")]

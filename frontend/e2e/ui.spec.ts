@@ -506,3 +506,70 @@ test("a nearly full VM disk is flagged beside the envs, with what frees it", asy
   await expect(page.getByText(/41 superseded image\(s\), up to 18\.3 GB/)).toBeVisible();
   await expect(page.getByText("luoto prune", { exact: true })).toBeVisible();
 });
+
+test("first setup on a Mac offers Apple's container first and installs the chosen runtime", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/overview",
+    (route) => route.fulfill({ json: { ...fixture("overview"), envs: [] } }),
+  );
+  const installs: unknown[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/setup/install",
+    (route, req) => {
+      installs.push(req.postDataJSON());
+      return route.fulfill({ json: { ok: true, command: "brew install container", output: "" } });
+    },
+  );
+  await open(page);
+
+  const apple = page.getByRole("radio", { name: /Apple's container/ });
+  const podman = page.getByRole("radio", { name: /podman/ });
+  await expect(apple).toBeChecked();
+  await expect(page.getByText("every container is a VM of its own")).toBeVisible();
+  await expect(page.getByText("luoto needs Apple's container 1.7.1 or later")).toBeVisible();
+  await expect(page.getByText("brew install container")).toBeVisible();
+  await expect(page.getByText("luoto setup --runtime container")).toBeVisible();
+
+  await podman.check();
+  await expect(page.getByText(/^use the installed podman/)).toBeVisible();
+  await expect(page.getByText("luoto setup --runtime podman")).toBeVisible();
+  await expect(page.getByRole("button", { name: "install…" })).toHaveCount(0);
+
+  await apple.check();
+  await page.getByRole("button", { name: "install…" }).click();
+  await page.getByRole("button", { name: "run it" }).click();
+  await expect.poll(() => installs).toEqual([{ runtime: "container" }]);
+});
+
+test("on Apple's container the status bar and the env say each container is its own VM", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/overview",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...fixture("overview"),
+          runtime: "Apple's container 1.7.1: each container its own VM",
+        },
+      }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/envs/web",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...fixture("env"),
+          isolation: "a VM of its own (Apple's container; `isolation` doesn't apply)",
+        },
+      }),
+  );
+  await open(page);
+  await expect(page.getByText("Apple's container 1.7.1: each container its own VM")).toBeVisible();
+  await page.getByRole("button", { name: /^web/ }).click();
+  await expect(page.getByText(/isolation: a VM of its own \(Apple's container/)).toBeVisible();
+});

@@ -175,10 +175,7 @@ async fn overview(State(ui): State<Ui>) -> ApiResult<Overview> {
         Ok(Overview {
             instance: names::instance(),
             desktop_notifications: crate::notify::desktop(ctx.global.notifications),
-            runtime: ctx
-                .rt
-                .version()
-                .unwrap_or_else(|_| ctx.rt.name().to_string()),
+            runtime: setup::runtime_line(&ctx.rt),
             envs,
             vault,
         })
@@ -233,6 +230,8 @@ async fn meta() -> Json<Meta> {
 struct SetupInfo {
     detection: setup::Detection,
     recommendation: setup::Recommendation,
+    /// The choice between Apple's `container` and podman, where Apple's can run.
+    runtimes: Option<setup::RuntimeOffer>,
     /// The gate, vault and tools images are there.
     images_ok: bool,
 }
@@ -241,6 +240,9 @@ async fn setup_info() -> ApiResult<SetupInfo> {
     blocking(|| {
         let d = setup::detect();
         let r = setup::recommend(&d);
+        let paths = crate::paths::Paths::get()?;
+        let current = setup::configured(&config::load_global(&paths)?);
+        let runtimes = setup::offer(&d, setup::probe_apple(), current);
         let images_ok = Ctx::load()
             .map(|ctx| {
                 ["gate", "vault", "tools"]
@@ -251,6 +253,7 @@ async fn setup_info() -> ApiResult<SetupInfo> {
         Ok(SetupInfo {
             detection: d,
             recommendation: r,
+            runtimes,
             images_ok,
         })
     })
@@ -258,7 +261,13 @@ async fn setup_info() -> ApiResult<SetupInfo> {
     .map(Json)
 }
 
-/// What running the recommended install printed.
+#[derive(Deserialize)]
+struct InstallRuntime {
+    /// The runtime chosen; the recommended one when missing.
+    runtime: Option<setup::RuntimeChoice>,
+}
+
+/// What running the install printed.
 #[derive(Serialize)]
 struct InstallOutput {
     ok: bool,
@@ -266,12 +275,9 @@ struct InstallOutput {
     output: String,
 }
 
-async fn setup_install() -> ApiResult<InstallOutput> {
-    blocking(|| {
-        let r = setup::recommend(&setup::detect());
-        let Some(cmd) = r.install else {
-            anyhow::bail!("nothing to install");
-        };
+async fn setup_install(Json(i): Json<InstallRuntime>) -> ApiResult<InstallOutput> {
+    blocking(move || {
+        let cmd = setup::install_command(i.runtime)?;
         if cmd[0] == "sudo" {
             anyhow::bail!(
                 "this needs your password — run it in a terminal: {}",
@@ -549,6 +555,8 @@ struct EnvDetail {
     missing_secrets: Vec<String>,
     sandbox_secrets: Vec<String>,
     ports: ports::EnvPorts,
+    /// How the dev container is separated, as `luoto status` says it.
+    isolation: String,
 }
 
 async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
@@ -578,8 +586,15 @@ async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
         } else {
             ports::EnvPorts::default()
         };
+        let isolation = init::isolation_text(
+            ctx.rt.flavor == crate::runtime::Flavor::Apple,
+            p.cfg.isolation,
+            ctx.global.gvisor.is_some(),
+        )
+        .into();
         Ok(EnvDetail {
             ports,
+            isolation,
             path: p.path.display().to_string(),
             rules: p.compiled.policy.rules.clone(),
             denies: p.compiled.policy.denies.len(),

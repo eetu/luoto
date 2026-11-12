@@ -4,6 +4,9 @@ yarn := "node " + (justfile_directory() / "frontend" / `awk '/^yarnPath:/{print 
 # macOS and Windows: luoto's own VM (`luoto setup` creates it).
 target := env_var_or_default("CARGO_TARGET_DIR", justfile_directory() / "target")
 runtime := env_var_or_default("LUOTO_RUNTIME", if os() == "linux" { "podman" } else { "podman --connection luoto" })
+# Apple's builder VM starts with 2 CPUs and 2 GB: every CPU and half the RAM (4-16 GB), as
+# `luoto setup --build` gives it.
+builder := if runtime == "container" { "--cpus " + num_cpus() + " --memory " + `m=$(( $(sysctl -n hw.memsize) / 2147483648 )); echo $(( m < 4 ? 4 : m > 16 ? 16 : m ))g` } else { "" }
 
 default:
     @just --list
@@ -34,10 +37,10 @@ link-dev:
 
 # Build the gate, vault, tools and base images where luoto runs them.
 images:
-    {{runtime}} build -f Containerfile --target gate -t localhost/luoto-gate:dev .
-    {{runtime}} build -f Containerfile --target vault -t localhost/luoto-vault:dev .
-    {{runtime}} build -f Containerfile --target tools -t localhost/luoto-tools:dev .
-    {{runtime}} build -f image/Containerfile -t localhost/luoto-base:dev image
+    {{runtime}} build {{builder}} -f Containerfile --target gate -t localhost/luoto-gate:dev .
+    {{runtime}} build {{builder}} -f Containerfile --target vault -t localhost/luoto-vault:dev .
+    {{runtime}} build {{builder}} -f Containerfile --target tools -t localhost/luoto-tools:dev .
+    {{runtime}} build {{builder}} -f image/Containerfile -t localhost/luoto-base:dev image
 
 # UI development: the API on :7878 plus Vite with hot reload on :5173.
 dev:

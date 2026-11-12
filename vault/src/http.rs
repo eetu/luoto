@@ -1,9 +1,13 @@
-//! The vault's API for gates, on the vault network only: one binding's value, or one
-//! ssh-agent message, for the env whose token the request bears.
+//! The vault's API for gates: one binding's value, or one ssh-agent message, for the env whose
+//! channel the request comes on, and only with that env's token.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use anyhow::Context;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use bytes::Bytes;
@@ -18,24 +22,135 @@ use luoto_shared::creds::{
     AgentRequest, CredentialError, CredentialRequest, VAULT_AGENT_PATH, VAULT_CREDENTIAL_PATH,
 };
 use luoto_shared::events::{Event, EventKind, Verdict};
-use tokio::net::TcpListener;
+use tokio::io::AsyncReadExt;
+use tokio::net::{UnixListener, UnixStream};
+use tokio::task::AbortHandle;
 
 use crate::agent;
 use crate::state::Vault;
 
-pub async fn serve(vault: Arc<Vault>, listener: TcpListener) {
+/// How gates reach the vault.
+pub enum Channels {
+    /// A socket per bound env, `<dir>/<env>/vault.sock`: each gate mounts only its env's folder.
+    PerEnv(EnvSockets),
+    /// One socket (Apple's, published to the host), on which each connection names its env in
+    /// its first line: luoto's watcher writes it, joining the env's gate to the vault.
+    Shared,
+}
+
+/// An env name as luoto gives them, and so a safe path segment.
+pub fn valid_env(env: &str) -> bool {
+    (1..=64).contains(&env.len())
+        && env
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// A listener on a new socket at `path`, for the vault's own user only: a gate runs as the same
+/// uid (65534), and Apple's socket forwarder as root.
+pub fn bind(path: &Path) -> anyhow::Result<UnixListener> {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::remove_file(path);
+    let listener = UnixListener::bind(path).with_context(|| format!("bind {}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
+pub struct EnvSockets {
+    dir: PathBuf,
+    served: Mutex<HashMap<String, AbortHandle>>,
+}
+
+impl EnvSockets {
+    pub fn new(dir: PathBuf) -> Self {
+        EnvSockets {
+            dir,
+            served: Mutex::default(),
+        }
+    }
+
+    /// Serve `env` on its socket, unless it is served already. Its folder stays once made: a
+    /// running gate mounts that folder, and sees a socket made in it again (after a restart).
+    pub fn open(&self, vault: &Arc<Vault>, env: &str) -> anyhow::Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut served = self.served.lock().unwrap_or_else(|e| e.into_inner());
+        if served.get(env).is_some_and(|h| !h.is_finished()) {
+            return Ok(());
+        }
+        let dir = self.dir.join(env);
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .recursive(true)
+            .create(&dir)
+            .with_context(|| format!("create {}", dir.display()))?;
+        let listener = bind(&dir.join("vault.sock"))?;
+        let task = tokio::spawn(serve_env(vault.clone(), listener, env.to_string()));
+        served.insert(env.to_string(), task.abort_handle());
+        Ok(())
+    }
+
+    /// Stop serving `env` and remove its folder (its gate is gone).
+    pub fn close(&self, env: &str) {
+        let task = self
+            .served
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(env);
+        if let Some(t) = task {
+            t.abort();
+        }
+        let dir = self.dir.join(env);
+        let _ = std::fs::remove_file(dir.join("vault.sock"));
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
+async fn serve_env(vault: Arc<Vault>, listener: UnixListener, env: String) {
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;
         };
+        tokio::spawn(serve_conn(vault.clone(), stream, env.clone()));
+    }
+}
+
+/// How long a connection on the shared socket has to name its env.
+const NAME_WAIT: Duration = Duration::from_secs(10);
+
+pub async fn serve_shared(vault: Arc<Vault>, listener: UnixListener) {
+    loop {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            continue;
+        };
         let v = vault.clone();
         tokio::spawn(async move {
-            let svc = service_fn(move |req| handle(v.clone(), req));
-            let _ = http1::Builder::new()
-                .serve_connection(TokioIo::new(stream), svc)
-                .await;
+            if let Ok(Some(env)) = tokio::time::timeout(NAME_WAIT, env_line(&mut stream)).await {
+                serve_conn(v, stream, env).await;
+            }
         });
     }
+}
+
+/// The env a connection on the shared socket names, read a byte at a time so that nothing
+/// after its line is taken from the HTTP that follows.
+async fn env_line(stream: &mut UnixStream) -> Option<String> {
+    let mut line = Vec::new();
+    loop {
+        match stream.read_u8().await.ok()? {
+            b'\n' => break,
+            b if line.len() < 64 => line.push(b),
+            _ => return None,
+        }
+    }
+    String::from_utf8(line).ok().filter(|e| valid_env(e))
+}
+
+async fn serve_conn(vault: Arc<Vault>, stream: UnixStream, env: String) {
+    let env: Arc<str> = env.into();
+    let svc = service_fn(move |req| handle(vault.clone(), env.clone(), req));
+    let _ = http1::Builder::new()
+        .serve_connection(TokioIo::new(stream), svc)
+        .await;
 }
 
 fn reply(status: StatusCode, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
@@ -46,6 +161,7 @@ fn reply(status: StatusCode, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
 
 async fn handle(
     vault: Arc<Vault>,
+    env: Arc<str>,
     req: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let path = req.uri().path();
@@ -59,9 +175,9 @@ async fn handle(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default();
-    let Some(env) = vault.env_for_token(token) else {
+    if !vault.token_is(&env, token) {
         return Ok(reply(StatusCode::FORBIDDEN, "unknown token"));
-    };
+    }
     // An agent message travels in base64 inside its JSON envelope.
     let limit = if agent { 2 * MAX_AGENT_MESSAGE } else { 4096 };
     let body = match Limited::new(req.into_body(), limit).collect().await {

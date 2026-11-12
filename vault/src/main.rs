@@ -11,26 +11,31 @@ mod http;
 mod state;
 mod upstream;
 
-use std::net::SocketAddr;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use luoto_shared::ctl::CTL_SOCKET;
 use luoto_shared::events::{Event, EventKind};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::UnixListener;
 
+use crate::http::Channels;
 use crate::state::{Vault, client_tls};
+
+fn var(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
 
 async fn serve() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let addr: SocketAddr = std::env::var("LUOTO_VAULT_ADDR")
-        .unwrap_or_else(|_| format!("127.0.0.1:{}", luoto_shared::VAULT_PORT))
-        .parse()
-        .context("LUOTO_VAULT_ADDR")?;
-    let listener = TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("bind {addr}"))?;
+    // Gates reach the vault on a socket per env, made in this folder for each bound env, or
+    // (Apple) on one socket whose every connection names its env first.
+    let (channels, shared) = match (var("LUOTO_VAULT_SOCKETS"), var("LUOTO_VAULT_SOCKET")) {
+        (Some(dir), None) => (Channels::PerEnv(http::EnvSockets::new(dir.into())), None),
+        (None, Some(path)) => (Channels::Shared, Some(http::bind(Path::new(&path))?)),
+        _ => bail!("set one of LUOTO_VAULT_SOCKETS (a folder) and LUOTO_VAULT_SOCKET"),
+    };
     let ctl_path = std::env::var("LUOTO_CTL_SOCKET").unwrap_or_else(|_| CTL_SOCKET.into());
     if let Some(parent) = std::path::Path::new(&ctl_path).parent() {
         std::fs::create_dir_all(parent)?;
@@ -55,8 +60,10 @@ async fn serve() -> Result<()> {
         message: Some(format!("vault {} started (locked)", luoto_shared::VERSION)),
         ..Default::default()
     });
-    tokio::spawn(ctl::serve(vault.clone(), ctl));
-    http::serve(vault, listener).await;
+    if let Some(listener) = shared {
+        tokio::spawn(http::serve_shared(vault.clone(), listener));
+    }
+    ctl::serve(vault, Arc::new(channels), ctl).await;
     Ok(())
 }
 

@@ -100,6 +100,23 @@
     margin-top: 4px;
   }
 
+  /* A command, copied on click. */
+  :global(.cmd) {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 4px 6px;
+    border: none;
+    border-radius: var(--halo-radius);
+    background: var(--halo-bg-light);
+    color: var(--halo-text-main);
+    text-align: left;
+  }
+
+  :global(.cmd code) {
+    flex: 1;
+  }
+
   :global(.small) {
     margin: 0;
     font-size: 12px;

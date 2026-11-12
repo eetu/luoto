@@ -45,6 +45,8 @@ mod state;
 mod sync;
 mod text;
 mod transfer;
+#[cfg(unix)]
+mod tunlink;
 mod ui;
 mod uninstall;
 mod upgrade;

@@ -601,7 +601,11 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
     );
     println!(
         "  isolation: {}",
-        crate::init::isolation_text(f.cfg.isolation, ctx.global.gvisor.is_some())
+        crate::init::isolation_text(
+            ctx.rt.flavor == crate::runtime::Flavor::Apple,
+            f.cfg.isolation,
+            ctx.global.gvisor.is_some()
+        )
     );
     println!(
         "  idle:   {}",

@@ -48,8 +48,11 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   them again; one an upstream refuses (401) is read again on its own, at most every 10
   minutes, when its source needs no one (the keychain, a 1Password service account, `file:`,
   Vault, `az`). Those background reads only replace what the vault holds, so a locked vault
-  stays empty. Each gate authenticates to the
-  vault with its own token and receives only its env's bindings, as short-lived values
+  stays empty. Gates share no network with each other or the vault: each reaches the vault
+  on a unix socket of its env's (a folder of the vault's socket volume that only its gate
+  mounts; on Apple's `container`, links luoto's background process opens to the gate and joins
+  to the vault under the env's name), and the vault takes only that env's token there. A gate
+  receives only its env's bindings, as short-lived values
   (GitHub installation tokens restricted to the env's repositories and permissions). On a
   credentialed host the gate removes any credential the client sent before injecting its own,
   so a dependency carrying an attacker's token cannot use it, and it injects only over TLS:
@@ -157,7 +160,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   other envs). `isolation = "container"` opts an env out of gVisor, leaving the VM's kernel as
   the boundary. With Docker, dev
   containers are plain containers, in Docker's VM on macOS and Windows (which shares your
-  folders) and on the host on Linux.
+  folders) and on the host on Linux. On Apple's `container` every container is a VM of its
+  own: the dev VM has no network card, only a tun link to its gate that luoto's background
+  process carries on your Mac, so it reaches neither your Mac nor your network but through the
+  gate. A gate is on its env's NAT network only, and the vault on its own.
 - **Control plane.** Policy, CA and credentials reach the gate and vault through the
   runtime's `exec` into a unix socket — there is no admin port. The local UI binds
   127.0.0.1, requires a per-run token, checks Host (DNS rebinding) and Origin, and sets a
@@ -223,13 +229,19 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   so stop the env's own traffic, which it could break anyway; other envs have their own gates.
   The event queue, cached certificates and the logs of the gate, the vault and the dev container
   (which root in the sandbox can write to) stay bounded; Docker keeps its daemon's log settings.
+  Apple's `container` caps no container's log, so there the gate keeps its events in a capped
+  file of its own and no process in the dev container holds its log open once it has started.
+  The dev VM's console, which Apple also logs uncapped, has no node left in the container
+  (and no MKNOD to make one), and its kernel writes there only what stops it; the runtime
+  adds a few lines for each of luoto's own calls into the container.
 - **Container or VM escape.** An exploit that escapes gVisor (or a plain container) lands in
   luoto's VM as the env's own unprivileged IDs; one more kernel exploit there reaches the other
   envs and the vault, which share the VM, and through podman's network helper also the
   services on your machine's loopback, and the helper's API, which can publish a port on your
   machine. On Linux there is no VM: gVisor is the boundary to
   the host, so install `runsc`. With Docker, an escape lands in Docker's VM, which shares your
-  folders (on Linux, on the host).
+  folders (on Linux, on the host). On Apple's `container`, an escape from the dev VM's kernel
+  has to break out through Apple's virtualization, onto your Mac.
 - **Forwarded ports.** A server in the sandbox on ports 1024–32767 is reachable at localhost
   on your machine while it listens. Code in the sandbox can hold a port a host tool expects
   first (a local OAuth callback, say), and the tool's browser redirect then reaches the

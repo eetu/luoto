@@ -250,5 +250,6 @@ export default {
   "credentials": [],
   "missing_secrets": [],
   "sandbox_secrets": [],
-  "ports": { "published": [], "forwarded": [5173], "taken": [3000] }
+  "ports": { "published": [], "forwarded": [5173], "taken": [3000] },
+  "isolation": "gVisor: its own user-space kernel (builds about 1.6× slower)"
 } satisfies EnvDetail;

@@ -9,16 +9,18 @@ use luoto_shared::events::{Event, EventKind};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
+use crate::http::{self, Channels};
 use crate::state::Vault;
 
 const MAX_REQUEST: u64 = 16 << 20;
 
-pub async fn serve(vault: Arc<Vault>, listener: UnixListener) {
+pub async fn serve(vault: Arc<Vault>, channels: Arc<Channels>, listener: UnixListener) {
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;
         };
         let vault = vault.clone();
+        let channels = channels.clone();
         tokio::spawn(async move {
             let (r, mut w) = stream.into_split();
             let mut line = String::new();
@@ -27,7 +29,7 @@ pub async fn serve(vault: Arc<Vault>, listener: UnixListener) {
                 return;
             }
             let resp = match serde_json::from_str::<VaultCtl>(&line) {
-                Ok(op) => dispatch(&vault, op),
+                Ok(op) => dispatch(&vault, &channels, op),
                 Err(e) => CtlResponse::err(format!("bad request: {e}")),
             };
             let mut out = serde_json::to_vec(&resp).unwrap_or_default();
@@ -46,7 +48,7 @@ fn lifecycle(vault: &Vault, env: &str, msg: String) {
     });
 }
 
-fn dispatch(vault: &Vault, op: VaultCtl) -> CtlResponse {
+fn dispatch(vault: &Arc<Vault>, channels: &Channels, op: VaultCtl) -> CtlResponse {
     match op {
         VaultCtl::Status => CtlResponse::ok(vault.status()),
         VaultCtl::Load { secrets, held_only } => {
@@ -59,6 +61,9 @@ fn dispatch(vault: &Vault, op: VaultCtl) -> CtlResponse {
             token_sha256,
             bindings,
         } => {
+            if !http::valid_env(&env) {
+                return CtlResponse::err("env names are 1-64 chars of a-z, 0-9 and '-'");
+            }
             let Ok(raw) = hex::decode(&token_sha256) else {
                 return CtlResponse::err("token_sha256 is not hex");
             };
@@ -67,6 +72,11 @@ fn dispatch(vault: &Vault, op: VaultCtl) -> CtlResponse {
             };
             let names: Vec<String> = bindings.keys().cloned().collect();
             vault.bind(&env, hash, bindings);
+            if let Channels::PerEnv(sockets) = channels
+                && let Err(e) = sockets.open(vault, &env)
+            {
+                return CtlResponse::err(format!("{e:#}"));
+            }
             lifecycle(
                 vault,
                 &env,
@@ -76,6 +86,11 @@ fn dispatch(vault: &Vault, op: VaultCtl) -> CtlResponse {
         }
         VaultCtl::Unbind { env } => {
             vault.unbind(&env);
+            if let Channels::PerEnv(sockets) = channels
+                && http::valid_env(&env)
+            {
+                sockets.close(&env);
+            }
             CtlResponse::ok(true)
         }
         VaultCtl::Lock => {
