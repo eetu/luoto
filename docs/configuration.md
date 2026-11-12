@@ -139,6 +139,12 @@ with their values. The refs it writes name the vault and item by ID, so a rename
 break them. Sources are configured in `~/.config/luoto/config.toml`. `[credentials.azure]`
 reads your `az` login itself, with no ref.
 
+1Password works best with the app's CLI integration on (Settings > Developer > Integrate with
+1Password CLI): `op` then unlocks through the app, with Touch ID, in any terminal. Signed in
+by hand instead, `op` holds its session only in the shell that ran `eval $(op signin)`, for 30
+minutes idle; when luoto finds it signed out, it offers `op signin` in place and keeps the
+session in memory until it exits.
+
 `[sandbox_secrets]` are resolved on your machine at `up` and written to a memory-only file in
 the dev container that every shell loads; they leave with the container. Anything that only
 needs a token in an HTTP header belongs under `[credentials.custom.<name>]` instead, where the

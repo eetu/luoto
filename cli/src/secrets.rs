@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -235,6 +235,15 @@ fn file_path(p: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(p))
 }
 
+/// The sessions `op signin` gave this process (`OP_SESSION_<id>`, as `eval $(op signin)` sets
+/// them in a shell), passed to every later `op`. Memory only: one lasts 30 minutes idle.
+static OP_SESSIONS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// What to do when `op` isn't signed in on this terminal.
+const OP_SIGN_IN: &str = "1Password isn't signed in: run `eval $(op signin)` before luoto, or \
+                          turn on Settings > Developer > Integrate with 1Password CLI in the \
+                          1Password app, which unlocks `op` with the app in every terminal";
+
 /// `op <args>` as `config.toml`'s 1Password source says: `account` (a ref's own) or its
 /// account, and the service account's token when that mode is on.
 fn op(global: &GlobalConfig, args: &[&str], account: Option<&str>) -> Result<Command> {
@@ -242,6 +251,9 @@ fn op(global: &GlobalConfig, args: &[&str], account: Option<&str>) -> Result<Com
     cmd.args(args);
     if let Some(acct) = account.or(global.sources.op.account.as_deref()) {
         cmd.args(["--account", acct]);
+    }
+    for (name, token) in OP_SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        cmd.env(name, token);
     }
     if op_service_account(global) {
         let token_ref = global
@@ -301,6 +313,89 @@ fn op_output(mut cmd: Command, what: &str, input: Option<&[u8]>) -> Result<Vec<u
     Ok(out.stdout)
 }
 
+/// `op <args>` run as [`op_output`] runs it. When it fails because 1Password isn't signed in
+/// here (no app integration, no `eval $(op signin)` in this shell), a terminal is offered the
+/// sign-in in place, and the command runs again: signing in from another terminal can't reach
+/// this process, and leaving would end the question that needed `op`.
+fn op_run(
+    global: &GlobalConfig,
+    args: &[&str],
+    account: Option<&str>,
+    what: &str,
+    input: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    let first = op_output(op(global, args, account)?, what, input);
+    if first.is_ok()
+        || op_service_account(global)
+        || !op_available()
+        || op_signed_in(global, account)
+    {
+        return first;
+    }
+    if !crate::prompt::confirm("1Password isn't signed in here. Sign in now (`op signin`)?") {
+        bail!("{OP_SIGN_IN}");
+    }
+    op_sign_in(global, account)?;
+    op_output(op(global, args, account)?, what, input)
+}
+
+/// Whether `op` is signed in to `account` (or the default one) here.
+fn op_signed_in(global: &GlobalConfig, account: Option<&str>) -> bool {
+    op(global, &["whoami"], account).is_ok_and(|mut cmd| {
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
+/// `op signin` on this terminal (it asks for the password there), keeping the session it
+/// prints for this process. With the app integration on, it authorizes the terminal instead
+/// and prints none.
+fn op_sign_in(global: &GlobalConfig, account: Option<&str>) -> Result<()> {
+    let mut cmd = op(global, &["signin"], account)?;
+    let out = crate::progress::pause(|| -> Result<std::process::Output> {
+        Ok(cmd
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .context("run `op signin`")?
+            .wait_with_output()?)
+    })?;
+    if !out.status.success() {
+        bail!("`op signin` failed (see above). {OP_SIGN_IN}");
+    }
+    let found = op_sessions(&String::from_utf8_lossy(&out.stdout));
+    let mut sessions = OP_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    sessions.retain(|(name, _)| !found.iter().any(|(n, _)| n == name));
+    sessions.extend(found);
+    Ok(())
+}
+
+/// The `OP_SESSION_<id>` variables `op signin` prints, in any shell's syntax (`export NAME="…"`,
+/// `set -x NAME "…"`, `$env:NAME="…"`).
+fn op_sessions(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|l| {
+            let rest = &l[l.find("OP_SESSION_")?..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            let (name, after) = rest.split_at(end);
+            let quoted = &after[after.find('"')? + 1..];
+            let token = &quoted[..quoted.find('"')?];
+            let plain = !token.is_empty()
+                && token
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
+            (name.len() > "OP_SESSION_".len() && plain)
+                .then(|| (name.to_string(), token.to_string()))
+        })
+        .collect()
+}
+
 /// Trimmed as a `file:` is: text typed into 1Password (a Secure Note's) often ends in a line
 /// break, which no header value can carry.
 fn op_read(global: &GlobalConfig, r: &str) -> Result<String> {
@@ -311,12 +406,10 @@ fn op_read(global: &GlobalConfig, r: &str) -> Result<String> {
             check_unique_address(a, &op_accounts())?;
         }
     }
-    let out = op_output(
-        op(
-            global,
-            &["read", "--no-newline", &op_ref],
-            account.as_deref(),
-        )?,
+    let out = op_run(
+        global,
+        &["read", "--no-newline", &op_ref],
+        account.as_deref(),
         "op read",
         None,
     )?;
@@ -453,8 +546,10 @@ fn op_id(s: &str) -> Option<String> {
 
 /// The vaults `account` (or the default one) can see, by name.
 pub fn op_vaults(global: &GlobalConfig, account: Option<&str>) -> Result<Vec<OpVault>> {
-    let out = op_output(
-        op(global, &["vault", "list", "--format", "json"], account)?,
+    let out = op_run(
+        global,
+        &["vault", "list", "--format", "json"],
+        account,
         "op vault list",
         None,
     )?;
@@ -480,12 +575,10 @@ fn parse_op_vaults(json: &[u8]) -> Result<Vec<OpVault>> {
 /// The items in vault `vault` (an ID) of `account` (or the default one), by title.
 pub fn op_items(global: &GlobalConfig, account: Option<&str>, vault: &str) -> Result<Vec<OpItem>> {
     let vault = op_id(vault).context("a 1Password vault ID is letters and digits")?;
-    let out = op_output(
-        op(
-            global,
-            &["item", "list", "--vault", &vault, "--format", "json"],
-            account,
-        )?,
+    let out = op_run(
+        global,
+        &["item", "list", "--vault", &vault, "--format", "json"],
+        account,
         "op item list",
         None,
     )?;
@@ -625,12 +718,10 @@ pub fn op_save(
             {"id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain", "value": note},
         ],
     });
-    let out = op_output(
-        op(
-            global,
-            &["item", "create", "--vault", &vault, "--format", "json", "-"],
-            account,
-        )?,
+    let out = op_run(
+        global,
+        &["item", "create", "--vault", &vault, "--format", "json", "-"],
+        account,
         "op item create",
         Some(&serde_json::to_vec(&item)?),
     )?;
@@ -993,6 +1084,32 @@ mod tests {
         assert!(op_item_ref(None, vault, &hostile, "password").is_err());
         assert!(op_item_ref(None, "../v", &item("LOGIN"), "password").is_err());
         assert!(op_item_ref(Some("-x"), vault, &item("LOGIN"), "password").is_err());
+    }
+
+    #[test]
+    fn op_signin_sessions_are_read_in_any_shells_syntax() {
+        let sh = "# This command is meant to be used with your shell's eval function.\n\
+                  export OP_SESSION_ABC123DEF=\"tok-EN_1.x\"\n";
+        let fish = "set -x OP_SESSION_ABC123DEF \"tok-EN_1.x\";\n";
+        let ps = "$env:OP_SESSION_ABC123DEF=\"tok-EN_1.x\"\n";
+        for out in [sh, fish, ps] {
+            assert_eq!(
+                op_sessions(out),
+                [("OP_SESSION_ABC123DEF".to_string(), "tok-EN_1.x".to_string())],
+                "{out}"
+            );
+        }
+        // Nothing but a plain name and token: the value reaches a child's environment.
+        for out in [
+            "",
+            "export OP_SESSION_=\"t\"",
+            "export OP_SESSION_X=\"\"",
+            "export OP_SESSION_X=\"a b\"",
+            "export OP_SESSION_X=\"$(id)\"",
+            "export OP_SESSION_X=unquoted",
+        ] {
+            assert!(op_sessions(out).is_empty(), "{out}");
+        }
     }
 
     #[test]

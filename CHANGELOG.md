@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.4
+
+- **1Password sign-in in place:** when `op` isn't signed in on the terminal (no app
+  integration, no `eval $(op signin)` in that shell), luoto offers `op signin` where it is,
+  mid-question, keeps the session in memory until it exits, and runs the command again.
+  Without a terminal, the error names both fixes; the app's CLI integration (Settings >
+  Developer) unlocks `op` in every terminal.
+
 ## 0.4.3 (2026-11-11)
 
 - **Open egress:** `luoto egress open` lets an env reach any HTTP(S) host and port no rule
