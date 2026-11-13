@@ -305,7 +305,7 @@ pub fn sets(
             file: file.to_string(),
             path,
             value: Value::Null,
-            append: false,
+            ..Default::default()
         };
         if !removes.contains(&set) {
             removes.push(set);
@@ -372,7 +372,7 @@ fn fill(set: &JsonSet, v: &Vars) -> Option<JsonSet> {
                 })
                 .collect(),
             value: Value::from(n),
-            append: false,
+            ..Default::default()
         });
     }
     let text = |t: &str| {
@@ -399,7 +399,7 @@ fn fill(set: &JsonSet, v: &Vars) -> Option<JsonSet> {
         file: set.file.clone(),
         path: set.path.iter().map(|p| text(p)).collect(),
         value: value(&set.value, &text),
-        append: false,
+        ..Default::default()
     })
 }
 

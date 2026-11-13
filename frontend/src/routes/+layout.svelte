@@ -161,6 +161,132 @@
     color: var(--halo-text-muted);
   }
 
+  :global(.error) {
+    color: var(--halo-error);
+  }
+
+  /* The surface: a header bar over a table that scrolls (an env's egress, the vault). */
+  :global(.surface) {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  :global(.surface > .bar) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    padding: 14px 18px 10px;
+  }
+
+  :global(.surface h1) {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  :global(.table-wrap) {
+    flex: 1;
+    min-height: 0;
+    padding: 0 18px 18px;
+    overflow: auto;
+  }
+
+  :global(.table-wrap > .empty) {
+    margin: 30px 0;
+    text-align: center;
+  }
+
+  :global(table.list) {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  :global(.list th) {
+    position: sticky;
+    top: 0;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--halo-border);
+    background: var(--halo-body);
+    color: var(--halo-text-muted);
+    font-family: var(--halo-font-heading);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-align: left;
+    text-transform: uppercase;
+  }
+
+  :global(.list td) {
+    padding: 7px 8px;
+    border-bottom: 1px solid var(--halo-border);
+    vertical-align: top;
+  }
+
+  /* A row that opens its subject: on click, or Enter/Space when focused. */
+  :global(.list tr[tabindex]) {
+    cursor: default;
+  }
+
+  :global(.list tr[tabindex]:hover) {
+    background: var(--halo-bg-light);
+  }
+
+  :global(.list tr[tabindex]:focus-visible) {
+    outline: 2px solid var(--halo-accent);
+    outline-offset: -2px;
+  }
+
+  :global(.list tr.selected) {
+    background: var(--halo-accent-soft);
+  }
+
+  /* A line under a row's main text. */
+  :global(.list .why) {
+    margin-top: 2px;
+    color: var(--halo-text-muted);
+    font-size: 12px;
+    font-weight: 400;
+  }
+
+  /* A state, in a pill. Muted is an inactive state: dashed borders mean borrowed. */
+  :global(.chip) {
+    display: inline-block;
+    padding: 1px 7px;
+    border: 1px solid transparent;
+    border-radius: var(--halo-radius-pill, 999px);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  :global(.chip.plain) {
+    background: var(--halo-bg-light);
+    color: var(--halo-text-main);
+  }
+
+  :global(.chip.bad) {
+    background: color-mix(in srgb, var(--halo-error) 15%, transparent);
+    color: var(--halo-error);
+  }
+
+  :global(.chip.accent) {
+    background: var(--halo-accent-soft);
+    color: var(--halo-accent);
+  }
+
+  :global(.chip.outline) {
+    border-color: var(--halo-accent);
+    color: var(--halo-accent);
+  }
+
+  :global(.chip.muted) {
+    border-color: var(--halo-border);
+    color: var(--halo-text-muted);
+  }
+
   :global(code),
   :global(.mono) {
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;

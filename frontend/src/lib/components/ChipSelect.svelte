@@ -17,8 +17,9 @@
   {#each options as o (o.name)}
     <button
       type="button"
-      class="chip"
+      class="option"
       class:on={selected.includes(o.name)}
+      aria-pressed={selected.includes(o.name)}
       title={o.title}
       onclick={() => toggle(o.name)}>{o.name}</button
     >
@@ -32,7 +33,7 @@
     gap: 6px;
   }
 
-  .chip {
+  .option {
     padding: 3px 9px;
     border: 1px solid var(--halo-border);
     border-radius: var(--halo-radius-pill, 999px);
@@ -41,7 +42,7 @@
     font-size: 12px;
   }
 
-  .chip.on {
+  .option.on {
     border-color: var(--halo-accent);
     background: var(--halo-accent-soft);
     color: var(--halo-accent);

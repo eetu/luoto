@@ -50,7 +50,7 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   Vault, `az`). Those background reads only replace what the vault holds, so a locked vault
   stays empty. Gates share no network with each other or the vault: each reaches the vault
   on a unix socket of its env's (a folder of the vault's socket volume that only its gate
-  mounts; on Apple's `container`, links luoto's background process opens to the gate and joins
+  mounts; on Apple's `container`, links the background watcher opens to the gate and joins
   to the vault under the env's name), and the vault takes only that env's token there. A gate
   receives only its env's bindings, as short-lived values
   (GitHub installation tokens restricted to the env's repositories and permissions). On a
@@ -120,9 +120,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   (compared case-insensitively, as macOS and Windows name them), refuses `.git` under any
   spelling, names that collide by case, and paths and symlinks that leave the folder. A
   pulled `.gitignore` decides what later copies leave out, so review its changes. `pull`
-  never writes into your home folder or a folder that holds it. With podman on macOS and Windows, envs run only in
-  luoto's own VM, which mounts none of your folders but luoto's shares folder, read-only
-  (`luoto doctor` checks), so an escape reaches what you shared, not your home directory.
+  never writes into your home folder or a folder that holds it. With podman on macOS and
+  Windows, envs run only in luoto's own VM, which mounts none of your folders but luoto's
+  shares folder, read-only (`luoto doctor` checks), so an escape reaches what you shared, not
+  your home directory.
 - **Shared folders** (`luoto share`). A folder you share is cloned into luoto's shares
   folder and the env's clones are mounted read-only at `/shares`, readable by any code
   there; nothing flows back, and a change in the folder arrives only with a sync. Only its
@@ -130,8 +131,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   one (never a `luoto.toml`, and `luoto import` leaves an archive's out), checked again at
   every sync: a folder inside your home folder but not home itself, a dot-folder or
   `~/Library`, or on a disk (`/Volumes`, `/mnt`, `/media`, `/srv`), and never a key folder
-  (`.ssh`, `.aws`, …) or one inside it. luoto's podman VM mounts the whole shares folder, so an escape from one env into
-  the VM reads every env's shares.
+  (`.ssh`, `.aws`, …) or one inside it. luoto's podman VM mounts the whole shares folder, so
+  an escape from one env into the VM reads every env's shares.
 - **Repositories cloned inside** (`luoto init <remote>`). The env's workspace is cloned in the
   env, through the gate, as the unprivileged user, with nothing on the host: git brings no
   hooks, submodules aren't fetched and LFS files stay pointers, and `.gitattributes` filters
@@ -162,17 +163,17 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   accepted here: the next `up` reviews it as a new one. Folders, CA files and `file:` refs on
   another machine (`\\server\share`, `/net/<host>`) are refused in any config, since looking
   one up sends your Windows credentials there or mounts it.
-- **Isolation.** With podman, dev containers run on gVisor (in luoto's VM on macOS and
-  Windows; on Linux once `runsc` is installed): the sandbox's system calls reach gVisor's
-  user-space kernel, not the VM's or the host's. In luoto's VM each env's dev container has its
-  own user ID range, and none maps to the VM user that owns podman (and so the vault and the
-  other envs). `isolation = "container"` opts an env out of gVisor, leaving the VM's kernel as
-  the boundary. With Docker, dev
-  containers are plain containers, in Docker's VM on macOS and Windows (which shares your
-  folders) and on the host on Linux. On Apple's `container` every container is a VM of its
-  own: the dev VM has no network card, only a tun link to its gate that luoto's background
-  process carries on your Mac, so it reaches neither your Mac nor your network but through the
-  gate. A gate is on its env's NAT network only, and the vault on its own.
+- **Isolation.** With podman, dev containers run on gVisor (in luoto's VM on macOS and Windows;
+  on Linux once `runsc` is installed): the sandbox's system calls reach gVisor's user-space
+  kernel, not the VM's or the host's. In luoto's VM each env's dev container has its own user
+  ID range, and none maps to the VM user that owns podman (and so the vault and the other
+  envs). `isolation = "container"` opts an env out of gVisor, leaving the VM's kernel as the
+  boundary. With Docker, dev containers are plain containers, in Docker's VM on macOS and
+  Windows (which shares your folders) and on the host on Linux. On Apple's `container` every
+  container is a VM of its own: the dev VM has no network card, only a tun link to its gate
+  that the background watcher carries on your Mac, so it reaches neither your Mac nor your
+  network but through the gate. A gate is on its env's NAT network only, and the vault on its
+  own.
 - **Control plane.** Policy, CA and credentials reach the gate and vault through the
   runtime's `exec` into a unix socket — there is no admin port. The local UI binds
   127.0.0.1, requires a per-run token, checks Host (DNS rebinding) and Origin, and sets a
@@ -202,9 +203,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   attacker can see, and through public counters (package download counts). A `*` read grant
   turns every host into such a channel; luoto asks for confirmation and offers time limits.
 - **Open egress.** While an env's egress is open, any code in it can upload anything to any
-  HTTP(S) host and download what it likes. What still holds: secrets stay in the vault and go only where their rules allow, private
-  addresses and services on your machine stay unreachable, raw TCP and SSH still need tunnel
-  rules, and UDP still goes nowhere. `luoto egress --open` shows where requests went; keep the window short.
+  HTTP(S) host and download what it likes. What still holds: secrets stay in the vault and go
+  only where their rules allow, private addresses and services on your machine stay
+  unreachable, raw TCP and SSH still need tunnel rules, and UDP still goes nowhere.
+  `luoto egress --open` shows where requests went; keep the window short.
 - **Model APIs.** Prompts to an allowed model API can carry data, and the API key can be
   spent by anything in the sandbox. Anthropic's, OpenAI's and Gemini's file and batch
   endpoints are denied, and so are requests asking them to fetch a URL or call an MCP server

@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { api } from "$lib/api";
-  import { act, app, openVault } from "$lib/stores/app.svelte";
+  import CopyCommand from "$lib/components/CopyCommand.svelte";
+  import { authCommands, credentialMenu } from "$lib/credentials";
+  import { app, openVault, vaultAction } from "$lib/stores/app.svelte";
 
   const d = $derived(app.detail);
+  const row = $derived(app.overview?.envs.find((e) => e.name === d?.name));
   // The vault lacks some of them (locked, or not read yet): an unlock reads them.
   const waiting = $derived(
     d?.credentials.filter((c) => c.state === "missing" || c.state === "locked").length ?? 0,
@@ -13,15 +15,14 @@
   <div class="section">
     <p class="label">credentials</p>
     {#if d.credentials.length === 0}
-      <p class="muted small">
-        none: the gate adds nothing. <code>luoto agent auth</code> and <code>luoto repo auth</code>
-        add an agent's or a repo's.
-      </p>
+      <p class="muted small">none: the gate adds nothing. An agent's or a repo's:</p>
+      {#each authCommands(d.name, row) as cmd (cmd)}<CopyCommand {cmd} />{/each}
     {:else}
       {#each d.credentials as c (c.binding)}
         <button
           class="cred"
           onclick={() => openVault({ env: c.env, binding: c.binding })}
+          oncontextmenu={(e) => credentialMenu(e, c)}
           title="where it is kept, where it goes, how to change it"
         >
           <span class="small"><code>{c.binding}</code> → {c.hosts.join(", ") || "no host"}</span>
@@ -31,19 +32,13 @@
               : ""}</span
           >
         </button>
+        {#if c.change}<CopyCommand cmd={c.change} />{/if}
       {/each}
       {#if waiting > 0}
         <div class="unlock">
           <p class="warn">the vault lacks {waiting} of them</p>
-          <button
-            class="btn"
-            onclick={() =>
-              void act(
-                "unlocking… (your secret store may ask to authorize)",
-                () => api.vault("unlock"),
-                "vault unlocked",
-              )}
-            disabled={!!app.busy}>unlock</button
+          <button class="btn" onclick={() => void vaultAction("unlock")} disabled={!!app.busy}
+            >Unlock</button
           >
         </div>
       {/if}

@@ -69,8 +69,9 @@ use clap_complete::engine::ArgValueCandidates;
 #[command(
     name = "luoto",
     version,
-    about = "Supply-chain-safe dev sandboxes: every tool inside, egress only through a policy you control",
-    after_help = "Start with `luoto setup`, then run `luoto init` in a project folder; `luoto ui` opens the web UI.\n\
+    about = "Supply-chain-safe dev sandboxes: egress only through your policy",
+    after_help = "Start with `luoto setup`, then run `luoto init` in a project folder.\n\
+                  `luoto ui` opens the web UI.\n\
                   Commands act on the env of the current folder; `-e NAME` picks another."
 )]
 struct Cli {
@@ -87,7 +88,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Detect the host, recommend/install a container runtime, prepare images.
+    /// Detect the host, set up a container runtime, prepare images.
     Setup(setup::SetupOpts),
     /// Check the runtime, images, vault and every env's isolation.
     Doctor {
@@ -98,15 +99,19 @@ enum Cmd {
     },
     /// Update luoto to the latest release.
     Upgrade,
-    /// Remove luoto's envs, vault, images, keychain entries, config and data (and its VM when
-    /// nothing else uses it), after listing them; the binary stays.
+    /// Remove everything luoto made, after listing it; the binary stays.
+    ///
+    /// Its envs, vault, images, keychain entries, config and data, and its VM when nothing
+    /// else uses it.
     Uninstall {
         /// Don't ask first.
         #[arg(long, short)]
         yes: bool,
     },
-    /// Remove luoto's superseded images (none a container uses or this luoto runs), after
-    /// listing them, and return the freed space to this machine; volumes stay.
+    /// Remove luoto's superseded images and return the freed space.
+    ///
+    /// None a container uses or this luoto runs, after listing them; the freed space goes back
+    /// to this machine, and volumes stay.
     Prune {
         /// Don't ask first.
         #[arg(long, short)]
@@ -118,11 +123,14 @@ enum Cmd {
         /// a page on the UI's origin.
         #[arg(long, default_value_t = names::ui_port())]
         port: u16,
+        /// Don't open it in the browser.
         #[arg(long)]
         no_open: bool,
     },
-    /// Create an env for a folder (default: the current one), or for a remote cloned inside
-    /// it (`luoto init acme/web`), and start it.
+    /// Create an env for a folder or a remote, and start it.
+    ///
+    /// A folder (default: the current one) is copied into the env; a remote (`luoto init
+    /// acme/web`) is cloned inside it.
     Init(init::InitOpts),
     /// Create or update the env's containers from its config and start it.
     Up {
@@ -130,6 +138,7 @@ enum Cmd {
         /// leaves the rest to start.
         #[arg(long)]
         all: bool,
+        /// Skip the isolation self-test after a start.
         #[arg(long)]
         no_selftest: bool,
         /// Recreate the dev container (the workspace and home volumes are kept).
@@ -145,23 +154,27 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// Delete the env: containers, workspace and home volumes, config (your folder stays; an
-    /// env cloned from a remote keeps only what was pushed).
+    /// Delete the env: its containers, volumes and config.
+    ///
+    /// Your folder stays; an env cloned from a remote keeps only what was pushed.
     Rm {
         /// Don't ask first.
         #[arg(long, short)]
         yes: bool,
     },
-    /// Discard the env's home (dotfiles, shell history, agents' logins and state, toolchains)
-    /// and recreate its dev container with an empty one; the workspace stays.
+    /// Discard the env's home and recreate its dev container.
+    ///
+    /// The home holds dotfiles, shell history, agents' logins and state, and toolchains; the
+    /// new one is empty, and the workspace stays.
     ResetHome {
         /// Don't ask first.
         #[arg(long, short)]
         yes: bool,
     },
-    /// Write the env to one file, to import into another luoto (a source build's into the
-    /// release, say) or on another machine: its config, workspace and home; secrets stay refs.
-    /// A running env is stopped first, after asking.
+    /// Write the env (config, workspace, home) to one file.
+    ///
+    /// To import into another luoto (a source build's into the release, say) or on another
+    /// machine; secrets stay refs. A running env is stopped first, after asking.
     Export {
         /// The archive (default: <env>.luoto.tar here; in a folder, that name there).
         file: Option<String>,
@@ -172,9 +185,11 @@ enum Cmd {
         #[arg(long, short)]
         yes: bool,
     },
-    /// Make an env from a file `luoto export` wrote, with its own subnet, CA and vault token;
-    /// `luoto up` starts it.
+    /// Make an env from a file `luoto export` wrote.
+    ///
+    /// It gets its own subnet, CA and vault token; `luoto up` starts it.
     Import {
+        /// The file `luoto export` wrote.
         file: String,
         /// Its name here (default: the one it had).
         #[arg(long)]
@@ -184,14 +199,14 @@ enum Cmd {
         yes: bool,
     },
     /// List envs.
-    #[command(visible_alias = "list")]
-    Ls {
+    #[command(visible_alias = "ls")]
+    List {
         /// Also what each env takes on disk (the runtime walks every volume, which takes a
         /// while).
         #[arg(long)]
         size: bool,
     },
-    /// Show the env's state, workspace, forwarded ports, credentials, rules, denies and mutes.
+    /// Show the env's state, ports, credentials, rules, denies and mutes.
     Status {
         /// The compiled policy as JSON.
         #[arg(long)]
@@ -203,25 +218,32 @@ enum Cmd {
     },
     /// Open the env's config in $EDITOR, validate and apply it.
     Edit,
-    /// Show the project's luoto.toml (team settings in the repository), apply or ignore it, or
-    /// draft one from the env (`suggest`).
+    /// Show, apply or ignore the project's luoto.toml, or draft one.
+    ///
+    /// luoto.toml holds the team's settings in the repository; `suggest` drafts one from the
+    /// env.
     Project {
         #[command(subcommand)]
         action: Option<ProjectCmd>,
     },
-    /// Open a shell in the env, or run a command: `luoto shell -- cmd args`.
+    /// Open a shell in the env, or run a command (`-- cmd args`).
     Shell {
+        /// The command and its arguments (default: a login shell).
         #[arg(last = true)]
         cmd: Vec<String>,
     },
-    /// Open the env in your editor over SSH (zed, code, cursor; `ssh` prints how to connect).
+    /// Open the env in your editor over SSH (zed, code, cursor).
+    ///
+    /// `--with ssh` prints how to connect.
     Open {
         /// Editor to use (default: `editor` in config.toml, else the first one installed).
         #[arg(long = "with", value_name = "EDITOR", add = ArgValueCandidates::new(complete::editors))]
         with: Option<String>,
     },
-    /// Reach a port in the env on another local port: `luoto forward 8080:5173`. Ports an env
-    /// listens on are forwarded to the same port here on their own.
+    /// Reach a port in the env on another local port.
+    ///
+    /// `luoto forward 8080:5173`. Ports an env listens on are forwarded to the same port here
+    /// on their own.
     Forward {
         /// The env's port, or `LOCAL:ENV` to use another port here (`8080:5173`).
         port: String,
@@ -229,15 +251,18 @@ enum Cmd {
         #[arg(long)]
         open: bool,
     },
-    /// Run an agent on one prompt without a terminal: its answer on stdout (or in --output)
-    /// and its exit code, for scripts and scheduled jobs. Brings the env up first, asking
-    /// nothing.
+    /// Run an agent on one prompt, for scripts and scheduled jobs.
+    ///
+    /// No terminal: its answer on stdout (or in --output) and its exit code. Brings the env up
+    /// first, asking nothing.
     Run {
+        /// The agent (`luoto agent list` lists them).
         #[arg(long, add = ArgValueCandidates::new(complete::agents))]
         agent: String,
         /// The prompt (else --prompt-file, else stdin).
         #[arg(long)]
         prompt: Option<String>,
+        /// Read the prompt from this file.
         #[arg(long, value_name = "FILE")]
         prompt_file: Option<String>,
         /// Write the agent's answer to this file here instead of stdout.
@@ -254,31 +279,37 @@ enum Cmd {
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Run, add, authenticate or list coding agents.
+    /// List, add, run, authenticate or remove coding agents.
     Agent {
         #[command(subcommand)]
         action: AgentCmd,
     },
-    /// Repositories beside the env's folder, each at /workspace/<name>: list, add, remove, and
-    /// what the env may do with a repo.
+    /// The env's repos at /workspace/<name>: list, add, remove, access.
+    ///
+    /// Repositories beside the env's folder: a host folder copied in, or a remote cloned in
+    /// the env, and what the env may do with each.
     Repo {
         #[command(subcommand)]
         action: Option<RepoCmd>,
     },
-    /// Environment variables for the env's shells: plain values, and secrets code in the env
-    /// reads (refs resolved on this machine at `up`).
+    /// Environment variables and secrets for the env's shells.
+    ///
+    /// Plain values, and secrets code in the env reads (refs resolved on this machine at
+    /// `up`).
     Var {
         #[command(subcommand)]
         action: Option<VarCmd>,
     },
-    /// Folders of this machine the env reads at /shares/<name>, read-only: data too large for a
-    /// repo (recordings, datasets).
+    /// Folders of this machine the env reads at /shares/<name>.
+    ///
+    /// Read-only: data too large for a repo (recordings, datasets).
     Share {
         #[command(subcommand)]
         action: Option<ShareCmd>,
     },
-    /// Copy changed files from the env back to its folder, and its repos copied in from
-    /// folders back to theirs (reviewed first).
+    /// Copy changed files from the env back to its folder, reviewed first.
+    ///
+    /// Its repos copied in from folders go back to theirs too.
     Pull {
         /// Write here instead of the env's folder (or the `--repo`'s). An env cloned from a
         /// remote has no folder: it pulls only here, into a new or empty folder unless you
@@ -295,14 +326,18 @@ enum Cmd {
         /// Include .git (its hooks and config count as risky).
         #[arg(long)]
         include_git: bool,
+        /// Write without asking.
         #[arg(long, short)]
         yes: bool,
     },
     /// Allow egress to a host.
     Allow(rules::AllowOpts),
     /// Remove rules by id or host.
-    Revoke { rule: String },
-    /// List requests filed from inside envs (all envs unless one is picked).
+    Revoke {
+        /// A rule's id (`luoto status` lists them), or its host.
+        rule: String,
+    },
+    /// List requests filed from inside envs (all unless `-e` picks one).
     Requests {
         /// Keep watching, and print each new request as it comes.
         #[arg(long)]
@@ -310,7 +345,9 @@ enum Cmd {
     },
     /// Approve an access request (adds a rule), as asked or narrowed.
     Approve {
+        /// The request's number (`luoto requests` lists them).
         id: u64,
+        /// Expire the rule after this long: 30m, 1h, 2d.
         #[arg(long)]
         ttl: Option<String>,
         /// Grant read-only access (GET, HEAD, OPTIONS) to a write request.
@@ -322,6 +359,7 @@ enum Cmd {
         /// Grant only these path globs (repeatable), within the request's paths.
         #[arg(long = "path")]
         paths: Vec<String>,
+        /// Approve without asking.
         #[arg(long, short)]
         yes: bool,
         /// Accept the rule's risks without asking.
@@ -330,16 +368,21 @@ enum Cmd {
     },
     /// Reject an access request.
     Reject {
+        /// The request's number (`luoto requests` lists them).
         id: u64,
+        /// Why, for the sandbox to read.
         #[arg(long)]
         note: Option<String>,
     },
-    /// What the env tried to reach, per host; `--follow` streams each attempt. `open` lets it
-    /// reach any HTTP(S) host for a while, `keep` keeps what that reached.
+    /// What the env tried to reach, per host; open or keep egress.
+    ///
+    /// `--follow` streams each attempt. `open` lets it reach any HTTP(S) host for a while,
+    /// `keep` keeps what that reached.
     #[command(args_conflicts_with_subcommands = true)]
     Egress {
         #[command(subcommand)]
         action: Option<EgressCmd>,
+        /// Only the hosts with denials (or only lookups).
         #[arg(long)]
         denied: bool,
         /// Only the hosts open egress let through: no rule allows them.
@@ -357,11 +400,13 @@ enum Cmd {
         /// Also the denials `[[mute]]` leaves out.
         #[arg(long)]
         all: bool,
+        /// The per-host summary as JSON.
         #[arg(long)]
         json: bool,
     },
-    /// The env's gate log, the background watcher's, or what its installs printed.
+    /// The env's gate log, the watcher's, or what its installs printed.
     Logs {
+        /// Which log.
         #[arg(value_enum, default_value_t = logs::Source::Gate)]
         source: logs::Source,
         /// Keep printing what is added.
@@ -371,7 +416,7 @@ enum Cmd {
         #[arg(short = 'n', long, value_name = "N")]
         lines: Option<usize>,
     },
-    /// The vault that holds secrets for every env: status, unlock, lock.
+    /// The vault of every env's secrets: status, unlock, lock, reload.
     Vault {
         #[command(subcommand)]
         action: Option<VaultCmd>,
@@ -386,24 +431,12 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum AgentCmd {
-    /// Run an agent in the env's workspace (installs it on first use).
-    Run {
-        #[arg(add = ArgValueCandidates::new(complete::agents))]
-        agent: String,
-        /// Skip the agent's own permission prompts (the sandbox is the boundary).
-        #[arg(long)]
-        yolo: bool,
-        #[arg(last = true)]
-        args: Vec<String>,
-    },
-    /// Remove an agent from the env's config; its files stay in the env's home.
-    #[command(visible_alias = "remove")]
-    Rm {
-        #[arg(add = ArgValueCandidates::new(complete::agents))]
-        agent: String,
-    },
+    /// List known agents and providers.
+    #[command(visible_alias = "ls")]
+    List,
     /// Install an agent in the env and add it to the config.
     Add {
+        /// The agent (`luoto agent list` lists them).
         #[arg(add = ArgValueCandidates::new(complete::agents))]
         agent: String,
         /// Its credential without the prompt: `KIND=REF` (`oauth_token=op://…`),
@@ -411,20 +444,41 @@ enum AgentCmd {
         #[arg(long, value_name = "KIND=REF")]
         credential: Option<String>,
     },
-    /// Change how an agent the env has authenticates: its credential, or a login inside.
+    /// Run an agent in the env's workspace (installs it on first use).
+    Run {
+        /// The agent (`luoto agent list` lists them).
+        #[arg(add = ArgValueCandidates::new(complete::agents))]
+        agent: String,
+        /// Skip the agent's own permission prompts (the sandbox is the boundary).
+        #[arg(long)]
+        yolo: bool,
+        /// Arguments for the agent.
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    /// Change how an agent authenticates: a credential or a login inside.
     Auth {
+        /// The agent (`luoto agent list` lists them).
         #[arg(add = ArgValueCandidates::new(complete::agents))]
         agent: String,
     },
-    /// List known agents and providers.
-    #[command(visible_alias = "ls")]
-    List,
+    /// Remove an agent from the env's config; its files stay.
+    ///
+    /// Its files stay in the env's home.
+    #[command(visible_alias = "remove")]
+    Rm {
+        /// The agent.
+        #[arg(add = ArgValueCandidates::new(complete::agents))]
+        agent: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum EgressCmd {
-    /// Let the env reach any HTTP(S) host no rule allows, for an hour or `--for`; hosts that
-    /// get your credentials, muted hosts and denies stay as they are.
+    /// Let the env reach any HTTP(S) host for an hour or `--for`.
+    ///
+    /// Any host no rule allows; hosts that get your credentials, muted hosts and denies stay
+    /// as they are.
     Open {
         /// How long: 30m, 2h, 1d (default 1h). With no end: `open = true` under [egress] in
         /// the env's file.
@@ -433,7 +487,9 @@ enum EgressCmd {
     },
     /// Close open egress: only the rules allow again.
     Close,
-    /// Keep what open egress reached: presets that cover its hosts, else a rule per host.
+    /// Keep what open egress reached: presets, else a rule per host.
+    ///
+    /// The presets that cover its hosts, else a rule per host.
     Keep {
         /// Only what it reached this recently (e.g. 2h).
         #[arg(long)]
@@ -449,7 +505,9 @@ enum RepoCmd {
     /// The env's repos and where each comes from.
     #[command(visible_alias = "ls")]
     List,
-    /// Add a host folder (copied in) or a remote (cloned in the env), at /workspace/<name>.
+    /// Add a host folder (copied in) or a remote (cloned in the env).
+    ///
+    /// Either is at /workspace/<name>.
     Add {
         /// A folder (starts with `/`, `~` or `.`, or exists), else a remote: `owner/repo` on
         /// GitHub, an https or ssh URL, or user@host:path.
@@ -463,8 +521,13 @@ enum RepoCmd {
         branch: Option<String>,
     },
     /// Remove a repo from the env's config; its copy in the env stays.
-    Rm { name: String },
-    /// Change what the env may do with a repo: fetch it public, read it or push, with a token.
+    Rm {
+        /// The repo's name in the workspace.
+        name: String,
+    },
+    /// Change what the env may do with a repo: fetch, read or push.
+    ///
+    /// Fetch it public, or read it or push with a token.
     Auth {
         /// The repo's name in the workspace, or its path on the forge (`acme/api`).
         repo: String,
@@ -476,7 +539,9 @@ enum ShareCmd {
     /// The env's shares, and which changed since the last sync.
     #[command(visible_alias = "ls")]
     List,
-    /// Share a folder: the env reads it at /shares/<name>, read-only, as of its last sync.
+    /// Share a folder, read-only at /shares/<name> in the env.
+    ///
+    /// The env reads it as of its last sync.
     Add {
         /// A folder inside your home folder (not a secret one such as ~/.ssh), or on a disk.
         folder: String,
@@ -489,13 +554,17 @@ enum ShareCmd {
     },
     /// Bring the env's shares up to date now (`luoto up` does too).
     Sync {
+        /// Only this share.
         name: Option<String>,
         /// Restart luoto's VM without asking, if it needs the shares folder first.
         #[arg(long, short)]
         yes: bool,
     },
     /// Stop sharing a folder.
-    Rm { name: String },
+    Rm {
+        /// The share's name.
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -503,10 +572,13 @@ enum VarCmd {
     /// The env's variables: plain values, and secrets by their ref.
     #[command(visible_alias = "ls")]
     List,
-    /// Set a variable: `NAME=value` a plain value (it stays in your shell history), `NAME`
-    /// a secret, asking where it is kept, or `NAME --ref <ref>`. A token an HTTP API takes is
-    /// safer under [credentials.custom.<name>]: the gate adds it and the env never sees it.
+    /// Set a variable: a plain value, or a secret by its ref.
+    ///
+    /// `NAME=value` a plain value (it stays in your shell history), `NAME` a secret, asking
+    /// where it is kept, or `NAME --ref <ref>`. A token an HTTP API takes is safer under
+    /// [credentials.custom.<name>]: the gate adds it and the env never sees it.
     Set {
+        /// `NAME=value` for a plain value, `NAME` for a secret.
         #[arg(value_name = "NAME[=VALUE]")]
         var: String,
         /// The secret's ref: op://, keyring:, vault://, env: or file:.
@@ -514,7 +586,10 @@ enum VarCmd {
         reference: Option<String>,
     },
     /// Remove a variable.
-    Rm { name: String },
+    Rm {
+        /// The variable's name.
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -527,11 +602,14 @@ enum ProjectCmd {
     },
     /// Stop applying it (this version is not offered again).
     Ignore,
-    /// Ask again for what the accepted luoto.toml needs only you add (`[needs]`): credentials
-    /// and sandbox secrets, each opening on what the env has.
+    /// Ask again for what luoto.toml needs only you add.
+    ///
+    /// What the accepted luoto.toml's `[needs]` names: credentials and sandbox secrets, each
+    /// question opening on what the env has.
     Needs,
-    /// Print a luoto.toml for the team from the env's settings, leaving out your credentials,
-    /// secrets, folders and temporary grants.
+    /// Print a luoto.toml for the team from the env's settings.
+    ///
+    /// It leaves out your credentials, secrets, folders and temporary grants.
     Suggest {
         /// Write it to the env's folder.
         #[arg(long)]
@@ -550,8 +628,9 @@ enum VaultCmd {
     Unlock,
     /// Wipe secrets from the vault and every gate.
     Lock,
-    /// Read the secrets again (after rotating one in your secret store): all the vault holds,
-    /// or with `-e` the env's.
+    /// Read the secrets again, after rotating one in your secret store.
+    ///
+    /// All the vault holds, or with `-e` the env's.
     Reload,
 }
 
@@ -570,38 +649,69 @@ fn main() -> ExitCode {
     match run(cli.env, cli.cmd) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("luoto: {}", text::lines(&format!("{e:#}")));
+            let msg = text::lines(&format!("{e:#}"));
+            eprintln!("{}", text::hang("luoto: ", &msg, text::columns()));
             ExitCode::FAILURE
         }
     }
 }
 
+/// Why `cmd` refuses the global `-e`: it acts on no env, on every env, or names its env
+/// another way.
+fn refuses_env(cmd: &Cmd) -> Option<String> {
+    let none = |c: &str| Some(format!("`luoto {c}` acts on no env; drop `-e`"));
+    match cmd {
+        Cmd::Setup(_) => none("setup"),
+        Cmd::Doctor { .. } => none("doctor"),
+        Cmd::Upgrade => none("upgrade"),
+        Cmd::Uninstall { .. } => none("uninstall"),
+        Cmd::Prune { .. } => none("prune"),
+        Cmd::Ui { .. } => none("ui"),
+        Cmd::List { .. } => none("list"),
+        Cmd::Agent {
+            action: AgentCmd::List,
+        } => none("agent list"),
+        Cmd::Logs {
+            source: logs::Source::Watcher,
+            ..
+        } => none("logs watcher"),
+        Cmd::Vault {
+            action: None | Some(VaultCmd::Status),
+        } => none("vault status"),
+        Cmd::Vault {
+            action: Some(VaultCmd::Unlock),
+        } => none("vault unlock"),
+        Cmd::Vault {
+            action: Some(VaultCmd::Lock),
+        } => none("vault lock"),
+        Cmd::Watch => none("watch"),
+        Cmd::SshProxy { .. } => none("ssh-proxy"),
+        Cmd::Up { all: true, .. } | Cmd::Down { all: true } => {
+            Some("`--all` acts on every env; drop `-e`".into())
+        }
+        Cmd::Init(_) => Some("`luoto init` names the env with --name, not -e".into()),
+        Cmd::Import { .. } => Some("`luoto import` names the env with --name, not -e".into()),
+        _ => None,
+    }
+}
+
 fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
     use commands as c;
+    if env_arg.is_some()
+        && let Some(why) = refuses_env(&cmd)
+    {
+        anyhow::bail!("{why}");
+    }
     let paths = paths::Paths::get()?;
     let env = || workspace::resolve(&paths, env_arg.as_deref());
     match cmd {
         Cmd::Setup(o) => setup::setup(o),
         Cmd::Doctor { report } => setup::doctor(report),
         Cmd::Upgrade => upgrade::upgrade(),
-        Cmd::Uninstall { .. } if env_arg.is_some() => {
-            anyhow::bail!("uninstall removes every env: leave out -e")
-        }
         Cmd::Uninstall { yes } => uninstall::uninstall(yes),
-        Cmd::Prune { .. } if env_arg.is_some() => {
-            anyhow::bail!("prune acts on luoto's images, not an env: leave out -e")
-        }
         Cmd::Prune { yes } => disk::prune(yes),
         Cmd::Ui { port, no_open } => ui::serve(port, !no_open),
-        Cmd::Init(o) => {
-            if env_arg.is_some() {
-                anyhow::bail!("`init` names the env with --name, not -e");
-            }
-            init::init(o)
-        }
-        Cmd::Up { all: true, .. } | Cmd::Down { all: true } if env_arg.is_some() => {
-            anyhow::bail!("--all acts on every env: leave out -e")
-        }
+        Cmd::Init(o) => init::init(o),
         Cmd::Up {
             all: true,
             no_selftest,
@@ -629,11 +739,8 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Export { file, no_home, yes } => {
             transfer::export(&env()?, file.as_deref(), no_home, yes)
         }
-        Cmd::Import { .. } if env_arg.is_some() => {
-            anyhow::bail!("`import` names the env with --name, not -e")
-        }
         Cmd::Import { file, name, yes } => transfer::import(&file, name.as_deref(), yes),
-        Cmd::Ls { size } => c::ls(size),
+        Cmd::List { size } => c::list(size),
         Cmd::Status { json, size } => c::status(&env()?, json, size),
         Cmd::Edit => c::edit(&env()?),
         Cmd::Project { action } => match action {
@@ -675,13 +782,13 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             )
         }
         Cmd::Agent { action } => match action {
-            AgentCmd::Run { agent, yolo, args } => agents::run(&env()?, &agent, yolo, &args),
-            AgentCmd::Rm { agent } => agents::rm(&env()?, &agent),
+            AgentCmd::List => agents::list(),
             AgentCmd::Add { agent, credential } => {
                 agents::add(&env()?, &agent, credential.as_deref())
             }
+            AgentCmd::Run { agent, yolo, args } => agents::run(&env()?, &agent, yolo, &args),
             AgentCmd::Auth { agent } => agents::auth(&env()?, &agent),
-            AgentCmd::List => agents::list(),
+            AgentCmd::Rm { agent } => agents::rm(&env()?, &agent),
         },
         Cmd::Repo { action } => match action.unwrap_or(RepoCmd::List) {
             RepoCmd::List => repos::list(&env()?),
@@ -914,7 +1021,7 @@ mod tests {
         for args in [["up", "--all", "-e", "web"], ["-e", "web", "down", "--all"]] {
             let cli = parse(&args).unwrap();
             let e = run(cli.env, cli.cmd).unwrap_err().to_string();
-            assert!(e.contains("leave out -e"), "{e}");
+            assert!(e.contains("drop `-e`"), "{e}");
         }
         let Ok(Cli {
             cmd:
@@ -956,7 +1063,7 @@ mod tests {
         );
         let cli = parse(&["uninstall", "-e", "web"]);
         let e = run(cli.env, cli.cmd).unwrap_err().to_string();
-        assert!(e.contains("leave out -e"), "{e}");
+        assert!(e.contains("drop `-e`"), "{e}");
     }
 
     #[test]
@@ -964,12 +1071,73 @@ mod tests {
         let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat()).unwrap();
         let cli = parse(&["prune", "-e", "web", "--yes"]);
         let e = run(cli.env, cli.cmd).unwrap_err().to_string();
-        assert!(e.contains("leave out -e"), "{e}");
-        assert!(matches!(parse(&["ls"]).cmd, Cmd::Ls { size: false }));
+        assert!(e.contains("drop `-e`"), "{e}");
+        assert!(matches!(parse(&["ls"]).cmd, Cmd::List { size: false }));
         assert!(matches!(
             parse(&["list", "--size"]).cmd,
-            Cmd::Ls { size: true }
+            Cmd::List { size: true }
         ));
+    }
+
+    #[test]
+    fn a_command_that_acts_on_no_env_refuses_one() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat()).unwrap();
+        for args in [
+            &["list", "-e", "web"][..],
+            &["-e", "web", "vault"],
+            &["vault", "lock", "-e", "web"],
+            &["agent", "list", "-e", "web"],
+            &["logs", "watcher", "-e", "web"],
+            &["doctor", "-e", "web"],
+        ] {
+            let cli = parse(args);
+            let e = run(cli.env, cli.cmd).unwrap_err().to_string();
+            assert!(e.contains("acts on no env; drop `-e`"), "{args:?}: {e}");
+        }
+        for args in [
+            &["vault", "reload", "-e", "web"][..],
+            &["requests", "-e", "web"],
+            &["logs", "installs", "-e", "web"],
+            &["status", "-e", "web"],
+        ] {
+            let cli = parse(args);
+            assert!(refuses_env(&cli.cmd).is_none(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn every_command_in_a_list_fits_80_columns() {
+        let mut todo = vec![Cli::command()];
+        while let Some(mut c) = todo.pop() {
+            let help = c.render_help().to_string();
+            let listed = help
+                .lines()
+                .skip_while(|l| *l != "Commands:")
+                .take_while(|l| !l.is_empty());
+            for line in listed {
+                assert!(line.chars().count() <= 80, "{}: {line}", c.get_name());
+            }
+            for l in help.lines().filter(|l| !l.starts_with(' ')) {
+                assert!(l.chars().count() <= 80, "{}: {l}", c.get_name());
+            }
+            todo.extend(c.get_subcommands().cloned());
+        }
+    }
+
+    #[test]
+    fn every_argument_says_what_it_is() {
+        let mut todo = vec![Cli::command()];
+        let mut bare = Vec::new();
+        while let Some(c) = todo.pop() {
+            for a in c.get_arguments() {
+                let builtin = ["help", "version"].contains(&a.get_id().as_str());
+                if !builtin && !a.is_hide_set() && a.get_help().is_none() {
+                    bare.push(format!("{} {}", c.get_name(), a.get_id()));
+                }
+            }
+            todo.extend(c.get_subcommands().filter(|s| !s.is_hide_set()).cloned());
+        }
+        assert!(bare.is_empty(), "{bare:?}");
     }
 
     #[test]

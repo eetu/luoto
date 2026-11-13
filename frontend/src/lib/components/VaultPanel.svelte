@@ -1,6 +1,6 @@
 <script lang="ts">
   import CopyCommand from "$lib/components/CopyCommand.svelte";
-  import { app, openVault, selectEnv } from "$lib/stores/app.svelte";
+  import { app, openVault, plural, selectEnv } from "$lib/stores/app.svelte";
 
   const v = $derived(app.vault);
   const status = $derived(v?.status ?? null);
@@ -60,8 +60,8 @@
       {/if}
     </div>
     <div class="actions">
-      <button class="btn" onclick={() => void selectEnv(cred.env)}>show {cred.env}'s egress</button>
-      <button class="btn" onclick={() => openVault()}>back to the vault</button>
+      <button class="btn" onclick={() => void selectEnv(cred.env)}>Show {cred.env}'s egress</button>
+      <button class="btn" onclick={() => openVault()}>Back to the vault</button>
     </div>
   {:else if subject}
     <p class="muted">this credential is no longer listed</p>
@@ -75,9 +75,11 @@
     </p>
     {#if v}
       <p class="small">
-        {counts.credentials} credential(s) in {counts.envs} env(s){#if counts.missing}, <span
-            class="err">{counts.missing} missing</span
-          >{/if}{#if v.unused.length}, {v.unused.length} secret(s) no env uses{/if}
+        {plural(counts.credentials, "credential")} in {plural(
+          counts.envs,
+          "env",
+        )}{#if counts.missing}, <span class="error">{counts.missing} missing</span
+          >{/if}{#if v.unused.length}, {plural(v.unused.length, "secret")} no env uses{/if}
       </p>
     {/if}
     <p class="muted small">
@@ -91,9 +93,5 @@
     margin: 0;
     font-size: 15px;
     word-break: break-all;
-  }
-
-  .err {
-    color: var(--halo-error);
   }
 </style>

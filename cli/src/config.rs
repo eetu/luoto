@@ -90,8 +90,7 @@ pub struct GlobalConfig {
 /// doesn't name.
 fn env_only<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
     Err(serde::de::Error::custom(
-        "credentials go in each env's own file (envs/<env>.toml, `luoto edit -e <env>`), not \
-         in config.toml",
+        "credentials go in each env's own file (envs/<env>.toml), not in config.toml",
     ))
 }
 
@@ -913,12 +912,20 @@ pub struct EnvFile {
     from: u32,
 }
 
+/// The error for an env name that names none.
+pub fn no_env(name: &str) -> anyhow::Error {
+    anyhow::anyhow!("no env `{name}` (`luoto list` lists them)")
+}
+
 impl EnvFile {
     pub fn load(paths: &Paths, name: &str) -> Result<Self> {
         validate_name(name)?;
         let path = paths.env_config(name);
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("no env `{name}` ({} not found)", path.display()))?;
+        if !path.exists() {
+            return Err(no_env(name));
+        }
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         Self::parse(path, &text)
     }
 
@@ -1198,7 +1205,7 @@ impl EnvFile {
                 list.get_mut(at).context("credentials.github")?
             }
             Some(_) => bail!(
-                "`credentials.github` in {} is written inline; add the repos by hand",
+                "`credentials.github` in {} is an inline table, which luoto doesn't change",
                 self.path.display()
             ),
         };
@@ -1285,7 +1292,8 @@ impl EnvFile {
             .and_then(|i| i.as_table_mut())
             .with_context(|| {
                 format!(
-                    "`credentials.azure_devops` in {path} is written inline; add the repos by hand"
+                    "`credentials.azure_devops` in {path} is an inline table, which luoto doesn't \
+                     change"
                 )
             })?;
         push_unique(table, key, repos);
@@ -1318,7 +1326,9 @@ impl EnvFile {
         let tables: Vec<&mut toml_edit::Table> = match item {
             toml_edit::Item::Table(t) => vec![t],
             toml_edit::Item::ArrayOfTables(list) => list.iter_mut().collect(),
-            _ => bail!("`credentials.{key}` in {path} is written inline; change it by hand"),
+            _ => bail!(
+                "`credentials.{key}` in {path} is an inline table, which luoto doesn't change"
+            ),
         };
         let mut found = false;
         let mut touched = Vec::new();

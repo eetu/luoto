@@ -212,6 +212,21 @@ pub fn say(f: impl FnOnce()) {
     f();
 }
 
+/// `warning: msg` on stderr through [`say`], wrapped to the terminal (`text::hang`).
+pub fn warn(msg: &str) {
+    labelled("warning: ", msg);
+}
+
+/// `note: msg` on stderr through [`say`], wrapped as [`warn`] wraps.
+pub fn note(msg: &str) {
+    labelled("note: ", msg);
+}
+
+fn labelled(label: &str, msg: &str) {
+    let s = text::hang(label, msg, text::columns());
+    say(|| eprintln!("{s}"));
+}
+
 /// Run `f` as a step: `label…` on a line of its own, then on a terminal the spinner, until it
 /// ends. A step inside another shows its own time.
 pub fn step<T>(label: &str, f: impl FnOnce() -> T) -> T {

@@ -17,7 +17,7 @@ part of its path or URL. For an env that exists:
 
 ```console
 $ luoto repo add ~/dev/lib
-$ luoto repo add https://dev.azure.com/acme/Platform/_git/infra --name infra --branch main
+$ luoto repo add https://dev.azure.com/fabrikam/Infra/_git/infra --name infra --branch main
 $ luoto repo list
 $ luoto repo rm lib
 ```
@@ -83,12 +83,12 @@ repos = ["acme/api", "acme/web"]
 read_repos = ["acme/secrets-schema"]
 
 [[credentials.github]]
-token = "op://Dev/github-acme-oss/token"
-repos = ["acme-oss/design-system"]
+token = "op://Dev/github-globex/token"
+repos = ["globex/design-system"]
 
 [credentials.azure_devops]
 token = "op://Dev/ado/pat"          # PAT with Code (Read & write)
-repos = ["acme/Platform/infra"]
+repos = ["fabrikam/Infra/infra"]
 ```
 
 Any other forge (GitLab, Forgejo, Gitea, Bitbucket, a self-hosted one) gets a
@@ -108,10 +108,11 @@ When it asks for a token, the references the config already has come first: one 
 reaches several owners (a classic token) becomes one credential listing all their repos, which
 also lets `gh pr create` reach every one of them.
 
-A public GitHub repo needs none to be cloned. SSH remotes use these as they are; with
-`[credentials.ssh]` they stay on SSH, with a key luoto can't limit to repos. GraphQL
-(`gh pr create`) goes with the first GitHub credential that may write; the others open pull
-requests over REST (`gh api repos/<owner>/<repo>/pulls`).
+A public GitHub repo needs none to be cloned. SSH remotes to GitHub, Azure DevOps or a
+`[[credentials.git]]` host are rewritten to HTTPS in the env and use these; with
+`[credentials.ssh]` naming their host they stay on SSH, with a key luoto can't limit to repos.
+GraphQL (`gh pr create`) goes with the first GitHub credential that may write; the others open
+pull requests over REST (`gh api repos/<owner>/<repo>/pulls`).
 
 ## Moving files
 

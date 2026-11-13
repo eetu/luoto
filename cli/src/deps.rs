@@ -460,9 +460,7 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
         e.missing_tools(&tools.keys().cloned().collect::<Vec<_>>())?
     } else {
         if !tools.is_empty() {
-            crate::progress::say(|| {
-                eprintln!("note: the env's image has no mise, so [tools] are not installed")
-            });
+            crate::progress::note("the env's image has no mise, so [tools] are not installed");
         }
         Vec::new()
     };
@@ -547,7 +545,7 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
             ))
         {
             bail!(
-                "{err:#}; to allow the denied hosts for installs, add them to [deps] hosts: {}",
+                "{err:#}; the gate denied {} (`[deps] hosts` allows hosts for installs)",
                 denied.join(", ")
             );
         }

@@ -157,6 +157,38 @@ pub fn wrap(s: &str, indent: &str, width: usize) -> String {
         .join("\n")
 }
 
+/// `s` after `label` (`warning: `), under the text after the label: each line of its first
+/// paragraph [`wrap`]ped to `width`, a line's own indent kept beyond that; what follows a blank
+/// line (a TOML snippet) as it is written.
+pub fn hang(label: &str, s: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let under = " ".repeat(label.width());
+    let mut out = Vec::new();
+    let mut prose = true;
+    for (i, line) in s.split('\n').enumerate() {
+        let body = line.trim_start();
+        prose &= !body.is_empty();
+        if !prose {
+            out.push(if i == 0 {
+                label.to_string()
+            } else if body.is_empty() {
+                String::new()
+            } else {
+                format!("{under}{line}")
+            });
+            continue;
+        }
+        let own = &line[..line.len() - body.len()];
+        let wrapped = wrap(body, &format!("{under}{own}"), width);
+        out.push(if i == 0 {
+            format!("{label}{}", &wrapped[under.len().min(wrapped.len())..])
+        } else {
+            wrapped
+        });
+    }
+    out.join("\n")
+}
+
 /// Unicode general category Cf (format) code points that affect how text renders.
 pub fn is_format(c: char) -> bool {
     matches!(
@@ -181,7 +213,7 @@ pub fn is_format(c: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Relay, display, fit, sh_quote, wrap};
+    use super::{Relay, display, fit, hang, sh_quote, wrap};
 
     #[test]
     fn a_command_in_backticks_is_never_broken() {
@@ -206,6 +238,24 @@ mod tests {
         );
         assert!(w.lines().all(|l| l.len() <= 40));
         assert_eq!(wrap("", "  ", 40), "");
+    }
+
+    #[test]
+    fn a_labelled_message_hangs_under_its_text() {
+        let s = "deps not installed: the gate denied it; `luoto egress -e web --denied` shows it\n  \
+                 one cause";
+        let out = hang("warning: ", s, 40);
+        assert_eq!(
+            out,
+            "warning: deps not installed: the gate\n         denied it;\n         \
+             `luoto egress -e web --denied`\n         shows it\n           one cause"
+        );
+        assert_eq!(hang("luoto: ", "short", 80), "luoto: short");
+        assert_eq!(
+            hang("luoto: ", "needs a terminal:\n\ntoken = \"op://a/b/c\"", 20),
+            "luoto: needs a terminal:\n\n       token = \"op://a/b/c\""
+        );
+        assert_eq!(hang("luoto: ", "", 80), "luoto: ");
     }
 
     #[test]

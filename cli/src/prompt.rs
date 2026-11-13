@@ -133,6 +133,18 @@ pub fn summary(title: &str, rows: &[(&str, String)]) -> String {
     out
 }
 
+/// `title`, then a row per `(key, value)`, the values in one column as in [`summary`], each
+/// wrapped to `width` under it.
+pub fn rows(title: &str, rows: &[(&str, String)], width: usize) -> String {
+    let wide = rows.iter().map(|(k, _)| k.len() + 3).max().unwrap_or(0);
+    let mut out = title.to_string();
+    for (k, v) in rows {
+        out.push('\n');
+        out.push_str(&crate::text::hang(&format!("  {k:<wide$}"), v, width));
+    }
+    out
+}
+
 /// `what` and the command that acts on it: on one line where it fits `width`, else the
 /// command on a line of its own.
 pub fn with_command(what: &str, command: &str, width: usize) -> String {
@@ -151,4 +163,29 @@ pub fn ask(question: &str, default: char) -> char {
         .chars()
         .next()
         .map_or(default, |c| c.to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rows;
+
+    #[test]
+    fn rows_line_up_and_wrap_under_their_column() {
+        let out = rows(
+            "env web",
+            &[
+                ("dev", "running".into()),
+                (
+                    "folder",
+                    "~/src/web (copied in; `luoto pull -e web` brings changes back)".into(),
+                ),
+            ],
+            50,
+        );
+        assert_eq!(
+            out,
+            "env web\n  dev      running\n  folder   ~/src/web (copied in;\n           \
+             `luoto pull -e web` brings changes\n           back)"
+        );
+    }
 }

@@ -265,7 +265,7 @@ pub struct AgentSetting {
 
 /// One value set in a config file (JSON, or TOML for a `.toml` file), at a path of keys,
 /// keeping everything else there.
-#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct JsonSet {
     /// `~/…` for the dev user's home.
@@ -276,6 +276,9 @@ pub struct JsonSet {
     /// entries (JSON only).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub append: bool,
+    /// Set `value` only where `path` holds nothing: a key the user set keeps their value.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub if_absent: bool,
 }
 
 /// An editor `luoto open` connects to an env. Every editor reaches the env over SSH through

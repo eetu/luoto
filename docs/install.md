@@ -30,10 +30,10 @@ unless a source build uses it or anything else is in it. The binary stays:
 `brew uninstall luoto`, `scoop uninstall luoto`, or delete `~/.local/bin/luoto`.
 
 `luoto doctor --report` writes a file only you can read, for a bug report: versions, the
-runtime and VM, doctor's checks, `config.toml`, each env's config and state, the watcher's
-log and the gates' and vault's recent lifecycle and error events, with secret references,
-tokens, your home folder, user names and email addresses taken out. Host and repository names
-stay, so read it before you share it.
+runtime and VM, doctor's checks, `config.toml`, each env's config and state, the background
+watcher's log and the gates' and vault's recent lifecycle and error events, with secret
+references, tokens, your home folder, user names and email addresses taken out. Host and
+repository names stay, so read it before you share it.
 
 A source build runs as `luoto-dev`, beside a release in the same VM: its config is in
 `~/.config/luoto-dev`, its envs' containers are `luoto-dev-<env>`, it has a vault of its own,

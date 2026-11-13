@@ -2,24 +2,24 @@
 
 ## 0.4.5
 
-- **Repos `up` couldn't clone come last:** after "is up", each with why and the command that
-  fixes it, instead of a warning mid-output. A clone the remote refused with the env's
-  credential says so (a token for another forge or account, or one that expired) and names
-  `luoto repo auth`.
-- **A launchpad folder's luoto.toml edited on this machine:** `up` notices that it changed
-  since the env took its copy (the one luoto reads) and offers to take it in; `luoto project
-  apply` takes it at once. Either way the change is shown and applied only after your yes.
-- **Repo access questions:** an overview of the repos that need access first, each question
-  numbered (2/4); Esc goes back to the repo before, opening on its answer; a 1Password item is
-  named ("Azure DevOps PAT", vault Work) rather than by its IDs, in the question that reuses it
-  and the summary, which also says what a new token replaces; a value that doesn't look like
-  a GitHub token is asked about before it is used; another owner's token is offered after a
-  new one, never preselected; the token how-to shows once, after the pick.
-- **Commands in backticks** are never broken across lines, so they copy whole.
+- **Clone failures:** listed last, after "is up", each with why and the command that fixes it.
+  A clone the remote refused with the env's credential says so (a token for another forge or
+  account, or one that expired) and names `luoto repo auth`.
+- **Launchpad edited on this machine:** `up` notices that a launchpad folder's `luoto.toml`
+  changed since the env took its copy and offers to take it in; `luoto project apply` takes it
+  at once. Either way the change is shown and applied only after your yes.
+- **Repo access questions:** an overview first, then each repo numbered (2/4), Esc going back
+  one; 1Password items by name, not ID; a value that doesn't look like a token is questioned.
+- **Copyable commands:** a command in backticks is never broken across lines.
+- **CLI messages:** wrapped to 80 columns; hints name the env with `-e`.
+- **`luoto list`:** the command's name; `ls` stays as its alias.
+- **`-e`:** an error on a command that acts on no env.
 - **Agent status in the terminal:** Claude Code in an env reports working, blocked on you and
   done as OSC 7501 (the Program Status Protocol), through hooks luoto adds beside your own;
-  terminals and agent managers that read it show it, others ignore it.
-- New guide: [changing an env](docs/guides/changing-an-env.md), task by task.
+  Codex reports done. Terminals and agent managers that read it show it, others ignore it.
+- **`luoto ui`:** sentence-case labels, each action in one place, right-click menus on
+  requests and credential rows, tables reachable from the keyboard.
+- **Guides:** [changing an env](docs/guides/changing-an-env.md), task by task.
 
 ## 0.4.4 (2026-11-12)
 

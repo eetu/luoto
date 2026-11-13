@@ -154,13 +154,7 @@ fn merge_toml(path: &Path, keys: &[&str], value: Value) -> Result<()> {
         }
         return Ok(());
     }
-    let value: toml_edit::Value = match value {
-        Value::String(s) => s.into(),
-        Value::Bool(b) => b.into(),
-        Value::Number(n) if n.is_i64() => n.as_i64().unwrap_or_default().into(),
-        Value::Number(n) => n.as_f64().unwrap_or_default().into(),
-        other => bail!("{other} has no TOML form here"),
-    };
+    let value = toml_value(value)?;
     let Some((last, parents)) = keys.split_last() else {
         bail!("no key to set in {}", path.display());
     };
@@ -178,6 +172,51 @@ fn merge_toml(path: &Path, keys: &[&str], value: Value) -> Result<()> {
     }
     std::fs::write(path, doc.to_string())?;
     Ok(())
+}
+
+/// `value` as TOML: a string, bool, number, or a list of them.
+fn toml_value(value: Value) -> Result<toml_edit::Value> {
+    Ok(match value {
+        Value::String(s) => s.into(),
+        Value::Bool(b) => b.into(),
+        Value::Number(n) if n.is_i64() => n.as_i64().unwrap_or_default().into(),
+        Value::Number(n) => n.as_f64().unwrap_or_default().into(),
+        Value::Array(items) => items
+            .into_iter()
+            .map(toml_value)
+            .collect::<Result<toml_edit::Array>>()?
+            .into(),
+        other => bail!("{other} has no TOML form here"),
+    })
+}
+
+/// Whether the JSON or TOML file at `path` has a value at `keys`.
+fn has_key(path: &Path, keys: &[&str]) -> Result<bool> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(false);
+    };
+    if path.extension().is_some_and(|e| e == "toml") {
+        let doc: toml_edit::DocumentMut = text
+            .parse()
+            .with_context(|| format!("{} is not TOML", path.display()))?;
+        let mut item = doc.as_item();
+        for k in keys {
+            match item.get(k) {
+                Some(next) => item = next,
+                None => return Ok(false),
+            }
+        }
+        return Ok(true);
+    }
+    if text.trim().is_empty() {
+        return Ok(false);
+    }
+    let doc: Value =
+        serde_json::from_str(&text).with_context(|| format!("{} is not JSON", path.display()))?;
+    Ok(keys
+        .iter()
+        .try_fold(&doc, |v, k| v.get(*k))
+        .is_some_and(|v| !v.is_null()))
 }
 
 fn register_mcp(kind: &str) -> Result<()> {
@@ -224,7 +263,7 @@ fn register_mcp(kind: &str) -> Result<()> {
 }
 
 /// One `--set`: a value at a path of keys in a JSON or TOML file of the dev user's home;
-/// `null` removes the key.
+/// `null` removes the key. With `if_absent`, a key that holds a value keeps it.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct JsonSet {
@@ -233,6 +272,8 @@ struct JsonSet {
     value: Value,
     #[serde(default)]
     append: bool,
+    #[serde(default)]
+    if_absent: bool,
 }
 
 /// The OSC 7501 report of `state` (idle, working, done, blocked, error), for `app`; none for
@@ -281,6 +322,9 @@ pub fn run(mcp: Option<&str>, briefing: &[String], set: &[String]) -> Result<Exi
         }
         let keys: Vec<&str> = j.path.iter().map(String::as_str).collect();
         let path = expand(&j.file)?;
+        if j.if_absent && has_key(&path, &keys)? {
+            continue;
+        }
         if j.append {
             append_json(&path, &keys, j.value)?;
         } else if path.extension().is_some_and(|e| e == "toml") {
@@ -341,6 +385,51 @@ mod tests {
         assert_eq!(doc["model"].as_str(), Some("gpt-5.5"));
         assert_eq!(doc["model_reasoning_effort"].as_str(), Some("high"));
         assert!(text.starts_with("# mine") && text.contains("[mcp_servers.luoto-sandbox]"));
+    }
+
+    #[test]
+    fn a_value_if_absent_leaves_the_users_own() {
+        let dir = std::env::temp_dir().join(format!("luoto-absent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let notify = |file: &Path| {
+            let set = json!({
+                "file": "~/x",
+                "path": ["notify"],
+                "value": ["/opt/luoto/bin/sandbox", "state", "done", "--app", "codex"],
+                "if_absent": true,
+            });
+            let j: JsonSet = serde_json::from_value(set).unwrap();
+            let keys: Vec<&str> = j.path.iter().map(String::as_str).collect();
+            if !(j.if_absent && has_key(file, &keys).unwrap()) {
+                merge_toml(file, &keys, j.value).unwrap();
+            }
+        };
+        let fresh = dir.join("fresh.toml");
+        notify(&fresh);
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&fresh).unwrap().parse().unwrap();
+        let args: Vec<&str> = doc["notify"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            args,
+            ["/opt/luoto/bin/sandbox", "state", "done", "--app", "codex"]
+        );
+        let mine = dir.join("mine.toml");
+        std::fs::write(&mine, "notify = [\"my-notifier\"]\n").unwrap();
+        notify(&mine);
+        assert_eq!(
+            std::fs::read_to_string(&mine).unwrap(),
+            "notify = [\"my-notifier\"]\n"
+        );
+        let json = dir.join("s.json");
+        std::fs::write(&json, r#"{"a": {"b": 1}, "c": null}"#).unwrap();
+        assert!(has_key(&json, &["a", "b"]).unwrap());
+        assert!(!has_key(&json, &["a", "x"]).unwrap() && !has_key(&json, &["c"]).unwrap());
+        assert!(!has_key(&dir.join("none.json"), &["a"]).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

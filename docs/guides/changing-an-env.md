@@ -11,10 +11,10 @@ running env without a restart. `luoto status` shows what it has now.
 | one gone from the env's list                      | `luoto repo rm api` (its copy in the env stays)   |
 | another token for a repo, or push instead of read | `luoto repo auth acme/api`                        |
 
-`repo add` asks what the env may do with the repo when no credential covers it, then clones
-it at once in a running env. When a clone fails, `luoto up` names the repo and the fix last,
-after "is up": a token the remote refused (one for another forge or account, or expired) is
-fixed with `luoto repo auth`.
+`repo add` asks what the env may do with the repo when no credential covers it
+([credentials](multi-repo.md#credentials)), then clones it at once in a running env. When a
+clone fails, `luoto up` names the repo and the fix last, after "is up": a token the remote
+refused (one for another forge or account, or expired) is fixed with `luoto repo auth`.
 
 **For the team,** add the repo to the launchpad's `luoto.toml` (`[repos.api] url = "…"`) and
 commit it. Each developer's env reads its own copy of the file in `/workspace`:

@@ -9,7 +9,8 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   tokens, whose reach luoto can't check. Needs a guided App setup (the manifest flow) first.
 - **Install windows bound to the installer:** a per-run proxy credential, so other processes
   can't use the window.
-- **Container hardening:** dropped capabilities, `nosuid,nodev` mounts, user namespaces on
+- **Container hardening:** `--cap-drop ALL` for the dev container on podman and Docker (the
+  gate, the vault and Apple's dev VM have it), `nosuid,nodev` mounts, user namespaces on
   Docker; tunnel rules check the SNI inside the tunnel; client credentials stripped on every
   host.
 - **gVisor on Linux** installed by `luoto setup --install`.
@@ -21,23 +22,23 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
 
 ## Workflow
 
-- **Agent status for Codex and OpenCode,** as Claude Code reports it (OSC 7501).
+- **Agent status for OpenCode,** as Claude Code and Codex report it (OSC 7501).
 - **An env as a machine for agent managers** that reach machines over SSH: through luoto's SSH,
   helpers they start run inside the env, behind its gate.
-- **Repo access asked per account, reviewed before it is written:** one token question per
-  GitHub owner or Azure DevOps organization (naming the repos it reaches), the answers shown
-  in one summary to write, change or leave for later, instead of a written answer per repo.
+- **Repo access, one question per account:** one token question per GitHub owner or Azure
+  DevOps organization (naming the repos it reaches), and one review of all the answers before
+  any is written.
 - **Services that come back:** a command on every start (a database after `up` or an idle
   stop), then sidecars.
-- **Corporate networks:** a CA for every upstream (Zscaler, Netskope) and egress through a
-  company proxy.
+- **Corporate networks:** a CA for every upstream, which the gate reads
+  (`LUOTO_UPSTREAM_CA`) but no command or config sets yet; egress through a company proxy.
 - **Moving work:** `fork` of an env; seed from a git bundle and `luoto fetch` into
   `refs/remotes/luoto/<env>`.
 - **A folder shared live** (Linux, or a VM that shares folders), with an audit of the files
   host tools act on (`.git/config`, hooks, `.envrc`, editor and pre-commit configs).
 - **`luoto run` jobs:** a clean-checkout start, a CI recipe.
 - **Detached agents:** `agent run --detach`, `agent ps`, `agent attach`.
-- **Orchestrators drive envs:** agent orchestrators (Paperclip; the parallel-agent tools that
+- **Orchestrators drive envs:** agent orchestrators (including the parallel-agent tools that
   give each agent only a git worktree) run each task in a luoto env through `luoto run` or an
   API, with the env's access requests and denials in the orchestrator's own approvals.
 - **`luoto push`:** a reviewed copy-in.
@@ -46,11 +47,12 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   progress the UI streams).
 - **Azure DevOps:** the `az` CLI (it addresses repos by ID) and Git LFS (served from blob
   storage).
-- **Shares on Windows,** where luoto's podman VM mounts no shares folder yet, **and on Linux with
-  SELinux** (Fedora): native podman without gVisor needs the clones relabelled to read them.
-- **The watcher hands over in place,** once more runs through it: a new luoto takes its open
-  links and forwarded connections (exec with the descriptors kept, the bytes read and not yet
-  written carried along) instead of closing them for its successor to open again.
+- **Shares on Windows,** where luoto's podman VM mounts no shares folder yet.
+- **Shares with SELinux** (Fedora): native podman on Linux without gVisor needs the clones
+  relabelled to read them.
+- **The background watcher hands over in place,** once more runs through it: a new luoto takes
+  its open links and forwarded connections (exec with the descriptors kept, the bytes read and
+  not yet written carried along) instead of closing them for its successor to open again.
 
 ## Git over SSH
 
@@ -82,5 +84,5 @@ Each change is a format migration (`cli/src/format.rs`); the first one also brin
 
 ## Internals
 
-- Windows verified end to end, or documented as WSL2-only.
+- Windows verified end to end, on podman's Hyper-V and WSL2 VMs and Docker Desktop.
 - `sandbox provision`: one call into the env instead of the 26 an unchanged `up` makes.

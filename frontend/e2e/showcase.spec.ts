@@ -82,7 +82,7 @@ test("blocked, allowed from the UI, then through", async ({ page }) => {
   }
 
   await page.emulateMedia({ colorScheme: "light" });
-  await page.getByRole("button", { name: "allow", exact: true }).click();
+  await page.getByRole("button", { name: "Allow", exact: true }).click();
   await expect(page.getByText(/allowed example\.com/)).toBeVisible();
   expect(fetchInside("https://example.com/")).toBe("200");
   // The rule allows what was blocked before it: the row reads as allowed, its denial as history.

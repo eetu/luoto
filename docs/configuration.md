@@ -51,8 +51,8 @@ protected_branches = ["main"]
 
 [credentials.azure_devops]    # Azure DevOps git over HTTPS
 token = "op://Dev/ado/pat"    # a PAT with Code (Read & write)
-repos = ["myorg/Project/repo"]   # `org/project/repo`, or the clone URL
-# read_repos = ["myorg/Project/lib"]   # fetched only
+repos = ["fabrikam/Apps/web"]    # `org/project/repo`, or the clone URL
+# read_repos = ["fabrikam/Apps/lib"]   # fetched only
 protected_branches = ["main"]
 
 [credentials.azure]           # Azure: az, terraform and the SDKs see a managed identity
@@ -117,38 +117,28 @@ run = ["git config --global pull.rebase true"]  # as you, in your home; keep the
 hosts = ["dl.k8s.io"]         # extra hosts readable only while installs run
 ```
 
-`config.toml` takes `[tools]`, `[deps]`, `[[deny]]`, `[[mute]]`, `idle_stop` and
-`auto_forward` too, for every env, and `[agents.<name>]` options (`model`, `effort`, `args`,
-`headless_args`) for every
-env that has that agent; an env's own, and its `luoto.toml`'s, come on top. Credentials go
-only in each env's own file. `notifications = false` there turns desktop notifications off.
-`runtime = "container"` there (`luoto setup` offers it) runs envs on Apple's `container`
-([install.md](install.md)).
+`config.toml` takes `[tools]`, `[deps]`, `[[deny]]`, `[[mute]]`, `idle_stop` and `auto_forward`
+too, for every env, and `[agents.<name>]` options (`model`, `effort`, `args`, `headless_args`)
+for every env that has that agent; an env's own, and its `luoto.toml`'s, come on top.
+Credentials go only in each env's own file. `notifications = false` there turns desktop
+[notifications](#notifications) off. `runtime = "container"` there (`luoto setup` offers it)
+runs envs on Apple's `container` ([install.md](install.md)).
 
 A `[[deny]]` beats every allow: a preset's, a rule's, an approved request's. It applies to the
 HTTP(S) the gate reads: a tunnel rule can't cover a denied host, and SSH to
-`[credentials.ssh] hosts` doesn't pass through it. A `[[mute]]` is
-for telemetry you keep denied: its denials are still recorded, but stay out of `luoto egress`,
-the UI and the offers to allow them; `luoto egress --all` shows them.
+`[credentials.ssh] hosts` doesn't pass through it. A `[[mute]]` is for telemetry you keep
+denied: its denials are still recorded, but stay out of `luoto egress`, the UI and the offers
+to allow them; `luoto egress --all` shows them.
 
 Secret refs: `op://…` (1Password CLI, desktop or service account), `vault://mount/path#field`
 (OpenBao / HashiCorp Vault), `keyring:service/account` (OS keychain), `env:NAME`, `file:path`.
-In 1Password, a token is an API Credential's `credential` field, a Password's `password`, or a
-Secure Note's `notesPlain` holding the token alone. With several accounts in the app,
-`?account=<account ID>` on a ref reads it from that one (`op account list` shows the IDs;
-`[sources.op] account` sets the default). A sign-in address works where only one account has
-it; every personal and family account signs in at `my.1password.com`. When you give a
-reference, the wizard can browse 1Password for it: account, vault and item, the field from the
-item's kind, or one you type: it lists names only, and 1Password lists custom fields only
-with their values. The refs it writes name the vault and item by ID, so a rename doesn't
-break them. Sources are configured in `~/.config/luoto/config.toml`. `[credentials.azure]`
+Sources are configured in `~/.config/luoto/config.toml`; with several 1Password accounts,
+`?account=<account ID>` on a ref (or `[sources.op] account`) picks one. `[credentials.azure]`
 reads your `az` login itself, with no ref.
 
-1Password works best with the app's CLI integration on (Settings > Developer > Integrate with
-1Password CLI): `op` then unlocks through the app, with Touch ID, in any terminal. Signed in
-by hand instead, `op` holds its session only in the shell that ran `eval $(op signin)`, for 30
-minutes idle; when luoto finds it signed out, it offers `op signin` in place and keeps the
-session in memory until it exits.
+When you give a reference, the wizard can browse 1Password for it and writes the vault and
+item by ID, so a rename doesn't break it; with the app's CLI integration on, `op` unlocks with
+Touch ID in any terminal ([how the questions go](agents.md#credentials)).
 
 `[sandbox_secrets]` are resolved on your machine at `up` and written to a memory-only file in
 the dev container that every shell loads; they leave with the container. Anything that only
@@ -156,27 +146,28 @@ needs a token in an HTTP header belongs under `[credentials.custom.<name>]` inst
 sandbox never sees it. `luoto var` sets and removes both `[env]` and `[sandbox_secrets]`
 ([guide](guides/env-vars.md)).
 
-`[shares]` names folders of this machine the env reads at `/shares/<name>`, read-only, for
-data too large for a repo such as recordings or datasets. `luoto share add <folder> [--name
-<name>]` adds one; `luoto share` lists them with what changed since the last sync; `luoto
-share rm <name>` removes one. The env reads clones in `~/.local/share/luoto-shares`, which
-take no space until a file changes on APFS (macOS), btrfs and XFS when the folder is on the
-same disk, and are copies otherwise. Every `luoto up`, and `luoto share sync`, clones again the files that changed (by
-size and modification time) and removes the ones you deleted. A running env sees a share
-added or removed at once; one started before it had any shares needs `luoto up --recreate`
-once. With podman on macOS, luoto's VM mounts the shares folder read-only: the first share
-adds it, after a yes, by restarting the VM (every env in it stops until its next `luoto
-up`). A share is a folder inside your home folder, never home itself, a dot-folder or
-`~/Library`, or on a disk (`/Volumes`, `/mnt`, `/media`, `/srv`), and never a key folder
-(`.ssh`, `.aws`, …) or one inside it; only its plain files are cloned, never what a link in it points to, and
-only the env's own file names one. Not on Windows yet.
+`[shares]` names folders of this machine the env reads at `/shares/<name>`, read-only, for data
+too large for a repo such as recordings or datasets. `luoto share add <folder> [--name <name>]`
+adds one; `luoto share` lists them with what changed since the last sync;
+`luoto share rm <name>` removes one. The env reads clones in `~/.local/share/luoto-shares`,
+which take no space until a file changes on APFS (macOS), btrfs and XFS when the folder is on
+the same disk, and are copies otherwise. Every `luoto up`, and `luoto share sync`, clones again
+the files that changed (by size and modification time) and removes the ones you deleted. A
+running env sees a share added or removed at once; one started before it had any shares needs
+`luoto up --recreate` once. With podman on macOS, luoto's VM mounts the shares folder
+read-only: the first share adds it, after a yes, by restarting the VM (every env in it stops
+until its next `luoto up`). A share is a folder inside your home folder, never home itself, a
+dot-folder or `~/Library`, or on a disk (`/Volumes`, `/mnt`, `/media`, `/srv`), and never a key
+folder (`.ssh`, `.aws`, …) or one inside it; only its plain files are cloned, never what a link
+in it points to, and only the env's own file names one. Not on Windows yet.
 
 A GitHub App for luoto needs only repository permissions such as Contents and Pull requests;
-luoto refuses Workflows, Actions, Secrets and Administration ([why](../SECURITY.md#what-holds-the-line)).
-A token or App installation reaches one owner's repos; for another owner's, write
-`[[credentials.github]]` once per owner instead of `[credentials.github]`. Each repo's requests
-get the credential that lists it, and GraphQL (`gh pr create`) the first one that may write,
-so the others open pull requests over REST (`gh api repos/<owner>/<repo>/pulls`).
+luoto refuses Workflows, Actions, Secrets and Administration
+([why](../SECURITY.md#what-holds-the-line)). A token or App installation reaches one owner's
+repos; for another owner's, write `[[credentials.github]]` once per owner instead of
+`[credentials.github]`. Each repo's requests get the credential that lists it, and GraphQL
+(`gh pr create`) the first one that may write, so the others open pull requests over REST
+(`gh api repos/<owner>/<repo>/pulls`).
 
 An Azure DevOps credential lets the env fetch and push its repos over HTTPS. Remotes keep
 working as they are: SSH ones (`git@ssh.dev.azure.com:v3/…`, or a host alias from your
@@ -206,9 +197,9 @@ Without a token it lists public repos to fetch. Its host's SSH remotes go over H
 
 An SSH credential lets git use SSH remotes as they are, to `hosts` on port 22 only;
 `github_port = 443` sends GitHub's to `ssh.github.com:443` instead, for networks that block 22.
-GitHub SSH remotes go to HTTPS when github.com isn't in `hosts`, as do Azure DevOps ones with
-an Azure DevOps credential; other forges' SSH remotes work only through `hosts`. SSH sessions are
-unscoped by repository, so use a deploy key where that matters
+SSH remotes to a host not in `hosts` go to HTTPS when it is GitHub, Azure DevOps (with an
+Azure DevOps credential) or a `[[credentials.git]]` host; others' work only through `hosts`.
+SSH sessions are unscoped by repository, so use a deploy key where that matters
 ([SECURITY.md](../SECURITY.md#what-holds-the-line)). From 1Password, the key's ref is
 `op://<vault>/<item>/private key?ssh-format=openssh`.
 
@@ -269,7 +260,8 @@ persists with the home volume, as do mise's toolchains.
 
 Verified by hand, from `luoto init` to a build or test run in the env: npm, Yarn 1 and 4, pnpm,
 pip, uv, Poetry, Cargo, Go, Java (pyspark with `--tool java=21`), Terraform and OpenTofu
-(`init` and `plan`), and a Rust + Yarn + uv monorepo. Other toolchains mise installs are untested ([ROADMAP.md](../ROADMAP.md)).
+(`init` and `plan`), and a Rust + Yarn + uv monorepo. Other toolchains mise installs are
+untested ([ROADMAP.md](../ROADMAP.md)).
 
 ## Shell
 
@@ -309,3 +301,10 @@ they are sandboxed; keep host-side ones to themes and keymaps.
 The sandbox side refuses SSH agent forwarding and reverse port forwards, so a session can't
 reach back to your machine. Don't open the env's folder directly in a host editor: its
 language servers would run project code outside the sandbox.
+
+## Notifications
+
+The background watcher shows a desktop notification for each new access request and the first
+denial at each host, and when the disk that holds envs runs low. macOS asks once to allow
+them; Linux needs `notify-send`. Where they are off (`notifications = false` in
+`config.toml`) or missing, the bell in `luoto ui` gives browser notifications for requests.

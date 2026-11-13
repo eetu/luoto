@@ -11,6 +11,3 @@
     <CopyCommand {cmd} />
   {/each}
 </div>
-
-<style>
-</style>

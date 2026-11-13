@@ -43,26 +43,8 @@
 </section>
 
 <style>
-  .surface {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    min-height: 0;
-  }
-
   .bar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    align-items: center;
     justify-content: space-between;
-    padding: 14px 18px 10px;
-  }
-
-  h1 {
-    margin: 0;
-    font-size: 16px;
-    font-weight: 600;
   }
 
   .tools {

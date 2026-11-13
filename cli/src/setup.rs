@@ -276,6 +276,7 @@ pub struct SetupOpts {
     /// or `podman`.
     #[arg(long, value_enum)]
     pub runtime: Option<RuntimeChoice>,
+    /// Don't ask first.
     #[arg(long, short)]
     pub yes: bool,
 }

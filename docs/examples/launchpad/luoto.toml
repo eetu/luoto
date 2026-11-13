@@ -1,6 +1,7 @@
 # A launchpad: a repository that holds only this file (and mise.toml), committed so that
 # `luoto init` in a clone of it gives everyone the same env, its repos beside it at
 # /workspace/<name>. `luoto init --repo ~/dev/<name>` uses a local checkout of one instead.
+# `up` asks each developer what their env may do with each repo, into their own env config.
 
 presets = ["npm", "terraform"]
 agents = ["claude"]
@@ -14,12 +15,7 @@ url = "https://github.com/acme/web.git"
 branch = "develop"                                        # default: the remote's
 
 [repos.infra]
-url = "https://dev.azure.com/acme/Platform/_git/infra"    # Azure DevOps
+url = "https://dev.azure.com/fabrikam/Infra/_git/infra"   # Azure DevOps
 
 [repos.design-system]
-url = "https://github.com/acme-oss/design-system.git"     # another GitHub owner
-
-# Each developer's credentials go in their own env config (`luoto edit`); `luoto init` prints
-# what these remotes need. What the team expects can be listed here:
-# [needs]
-# credentials = ["anthropic"]
+url = "https://github.com/globex/design-system.git"       # another GitHub owner

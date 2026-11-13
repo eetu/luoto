@@ -341,11 +341,12 @@ pub fn login_in_env(ctx: &Ctx, env: &str, c: &AzureCred) {
         )
     });
     if let Err(e) = run {
-        eprintln!(
-            "note: `az login --identity` failed in `{env}`, so az there is not logged in: {}\n      \
-             see docs/guides/azure.md; `luoto up -e {env}` tries again",
-            crate::text::lines(&format!("{e:#}"))
-        );
+        crate::progress::note(&format!(
+            "`az login --identity` failed in `{env}`, so az there is not logged in ({}); \
+             `luoto up -e {env}` tries again, \
+             https://github.com/eetu/luoto/blob/main/docs/guides/azure.md has the causes",
+            crate::text::display(&format!("{e:#}").replace('\n', " "))
+        ));
     }
 }
 

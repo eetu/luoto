@@ -13,7 +13,7 @@ reason = "file storage, batches, fine-tuning and admin endpoints of the OpenAI A
 label = "OpenAI API key"
 short = "billed per use, from platform.openai.com"
 prefix = "sk-"
-how = "platform.openai.com/api-keys > Create new secret key. A ChatGPT plan instead needs a login inside the sandbox."
+how = "platform.openai.com/api-keys > Create new secret key. A ChatGPT plan instead needs a login inside the env."
 header = "authorization"
 format = "Bearer {secret}"
 env = { OPENAI_API_KEY = "sk-proj-luotoplaceholder000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" }

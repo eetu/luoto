@@ -12,9 +12,9 @@
     copyText,
     openLeft,
     openVault,
-    refreshVault,
-    say,
+    plural,
     selectEnv,
+    vaultAction,
   } from "$lib/stores/app.svelte";
   import type { EnvRow } from "$lib/types";
 
@@ -24,43 +24,30 @@
   // Secrets the envs' credentials need and the vault lacks: an unlock reads them.
   const missing = $derived(vault?.envs.reduce((n, e) => n + e.missing.length, 0) ?? 0);
 
+  // How many credentials the vault holds secrets for, across envs.
+  const bindings = $derived(vault?.envs.reduce((n, e) => n + e.bindings.length, 0) ?? 0);
+
   function vaultMenu(e: MouseEvent) {
     const locked = vault?.locked ?? true;
-    const then = () => (app.view === "vault" ? refreshVault() : undefined);
+    const off = !vault ? "not running" : undefined;
     openMenu(e, "vault", [
       {
         label: "Unlock",
-        run: () =>
-          void act(
-            "unlocking… (your secret store may ask to authorize)",
-            () => api.vault("unlock"),
-            "vault unlocked",
-          ).then(then),
+        run: () => void vaultAction("unlock"),
         disabled: !vault || (!locked && missing === 0),
-        hint: !vault ? "not running" : !locked && missing === 0 ? "unlocked" : undefined,
+        hint: off ?? (!locked ? (missing ? `${missing} missing` : "unlocked") : undefined),
       },
       {
         label: "Read secrets again",
-        run: () =>
-          void act("reading secrets again… (your secret store may ask)", api.reloadVault).then(
-            (r) => {
-              if (r) say(`read ${r.read}: ${r.changed} changed`, r.failed.length > 0);
-              return then();
-            },
-          ),
+        run: () => void vaultAction("reload"),
         disabled: !vault || locked,
-        hint: !vault ? "not running" : locked ? "locked" : "after rotating one",
+        hint: off ?? (locked ? "locked" : plural(vault?.loaded_refs.length ?? 0, "secret")),
       },
       {
         label: "Lock",
-        run: () =>
-          void act(
-            "locking…",
-            () => api.vault("lock"),
-            "vault locked; credentialed hosts now get 403",
-          ).then(then),
+        run: () => void vaultAction("lock"),
         disabled: !vault || locked,
-        hint: !vault ? "not running" : locked ? "locked" : "every env's credentials",
+        hint: off ?? (locked ? "locked" : plural(bindings, "credential")),
       },
     ]);
   }
@@ -84,7 +71,6 @@
         label: "Rebuild dev container",
         run: () =>
           void act("rebuilding…", () => api.action(env.name, "rebuild"), `${env.name} rebuilt`),
-        hint: "volumes kept",
       },
       env.open
         ? {
@@ -101,7 +87,6 @@
                 () => api.action(env.name, "open"),
                 `${env.name} reaches any HTTP(S) host for 1 h`,
               ),
-            hint: "any HTTP(S) host",
           },
       {
         label: "Copy shell command",
@@ -145,7 +130,7 @@
   {:else}
     <p class="muted empty">no envs yet</p>
   {/each}
-  <button class="btn new" onclick={onNew}><Plus size={14} /> new env</button>
+  <button class="btn new" onclick={onNew}><Plus size={14} /> New env</button>
 
   <p class="label vault-label">vault</p>
   <button

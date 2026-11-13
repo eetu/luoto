@@ -281,7 +281,9 @@ pub fn accepted(ctx: &Ctx, env: &str) -> Option<(String, ProjectConfig)> {
     match parse(&text) {
         Ok(p) => Some((text, p)),
         Err(e) => {
-            eprintln!("warning: the accepted luoto.toml no longer parses ({e:#}); ignoring it");
+            crate::progress::warn(&format!(
+                "the accepted luoto.toml no longer parses ({e:#}); ignoring it"
+            ));
             None
         }
     }
@@ -955,10 +957,10 @@ pub fn review(ctx: &Ctx, env: &str) -> Result<bool> {
     let st = status(ctx, env)?;
     let text = st.text.as_deref().unwrap_or_default();
     match st.state {
-        State::Invalid => eprintln!(
-            "warning: the project's luoto.toml is not applied: {}",
+        State::Invalid => crate::progress::warn(&format!(
+            "the project's luoto.toml is not applied: {}",
             st.error.as_deref().unwrap_or_default()
-        ),
+        )),
         State::Removed => println!(
             "note: the project no longer has luoto.toml; its accepted settings still apply \
              (`luoto project ignore -e {env}` drops them)"

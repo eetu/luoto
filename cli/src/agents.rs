@@ -114,8 +114,8 @@ pub fn install(ctx: &Ctx, env_name: &str, agent: &str) -> Result<()> {
         }
         if !status.success() {
             bail!(
-                "installing {agent} failed; `luoto logs installs -e {env_name}` has what it \
-                 printed, `luoto egress -e {env_name} --denied --since 15m` what the gate blocked"
+                "installing {agent} failed; {}",
+                crate::logs::InstallLog::hint(env_name)
             );
         }
     }
@@ -269,7 +269,7 @@ fn summary(env_name: &str, name: &str, a: &profiles::Agent, cfg: &EnvConfig) -> 
             Auth::LoginInside { .. } => {
                 rows.push((
                     "credential",
-                    "log in inside the sandbox (code in the env can read the session)".into(),
+                    "log in inside the env (code in the env can read the session)".into(),
                 ));
                 if let Some(how) = p.as_ref().and_then(|p| p.login_how.clone()) {
                     rows.push(("sign in", how));
@@ -323,7 +323,7 @@ pub fn ask_missing(ctx: &Ctx, env_name: &str, cfg: &EnvConfig) -> Result<()> {
     }
     for name in &lacking {
         if let Some(a) = profiles::agent(name) {
-            eprintln!("note: {}", credential_help(ctx, env_name, name, &a));
+            crate::progress::note(&credential_help(env_name, name, &a));
         }
     }
     Ok(())
@@ -429,7 +429,7 @@ fn credentials(ctx: &Ctx, env_name: &str, agents: &[String], interactive: bool) 
             println!();
             ask(ctx, env_name, name, &a, Mode::Missing)?;
         } else if !login_inside(ctx, env_name, name, &a)? {
-            println!("\n{}", credential_help(ctx, env_name, name, &a));
+            println!("\n{}", credential_help(env_name, name, &a));
         }
     }
     Ok(())
@@ -545,30 +545,25 @@ fn scripted_command(env_name: &str, name: &str, a: &profiles::Agent) -> String {
 }
 
 /// What gives agent `name` a credential, for when no one was asked: `agent auth` on a
-/// terminal; without one, `agent add --credential` or the env's config.
-fn credential_help(ctx: &Ctx, env_name: &str, name: &str, a: &profiles::Agent) -> String {
+/// terminal; without one, `agent add --credential`.
+fn credential_help(env_name: &str, name: &str, a: &profiles::Agent) -> String {
     let provider = a.providers.first().and_then(|p| profiles::provider(p));
-    let pname = a.providers.first().map_or("anthropic", String::as_str);
-    let file = ctx.paths.env_config(env_name).display().to_string();
-    let on_terminal = format!("`luoto agent auth -e {env_name} {name}` on a terminal");
+    let mut how = format!("`luoto agent auth -e {env_name} {name}` on a terminal");
     let scripted = scripted_command(env_name, name, a);
+    if !scripted.is_empty() {
+        how.push_str(&format!(", or {scripted}"));
+    }
     if let Some(p) = provider.as_ref().filter(|p| p.auth.is_empty()) {
         return format!(
-            "{} signs in inside the sandbox, where code in the env can read its session. Allow \
-             it with {on_terminal}, or {scripted}, or add to {file}:\n\n  \
-             [credentials.{pname}]\n  login_inside = true\n\nThen {}.",
+            "{} logs in inside the env, where code in the env can read its session. Allow it \
+             with {how}. Then {}.",
             a.title(),
             p.login_how.as_deref().unwrap_or_default()
         );
     }
-    let kind = provider
-        .as_ref()
-        .and_then(|p| p.kinds().first().map(|k| k.to_string()))
-        .unwrap_or_else(|| "api_key".into());
     let mut out = format!(
-        "{} needs a credential for {}. The gate adds it to each request; the sandbox never \
-         holds it. Set it with {on_terminal}, or {scripted}, or add to {file}:\n\n  \
-         [credentials.{pname}]\n  {kind} = \"op://<vault>/<item>/<field>\"   # or keyring:<service>/<account>, env:<NAME>",
+        "{} needs a credential for {}. The gate adds it to each request; the env never holds \
+         it. Set it with {how}.",
         a.title(),
         a.providers.join(" or ")
     );
@@ -579,8 +574,8 @@ fn credential_help(ctx: &Ctx, env_name: &str, name: &str, a: &profiles::Agent) -
         }
         if let Some(how) = p.login_how.as_deref().filter(|_| !p.login_hosts.is_empty()) {
             out.push_str(&format!(
-                "\n\nlogin_inside = true: sign in inside the sandbox instead, where code in the \
-                 env can read the session: {how}."
+                "\n\nlogin_inside: log in inside the env instead, where code in the env can \
+                 read the session: {how}."
             ));
         }
     }
@@ -659,7 +654,7 @@ pub fn settings(
             file: s.file.clone(),
             path: s.path.clone(),
             value: serde_json::Value::String(value.to_string()),
-            append: false,
+            ..Default::default()
         })
     });
     let sets = s.removes.into_iter().chain(options).chain(s.adds).collect();
@@ -703,9 +698,7 @@ pub fn configure(
             continue;
         }
         if let Err(e) = register(ctx, env_name, &a, &sets) {
-            crate::progress::say(|| {
-                eprintln!("warning: {} not set up for luoto ({e:#})", a.description)
-            });
+            crate::progress::warn(&format!("{} not set up for luoto ({e:#})", a.description));
             continue;
         }
         if now.is_empty() {
@@ -897,7 +890,7 @@ pub fn auth(env_name: &str, agent: &str) -> Result<ExitCode> {
     if login_only(&a) && !have.is_empty() {
         println!("{}", summary(env_name, agent, &a, &own));
         println!(
-            "nothing else to choose: {} signs in inside the env",
+            "nothing else to choose: {} logs in inside the env",
             a.title()
         );
         return Ok(ExitCode::SUCCESS);
@@ -1154,14 +1147,14 @@ pub fn headless(
             eprint!("{}", events::fmt_denials(env_name, &events::denials(&evs)));
             eprint!("{}", events::fmt_opened(env_name, &events::opened(&evs)));
         }
-        Err(e) => eprintln!("warning: no summary of the gate's denials ({e:#})"),
+        Err(e) => crate::progress::warn(&format!("no summary of the gate's denials ({e:#})")),
     }
     relayed?;
     crate::disk::hint_growth(&ctx, env_name);
     if down {
         match env::down(&ctx, env_name) {
             Ok(()) => eprintln!("env `{env_name}` stopped"),
-            Err(e) => eprintln!("warning: env `{env_name}` not stopped ({e:#})"),
+            Err(e) => crate::progress::warn(&format!("env `{env_name}` not stopped ({e:#})")),
         }
     }
     match stopped {
@@ -1201,7 +1194,7 @@ fn answer(
         Ok(Ok(())) => Ok(()),
         // A write that fails leaves the rest on stderr rather than lost.
         Ok(Err(e)) | Err(e) => {
-            eprintln!("warning: {path} not written whole ({e}); the rest follows");
+            crate::progress::warn(&format!("{path} not written whole ({e}); the rest follows"));
             relay(&mut out, &mut io::stderr(), err_tty)
         }
     }
@@ -1224,7 +1217,7 @@ fn relay(
         let n = from.read(&mut buf)?;
         let take = n.min(left);
         if take < n && left > 0 {
-            eprintln!("warning: the output was cut at {} MiB", ANSWER_CAP >> 20);
+            crate::progress::warn(&format!("the output was cut at {} MiB", ANSWER_CAP >> 20));
         }
         left -= take;
         if terminal {
@@ -1407,7 +1400,7 @@ mod tests {
                 &cfg("[credentials.anthropic]\nlogin_inside = true")
             ),
             "Claude Code\n  \
-             credential   log in inside the sandbox (code in the env can read the session)\n  \
+             credential   log in inside the env (code in the env can read the session)\n  \
              sign in      run `claude` in `luoto shell` and log in (the session has full scopes)\n  \
              change it    luoto agent auth -e web claude"
         );

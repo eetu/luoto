@@ -78,12 +78,12 @@ The env has no folder on this machine, so commands take `-e web`: `luoto shell -
 mise in `/workspace`, which reads the clone's `mise.toml`: that runs inside the sandbox, with
 the egress the env has.
 
-`luoto status -e web` says where the workspace comes from, and `luoto ls` lists it under FROM.
+`luoto status -e web` says where the workspace comes from, and `luoto list` lists it under FROM.
 
 ## Getting work out
 
-Push from the env, with a credential that covers the repository (`luoto edit -e web`, or
-`luoto up` on a terminal asks). To copy files to your machine:
+Push from the env once its access is `Read and push`: `luoto repo auth -e web acme/web`
+changes it. To copy files to your machine:
 
 ```console
 $ luoto pull -e web --to ~/review/web
@@ -102,5 +102,5 @@ your own tools act on (`.envrc`, `.vscode`, build wrappers, hooks) are held back
 - `luoto rm -e web` first names each repo in the env with what no remote has: files not
   committed, commits not pushed, stashes.
 
-A large repository fills the disk of luoto's VM, which your other envs share: that costs space,
-not isolation.
+A large repository fills the disk your other envs share (luoto's VM with podman): that costs
+space, not isolation.

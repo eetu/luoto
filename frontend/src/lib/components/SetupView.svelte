@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api } from "$lib/api";
   import CopyCommand from "$lib/components/CopyCommand.svelte";
-  import { act, errorText, say } from "$lib/stores/app.svelte";
+  import { act, app, errorText, say } from "$lib/stores/app.svelte";
   import type { RuntimeChoice, SetupInfo } from "$lib/types";
 
   // First run: what this machine has, what luoto recommends, and the one confirmed step to
@@ -76,7 +76,8 @@
         <p class="muted">no container runtime found</p>
       {/each}
       <p class="muted small">
-        images: {info.images_ok ? "present" : offer ? "missing" : "missing — run `luoto setup`"}
+        images: {#if info.images_ok}present{:else if offer}missing{:else}missing — run
+          <code>luoto setup</code>{/if}
       </p>
     </div>
 
@@ -134,11 +135,13 @@
         {#if confirming}
           <p class="small">This runs on your machine (not sandboxed), from the package manager.</p>
           <div class="actions">
-            <button class="btn primary" onclick={install}>run it</button>
-            <button class="btn" onclick={() => (confirming = false)}>cancel</button>
+            <button class="btn primary" onclick={install} disabled={!!app.busy}>Run it</button>
+            <button class="btn" onclick={() => (confirming = false)}>Cancel</button>
           </div>
         {:else}
-          <button class="btn primary" onclick={() => (confirming = true)}>install…</button>
+          <button class="btn primary" onclick={() => (confirming = true)} disabled={!!app.busy}
+            >Install…</button
+          >
         {/if}
       {/if}
       {#if output}<pre>{output}</pre>{/if}
@@ -150,7 +153,7 @@
     </div>
 
     {#if ready}
-      <button class="btn primary" onclick={onNew}>create your first env</button>
+      <button class="btn primary" onclick={onNew}>Create your first env</button>
     {/if}
   {/if}
 </section>

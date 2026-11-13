@@ -451,7 +451,7 @@ const SERVER: &str = "A model server";
 const SERVER_SHORT: &str = "yours, on this or another machine";
 
 /// The login inside, as the kind menu offers it.
-const LOGIN: &str = "Log in inside the sandbox";
+const LOGIN: &str = "Log in inside the env";
 const LOGIN_SHORT: &str = "weaker: code in the env can read it";
 const LATER: &str = "Later";
 const LATER_SHORT: &str = "the agent can't connect without one";
@@ -498,7 +498,7 @@ fn credential_with(
         )
     } else {
         format!(
-            "{} signs in inside the sandbox, with your own account.",
+            "{} logs in inside the env, with your own account.",
             a.title()
         )
     };
@@ -1060,8 +1060,8 @@ pub fn secret(ask: &SecretAsk, global: &GlobalConfig) -> Result<Step<Secret>> {
 }
 
 /// A secret pasted into a new 1Password item, in the account (when the app has several) and
-/// vault picked before it: the paste is the last question, so going back never drops one.
-/// Its reference; `Back` is Esc at the first question.
+/// vault (when the account has several) picked before it: the paste is the last question, so
+/// going back never drops one. Its reference; `Back` is Esc at the first question.
 fn op_paste(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> {
     let accounts = op_accounts(global);
     let mut vaults: HashMap<Option<String>, Vec<OpVault>> = HashMap::new();
@@ -1086,14 +1086,26 @@ fn op_paste(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> {
         if list.is_empty() {
             bail!("no 1Password vaults to choose from: `op vault list` gave none");
         }
+        let only = list.len() == 1;
+        if only {
+            println!("  1Password vault: {}", display(&list[0].name));
+        }
         loop {
-            let names = list.iter().map(|v| display(&v.name)).collect();
-            let q = format!("1Password vault to save the {} in:", ask.label);
-            let Step::Got(i) = pick_index(&q, names, at_vault)? else {
-                break;
+            let i = if only {
+                0
+            } else {
+                let names = list.iter().map(|v| display(&v.name)).collect();
+                let q = format!("1Password vault to save the {} in:", ask.label);
+                let Step::Got(i) = pick_index(&q, names, at_vault)? else {
+                    break;
+                };
+                i
             };
             at_vault = i;
             let Step::Got(secret) = paste(ask)? else {
+                if only {
+                    break;
+                }
                 continue;
             };
             if !shape_ok(ask, &secret) {
@@ -1203,6 +1215,9 @@ fn browse(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> {
     // Where each list was left, to reopen it there.
     let (mut at_account, mut at_vault, mut at_item) = (0usize, 0usize, 0usize);
     let (mut vault, mut item): (Option<OpVault>, Option<OpItem>) = (None, None);
+    // Coming back to a vault from its items: an account's only vault isn't a question, so
+    // Esc goes on back past it.
+    let mut backing = false;
     let mut at = if accounts.is_empty() {
         At::Vault
     } else {
@@ -1224,6 +1239,7 @@ fn browse(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> {
                 };
                 at_account = i;
                 account = Some(accounts[i].id.clone());
+                backing = false;
                 at = At::Vault;
             }
             At::Vault => {
@@ -1245,6 +1261,20 @@ fn browse(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> {
                         return Ok(Step::Back);
                     }
                     at = At::Account;
+                    continue;
+                }
+                if let [only] = &list[..] {
+                    if std::mem::take(&mut backing) {
+                        if accounts.is_empty() {
+                            return Ok(Step::Back);
+                        }
+                        at = At::Account;
+                    } else {
+                        println!("  1Password vault: {}", display(&only.name));
+                        vault = Some(only.clone());
+                        at_item = 0;
+                        at = At::Item;
+                    }
                     continue;
                 }
                 let names = list.iter().map(|v| display(&v.name)).collect();
@@ -1276,6 +1306,7 @@ fn browse(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> {
                 };
                 if list.is_empty() {
                     println!("  {} holds no items", display(&v.name));
+                    backing = true;
                     at = At::Vault;
                     continue;
                 }
@@ -1287,7 +1318,10 @@ fn browse(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> {
                         item = Some(list[i].clone());
                         at = At::Field;
                     }
-                    Step::Back => at = At::Vault,
+                    Step::Back => {
+                        backing = true;
+                        at = At::Vault;
+                    }
                 }
             }
             At::Field => {
@@ -1697,7 +1731,7 @@ mod tests {
                 "Claude subscription token (recommended)  `claude setup-token` on this machine",
                 "Anthropic API key                        billed per use (platform.claude.com)",
                 "A model server                           yours, on this or another machine",
-                "Log in inside the sandbox                weaker: code in the env can read it",
+                "Log in inside the env                    weaker: code in the env can read it",
                 "Later                                    the agent can't connect without one",
             ]
         );
@@ -1731,7 +1765,7 @@ mod tests {
             "claude",
             &[],
             Mode::Missing,
-            &[Some("Log in inside the sandbox")],
+            &[Some("Log in inside the env")],
             vec![],
         );
         assert_eq!(r.answer, Answer::Set(inside("anthropic")));
@@ -1870,7 +1904,7 @@ mod tests {
         );
         assert_eq!(r.answer, Answer::Leave);
         let m = &r.menus[0];
-        assert!(m.labels[m.at].starts_with("Log in inside the sandbox (current)"));
+        assert!(m.labels[m.at].starts_with("Log in inside the env (current)"));
     }
 
     #[test]

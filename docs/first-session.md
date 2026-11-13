@@ -23,26 +23,34 @@ starts it; your folder stays as it was. `c` goes through the settings one at a t
 
 ## 2. Give it credentials, without giving them to it
 
-Two tokens: one for Claude Code (`claude setup-token` on your machine uses your Claude
-subscription) and a fine-grained GitHub token for this repository only, with Contents and Pull
-requests set to read and write. Keep both in your secret store and point the env at them with
-`luoto edit`:
+The first `up` asked what the env may do with the folder's remote. To let it push and open
+pull requests, make a fine-grained GitHub token for this repository only, with Contents and
+Pull requests set to read and write, and give it to the env:
+
+```console
+$ luoto repo auth you/my-app
+? What can the env do with you/my-app?
+  Fetch only, it's public            no token
+  Read it, it's private              token with Contents: read
+> Read and push, open pull requests  token with Contents + Pull requests: write
+```
+
+It then asks where the token is kept (your OS keychain, 1Password, or a reference to another
+secret store) and writes this into the env's file, applied at once:
 
 ```toml
-[credentials.anthropic]
-oauth_token = "op://Private/claude-code/token"
-
 [credentials.github]
 token = "op://Private/github-my-app/token"
 repos = ["you/my-app"]
-protected_branches = ["main"]
 ```
 
-Saving applies it. luoto reads the secrets on your machine and hands them to the vault, which
-lives outside the sandbox. Inside, `GH_TOKEN` and Claude's token are placeholders; the gate
-puts the real ones on requests to GitHub and Anthropic, for `you/my-app` only, and refuses
-pushes to `main`. No secret store? `luoto agent add claude` asks for the token and keeps it in
-your OS keychain; `luoto agent auth claude` asks again to change it.
+luoto reads the secret on your machine and hands it to the vault, which lives outside the
+sandbox. Inside, `GH_TOKEN` is a placeholder; the gate puts the real token on requests to
+GitHub, for `you/my-app` only, and refuses pushes to `main` and `master`
+(`protected_branches`). Claude Code's token goes the same way: `luoto agent add claude` (next
+step) asks for it (`claude setup-token` on your machine makes one from your Claude
+subscription), and `luoto agent auth claude` changes it. Other changes, each a command:
+[Changing an env](guides/changing-an-env.md).
 
 `luoto ui` shows which credentials an env has, never their values:
 
@@ -64,9 +72,10 @@ attaches Zed, VS Code or Cursor over SSH, and `luoto shell` opens a terminal.
 ## 4. Run it and open it
 
 Start the project as usual in the env's terminal: `yarn dev` prints
-`http://localhost:5173/`, and clicking it opens the app in your browser. A background watcher
-(started by `up`, `shell` and editor sessions) forwards each port a server in the env listens
-on, 1024–32767, to the same port on your machine for as long as it listens. It goes through
+`http://localhost:5173/`, and clicking it opens the app in your browser. The background
+watcher (started by `up`, `shell` and editor sessions; `luoto logs watcher` shows its log)
+forwards each port a server in the env listens on, 1024–32767, to the same port on your
+machine for as long as it listens. It goes through
 the runtime rather than a network path, so servers bound to the env's own localhost work too;
 a port already taken here is skipped (`luoto forward LOCAL:ENV` maps it elsewhere).
 `luoto status` and the env's panel in `luoto ui` list the forwarded ports as links.
@@ -101,5 +110,7 @@ Hosts that get your credentials keep to their rules throughout, and muted hosts 
 
 `luoto pull` brings files back to your folder when you need them there; it holds back git
 hooks and other files your own tools would run. `luoto down` stops the env, and it stops by
-itself after 30 minutes with nothing running in it (`idle_stop`); luoto's VM stops once no
-env has run for as long. `luoto up` brings it back in about 10 s and unlocks the vault anew.
+itself after 30 minutes with nothing running in it (`idle_stop`). With podman on macOS and
+Windows, luoto's VM stops too once no env has run for as long; on Apple's `container` each
+container is a VM of its own, which stops with its env. `luoto up` brings it back in about
+10 s and unlocks the vault anew.

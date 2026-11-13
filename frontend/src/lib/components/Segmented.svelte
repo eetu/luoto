@@ -19,6 +19,7 @@
     <button
       type="button"
       class:active={value === o.value}
+      aria-pressed={value === o.value}
       {disabled}
       onclick={() => onchange(o.value)}>{o.label}</button
     >

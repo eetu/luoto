@@ -57,8 +57,8 @@ async fn run(port: u16, open_browser: bool) -> Result<()> {
         store,
     };
     if Spa::get("index.html").is_none() {
-        eprintln!(
-            "note: the UI bundle is not built into this binary (run `just ui-build`); the API still works"
+        crate::progress::note(
+            "the UI bundle is not built into this binary (`just ui-build`); the API still works",
         );
     }
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))

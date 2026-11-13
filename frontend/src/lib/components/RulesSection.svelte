@@ -70,7 +70,11 @@
   <div class="section">
     <p class="label">from presets & profiles</p>
     {#each groups as [origin, rules] (origin)}
-      <button class="group" onclick={() => (open[origin] = !open[origin])}>
+      <button
+        class="group"
+        aria-expanded={!!open[origin]}
+        onclick={() => (open[origin] = !open[origin])}
+      >
         <span>{origin}</span><span class="muted small">{rules.length}</span>
       </button>
       {#if open[origin]}

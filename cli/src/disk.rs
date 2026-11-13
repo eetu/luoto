@@ -267,7 +267,7 @@ pub fn warn_if_low(ctx: &Ctx) {
     if let Ok(Some(s)) = space(&ctx.rt)
         && s.low()
     {
-        eprintln!("warning: {}", low_text(place(&ctx.rt), &s));
+        crate::progress::warn(&low_text(place(&ctx.rt), &s));
     }
 }
 
@@ -477,8 +477,8 @@ pub fn hint_growth(ctx: &Ctx, env: &str) {
     let Some(g) = Seen::update(&ctx.paths, |seen| seen.grew(&s, now)) else {
         return;
     };
-    eprintln!(
-        "note: {} grew by {} {} ({} used, {} free)",
+    let mut note = format!(
+        "{} grew by {} {} ({} used, {} free)",
         place(&ctx.rt),
         human(g.bytes),
         over(now - g.since),
@@ -490,16 +490,17 @@ pub fn hint_growth(ctx: &Ctx, env: &str) {
             build_dirs(&ctx.rt, env)
         });
         if !dirs.is_empty() {
-            eprintln!(
-                "  the biggest build folders in `{env}`: {}",
+            note.push_str(&format!(
+                "\n  the biggest build folders in `{env}`: {}",
                 dirs.join(", ")
-            );
+            ));
         }
     }
-    eprintln!(
-        "  `luoto ls --size` shows what each env takes, `luoto status --size -e {env}` where; \
-         `luoto prune` removes superseded images and returns freed space to this machine"
-    );
+    note.push_str(&format!(
+        "\n  `luoto list --size` shows what each env takes, `luoto status --size -e {env}` \
+         where; `luoto prune` removes superseded images and returns freed space to this machine"
+    ));
+    crate::progress::note(&note);
 }
 
 /// For the watcher: a notification when free space has fallen under one of [`FREE_MARKS`]
@@ -514,7 +515,7 @@ pub fn free_note(ctx: &Ctx) -> Option<Note> {
             human(s.free),
             place(&ctx.rt)
         ),
-        body: "A full disk stops every env. `luoto ls --size` shows what each takes; \
+        body: "A full disk stops every env. `luoto list --size` shows what each takes; \
                `luoto prune` removes superseded images."
             .into(),
     })

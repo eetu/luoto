@@ -238,7 +238,7 @@ fn requested(req: &AccessRequest) -> Result<&str> {
         bail!("request #{} asks for no variable", req.id);
     };
     if req.status != RequestStatus::Pending {
-        bail!("request #{} is already {:?}", req.id, req.status);
+        bail!("request #{} is already {}", req.id, req.status);
     }
     check_name(name)?;
     Ok(name)

@@ -335,8 +335,7 @@ pub fn export(env: &str, file: Option<&str>, no_home: bool, yes: bool) -> Result
     let ctx = Ctx::load()?;
     config::validate_name(env)?;
     let cfg_path = ctx.paths.env_config(env);
-    let config = std::fs::read_to_string(&cfg_path)
-        .with_context(|| format!("no env `{env}` (`luoto ls` lists them)"))?;
+    let config = std::fs::read_to_string(&cfg_path).map_err(|_| config::no_env(env))?;
     let Some(state) = EnvState::load(&ctx.paths, env)? else {
         bail!(
             "`{env}` was never started, so it has no workspace: its config ({}) is all there \
@@ -508,7 +507,7 @@ fn read_volume<W: Write>(
         bail!("{what} failed: {said}");
     }
     if !said.is_empty() {
-        eprintln!("note: tar, {what}: {said}");
+        crate::progress::note(&format!("tar, {what}: {said}"));
     }
     Ok(())
 }
@@ -576,7 +575,7 @@ impl archive::Sink for Extract<'_> {
             bail!("writing the {} volume failed: {said}", part.label());
         }
         if !said.is_empty() {
-            eprintln!("note: tar, writing the {}: {said}", part.label());
+            crate::progress::note(&format!("tar, writing the {}: {said}", part.label()));
         }
         let vbox = self.vbox.take().context("no volume open")?;
         // One container per owner, nearly always the dev user's alone.
@@ -593,10 +592,10 @@ impl archive::Sink for Extract<'_> {
                 .rt
                 .run_stdin(vbox.args(true, chown_cmd(uid, gid)), &paths);
             if let Err(e) = out {
-                eprintln!(
-                    "note: the {}'s links keep root as their owner ({e:#})",
+                crate::progress::note(&format!(
+                    "the {}'s links keep root as their owner ({e:#})",
                     part.label()
-                );
+                ));
             }
         }
         Ok(())
@@ -637,7 +636,7 @@ fn secret_refs(text: &str) -> Vec<(String, String)> {
 }
 
 /// What to say of the keychain entries the config's refs name, which don't move with it.
-fn keychain_note(text: &str, env: &str) -> Option<String> {
+fn keychain_note(text: &str) -> Option<String> {
     let mut refs: Vec<String> = Vec::new();
     for svc in [names::instance(), names::other_instance()] {
         refs.extend(
@@ -667,11 +666,7 @@ fn keychain_note(text: &str, env: &str) -> Option<String> {
             names::other_instance()
         ));
     }
-    note.push_str(&format!(
-        "; from another, store them again here.\n      To keep a secret with this luoto, delete \
-         its credential (`luoto edit -e {env}`) and `luoto up -e {env}` asks for it, or point \
-         its ref elsewhere."
-    ));
+    note.push_str("; from another, store them again here, or point the env's refs elsewhere.");
     Some(note)
 }
 
@@ -921,7 +916,9 @@ fn summary(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) -> Vec<String>
 fn clear_leftovers(ctx: &Ctx, name: &str) -> Result<()> {
     let dir = ctx.paths.env_state(name);
     if dir.join(PARTIAL).exists() {
-        eprintln!("note: an import of `{name}` was cut short here; what it left is removed");
+        crate::progress::note(&format!(
+            "an import of `{name}` was cut short here; what it left is removed"
+        ));
         env::remove(ctx, name)?;
     } else if dir.exists() {
         bail!(
@@ -1090,7 +1087,7 @@ fn notes(ctx: &Ctx, name: &str, head: &Head, cfg: &EnvConfig) -> Vec<String> {
             Err(_) => out.push(format!(
                 "its folder {} isn't on this machine. The workspace came in the archive, so the \
                  env works without it; `luoto pull` needs `--to` until `[workspace] dir` names \
-                 one here (`luoto edit -e {name}`)",
+                 one here",
                 display(d)
             )),
             Ok(dir) => {
@@ -1136,7 +1133,7 @@ fn notes(ctx: &Ctx, name: &str, head: &Head, cfg: &EnvConfig) -> Vec<String> {
             missing.join(", ")
         ));
     }
-    if let Some(n) = keychain_note(&head.config, name) {
+    if let Some(n) = keychain_note(&head.config) {
         out.push(n);
     }
     let m = &head.manifest;
@@ -1272,17 +1269,10 @@ mod tests {
     fn keychain_entries_that_stay_behind_are_named() {
         let other = names::other_instance();
         let text = format!("[credentials.anthropic]\noauth_token = \"keyring:{other}/claude\"\n");
-        let note = keychain_note(&text, "web").unwrap();
+        let note = keychain_note(&text).unwrap();
         assert!(note.contains(&format!("keyring:{other}/claude")), "{note}");
         assert!(note.contains(&format!("`{other} uninstall`")), "{note}");
-        assert!(note.contains("luoto edit -e web"), "{note}");
-        assert!(
-            keychain_note(
-                "[credentials.anthropic]\noauth_token = \"op://a/b/c\"\n",
-                "web"
-            )
-            .is_none()
-        );
+        assert!(keychain_note("[credentials.anthropic]\noauth_token = \"op://a/b/c\"\n").is_none());
     }
 
     fn head(config: &str, project: Option<&str>, state: Moved) -> Head {

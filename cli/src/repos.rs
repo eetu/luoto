@@ -530,7 +530,7 @@ impl Seeded {
     /// Each failure as a warning, for a command whose own summary doesn't list them.
     pub fn warn(&self) {
         for f in &self.failed {
-            crate::progress::say(|| eprintln!("warning: repo {f}"));
+            crate::progress::warn(&format!("repo {f}"));
         }
     }
 }
@@ -600,7 +600,9 @@ pub fn seed(ctx: &Ctx, env: &str, cfg: &EnvConfig, done: &BTreeSet<String>) -> S
         }
     }
     if let Err(e) = exclude_from_folder(ctx, env, &added) {
-        eprintln!("warning: repos not added to the folder's .git/info/exclude ({e:#})");
+        crate::progress::warn(&format!(
+            "repos not added to the folder's .git/info/exclude ({e:#})"
+        ));
     }
     Seeded { done: now, failed }
 }
@@ -1169,8 +1171,8 @@ fn hint(
     };
     Some(format!(
         "Public repos need none of these. For a private one, or to push from the env, give it \
-         HTTPS credentials (`luoto repo auth -e {env} <repo>` on a terminal, or `luoto edit -e \
-         {env}`); each reaches only the repos it lists:\n\n{}{ssh_note}",
+         HTTPS credentials (`luoto repo auth -e {env} <repo>` on a terminal); each reaches only \
+         the repos it lists:\n\n{}{ssh_note}",
         blocks
             .iter()
             .map(|b| format!("  {}", b.replace('\n', "\n  ")))
@@ -1974,7 +1976,7 @@ pub fn add(
     let repo = match &src {
         Source::Folder(d) => {
             if branch.is_some() {
-                bail!("--branch is for remotes; a folder is copied as it is");
+                bail!("--branch is for a remote; a folder is copied as it is");
             }
             check_folder(f.cfg.workspace.dir.as_deref(), d)?;
             Repo {
@@ -2121,8 +2123,8 @@ pub fn auth(env_name: &str, which: &str) -> Result<ExitCode> {
     }
     if !crate::prompt::interactive() {
         bail!(
-            "repo auth needs a terminal; without one, `luoto edit -e {env_name}` sets a repo's \
-             access in its [credentials]"
+            "`luoto repo auth` asks on a terminal; without one, a repo's access is what the \
+             env's [credentials] give it"
         );
     }
     if !ask_repo(&ctx, env_name, &forge, &repo, Mode::Change)? {

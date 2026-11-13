@@ -1,7 +1,7 @@
 <script lang="ts">
   import CopyCommand from "$lib/components/CopyCommand.svelte";
   import SectionHead from "$lib/components/SectionHead.svelte";
-  import { app, diskSize, refreshVmDisk } from "$lib/stores/app.svelte";
+  import { app, diskSize, plural, refreshVmDisk } from "$lib/stores/app.svelte";
 
   // The disk every env lives on: a full one stops them all, so a low one is flagged here,
   // with the command that frees luoto's superseded images.
@@ -32,7 +32,7 @@
     {/if}
     {#if v.prunable > 0}
       <p class="small muted">
-        {v.prunable} superseded image(s), up to {diskSize(v.prunable_bytes)}:
+        {plural(v.prunable, "superseded image")}, up to {diskSize(v.prunable_bytes)}:
       </p>
       <CopyCommand cmd="luoto prune" />
     {/if}

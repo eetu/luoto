@@ -29,15 +29,17 @@
         {#if d.dev === "running"}
           <button
             class="btn"
+            disabled={!!app.busy}
             onclick={() =>
               void act("stopping…", () => api.action(d.name, "down"), `${d.name} stopped`)}
-            >stop</button
+            >Stop</button
           >
         {:else}
           <button
             class="btn primary"
+            disabled={!!app.busy}
             onclick={() => void act("starting…", () => api.action(d.name, "up"), `${d.name} is up`)}
-            >start</button
+            >Start</button
           >
         {/if}
         <SelftestSection />
