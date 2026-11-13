@@ -34,12 +34,22 @@ class Luoto < Formula
   end
 
   def caveats
-    <<~EOS
-      luoto needs a container runtime: podman or Docker. For podman:
-        brew install podman
-      Then run:
-        luoto setup
-    EOS
+    if OS.mac? && Hardware::CPU.arm? && MacOS.version >= :tahoe
+      <<~EOS
+        luoto needs a container runtime: Apple's container (recommended: every env its
+        own VM), podman or Docker. For Apple's container:
+          brew install container
+        Then run:
+          luoto setup
+      EOS
+    else
+      <<~EOS
+        luoto needs a container runtime: podman or Docker. For podman:
+          brew install podman
+        Then run:
+          luoto setup
+      EOS
+    end
   end
 
   test do
