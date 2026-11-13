@@ -875,9 +875,83 @@ pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
     Ok(s)
 }
 
+/// The env's folder's luoto.toml against the env's copy, which is what luoto reads while the
+/// env runs: the folder is copied in only on the first `up`.
+#[derive(Debug, PartialEq)]
+pub enum FolderCopy {
+    /// The same, or nothing to compare.
+    Same,
+    /// Changed in the folder since the env took its copy (which is still the accepted one).
+    Newer(String),
+    /// Changed in the folder and in the env.
+    Both,
+}
+
+pub fn folder_copy(ctx: &Ctx, env: &str) -> Result<FolderCopy> {
+    let cfg = EnvFile::load(&ctx.paths, env)?.cfg;
+    let Some(dir) = cfg.workspace.dir.as_deref() else {
+        return Ok(FolderCopy::Same);
+    };
+    if !ctx.rt.is_running(&names::dev(env)) {
+        return Ok(FolderCopy::Same);
+    }
+    let Some(host) = read_host(&workspace::canonical(dir)?)? else {
+        return Ok(FolderCopy::Same);
+    };
+    let copy = read_env(ctx, env)?;
+    Ok(compare_copies(
+        &host,
+        copy.as_deref(),
+        accepted(ctx, env).map(|(t, _)| t).as_deref(),
+    ))
+}
+
+fn compare_copies(host: &str, copy: Option<&str>, accepted: Option<&str>) -> FolderCopy {
+    if copy == Some(host) {
+        FolderCopy::Same
+    } else if copy.is_none() || copy == accepted {
+        FolderCopy::Newer(host.to_string())
+    } else {
+        FolderCopy::Both
+    }
+}
+
+/// Take the folder's luoto.toml into the env when it changed there since the env took its copy;
+/// on `up` after a yes, with `luoto project apply` at once. Whether it was taken.
+pub fn take_from_folder(ctx: &Ctx, env: &str, ask: bool) -> Result<bool> {
+    match folder_copy(ctx, env)? {
+        FolderCopy::Same => Ok(false),
+        FolderCopy::Newer(text) => {
+            let take = !ask
+                || crate::prompt::confirm(
+                    "luoto.toml in your folder changed since the env took its copy, which is \
+                     the one luoto reads. Take yours into the env?",
+                );
+            if take {
+                write_env(ctx, env, &text)?;
+                println!("took luoto.toml from your folder into the env");
+            } else if !crate::prompt::interactive() {
+                println!(
+                    "note: luoto.toml in your folder changed since the env took its copy: \
+                     `luoto project apply -e {env}` takes it in"
+                );
+            }
+            Ok(take)
+        }
+        FolderCopy::Both => {
+            println!(
+                "note: luoto.toml changed in your folder and in the env; luoto reads the env's \
+                 copy (`luoto pull -e {env}` brings it out to compare)"
+            );
+            Ok(false)
+        }
+    }
+}
+
 /// On `up`: let the user decide on a luoto.toml the workspace changed. Never applies anything
 /// without a yes on a terminal. Whether the user applied a change.
 pub fn review(ctx: &Ctx, env: &str) -> Result<bool> {
+    take_from_folder(ctx, env, true)?;
     let st = status(ctx, env)?;
     let text = st.text.as_deref().unwrap_or_default();
     match st.state {
@@ -969,6 +1043,25 @@ pub fn ignore(ctx: &Ctx, env: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_copy_changed_only_on_this_machine_is_taken_in() {
+        let (old, new) = ("presets = [\"npm\"]\n", "presets = [\"pypi\"]\n");
+        assert_eq!(compare_copies(old, Some(old), Some(old)), FolderCopy::Same);
+        assert_eq!(
+            compare_copies(new, Some(old), Some(old)),
+            FolderCopy::Newer(new.into())
+        );
+        assert_eq!(
+            compare_copies(new, None, None),
+            FolderCopy::Newer(new.into())
+        );
+        // Changed in the env too (a `git pull` there): neither wins.
+        assert_eq!(
+            compare_copies(new, Some("ports = [3000]\n"), Some(old)),
+            FolderCopy::Both
+        );
+    }
 
     #[test]
     fn a_projects_rule_over_your_credentials_host_says_so() {

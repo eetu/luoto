@@ -23,6 +23,14 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
         println!("`{name}` no longer applies the project's luoto.toml");
         return Ok(ExitCode::SUCCESS);
     }
+    if accept {
+        project::take_from_folder(&ctx, name, false)?;
+    } else if let project::FolderCopy::Newer(_) = project::folder_copy(&ctx, name)? {
+        println!(
+            "luoto.toml in your folder changed since the env took its copy: `luoto project \
+             apply -e {name}` takes it in"
+        );
+    }
     let st = project::status(&ctx, name)?;
     let show = |lines: &[(String, String)]| project::print_entries(lines, "  ");
     match st.state {

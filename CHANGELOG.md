@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.5
+
+- **Repos `up` couldn't clone come last:** after "is up", each with why and the command that
+  fixes it, instead of a warning mid-output. A clone the remote refused with the env's
+  credential says so (a token for another forge or account, or one that expired) and names
+  `luoto repo auth`.
+- **A launchpad folder's luoto.toml edited on this machine:** `up` notices that it changed
+  since the env took its copy (the one luoto reads) and offers to take it in; `luoto project
+  apply` takes it at once. Either way the change is shown and applied only after your yes.
+- **Repo access questions:** an overview of the repos that need access first, each question
+  numbered (2/4); Esc goes back to the repo before, opening on its answer; a 1Password item is
+  named ("Azure DevOps PAT", vault Work) rather than by its IDs, in the question that reuses it
+  and the summary, which also says what a new token replaces; a value that doesn't look like
+  a GitHub token is asked about before it is used; another owner's token is offered after a
+  new one, never preselected; the token how-to shows once, after the pick.
+- **Commands in backticks** are never broken across lines, so they copy whole.
+- **Agent status in the terminal:** Claude Code in an env reports working, blocked on you and
+  done as OSC 7501 (the Program Status Protocol), through hooks luoto adds beside your own;
+  terminals and agent managers that read it show it, others ignore it.
+- New guide: [changing an env](docs/guides/changing-an-env.md), task by task.
+
 ## 0.4.4 (2026-11-12)
 
 - **Apple's `container`:** on macOS 26 on Apple silicon, `luoto setup` offers it first

@@ -78,6 +78,7 @@ Step by step, for a task:
 
 | guide                                                         | when you want to                                                              |
 | ------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| [Changing an env](docs/guides/changing-an-env.md)             | add a repo, fix a token, allow a host, recreate the container                 |
 | [A repository you don't trust](docs/guides/untrusted-repo.md) | clone and try one with nothing of it on your machine                          |
 | [Several repositories](docs/guides/multi-repo.md)             | work on more than one repo in an env, or give a team a launchpad              |
 | [Headless runs](docs/guides/headless.md)                      | run an agent from a script or a schedule, and let it open pull requests       |

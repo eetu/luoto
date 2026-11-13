@@ -113,6 +113,15 @@ enum Cmd {
         #[arg(long = "set")]
         set: Vec<String>,
     },
+    /// Report an agent's state to its terminal (OSC 7501, the Program Status Protocol), from
+    /// the agent's hooks: idle, working, done, blocked or error.
+    #[command(hide = true)]
+    State {
+        state: String,
+        /// The agent, as the terminal names it (`claude-code`).
+        #[arg(long)]
+        app: Option<String>,
+    },
     /// Verify isolation from inside (run by `luoto up` and `luoto doctor`).
     Selftest {
         #[arg(long)]
@@ -170,6 +179,10 @@ fn main() -> ExitCode {
         Cmd::SshAgent { socket } => ssh_agent::serve(&socket).map(|()| ExitCode::SUCCESS),
         Cmd::Net { socket } => net::serve(&socket).map(|()| ExitCode::SUCCESS),
         Cmd::AgentSetup { mcp, briefing, set } => agent_setup::run(mcp.as_deref(), &briefing, &set),
+        Cmd::State { state, app } => {
+            agent_setup::report_status(&state, app.as_deref());
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Selftest { json, probe } => return selftest::run(json, probe.as_deref()),
     };
     match result {

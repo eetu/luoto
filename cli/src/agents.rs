@@ -618,7 +618,7 @@ fn register(
         args.push("--briefing".into());
         args.push(b.clone());
     }
-    for set in &a.first_run {
+    for set in a.first_run.iter().chain(&a.status) {
         args.push("--set".into());
         args.push(serde_json::to_string(set)?);
     }
@@ -659,6 +659,7 @@ pub fn settings(
             file: s.file.clone(),
             path: s.path.clone(),
             value: serde_json::Value::String(value.to_string()),
+            append: false,
         })
     });
     let sets = s.removes.into_iter().chain(options).chain(s.adds).collect();

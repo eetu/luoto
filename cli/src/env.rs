@@ -568,7 +568,8 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             }
             (None, Some(url)) => {
                 let locked = repos::creds_locked(ctx, env);
-                if let Err(e) = repos::clone_workspace(ctx, env, url, ws.branch.as_deref(), locked)
+                if let Err(e) =
+                    repos::clone_workspace(ctx, env, url, ws.branch.as_deref(), locked, &p.cfg)
                 {
                     if repos::undecline(ctx, env, url)? {
                         eprintln!(
@@ -616,7 +617,8 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             );
         }
     }
-    let repos = repos::seed(ctx, env, &p.cfg.workspace, &seeded_repos);
+    let seeded = repos::seed(ctx, env, &p.cfg, &seeded_repos);
+    let repos = seeded.done.clone();
     let cloned = repos.iter().any(|n| {
         !seeded_repos.contains(n)
             && p.cfg
@@ -703,15 +705,31 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             crate::egress::state_line(env, until, width)
         );
     }
-    if !opts.quiet && !opts.brief {
+    if opts.quiet || opts.brief {
+        seeded.warn();
+    } else {
         println!(
-            "env `{env}` is up{}",
+            "env `{env}` is up{}{}",
             if dev == Launch::Created {
                 " (new dev container)"
             } else {
                 ""
+            },
+            match seeded.failed.len() {
+                0 => String::new(),
+                1 => ", but a repo isn't there:".to_string(),
+                n => format!(", but {n} repos aren't there:"),
             }
         );
+        // Last, where they are read: a repo that failed mid-output is easy to miss.
+        let width = crate::text::columns();
+        for f in &seeded.failed {
+            for (i, l) in f.lines().enumerate() {
+                // Under its first line, hanging: the repo's name stands out.
+                let text = crate::text::wrap(l.trim_start(), "    ", width);
+                println!("{}", if i == 0 { &text[2..] } else { &text });
+            }
+        }
         if !p.cfg.ports.is_empty() {
             let ports: Vec<String> = p
                 .cfg

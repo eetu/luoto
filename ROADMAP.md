@@ -21,6 +21,12 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
 
 ## Workflow
 
+- **Agent status for Codex and OpenCode,** as Claude Code reports it (OSC 7501).
+- **An env as a machine for agent managers** that reach machines over SSH: through luoto's SSH,
+  helpers they start run inside the env, behind its gate.
+- **Repo access asked per account, reviewed before it is written:** one token question per
+  GitHub owner or Azure DevOps organization (naming the repos it reaches), the answers shown
+  in one summary to write, change or leave for later, instead of a written answer per repo.
 - **Services that come back:** a command on every start (a database after `up` or an idle
   stop), then sidecars.
 - **Corporate networks:** a CA for every upstream (Zscaler, Netskope) and egress through a

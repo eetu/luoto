@@ -117,13 +117,28 @@ pub fn columns() -> usize {
 }
 
 /// `s` broken at spaces into lines of at most `width` columns, each after `indent`; a word
-/// longer than a line keeps a line of its own.
+/// longer than a line keeps a line of its own, and so does a command in backticks, which is
+/// never broken, so that it copies whole.
 pub fn wrap(s: &str, indent: &str, width: usize) -> String {
     use unicode_width::UnicodeWidthStr;
     let room = width.saturating_sub(indent.width()).max(20);
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
-    for word in s.split_whitespace() {
+    let mut words: Vec<String> = Vec::new();
+    let mut open = false;
+    for w in s.split_whitespace() {
+        match words.last_mut() {
+            Some(last) if open => {
+                last.push(' ');
+                last.push_str(w);
+            }
+            _ => words.push(w.to_string()),
+        }
+        if w.matches('`').count() % 2 == 1 {
+            open = !open;
+        }
+    }
+    for word in &words {
         if !line.is_empty() && line.width() + 1 + word.width() > room {
             lines.push(std::mem::take(&mut line));
         }
@@ -167,6 +182,19 @@ pub fn is_format(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{Relay, display, fit, sh_quote, wrap};
+
+    #[test]
+    fn a_command_in_backticks_is_never_broken() {
+        let s =
+            "if private, a token: `luoto repo auth -e web acme/a-long-repository-name` and more";
+        let out = wrap(s, "  ", 40);
+        assert!(
+            out.lines()
+                .any(|l| l.trim() == "`luoto repo auth -e web acme/a-long-repository-name`"),
+            "{out}"
+        );
+        assert_eq!(wrap("a b c", "", 80), "a b c");
+    }
 
     #[test]
     fn prose_breaks_at_spaces_within_its_width() {

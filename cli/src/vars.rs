@@ -140,10 +140,15 @@ pub fn ask(ctx: &Ctx, mode: Mode, env: &str, name: &str, own: &EnvConfig) -> Res
         current: own.sandbox_secrets.get(name).map(String::as_str),
         help: &help,
         kind: None,
+        how: None,
+        shape: None,
     };
     let crate::wizard::Step::Got(crate::wizard::Secret::Ref(r)) =
         crate::wizard::secret(&ask, &ctx.global)?
     else {
+        if mode == Mode::Change {
+            println!("unchanged");
+        }
         return Ok(false);
     };
     let value = Value::Secret(r);

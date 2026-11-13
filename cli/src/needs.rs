@@ -495,6 +495,8 @@ fn ask_custom(
         current: had.map(|c| c.secret.as_str()),
         help: &help,
         kind: None,
+        how: None,
+        shape: None,
     };
     let crate::wizard::Step::Got(crate::wizard::Secret::Ref(r)) =
         crate::wizard::secret(&ask, &ctx.global)?
