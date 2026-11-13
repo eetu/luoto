@@ -65,7 +65,7 @@
       <button
         class="icon"
         aria-label="browser notifications"
-        title="desktop notifications show access requests; `notifications = false` in config.toml hands them to this browser"
+        title="desktop notifications show access requests; notifications = false in config.toml hands them to this browser"
         disabled
       >
         <Bell size={16} />
@@ -113,7 +113,7 @@
   </div>
 
   <footer class="status">
-    <span class:error={app.status?.error}>{app.status?.text ?? ""}</span>
+    <span class:error={app.status?.error} role="status">{app.status?.text ?? ""}</span>
     <span class="spacer"></span>
     <span class="muted">{app.overview?.runtime ?? ""}</span>
     <span class="live" class:on={app.live} title={app.live ? "live events" : "reconnecting"}></span>
@@ -202,10 +202,6 @@
     border-top: 1px solid var(--halo-border);
     background: var(--halo-bg-main);
     font-size: 12px;
-  }
-
-  .status .error {
-    color: var(--halo-error);
   }
 
   .live {

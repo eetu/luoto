@@ -1,15 +1,7 @@
 <script lang="ts">
-  import { api } from "$lib/api";
-  import { openMenu } from "$lib/menu.svelte";
-  import {
-    act,
-    app,
-    copyText,
-    openVault,
-    refreshVault,
-    say,
-    selectEnv,
-  } from "$lib/stores/app.svelte";
+  import CopyCommand from "$lib/components/CopyCommand.svelte";
+  import { authCommands, credentialMenu } from "$lib/credentials";
+  import { app, openVault, plural, vaultAction } from "$lib/stores/app.svelte";
   import type { Credential, CredState } from "$lib/types";
 
   const v = $derived(app.vault);
@@ -26,54 +18,27 @@
   // Credentials whose secret the unlocked vault lacks: an unlock reads them.
   const missing = $derived(v?.credentials.filter((c) => c.state === "missing").length ?? 0);
   const without = $derived(
-    (app.overview?.envs ?? []).map((e) => e.name).filter((n) => !groups.some(([g]) => g === n)),
+    (app.overview?.envs ?? []).filter((e) => !groups.some(([g]) => g === e.name)),
   );
 
   const STATES: Record<CredState, { text: string; cls: string; hint: string }> = {
-    loaded: { text: "loaded", cls: "loaded", hint: "the vault holds it" },
-    missing: { text: "missing", cls: "missing", hint: "not read yet: unlock reads it" },
-    locked: { text: "locked", cls: "missing", hint: "the vault is locked: unlock" },
-    not_up: { text: "env not up", cls: "idle", hint: "registered at the env's next `luoto up`" },
+    loaded: { text: "loaded", cls: "plain", hint: "the vault holds it" },
+    missing: { text: "missing", cls: "bad", hint: "not read yet: unlock reads it" },
+    locked: { text: "locked", cls: "bad", hint: "the vault is locked: unlock" },
+    not_up: { text: "env not up", cls: "muted", hint: "registered when the env next starts" },
   };
 
   function since(t: string): string {
     return new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 
-  async function unlock() {
-    await act(
-      "unlocking… (your secret store may ask to authorize)",
-      () => api.vault("unlock"),
-      "vault unlocked",
-    );
-    void refreshVault();
-  }
+  const open = (c: Credential) => openVault({ env: c.env, binding: c.binding });
 
-  async function lock() {
-    await act("locking…", () => api.vault("lock"), "vault locked; credentialed hosts now get 403");
-    void refreshVault();
-  }
-
-  async function reload() {
-    const r = await act("reading secrets again… (your secret store may ask)", api.reloadVault);
-    if (!r) return;
-    const failed = r.failed.length ? `; not read: ${r.failed.join("; ")}` : "";
-    say(`read ${r.read}: ${r.changed} changed${failed}`, r.failed.length > 0);
-    void refreshVault();
-  }
-
-  function menu(e: MouseEvent, c: Credential) {
-    openMenu(e, `${c.env}: ${c.binding}`, [
-      {
-        label: "Copy change command",
-        run: () => c.change && copyText(c.change),
-        disabled: !c.change,
-        hint: c.change ? undefined : "no command yet: the env's own file",
-      },
-      { label: "Copy where it is kept", run: () => copyText(c.kept) },
-      { label: `Show ${c.env}'s egress`, run: () => void selectEnv(c.env) },
-    ]);
-  }
+  const onKey = (e: KeyboardEvent, c: Credential) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    open(c);
+  };
 
   const chosen = (c: Credential) =>
     app.subject.kind === "credential" &&
@@ -92,41 +57,46 @@
       {:else if status.locked}
         locked: every env's credentials wait for an unlock
       {:else}
-        unlocked since {since(status.started)}, {status.loaded_refs.length} secret(s) in memory, shared
-        by every env
+        unlocked since {since(status.started)}, {plural(status.loaded_refs.length, "secret")} in memory,
+        shared by every env
       {/if}
     </span>
     <span class="spacer"></span>
     {#if status?.locked}
-      <button class="btn primary" onclick={() => void unlock()} disabled={!!app.busy}>unlock</button
+      <button class="btn primary" onclick={() => void vaultAction("unlock")} disabled={!!app.busy}
+        >Unlock</button
       >
     {:else if status}
       {#if missing > 0}
         <button
           class="btn primary"
           title="read the secrets the vault lacks"
-          onclick={() => void unlock()}
-          disabled={!!app.busy}>unlock</button
+          onclick={() => void vaultAction("unlock")}
+          disabled={!!app.busy}>Unlock</button
         >
       {/if}
       <button
         class="btn"
         title="after rotating a secret in your secret store"
-        onclick={() => void reload()}
-        disabled={!!app.busy}>reload</button
+        onclick={() => void vaultAction("reload")}
+        disabled={!!app.busy}>Reload</button
       >
-      <button class="btn" onclick={() => void lock()} disabled={!!app.busy}>lock</button>
+      <button class="btn" onclick={() => void vaultAction("lock")} disabled={!!app.busy}
+        >Lock</button
+      >
     {/if}
   </header>
 
   <div class="table-wrap">
     {#if v && groups.length === 0 && v.unused.length === 0}
-      <p class="empty muted">
-        No env has credentials. An agent's or a repo's are added with
-        <code>luoto agent auth</code> and <code>luoto repo auth</code>.
-      </p>
+      <p class="empty muted">No env has credentials. An agent's or a repo's are added with:</p>
+      {#each without as e (e.name)}
+        <div class="auth">
+          {#each authCommands(e.name, e) as cmd (cmd)}<CopyCommand {cmd} />{/each}
+        </div>
+      {/each}
     {:else if v}
-      <table>
+      <table class="list">
         <thead>
           <tr>
             <th>credential</th>
@@ -142,8 +112,10 @@
               {@const st = STATES[c.state]}
               <tr
                 class:selected={chosen(c)}
-                onclick={() => openVault({ env: c.env, binding: c.binding })}
-                oncontextmenu={(e) => menu(e, c)}
+                tabindex="0"
+                onclick={() => open(c)}
+                onkeydown={(e) => onKey(e, c)}
+                oncontextmenu={(e) => credentialMenu(e, c)}
               >
                 <td>
                   <code>{c.binding}</code>
@@ -162,42 +134,24 @@
                 <td class="muted">left from a credential since changed</td>
                 <td class="mono">{r}</td>
                 <td class="muted">nowhere</td>
-                <td><span class="chip idle" title="lock and unlock to drop it">unused</span></td>
+                <td><span class="chip muted" title="lock and unlock to drop it">unused</span></td>
               </tr>
             {/each}
           {/if}
         </tbody>
       </table>
-      {#if without.length}
-        <p class="muted small note">{without.join(", ")}: no credentials</p>
-      {/if}
+      {#each without as e (e.name)}
+        <p class="muted small note">{e.name}: no credentials</p>
+        <div class="auth">
+          {#each authCommands(e.name, e) as cmd (cmd)}<CopyCommand {cmd} />{/each}
+        </div>
+      {/each}
       {#each v.errors as e, n (n)}<p class="warn note">{e}</p>{/each}
     {/if}
   </div>
 </section>
 
 <style>
-  .surface {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    min-height: 0;
-  }
-
-  .bar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    align-items: center;
-    padding: 14px 18px 10px;
-  }
-
-  h1 {
-    margin: 0;
-    font-size: 16px;
-    font-weight: 600;
-  }
-
   .state {
     font-size: 12px;
   }
@@ -206,47 +160,8 @@
     flex: 1;
   }
 
-  .table-wrap {
-    flex: 1;
-    min-height: 0;
-    padding: 0 18px 18px;
-    overflow: auto;
-  }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-  }
-
-  th {
-    position: sticky;
-    top: 0;
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--halo-border);
-    background: var(--halo-body);
-    color: var(--halo-text-muted);
-    font-family: var(--halo-font-heading);
-    font-size: 11px;
-    font-weight: 500;
-    letter-spacing: 0.04em;
-    text-align: left;
-    text-transform: uppercase;
-  }
-
   td {
-    padding: 7px 8px;
-    border-bottom: 1px solid var(--halo-border);
-    vertical-align: top;
     overflow-wrap: anywhere;
-  }
-
-  tbody tr:not(.group):hover {
-    background: var(--halo-bg-light);
-  }
-
-  tr.selected {
-    background: var(--halo-accent-soft);
   }
 
   tr.group td {
@@ -258,41 +173,16 @@
     text-transform: uppercase;
   }
 
-  .why {
-    margin-top: 2px;
-    color: var(--halo-text-muted);
-    font-size: 12px;
-  }
-
-  .chip {
-    display: inline-block;
-    padding: 1px 7px;
-    border-radius: var(--halo-radius-pill, 999px);
-    font-size: 11px;
-    white-space: nowrap;
-  }
-
-  .chip.loaded {
-    background: var(--halo-bg-light);
-    color: var(--halo-text-main);
-  }
-
-  .chip.missing {
-    background: color-mix(in srgb, var(--halo-error) 15%, transparent);
-    color: var(--halo-error);
-  }
-
-  .chip.idle {
-    border: 1px dashed var(--halo-border);
-    color: var(--halo-text-muted);
-  }
-
-  .empty {
-    margin: 30px 0;
-    text-align: center;
-  }
-
   .note {
-    margin: 10px 8px 0;
+    margin: 10px 8px 4px;
+  }
+
+  .auth {
+    max-width: 480px;
+    margin: 0 8px;
+  }
+
+  .empty ~ .auth {
+    margin: 0 auto 8px;
   }
 </style>

@@ -349,8 +349,8 @@ pub fn ask(ctx: &Ctx, env: &str, mode: Mode) -> Result<bool> {
     if !crate::prompt::interactive() {
         if mode == Mode::Change {
             bail!(
-                "these questions need a terminal; without one, add them to the env's file \
-                 (`luoto edit -e {env}`):\n\n{}",
+                "`luoto project needs -e {env}` asks on a terminal; what its answers set in the \
+                 env's file:\n\n{}",
                 grouped(&asked).join("\n\n")
             );
         }
@@ -433,7 +433,7 @@ fn ask_provider(ctx: &Ctx, mode: Mode, env: &str, name: &str, own: &EnvConfig) -
                     p.auth.get(kind).map_or(kind.as_str(), |k| k.label.as_str()),
                     crate::secrets::shown_ref(reference)
                 ),
-                Auth::LoginInside { .. } => "log in inside the sandbox".into(),
+                Auth::LoginInside { .. } => "log in inside the env".into(),
             };
             summary(env, p.title(), vec![("credential", shown)]);
             Ok(true)
@@ -495,6 +495,8 @@ fn ask_custom(
         current: had.map(|c| c.secret.as_str()),
         help: &help,
         kind: None,
+        how: None,
+        shape: None,
     };
     let crate::wizard::Step::Got(crate::wizard::Secret::Ref(r)) =
         crate::wizard::secret(&ask, &ctx.global)?

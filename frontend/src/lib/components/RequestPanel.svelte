@@ -148,9 +148,9 @@
       <CopyCommand cmd={`luoto var set -e ${app.env} ${variable.name}`} />
       <div class="actions">
         <button class="btn primary" onclick={() => void approveVar()} disabled={!!app.busy}
-          >approve</button
+          >Approve</button
         >
-        <button class="btn" onclick={reject} disabled={!!app.busy}>reject</button>
+        <button class="btn" onclick={reject} disabled={!!app.busy}>Reject</button>
       </div>
     {/if}
   {:else if req?.install}
@@ -181,9 +181,9 @@
     {#if req.status === "pending"}
       <div class="actions">
         <button class="btn primary" onclick={() => void approve(false)} disabled={!!app.busy}
-          >{req.install.kind === "preset" ? "approve" : "approve and install"}</button
+          >{req.install.kind === "preset" ? "Approve" : "Approve and install"}</button
         >
-        <button class="btn" onclick={reject} disabled={!!app.busy}>reject</button>
+        <button class="btn" onclick={reject} disabled={!!app.busy}>Reject</button>
       </div>
     {/if}
   {:else if req}
@@ -253,15 +253,15 @@
         </select>
       </label>
       {#if risks.length > 0}
-        <Risks {risks} confirm="approve anyway" onconfirm={() => void approve(true)} />
+        <Risks {risks} confirm="Approve anyway" onconfirm={() => void approve(true)} />
       {/if}
       <div class="actions">
         {#if risks.length === 0}
           <button class="btn primary" onclick={() => void approve(false)} disabled={!!app.busy}
-            >approve</button
+            >Approve</button
           >
         {/if}
-        <button class="btn" onclick={reject} disabled={!!app.busy}>reject</button>
+        <button class="btn" onclick={reject} disabled={!!app.busy}>Reject</button>
       </div>
     {/if}
   {:else}

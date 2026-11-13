@@ -113,6 +113,18 @@ enum Cmd {
         #[arg(long = "set")]
         set: Vec<String>,
     },
+    /// Report an agent's state to its terminal (OSC 7501, the Program Status Protocol), from
+    /// the agent's hooks: idle, working, done, blocked or error.
+    #[command(hide = true)]
+    State {
+        state: String,
+        /// The agent, as the terminal names it (`claude-code`).
+        #[arg(long)]
+        app: Option<String>,
+        /// What the agent appends to its hook's command (Codex: a JSON event), ignored.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        rest: Vec<String>,
+    },
     /// Verify isolation from inside (run by `luoto up` and `luoto doctor`).
     Selftest {
         #[arg(long)]
@@ -170,6 +182,10 @@ fn main() -> ExitCode {
         Cmd::SshAgent { socket } => ssh_agent::serve(&socket).map(|()| ExitCode::SUCCESS),
         Cmd::Net { socket } => net::serve(&socket).map(|()| ExitCode::SUCCESS),
         Cmd::AgentSetup { mcp, briefing, set } => agent_setup::run(mcp.as_deref(), &briefing, &set),
+        Cmd::State { state, app, .. } => {
+            agent_setup::report_status(&state, app.as_deref());
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Selftest { json, probe } => return selftest::run(json, probe.as_deref()),
     };
     match result {
@@ -578,6 +594,19 @@ fn relay(port: u16) -> Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_state_takes_what_codex_appends() {
+        let event = r#"{"type":"agent-turn-complete","last-assistant-message":"--done"}"#;
+        let cli =
+            Cli::try_parse_from(["sandbox", "state", "done", "--app", "codex", event]).unwrap();
+        let Cmd::State { state, app, rest } = cli.cmd else {
+            panic!("not state")
+        };
+        assert_eq!((state.as_str(), app.as_deref()), ("done", Some("codex")));
+        assert_eq!(rest, [event]);
+        assert!(Cli::try_parse_from(["sandbox", "state", "working", "--app", "x"]).is_ok());
+    }
 
     #[test]
     fn a_target_with_a_port_asks_for_a_tunnel() {

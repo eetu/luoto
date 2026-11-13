@@ -44,16 +44,18 @@
         {/if}
       </div>
       <div class="actions">
-        <button class="btn primary" onclick={() => run("accept")}>apply</button>
+        <button class="btn primary" onclick={() => run("accept")} disabled={!!app.busy}
+          >Apply</button
+        >
         {#if status.state !== "declined"}
-          <button class="btn" onclick={() => run("forget")}>ignore</button>
+          <button class="btn" onclick={() => run("forget")} disabled={!!app.busy}>Ignore</button>
         {/if}
       </div>
     {:else if status.state === "invalid"}
       <p class="small warn">not applied: {status.error}</p>
     {:else if status.state === "removed"}
       <p class="small muted">gone from the project; the accepted settings still apply</p>
-      <button class="btn" onclick={() => run("forget")}>drop them</button>
+      <button class="btn" onclick={() => run("forget")} disabled={!!app.busy}>Drop them</button>
     {:else if status.state === "unread"}
       <p class="small muted">
         in the env's clone, read when it starts{status.accepted.length

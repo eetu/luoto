@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import type { Pulled, PullPlans, Reloaded, SelftestReport } from "../src/lib/types";
 import egressHosts from "./fixtures/egress";
 import { fixture, mockApi } from "./mock";
 
@@ -35,7 +36,7 @@ test("a blocked host is allowed from the egress view", async ({ page }) => {
 
   await blocked.click();
   await expect(page.getByRole("heading", { name: "example.com" })).toBeVisible();
-  await page.getByRole("button", { name: "allow", exact: true }).click();
+  await page.getByRole("button", { name: "Allow", exact: true }).click();
 
   await expect.poll(() => writes.length).toBe(1);
   expect(writes[0]).toMatchObject({
@@ -83,7 +84,7 @@ test("open egress shows on the env and its hosts, kept until revoked", async ({ 
   await expect(row.locator(".chip")).toHaveText("open");
   await row.click();
   await expect(page.getByText("let through by open egress")).toBeVisible();
-  await page.getByRole("button", { name: "keep", exact: true }).click();
+  await page.getByRole("button", { name: "Keep", exact: true }).click();
 
   await expect.poll(() => writes.length).toBe(1);
   expect(writes[0]).toMatchObject({
@@ -110,11 +111,11 @@ test("a new env waits until its folder's luoto.toml is on screen", async ({ page
     await route.fulfill({ json: proposal });
   });
   await open(page);
-  await page.getByRole("button", { name: "new env" }).click();
+  await page.getByRole("button", { name: "New env" }).click();
 
   const folder = page.getByPlaceholder("~/dev/my-project");
   await folder.fill("~/dev/api");
-  const create = page.getByRole("button", { name: "create", exact: true });
+  const create = page.getByRole("button", { name: "Create", exact: true });
   await expect(create).toBeDisabled();
   await folder.press("Enter");
 
@@ -163,14 +164,14 @@ test("an env cloned from a remote shows where it comes from and pulls only in a 
   );
   await open(page);
   await page.getByRole("button", { name: /^web/ }).click();
-  await expect(page.getByRole("button", { name: "pull changes…" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Pull changes…" })).toBeVisible();
 
   await page.getByRole("button", { name: /^api/ }).click();
   await expect(page.getByText("cloned from", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("acme/api", { exact: true })).toBeVisible();
   await expect(page.getByText("(develop)")).toBeVisible();
-  await expect(page.getByText("luoto pull --to <new folder>")).toBeVisible();
-  await expect(page.getByRole("button", { name: "pull changes…" })).toHaveCount(0);
+  await expect(page.getByText("luoto pull -e api --to <new folder>")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Pull changes…" })).toHaveCount(0);
   await expect(page.getByText(/in the env's clone, read when it starts/)).toBeVisible();
 });
 
@@ -190,11 +191,11 @@ test("a remote in the new-env dialog is made in a terminal", async ({ page }) =>
     }),
   );
   await open(page);
-  await page.getByRole("button", { name: "new env" }).click();
+  await page.getByRole("button", { name: "New env" }).click();
   await page.getByPlaceholder("~/dev/my-project").fill("acme/web");
 
   await expect(page.getByText("luoto init acme/web")).toBeVisible();
-  await expect(page.getByRole("button", { name: "create", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Create", exact: true })).toBeDisabled();
   expect(writes).toHaveLength(0);
 });
 
@@ -216,7 +217,7 @@ test("applying luoto.toml names the text that was reviewed", async ({ page }) =>
   });
   await open(page);
   await page.getByRole("button", { name: /^web/ }).click();
-  await page.getByRole("button", { name: "apply", exact: true }).click();
+  await page.getByRole("button", { name: "Apply", exact: true }).click();
 
   await expect.poll(() => posted).toEqual([{ action: "accept", sha: status.sha }]);
 });
@@ -238,7 +239,7 @@ test("a TLS reject hints at a tunnel without choosing one", async ({ page }) => 
     "aria-checked",
     "false",
   );
-  await page.getByRole("button", { name: "allow", exact: true }).click();
+  await page.getByRole("button", { name: "Allow", exact: true }).click();
 
   await expect.poll(() => writes.length).toBe(1);
   const body = writes[0].body as { rule: { host: string; access: string; mode?: string } };
@@ -278,10 +279,10 @@ test("approving a request whose rule has risks shows them and resends with force
   await open(page);
   await page.getByRole("button", { name: /^web/ }).click();
   await page.getByRole("button", { name: /access to \*\.example\.com/ }).click();
-  await page.getByRole("button", { name: "approve", exact: true }).click();
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
 
   await expect(page.getByText(risks[0])).toBeVisible();
-  await page.getByRole("button", { name: "approve anyway" }).click();
+  await page.getByRole("button", { name: "Approve anyway" }).click();
 
   await expect.poll(() => forced).toEqual([false, true]);
 });
@@ -323,9 +324,9 @@ test("a port request reads as an uninspected tunnel and needs its risk confirmed
 
   await expect(page.getByRole("heading", { name: "db.example.com:5432" })).toBeVisible();
   await expect(page.getByRole("group", { name: "grant" })).toHaveCount(0);
-  await page.getByRole("button", { name: "approve", exact: true }).click();
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
   await expect(page.getByText(risks[0])).toBeVisible();
-  await page.getByRole("button", { name: "approve anyway" }).click();
+  await page.getByRole("button", { name: "Approve anyway" }).click();
 
   await expect.poll(() => bodies.map((b) => b.force)).toEqual([false, true]);
   expect(bodies.every((b) => b.narrow === undefined)).toBe(true);
@@ -362,7 +363,7 @@ test("a write request can be approved as read-only on some of its paths", async 
     .click();
   await expect(page.getByText(/Write access lets anything/)).toHaveCount(0);
   await page.getByRole("textbox", { name: "paths" }).fill("/v1/**");
-  await page.getByRole("button", { name: "approve", exact: true }).click();
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
 
   await expect.poll(() => sent.length).toBe(1);
   expect(sent[0]).toMatchObject({
@@ -401,7 +402,7 @@ test("selected requests are approved together, each as it was shown", async ({ p
   await open(page);
   await page.getByRole("button", { name: /^web/ }).click();
   await page.getByRole("checkbox", { name: "select all" }).check();
-  await page.getByRole("button", { name: "approve 2" }).click();
+  await page.getByRole("button", { name: "Approve 2" }).click();
 
   await expect.poll(() => sent.length).toBe(2);
   expect(sent[0]).toMatchObject({ id: "3", body: { created, ttl: "60m" } });
@@ -442,7 +443,7 @@ test("a variable request takes a value, the one it suggests filled in", async ({
   await page.getByRole("button", { name: /the variable APP_MODE/ }).click();
   const value = page.getByRole("textbox", { name: "value" });
   await expect(value).toHaveValue("");
-  await page.getByRole("button", { name: "approve" }).click();
+  await page.getByRole("button", { name: "Approve" }).click();
   await expect(page.getByText("give the value first")).toBeVisible();
   await expect(value).toBeFocused();
   expect(sent).toHaveLength(0);
@@ -455,7 +456,7 @@ test("a variable request takes a value, the one it suggests filled in", async ({
   await expect(page.getByText("variable request #6")).toBeVisible();
   await expect(value).toHaveValue("debug");
   await expect(page.getByText("value it suggests — written by code in the sandbox")).toBeVisible();
-  await page.getByRole("button", { name: "approve" }).click();
+  await page.getByRole("button", { name: "Approve" }).click();
   await expect.poll(() => sent.length).toBe(2);
   expect(sent[1]).toEqual({ id: "6", body: { created, var: "debug" } });
 });
@@ -500,7 +501,7 @@ test("the env panel shows its shares, what changed on this machine, and syncs th
 
   await expect(page.getByText("/shares/recordings")).toBeVisible();
   await expect(page.getByText("1 changed on this machine since the last sync")).toBeVisible();
-  await page.getByRole("button", { name: "sync", exact: true }).click();
+  await page.getByRole("button", { name: "Sync", exact: true }).click();
   await expect(page.getByText("3 files, 1.5 GB, up to date")).toBeVisible();
   await expect(page.getByText("share recordings: 1 file(s) updated")).toBeVisible();
 });
@@ -652,7 +653,7 @@ test("a nearly full VM disk is flagged beside the envs, with what frees it", asy
   await open(page);
   await expect(page.getByText("4.2 GB free of 106.8 GB")).toBeVisible();
   await expect(page.getByText(/nearly full, and a full disk stops every env/)).toBeVisible();
-  await expect(page.getByText(/41 superseded image\(s\), up to 18\.3 GB/)).toBeVisible();
+  await expect(page.getByText(/41 superseded images, up to 18\.3 GB/)).toBeVisible();
   await expect(page.getByText("luoto prune", { exact: true })).toBeVisible();
 });
 
@@ -685,11 +686,11 @@ test("first setup on a Mac offers Apple's container first and installs the chose
   await podman.check();
   await expect(page.getByText(/^use the installed podman/)).toBeVisible();
   await expect(page.getByText("luoto setup --runtime podman")).toBeVisible();
-  await expect(page.getByRole("button", { name: "install…" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Install…" })).toHaveCount(0);
 
   await apple.check();
-  await page.getByRole("button", { name: "install…" }).click();
-  await page.getByRole("button", { name: "run it" }).click();
+  await page.getByRole("button", { name: "Install…" }).click();
+  await page.getByRole("button", { name: "Run it" }).click();
   await expect.poll(() => installs).toEqual([{ runtime: "container" }]);
 });
 
@@ -721,4 +722,282 @@ test("on Apple's container the status bar and the env say each container is its 
   await expect(page.getByText("Apple's container 1.7.1: each container its own VM")).toBeVisible();
   await page.getByRole("button", { name: /^web/ }).click();
   await expect(page.getByText(/isolation: a VM of its own \(Apple's container/)).toBeVisible();
+});
+
+test("a pull is reviewed, then written, risky files only when ticked", async ({ page }) => {
+  await mockApi(page);
+  const applied: unknown[] = [];
+  const plan = {
+    dir: "/home/me/dev/web",
+    repo: null,
+    entries: [
+      { path: "src/app.ts", change: "changed", size: 120, executable: false, risky: null },
+      {
+        path: ".git/hooks/pre-commit",
+        change: "new",
+        size: 40,
+        executable: true,
+        risky: "git runs it",
+      },
+    ],
+    unchanged: 12,
+    refused: [],
+    digest: "d1",
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/pull",
+    (route, req) => {
+      if (req.method() !== "POST") {
+        return route.fulfill({ json: { plans: [plan], digest: "all" } satisfies PullPlans });
+      }
+      applied.push(req.postDataJSON());
+      return route.fulfill({ json: { written: 2, skipped: 0 } satisfies Pulled });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: "Pull changes…" }).click();
+
+  await expect(page.getByText("2 new or changed, 12 unchanged")).toBeVisible();
+  await expect(page.getByText("changed src/app.ts")).toBeVisible();
+  await expect(page.getByText("— git runs it")).toBeVisible();
+  const risky = page.getByRole("checkbox", { name: "also write risky files" });
+  await expect(risky).not.toBeChecked();
+  await risky.check();
+  await page.getByRole("button", { name: "Write to folder" }).click();
+
+  await expect.poll(() => applied).toEqual([{ digest: "all", include_risky: true }]);
+  await expect(page.getByRole("status")).toHaveText("wrote 2 files");
+  await expect(page.getByRole("button", { name: "Pull changes…" })).toBeVisible();
+});
+
+test("a pull with only risky files writes nothing until they are ticked", async ({ page }) => {
+  await mockApi(page);
+  const entry = { path: ".envrc", change: "new", size: 9, executable: false, risky: "direnv" };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/pull",
+    (route) =>
+      route.fulfill({
+        json: {
+          plans: [
+            { dir: "/d", repo: null, entries: [entry], unchanged: 0, refused: [], digest: "x" },
+          ],
+          digest: "x",
+        } satisfies PullPlans,
+      }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: "Pull changes…" }).click();
+
+  const write = page.getByRole("button", { name: "Write to folder" });
+  await expect(write).toBeDisabled();
+  await page.getByRole("checkbox", { name: "also write risky files" }).check();
+  await expect(write).toBeEnabled();
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(write).toHaveCount(0);
+});
+
+test("a stopped env greys pull and self-test, saying why", async ({ page }) => {
+  await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/envs/web",
+    (route) => route.fulfill({ json: { ...fixture("env"), dev: "stopped" } }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  for (const name of ["Pull changes…", "Self-test"]) {
+    const button = page.getByRole("button", { name });
+    await expect(button).toBeDisabled();
+    await expect(button).toHaveAttribute("title", "start the env first");
+  }
+});
+
+test("the self-test report lists each check, a failure flagged", async ({ page }) => {
+  await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/selftest",
+    (route) =>
+      route.fulfill({
+        json: {
+          ok: false,
+          checks: [
+            { name: "egress", ok: true, detail: "example.com refused" },
+            { name: "metadata", ok: false, detail: "169.254.169.254 answered" },
+          ],
+        } satisfies SelftestReport,
+      }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: "Self-test" }).click();
+
+  await expect(page.getByRole("status")).toHaveText("isolation self-test FAILED");
+  const checks = page.locator("ul.checks li");
+  await expect(checks.filter({ hasText: "egress" })).toContainText("ok");
+  const failed = checks.filter({ hasText: "metadata" });
+  await expect(failed).toContainText("FAIL");
+  await expect(failed).toContainText("169.254.169.254 answered");
+});
+
+test("a rule of yours is revoked by its button or its menu", async ({ page }) => {
+  await mockApi(page);
+  const env = fixture("env");
+  const mine = { origin: "user", access: "read" } as const;
+  await page.route(
+    (url) => url.pathname === "/api/envs/web",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...env,
+          rules: [
+            { ...mine, id: "u1", host: "api.example.com" },
+            { ...mine, id: "u2", host: "cdn.example.com" },
+            ...env.rules,
+          ],
+        },
+      }),
+  );
+  const deleted: string[] = [];
+  await page.route(
+    (url) => url.pathname.startsWith("/api/envs/web/rules/"),
+    (route, req) => {
+      deleted.push(`${req.method()} ${new URL(req.url()).pathname}`);
+      return route.fulfill({ json: 1 });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  await page.getByRole("button", { name: "revoke api.example.com" }).click();
+  await expect.poll(() => deleted).toEqual(["DELETE /api/envs/web/rules/u1"]);
+  await expect(page.getByRole("status")).toHaveText("revoked api.example.com");
+
+  await page
+    .getByRole("listitem")
+    .filter({ hasText: "cdn.example.com" })
+    .click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Revoke" }).click();
+  await expect.poll(() => deleted).toHaveLength(2);
+  expect(deleted[1]).toBe("DELETE /api/envs/web/rules/u2");
+
+  // A preset's rule shows in the group, not among yours.
+  const group = page.getByRole("button", { name: /preset:debian/ });
+  await expect(group).toHaveAttribute("aria-expanded", "false");
+  await group.click();
+  await expect(group).toHaveAttribute("aria-expanded", "true");
+});
+
+test("the vault's unlock, reload and lock each report what came of them", async ({ page }) => {
+  await mockApi(page);
+  const reloaded = {
+    read: 3,
+    changed: 1,
+    failed: ["op://Dev/billing/key: not found"],
+    expires: {},
+  } satisfies Reloaded;
+  await page.route(
+    (url) => /^\/api\/vault\/(unlock|lock|reload)$/.test(url.pathname),
+    (route, req) =>
+      route.fulfill({ json: req.url().endsWith("/reload") ? reloaded : { ok: true } }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: "no secrets in use" }).click();
+  const status = page.getByRole("status");
+
+  await page.getByRole("button", { name: "Reload" }).click();
+  await expect(status).toHaveText("read 3: 1 changed; not read: op://Dev/billing/key: not found");
+  await expect(status).toHaveClass(/error/);
+
+  await page.getByRole("button", { name: "Unlock", exact: true }).click();
+  await expect(status).toHaveText("vault unlocked");
+  await expect(status).not.toHaveClass(/error/);
+
+  await page.getByRole("button", { name: "Lock", exact: true }).click();
+  await expect(status).toHaveText("vault locked; credentialed hosts now get 403");
+
+  // The env list's vault menu does the same.
+  await page.getByRole("button", { name: "no secrets in use" }).click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: /Read secrets again/ })).toBeDisabled();
+});
+
+test("the env row's menu starts, stops and copies, a denied clipboard said", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: () => Promise.reject(new Error("denied")) },
+    });
+  });
+  await mockApi(page);
+  const actions: string[] = [];
+  await page.route(
+    (url) => /^\/api\/envs\/web\/(up|down|open)$/.test(url.pathname),
+    (route, req) => {
+      actions.push(new URL(req.url()).pathname);
+      return route.fulfill({ json: {} });
+    },
+  );
+  await open(page);
+  const row = page.getByRole("button", { name: /^web/ });
+
+  await row.click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: /^Start/ })).toBeDisabled();
+  await page.getByRole("menuitem", { name: /^Stop/ }).click();
+  await expect(page.getByRole("status")).toHaveText("web stopped");
+  expect(actions).toEqual(["/api/envs/web/down"]);
+
+  await row.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Open egress for 1 h" }).click();
+  await expect.poll(() => actions).toContain("/api/envs/web/open");
+
+  await row.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Copy shell command" }).click();
+  await expect(page.getByRole("status")).toHaveText(/denied the clipboard.*luoto shell -e web/);
+});
+
+test("a request card's menu approves for an hour, rejects, or opens it", async ({ page }) => {
+  await mockApi(page);
+  const created = new Date().toISOString();
+  const request = { id: 3, host: "a.example", access: "read", reason: "docs", status: "pending" };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [{ ...request, created }] }),
+  );
+  const sent: { path: string; body: unknown }[] = [];
+  await page.route(
+    (url) => /^\/api\/envs\/web\/requests\/3\/(approve|reject)$/.test(url.pathname),
+    (route, req) => {
+      sent.push({ path: new URL(req.url()).pathname, body: req.postDataJSON() });
+      return route.fulfill({ json: { host: "a.example", access: "read" } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  const card = page.getByRole("listitem").filter({ hasText: "a.example" });
+
+  await card.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Review…" }).click();
+  await expect(page.getByText("access request #3")).toBeVisible();
+
+  await card.click({ button: "right" });
+  await page.getByRole("menuitem", { name: /^Approve/ }).click();
+  await expect.poll(() => sent).toHaveLength(1);
+  expect(sent[0]).toMatchObject({
+    path: "/api/envs/web/requests/3/approve",
+    body: { created, ttl: "60m" },
+  });
+
+  await card.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Reject" }).click();
+  await expect.poll(() => sent.map((s) => s.path)).toContain("/api/envs/web/requests/3/reject");
+});
+
+test("the new-env dialog says why it can't create yet", async ({ page }) => {
+  await mockApi(page);
+  await open(page);
+  await page.getByRole("button", { name: "New env" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("pick a folder")).toBeVisible();
+  await page.getByPlaceholder("~/dev/my-project").press("Enter");
+  await expect(page.getByRole("status")).toHaveText("pick a folder");
 });

@@ -4,6 +4,8 @@ Step by step, for a task; the reference is [configuration](../configuration.md),
 [projects and repositories](../projects.md) and [agents.md](../agents.md), and the
 [README](../../README.md) has the overview.
 
+- [Changing an env](changing-an-env.md): another repo, for you or the team, a token the
+  remote refused, a host, a variable, a folder, the container, each a command.
 - [A repository you don't trust](untrusted-repo.md): cloned inside the env with nothing on
   your machine, and what you are asked before anything of it runs.
 - [Several repositories in one env](multi-repo.md): from the command line, a team's launchpad,

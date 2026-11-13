@@ -2,8 +2,9 @@
 
 How to set up the agents in your envs: their model and effort, the arguments they start with,
 their credentials without the prompt, your own settings in every env, and commits without AI
-attribution. What luoto knows
-about each agent (hosts, credentials, what is verified) is in [agents.md](../agents.md).
+attribution. A model server of yours instead of the cloud: [Model servers](model-servers.md).
+What luoto knows about each agent (hosts, credentials, what is verified) is in
+[agents.md](../agents.md).
 
 ## Model and effort
 
@@ -33,8 +34,8 @@ headless_args = ["--bare"]             # `luoto run` only, after `args`
 
 They follow the agent's command (for `luoto run`, where its command line takes options: after
 `run` for OpenCode, `exec` for Codex), and `luoto agent run claude -- …` or
-`luoto run … -- …` adds more for one start. `claude` typed in a shell starts without them. Claude Code's
-`--bare` reads no subscription token, so it needs an `api_key` or a model server.
+`luoto run … -- …` adds more for one start. `claude` typed in a shell starts without them.
+Claude Code's `--bare` reads no subscription token, so it needs an `api_key` or a model server.
 
 A team's `luoto.toml` may set them, shown in its review, but not the flags that turn off or
 loosen the agent's own permission prompts (its `yolo` flags and the ones its file in

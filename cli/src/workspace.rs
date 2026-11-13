@@ -432,12 +432,10 @@ fn collect(
         .flatten();
     let Some(files) = files else {
         if dir.join(".git").exists() {
-            crate::progress::say(|| {
-                eprintln!(
-                    "warning: git can't list {}; copying all of it, ignored files included",
-                    dir.display()
-                );
-            });
+            crate::progress::warn(&format!(
+                "git can't list {}; copying all of it, ignored files included",
+                dir.display()
+            ));
         }
         return walk(src, rel, false, out, seen);
     };
@@ -735,7 +733,7 @@ pub fn pull_targets(
             None => match canonical(dir) {
                 Ok(d) => checked(d)?,
                 Err(e) => {
-                    eprintln!("warning: repo {name} left out: {e:#}");
+                    crate::progress::warn(&format!("repo {name} left out: {e:#}"));
                     continue;
                 }
             },

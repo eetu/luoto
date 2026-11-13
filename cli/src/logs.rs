@@ -46,7 +46,7 @@ pub fn show(
         if paths.env_config(&name).exists() {
             Ok(name)
         } else {
-            Err(anyhow::anyhow!("no env `{name}` (`luoto ls` lists them)"))
+            Err(crate::config::no_env(&name))
         }
     };
     match source {
@@ -81,7 +81,7 @@ fn gate(name: &str, follow: bool, lines: Option<usize>) -> Result<ExitCode> {
     };
     let in_file = crate::events::in_file(&ctx.rt, &gate);
     if in_file && state != "running" {
-        eprintln!("the gate isn't running: its events show once it is (`luoto up -e {name}`)");
+        progress::note(&crate::events::gate_down(name));
     }
     let mut args = vec!["logs".to_string()];
     if follow {
@@ -372,6 +372,14 @@ impl InstallLog {
             cap: CAP,
             file: Mutex::new(None),
         }
+    }
+
+    /// Where to look when an install in `env` failed.
+    pub fn hint(env: &str) -> String {
+        format!(
+            "`luoto logs installs -e {env}` has what it printed, \
+             `luoto egress -e {env} --denied --since 30m` what the gate blocked"
+        )
     }
 
     /// A line of luoto's own, with the time: what installs, or how it ended.

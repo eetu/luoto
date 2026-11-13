@@ -4,7 +4,7 @@
   import LabelledLines from "$lib/components/LabelledLines.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import { useDetect } from "$lib/detect.svelte";
-  import { act, app, selectEnv } from "$lib/stores/app.svelte";
+  import { act, app, say, selectEnv } from "$lib/stores/app.svelte";
 
   let { open, onClose }: { open: boolean; onClose: () => void } = $props();
 
@@ -43,15 +43,24 @@
   // A remote is cloned inside the env, and its first start asks about the clone's luoto.toml
   // and installs on a terminal: such an env is made with `luoto init`, not here.
   const remote = $derived(detection.ready ? (proposal?.remote ?? null) : null);
-  const valid = $derived(
-    /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/.test(finalName) &&
-      dir.trim() !== "" &&
-      detection.ready &&
-      !remote,
+  // Why create is off, or null when it is on.
+  const blocked = $derived(
+    dir.trim() === ""
+      ? "pick a folder"
+      : !/^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/.test(finalName)
+        ? "a name is lowercase letters, digits and dashes, up to 40"
+        : !detection.ready || !proposal
+          ? "still reading the folder…"
+          : remote
+            ? "a remote is created in a terminal"
+            : null,
   );
 
   async function create() {
-    if (!valid || !proposal) return;
+    if (blocked || !proposal) {
+      say(blocked ?? "still reading the folder…", true);
+      return;
+    }
     const body = {
       ...query,
       presets,
@@ -164,8 +173,13 @@
     </div>
   {/snippet}
   {#snippet footer()}
-    <button class="btn" onclick={onClose}>cancel</button>
-    <button class="btn primary" onclick={create} disabled={!valid}>create</button>
+    <div class="foot">
+      <div class="actions">
+        <button class="btn" onclick={onClose}>Cancel</button>
+        <button class="btn primary" onclick={create} disabled={!!blocked}>Create</button>
+      </div>
+      {#if blocked}<p class="hint why">{blocked}</p>{/if}
+    </div>
   {/snippet}
 </Modal>
 
@@ -200,8 +214,11 @@
 
   .hint {
     margin: 6px 0 0;
-    color: var(--halo-text-muted);
     font-size: 12px;
+  }
+
+  .hint:not(.error) {
+    color: var(--halo-text-muted);
   }
 
   .pins {
@@ -222,7 +239,14 @@
     margin-top: 0;
   }
 
-  .hint.error {
-    color: var(--halo-error);
+  .foot {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    align-items: flex-end;
+  }
+
+  .foot .actions {
+    margin: 0;
   }
 </style>

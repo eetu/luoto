@@ -2,7 +2,9 @@
   import ShieldQuestion from "@lucide/svelte/icons/shield-question";
 
   import { api } from "$lib/api";
+  import { openMenu } from "$lib/menu.svelte";
   import { act, ago, app, installLabel, requestTarget, say, TTLS } from "$lib/stores/app.svelte";
+  import type { AccessRequest } from "$lib/types";
 
   // Requests ticked for one decision; ids no longer pending drop out. A variable request takes
   // a value, given on its own panel, so it is never ticked.
@@ -48,6 +50,55 @@
       outcome.length > 0,
     );
   }
+
+  const review = (r: AccessRequest) => (app.subject = { kind: "request", id: r.id });
+
+  /** Approve one request as asked, for an hour; one whose rule has risks opens for review. */
+  const approveOne = (r: AccessRequest) => {
+    const env = app.env;
+    if (!env) return;
+    void act(
+      "approving…",
+      () => api.approve(env, r, r.install ? undefined : "60m"),
+      `approved #${r.id}`,
+      () => {
+        review(r);
+        say(`#${r.id} has risks to confirm`, true);
+      },
+    );
+  };
+
+  function menu(e: MouseEvent, r: AccessRequest) {
+    const takesValue = r.install?.kind === "var";
+    const busy = !!app.busy;
+    openMenu(e, `#${r.id} ${r.install ? installLabel(r.install) : requestTarget(r)}`, [
+      {
+        label: "Approve",
+        run: () => approveOne(r),
+        disabled: takesValue || busy,
+        hint: takesValue
+          ? "needs a value"
+          : busy
+            ? "busy"
+            : r.install
+              ? undefined
+              : r.port
+                ? "tunnel, 1 h"
+                : `${r.access}, 1 h`,
+      },
+      {
+        label: "Reject",
+        run: () => {
+          const env = app.env;
+          if (env) void act("rejecting…", () => api.reject(env, r), `rejected #${r.id}`);
+        },
+        danger: true,
+        disabled: busy,
+        hint: busy ? "busy" : undefined,
+      },
+      { label: "Review…", run: () => review(r) },
+    ]);
+  }
 </script>
 
 {#if app.pending.length > 0}
@@ -73,10 +124,10 @@
             </label>
           {/if}
           <button class="btn primary" onclick={() => void decide(true)} disabled={!!app.busy}
-            >approve {chosen.length}</button
+            >Approve {chosen.length}</button
           >
           <button class="btn" onclick={() => void decide(false)} disabled={!!app.busy}
-            >reject {chosen.length}</button
+            >Reject {chosen.length}</button
           >
         {/if}
       </div>
@@ -85,6 +136,8 @@
       <div
         class="request halo-card"
         class:selected={app.subject.kind === "request" && app.subject.id === r.id}
+        oncontextmenu={(e) => menu(e, r)}
+        role="listitem"
       >
         {#if batchable.length > 1}
           {@const takesValue = r.install?.kind === "var"}
@@ -97,7 +150,7 @@
             onchange={(e) => pick(r.id, e.currentTarget.checked)}
           />
         {/if}
-        <button class="open" onclick={() => (app.subject = { kind: "request", id: r.id })}>
+        <button class="open" onclick={() => review(r)}>
           <ShieldQuestion size={16} />
           {#if r.install}
             <span

@@ -208,6 +208,10 @@ pub struct Agent {
     /// sandbox, its trust questions guard nothing the sandbox doesn't.
     #[serde(default, rename = "first_run")]
     pub first_run: Vec<JsonSet>,
+    /// Hooks that report its state (working, blocked, done) to its terminal (`sandbox state`,
+    /// OSC 7501), added beside the user's own.
+    #[serde(default)]
+    pub status: Vec<JsonSet>,
     /// Where each option an env can give the agent (`model`, `effort`) goes in its own
     /// config: written at `up`, under anything the user chooses in a session.
     #[serde(default)]
@@ -261,13 +265,20 @@ pub struct AgentSetting {
 
 /// One value set in a config file (JSON, or TOML for a `.toml` file), at a path of keys,
 /// keeping everything else there.
-#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct JsonSet {
     /// `~/…` for the dev user's home.
     pub file: String,
     pub path: Vec<String>,
     pub value: serde_json::Value,
+    /// Add `value` to the list at `path` unless it is there already, keeping the user's own
+    /// entries (JSON only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub append: bool,
+    /// Set `value` only where `path` holds nothing: a key the user set keeps their value.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub if_absent: bool,
 }
 
 /// An editor `luoto open` connects to an env. Every editor reaches the env over SSH through

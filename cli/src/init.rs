@@ -29,6 +29,7 @@ pub struct InitOpts {
     /// The branch a remote's clone checks out (default: the remote's).
     #[arg(long)]
     pub branch: Option<String>,
+    /// The dev container's image (default: luoto's base image).
     #[arg(long)]
     pub image: Option<String>,
     /// Egress presets (repeatable), replacing the defaults and the detected ones:
@@ -345,14 +346,14 @@ fn credential_rows(p: &Proposal, specs: &[String], asks: bool) -> Vec<String> {
                     .get(kind)
                     .map(|k| format!("{} = {}", k.label, crate::secrets::shown_ref(r))),
                 None => (kind == "login_inside" && !p.login_hosts.is_empty())
-                    .then(|| "log in inside the sandbox".to_string()),
+                    .then(|| "log in inside the env".to_string()),
             })
         });
         let login = providers.iter().any(|p| !p.login_hosts.is_empty());
         let how = match given {
             Some(g) => g,
             None if asks => "not set (asked at the first up)".into(),
-            None if login => "log in inside the sandbox (no terminal to ask on)".into(),
+            None if login => "log in inside the env (no terminal to ask on)".into(),
             None => format!("not set (`luoto agent auth -e {} {name}`)", p.name),
         };
         rows.push(format!("{name}: {how}"));
@@ -891,7 +892,8 @@ pub fn offer(
 pub fn print_needs(name: &str, needs: &[String]) {
     if !needs.is_empty() {
         println!(
-            "\nThe project needs credentials only you can add (`luoto edit -e {name}`):\n\n{}\n",
+            "\nThe project needs credentials only you can add (`luoto project needs -e {name}` \
+             asks for them):\n\n{}\n",
             needs.join("\n\n")
         );
     }
@@ -1078,7 +1080,7 @@ mod tests {
         assert_eq!(
             credential_rows(&p, &[], false),
             [
-                "claude: log in inside the sandbox (no terminal to ask on)".to_string(),
+                "claude: log in inside the env (no terminal to ask on)".to_string(),
                 format!("copilot: not set (`luoto agent auth -e {name} copilot`)"),
             ]
         );

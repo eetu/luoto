@@ -305,6 +305,7 @@ pub fn sets(
             file: file.to_string(),
             path,
             value: Value::Null,
+            ..Default::default()
         };
         if !removes.contains(&set) {
             removes.push(set);
@@ -371,6 +372,7 @@ fn fill(set: &JsonSet, v: &Vars) -> Option<JsonSet> {
                 })
                 .collect(),
             value: Value::from(n),
+            ..Default::default()
         });
     }
     let text = |t: &str| {
@@ -397,6 +399,7 @@ fn fill(set: &JsonSet, v: &Vars) -> Option<JsonSet> {
         file: set.file.clone(),
         path: set.path.iter().map(|p| text(p)).collect(),
         value: value(&set.value, &text),
+        ..Default::default()
     })
 }
 
@@ -898,6 +901,8 @@ fn new_server(
             current: None,
             help: &help,
             kind: None,
+            how: None,
+            shape: None,
         };
         match secret(&ask, global)? {
             Step::Got(Secret::Ref(r)) => {

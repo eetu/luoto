@@ -54,7 +54,7 @@
   const notes = $derived(
     [
       access === "write" && "write lets code in the sandbox upload data to this host",
-      target === "*" && "`*` covers every host: even reads can leak data in URLs",
+      target === "*" && "a lone wildcard covers every host: even reads can leak data in URLs",
       tunnel &&
         "a tunnel is not inspected: any method and path, no credential stripping or injection, no git or GraphQL guards",
       allowPrivate && "reaches services on your machine or network",
@@ -148,10 +148,10 @@
   {/if}
 
   {#if risks.length > 0}
-    <Risks {risks} confirm="allow anyway" onconfirm={() => void attempt(true)} />
+    <Risks {risks} confirm="Allow anyway" onconfirm={() => void attempt(true)} />
   {:else}
     <button type="submit" class="btn primary" disabled={!target.trim() || !!app.busy}
-      >{keep ? "keep" : "allow"}</button
+      >{keep ? "Keep" : "Allow"}</button
     >
   {/if}
 </form>

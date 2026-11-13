@@ -113,6 +113,17 @@ pub enum RequestStatus {
     Rejected,
 }
 
+impl std::fmt::Display for RequestStatus {
+    /// Its serde name: `approved`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RequestStatus::Pending => "pending",
+            RequestStatus::Approved => "approved",
+            RequestStatus::Rejected => "rejected",
+        })
+    }
+}
+
 /// What the sandbox asks to have in the env besides a host: software, a preset's access, or a
 /// variable with a plain value. Approved, it joins the env's config (`[deps] system`,
 /// `[tools]`, `presets`, `[env]`), so it holds for every container the env gets. A secret is

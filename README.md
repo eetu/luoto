@@ -43,7 +43,7 @@ the attempt with a scoped allow next to it:
 | macOS, Linux                                 | `curl -fsSL https://raw.githubusercontent.com/eetu/luoto/main/install.sh \| sh`                   |
 | macOS, Linux (Homebrew)                      | `brew install eetu/tap/luoto` (a full name trusts that formula only)                              |
 | Linux, no script                             | a `.tar.gz` from [Releases](https://github.com/eetu/luoto/releases), checked against `SHA256SUMS` |
-| from source                                  | `just install-cli`, then `luoto setup --build`                                                    |
+| from source                                  | `just link-dev`, then `luoto-dev setup --build` ([source builds](docs/install.md))                |
 | Windows (Scoop; not yet verified end to end) | `scoop bucket add luoto https://github.com/eetu/scoop-luoto` then `scoop install luoto`           |
 
 Then, once:
@@ -54,7 +54,8 @@ luoto setup
 
 It checks your container runtime (podman ≥ 5.2 or Docker ≥ 28; on macOS 26 on Apple silicon
 it offers Apple's `container` first; `--install` installs the one picked after showing the
-command), creates luoto's own VM where podman needs one, and gets the images. Updates, tab completion and checking a download: [Install details](docs/install.md).
+command), creates luoto's own VM where podman needs one, and gets the images. Updates, tab
+completion and checking a download: [Install details](docs/install.md).
 
 ## Getting started
 
@@ -78,6 +79,7 @@ Step by step, for a task:
 
 | guide                                                         | when you want to                                                              |
 | ------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| [Changing an env](docs/guides/changing-an-env.md)             | add a repo, fix a token, allow a host, recreate the container                 |
 | [A repository you don't trust](docs/guides/untrusted-repo.md) | clone and try one with nothing of it on your machine                          |
 | [Several repositories](docs/guides/multi-repo.md)             | work on more than one repo in an env, or give a team a launchpad              |
 | [Headless runs](docs/guides/headless.md)                      | run an agent from a script or a schedule, and let it open pull requests       |
@@ -85,6 +87,7 @@ Step by step, for a task:
 | [Model servers](docs/guides/model-servers.md)                 | use Ollama, LM Studio, MTPLX or another server of yours beside the cloud      |
 | [Azure](docs/guides/azure.md)                                 | run `az`, terraform and the SDKs on your subscriptions                        |
 | [Cloud APIs](docs/guides/cloud-apis.md)                       | use Hetzner, UpCloud, DigitalOcean or Cloudflare from an env                  |
+| [Environment variables](docs/guides/env-vars.md)              | set a plain value, a secret the code reads, or a token it never sees          |
 | [Moving an env](docs/guides/moving-envs.md)                   | take an env to the release, or to another machine                             |
 
 Reference:
@@ -131,47 +134,41 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | the env back after a reboot or an idle stop (unlocks the vault if needed)                            | `luoto up` (`--all`: every env)<br>`luoto vault unlock`                                                                            |
 | a secret you rotated in your secret store, in use                                                    | `luoto vault reload` (`-e <env>` for one env's)                                                                                    |
 | the gate's log, the background watcher's, or what the env's installs printed                         | `luoto logs`<br>`luoto logs watcher`<br>`luoto logs installs -f`                                                                   |
-| what installs and clones print as they come, instead of a spinner                                   | `o` while one runs<br>`-v` on any command (`luoto up -v`)                                                                          |
-| what each env takes on disk, and how full luoto's VM is                                              | `luoto status --size`<br>`luoto ls --size`<br>`luoto doctor`                                                                             |
+| what installs and clones print as they come, instead of a spinner                                    | `o` while one runs<br>`-v` on any command (`luoto up -v`)                                                                          |
+| what each env takes on disk, and how full the disk that holds them is                                | `luoto status --size`<br>`luoto list --size`<br>`luoto doctor`                                                                     |
 | the space luoto's superseded images take, back on this machine (volumes stay)                        | `luoto prune`                                                                                                                      |
 | to check isolation, or a bug report with secrets and what identifies you taken out                   | `luoto doctor`<br>`luoto doctor --report`                                                                                          |
 | to remove luoto: envs, vault, images, keychain entries, config and data (the binary stays)           | `luoto uninstall`                                                                                                                  |
 
 Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host> --reason …`
 asks you for access (`<host>:<port>` for a tunnel; `--preset npm` for a registry's hosts at
-once; `--package <name>` or `--tool <tool>@<version>` for software to keep; `--var <NAME>=<value>`
-for a plain variable); only you can approve, on the host. A new request gets a desktop notification, as does the first denial at
-each host (macOS through `terminal-notifier`, which Homebrew installs with luoto, else
-`osascript`, whose come from Script Editor; Linux with `notify-send`). Without
-them (turned off, or on Windows), the bell in `luoto ui` gives browser notifications for
-requests.
+once; `--package <name>` or `--tool <tool>@<version>` for software to keep;
+`--var <NAME>=<value>` for a plain variable); only you can approve, on the host. A new
+request gets a desktop notification, as does the first denial at each host
+([notifications](docs/configuration.md#notifications)); where they are off, or on Windows, the
+bell in `luoto ui` gives browser notifications for requests.
 
 ## Agents
 
 `luoto agent run <agent>` installs the agent on first run (`up` installs those listed in the
 env's `agents` or its `luoto.toml`), applies the env's current config and starts the agent in
-`/workspace`; `--yolo` turns off its own permission prompts (OpenCode has no
-flag for it), since the sandbox is the boundary. After that first run the command (`claude`,
-`codex`, …) also works in any env terminal, including an editor's. Each agent needs a credential
-for one of its providers under `[credentials.<provider>]`, or a model server of yours; the gate
-adds it to every request and the sandbox sees only a placeholder. `luoto agent auth <agent>` changes it, its questions
-opening on what the env has. [docs/agents.md](docs/agents.md#credentials) covers where
-to get one, how the prompt keeps it, and logins inside the sandbox, with the hosts and
-verification status of each agent. `luoto agent list` shows agents and providers. Model,
-effort, your own agent settings and commits without AI attribution:
+`/workspace`; `--yolo` turns off its own permission prompts (OpenCode has no flag for it),
+since the sandbox is the boundary. After that first run the command (`claude`, `codex`, …)
+also works in any env terminal, including an editor's. Each agent needs a credential for one
+of its providers under `[credentials.<provider>]`, or a model server of yours; the gate adds it
+to every request and the sandbox sees only a placeholder. `luoto agent auth <agent>` changes
+it, its questions opening on what the env has. [docs/agents.md](docs/agents.md#credentials)
+covers where to get one, how the prompt keeps it, and logins inside the sandbox, with the
+hosts and verification status of each agent. `luoto agent list` shows agents and providers.
+Model, effort, your own agent settings and commits without AI attribution:
 [docs/guides/agent-settings.md](docs/guides/agent-settings.md). Claude Code, Codex and OpenCode
 can also use a model server of yours, on this machine (Ollama, LM Studio, MTPLX, …), your
 network or the internet, beside the cloud:
 [docs/guides/model-servers.md](docs/guides/model-servers.md).
 
-Without a terminal, `luoto run --agent claude --prompt "…"` runs one prompt: it brings the env
-up (asking nothing), runs the agent in its non-interactive mode and prints its answer (or
-writes it with `--output FILE`), exiting with the agent's code; `--timeout 30m` stops the agent
-and what it started once it has run that long (exit 124), `--down` stops the env after, and
-what the gate denied during the run is listed on stderr.
-A cron job or CI step can run it; pull requests it opens go through the gate as any other.
-[docs/guides/headless.md](docs/guides/headless.md) has examples, what an unattended run needs,
-and how to let GitHub merge its pull requests.
+Without a terminal, `luoto run --agent claude --prompt "…"` runs one prompt and prints the
+agent's answer, for a cron job or a CI step:
+[docs/guides/headless.md](docs/guides/headless.md).
 
 | agent                         | command    | credential                                                  |
 | ----------------------------- | ---------- | ----------------------------------------------------------- |
@@ -193,14 +190,17 @@ and how to let GitHub merge its pull requests.
   tunnel or websocket after an hour without traffic. A rule's `idle` (`luoto allow
   k8s.example.com --idle 2h`, at most 24h) gives its host that long instead, for long polls
   such as `kubectl logs -f`.
-- luoto's VM keeps its disk in a file on yours (up to 100 GB, podman's default) that grows as
-  images, toolchains and workspaces fill it and doesn't shrink when they go. A full VM disk
-  stops every env: `luoto doctor` shows how full it is and what the file takes here, `luoto up`
-  and the UI warn under 10 GB free, and `luoto prune` removes luoto's superseded images and
-  trims the VM so the freed space returns to this machine. Each time the VM's disk has grown
-  10 GB (or a tenth of it) since luoto last said so, `up`, `down`, `luoto run` and the end of
-  a shell or agent session say so, with the env's biggest build folders (`target/`,
-  `node_modules/`, …); the watcher notifies when free space falls under 10 GB and 3 GB.
+- With podman on macOS and Windows, luoto's VM keeps its disk in a file on yours (up to
+  100 GB, podman's default) that grows as images, toolchains and workspaces fill it and doesn't
+  shrink when they go. A full VM disk stops every env: `luoto doctor` shows how full it is and
+  what the file takes here, `luoto up` and the UI warn under 10 GB free, and `luoto prune`
+  removes luoto's superseded images and trims the VM so the freed space returns to this
+  machine. Each time the VM's disk has grown 10 GB (or a tenth of it) since luoto last said
+  so, `up`, `down`, `luoto run` and the end of a shell or agent session say so, with the env's
+  biggest build folders (`target/`, `node_modules/`, …). On Apple's `container`, images and
+  volumes are files on your Mac's disk, whose free space gets the same warnings; `luoto prune`
+  removes the superseded images. Either way the background watcher notifies when free space
+  falls under 10 GB and 3 GB.
 - On Apple's `container` ([Platforms](docs/how-it-works.md#platforms)): an env's egress
   history shows only while its gate runs, and a volume attaches to one running container at a
   time, so refilling the tools volume stops the dev container briefly.

@@ -33,6 +33,7 @@ pub fn parse_ttl(s: &str) -> Result<TimeDelta> {
 
 #[derive(clap::Args)]
 pub struct AllowOpts {
+    /// The host (`docs.rs`), a wildcard over its subdomains (`*.docs.rs`), or a URL.
     pub host: String,
     /// Any method (default: read-only GET/HEAD/OPTIONS).
     #[arg(long)]
@@ -63,6 +64,7 @@ pub struct AllowOpts {
     /// The one port it covers (default: 80 and 443).
     #[arg(long)]
     pub port: Option<u16>,
+    /// Why the rule is there, kept with it.
     #[arg(long)]
     pub note: Option<String>,
     /// Accept risky rules (wildcards over shared domains, `*`, write) without asking.
@@ -167,7 +169,7 @@ pub fn accepting_risks<T>(force: bool, add: impl Fn(bool) -> Result<T>) -> Resul
                     eprintln!("risk: {r}");
                 }
                 if !crate::prompt::confirm("Accept these risks?") {
-                    bail!("not added (pass --force to accept these risks)");
+                    bail!("not added (`{}` accepts these risks)", with_force());
                 }
                 add(true)
             }
@@ -177,12 +179,23 @@ pub fn accepting_risks<T>(force: bool, add: impl Fn(bool) -> Result<T>) -> Resul
     }
 }
 
+/// This command as it was given, with `--force`.
+fn with_force() -> String {
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .map(|a| crate::text::sh_quote(&crate::text::display(&a)))
+        .collect();
+    format!("{} {} --force", names::instance(), args.join(" "))
+}
+
 /// Remove the env's user rules with this id or host; how many there were.
 pub fn remove(ctx: &Ctx, name: &str, id_or_host: &str) -> Result<usize> {
     let n = EnvFile::load(&ctx.paths, name)?.remove_rules(id_or_host)?;
     if n == 0 {
         bail!(
-            "no user rule with id or host `{id_or_host}` (preset rules are changed by editing `presets`)"
+            "`{name}` has no rule of yours with id or host `{}` (`luoto status -e {name}` lists \
+             them)",
+            crate::text::display(id_or_host)
         );
     }
     sync::reapply(ctx, name)?;
@@ -226,7 +239,7 @@ pub fn describe(rule: &Rule) -> String {
 /// widen it.
 pub fn grant(req: &AccessRequest, narrow: &Narrowing) -> Result<Rule> {
     if req.status != RequestStatus::Pending {
-        bail!("request #{} is already {:?}", req.id, req.status);
+        bail!("request #{} is already {}", req.id, req.status);
     }
     req.grant(narrow).map_err(anyhow::Error::msg)
 }
@@ -304,7 +317,7 @@ pub fn approve(
 /// its note tells the sandbox whether the install worked. What happened, for people.
 fn approve_install(ctx: &Ctx, name: &str, req: &AccessRequest) -> Result<String> {
     if req.status != RequestStatus::Pending {
-        bail!("request #{} is already {:?}", req.id, req.status);
+        bail!("request #{} is already {}", req.id, req.status);
     }
     let Some(install) = &req.install else {
         bail!("request #{} asks for access, not an install", req.id);

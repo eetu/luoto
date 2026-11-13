@@ -192,7 +192,7 @@ fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
     } else {
         rt.create_volume(&names::vault_sockets(), &labels("", "vault"))?;
     }
-    if start_or_create(ctx, &spec, image_id, true)? == Launch::Created {
+    if start_or_create(ctx, &spec, image_id, None)? == Launch::Created {
         remove_old_vault_net(ctx);
     }
     wait_until(Duration::from_secs(20), || ctl::vault_status(rt).ok())
@@ -222,9 +222,14 @@ enum Launch {
     Created,
 }
 
-/// Start a stopped container, (re)create one whose spec (or image, `image_id`) changed when
-/// `recreate` allows.
-fn start_or_create(ctx: &Ctx, spec: &RunSpec, image_id: &str, recreate: bool) -> Result<Launch> {
+/// Start a stopped container, (re)create one whose spec (or image, `image_id`) changed, unless
+/// it is env `keep`'s dev container, which `luoto up --recreate` recreates.
+fn start_or_create(
+    ctx: &Ctx,
+    spec: &RunSpec,
+    image_id: &str,
+    keep: Option<&str>,
+) -> Result<Launch> {
     let rt = &ctx.rt;
     let hash = spec_hash(rt, spec, image_id);
     let mut spec = spec.clone();
@@ -236,18 +241,17 @@ fn start_or_create(ctx: &Ctx, spec: &RunSpec, image_id: &str, recreate: bool) ->
         }
         Some((state, label)) => {
             let same = label == hash;
-            if !same && recreate {
+            if !same && keep.is_none() {
                 rt.remove_container(&spec.name)?;
                 rt.create_and_start(&spec)?;
                 return Ok(Launch::Created);
             }
-            if !same {
-                crate::progress::say(|| {
-                    eprintln!(
-                        "note: {} was created from an older config or luoto version; `luoto up --recreate` applies it (volumes are kept)",
-                        spec.name
-                    )
-                });
+            if let Some(env) = keep.filter(|_| !same) {
+                crate::progress::note(&format!(
+                    "{} was created from an older config or luoto version; \
+                     `luoto up -e {env} --recreate` applies it (volumes are kept)",
+                    spec.name
+                ));
             }
             if state == "running" {
                 return Ok(Launch::AlreadyRunning);
@@ -466,10 +470,8 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     let image = env_image(ctx, &layered(ctx, env)?);
     let ids = ensure_images(ctx, &image)?;
     let state = state::ensure(ctx, env, &image)?;
+    // Its warnings are about choices the user made: `edit` and `status` show them.
     let mut p = plan(ctx, env)?;
-    for w in &p.compiled.warnings {
-        eprintln!("warning: {w}");
-    }
     let rt = &ctx.rt;
     let a = names::addrs(state.octet);
     let (env_ca, made) = ca::ensure(&ctx.paths.env_state(env), env)?;
@@ -568,21 +570,22 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             }
             (None, Some(url)) => {
                 let locked = repos::creds_locked(ctx, env);
-                if let Err(e) = repos::clone_workspace(ctx, env, url, ws.branch.as_deref(), locked)
+                if let Err(e) =
+                    repos::clone_workspace(ctx, env, url, ws.branch.as_deref(), locked, &p.cfg)
                 {
                     if repos::undecline(ctx, env, url)? {
-                        eprintln!(
-                            "note: it was answered as public; `luoto up` asks for its access again"
-                        );
+                        crate::progress::note(&format!(
+                            "it was answered as public; `luoto up -e {env}` asks for its access \
+                             again"
+                        ));
                     }
                     return Err(e);
                 }
                 cloned_workspace = true;
             }
-            (None, None) => bail!(
-                "env `{env}` has no folder or remote: set `[workspace] dir` or `url` \
-                 (`luoto edit -e {env}`)"
-            ),
+            (None, None) => {
+                bail!("env `{env}` has no folder or remote (`[workspace] dir` or `url`)")
+            }
         }
         // The install question outlives this `up`: one cut short, or unable to ask, leaves it
         // for the next.
@@ -611,12 +614,14 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         }
         drop(_restarting);
         if p.image != image {
-            eprintln!(
-                "note: luoto.toml names another image; `luoto up --recreate` applies it (volumes are kept)"
-            );
+            crate::progress::note(&format!(
+                "luoto.toml names another image; `luoto up -e {env} --recreate` applies it \
+                 (volumes are kept)"
+            ));
         }
     }
-    let repos = repos::seed(ctx, env, &p.cfg.workspace, &seeded_repos);
+    let seeded = repos::seed(ctx, env, &p.cfg, &seeded_repos);
+    let repos = seeded.done.clone();
     let cloned = repos.iter().any(|n| {
         !seeded_repos.contains(n)
             && p.cfg
@@ -660,7 +665,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
                 }
             }
             Err(e) => {
-                eprintln!("warning: the cloned repos weren't read ({e:#})");
+                crate::progress::warn(&format!("the cloned repos weren't read ({e:#})"));
                 // What the clone pins is unknown: nothing installs without a look at it.
                 if installs_pending {
                     install = false;
@@ -671,14 +676,16 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     }
     if install {
         if let Err(e) = deps::ensure(ctx, env, &p.cfg, state.home()) {
-            eprintln!(
-                "warning: deps not installed: {e:#}\n         \
-                 see `luoto egress -e {env} --denied --since 30m`; `luoto up -e {env}` retries"
-            );
+            crate::progress::warn(&format!(
+                "deps not installed ({e:#}); {}; `luoto up -e {env}` retries",
+                crate::logs::InstallLog::hint(env)
+            ));
         }
         let agents: Vec<String> = p.cfg.agents.names().cloned().collect();
         if let Err(e) = crate::agents::ensure(ctx, env, &agents, opts.quiet) {
-            eprintln!("warning: agents not installed: {e:#}\n         `luoto up -e {env}` retries");
+            crate::progress::warn(&format!(
+                "agents not installed ({e:#}); `luoto up -e {env}` retries"
+            ));
         }
     }
     // After deps: the image or [deps] may be what brings `az`, which then runs in the
@@ -703,15 +710,31 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             crate::egress::state_line(env, until, width)
         );
     }
-    if !opts.quiet && !opts.brief {
+    if opts.quiet || opts.brief {
+        seeded.warn();
+    } else {
         println!(
-            "env `{env}` is up{}",
+            "env `{env}` is up{}{}",
             if dev == Launch::Created {
                 " (new dev container)"
             } else {
                 ""
+            },
+            match seeded.failed.len() {
+                0 => String::new(),
+                1 => ", but a repo isn't there:".to_string(),
+                n => format!(", but {n} repos aren't there:"),
             }
         );
+        // Last, where they are read: a repo that failed mid-output is easy to miss.
+        let width = crate::text::columns();
+        for f in &seeded.failed {
+            for (i, l) in f.lines().enumerate() {
+                // Under its first line, hanging: the repo's name stands out.
+                let text = crate::text::wrap(l.trim_start(), "    ", width);
+                println!("{}", if i == 0 { &text[2..] } else { &text });
+            }
+        }
         if !p.cfg.ports.is_empty() {
             let ports: Vec<String> = p
                 .cfg
@@ -1043,7 +1066,7 @@ fn start_gate(
     // The vault makes the env's folder of sockets, which the gate mounts, as it binds the env.
     // With a running gate this comes before `apply_policy` (`sync::bind_vault`).
     sync::bind_vault(ctx, env, state, &p.compiled)?;
-    let launch = start_or_create(ctx, &gate_spec(ctx, env, p, &a), image_id, true)?;
+    let launch = start_or_create(ctx, &gate_spec(ctx, env, p, &a), image_id, None)?;
     if launch == Launch::Created {
         remove_old_vault_net(ctx);
     }
@@ -1072,12 +1095,10 @@ fn start_gate(
     // Credentials failing to unlock must not block the env: credentialed hosts fail closed
     // ("credentials locked") until `luoto vault unlock` succeeds.
     if let Err(e) = sync::load_secrets(ctx, &p.compiled.vault_refs(), &format!("`{env}`"), true) {
-        crate::progress::say(|| {
-            eprintln!(
-                "warning: {e:#}\n         their hosts return 403 until then; once it is fixed, \
-             `luoto up -e {env}` loads them"
-            )
-        });
+        crate::progress::warn(&format!(
+            "{e:#}; their hosts return 403 until then, and once it is fixed `luoto up -e {env}` \
+             loads them"
+        ));
     }
     Ok(launch)
 }
@@ -1124,9 +1145,7 @@ fn dev_spec(ctx: &Ctx, env: &str, p: &Plan, state: &EnvState, tools_id: &str) ->
         cfg.resources.oci_runtime.clone()
     };
     if gvisor && (cfg.resources.memory.is_some() || cfg.resources.cpus.is_some()) {
-        crate::progress::say(|| {
-            eprintln!("warning: memory and CPU limits don't apply to gVisor envs (rootless podman)")
-        });
+        crate::progress::warn("memory and CPU limits don't apply to gVisor envs (rootless podman)");
     }
     Ok(RunSpec {
         hostname: Some(env.into()),
@@ -1222,7 +1241,7 @@ fn start_dev(
     let _waiting = crate::progress::waiting("starting the dev container");
     let rt = &ctx.rt;
     let spec = dev_spec(ctx, env, p, state, &ids.tools)?;
-    let mut launch = start_or_create(ctx, &spec, &ids.dev, false)?;
+    let mut launch = start_or_create(ctx, &spec, &ids.dev, Some(env))?;
     // On Apple the watcher joins the dev container's tun link to the gate: init.sh needs it
     // before it can finish.
     if rt.flavor == Flavor::Apple {
@@ -1304,9 +1323,7 @@ fn after_start(
         .filter(|u| ssh::valid_user(u))
         .map(str::to_string);
     if user.is_none() && reported.is_some_and(|u| !u.is_empty()) {
-        crate::progress::say(|| {
-            eprintln!("warning: the env reported an invalid login name; SSH uses `dev`")
-        });
+        crate::progress::warn("the env reported an invalid login name; SSH uses `dev`");
     }
     if state.user != user {
         EnvState::update(&ctx.paths, env, |s| s.user = user)?;
@@ -1321,7 +1338,7 @@ fn after_start(
     };
     crate::agents::configure(ctx, env, &p.cfg, None, write)?;
     if let Err(e) = ssh::authorize(ctx, env) {
-        crate::progress::say(|| eprintln!("warning: SSH access not set up ({e:#})"));
+        crate::progress::warn(&format!("SSH access not set up ({e:#})"));
     }
     ssh::write_config(ctx)?;
     Ok(())

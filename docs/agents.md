@@ -24,7 +24,10 @@ them. Then luoto:
   tells it that egress is filtered and how to ask you for access;
 - registers the sandbox MCP server (`sandbox mcp`), so it can read the policy and file access
   requests;
-- sets the variables that turn off its auto-update and telemetry where it has them.
+- sets the variables that turn off its auto-update and telemetry where it has them;
+- adds hooks, beside your own, that report its state to the terminal as OSC 7501 (the Program
+  Status Protocol, which terminals and agent managers that show agents' status read and
+  others ignore): Claude Code reports working, blocked on you and done; Codex, done.
 
 Model and effort, credentials without the prompt and your own settings in every env:
 [guides/agent-settings.md](guides/agent-settings.md).

@@ -90,8 +90,17 @@ export function say(text: string, error = false): void {
 export const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 export const copyText = (text: string): void => {
-  void navigator.clipboard.writeText(text).then(() => say(`copied: ${text}`));
+  // The clipboard API is missing outside a secure context, and a browser can deny the write.
+  void Promise.resolve()
+    .then(() => navigator.clipboard.writeText(text))
+    .then(
+      () => say(`copied: ${text}`),
+      () => say(`the browser denied the clipboard: select and copy ${text}`, true),
+    );
 };
+
+/** A count and its noun: `1 file`, `3 files`. */
+export const plural = (n: number, word: string): string => `${n} ${n === 1 ? word : `${word}s`}`;
 
 function failed(e: unknown): void {
   if (e instanceof ApiError && e.status === 401) {
@@ -204,6 +213,8 @@ export async function busyWhile<T>(
   onRisks?: (risks: string[]) => void,
 ): Promise<T | null> {
   app.busy = label;
+  // The outcome of an earlier action no longer describes what is on screen.
+  app.status = null;
   try {
     return await fn();
   } catch (e) {
@@ -233,6 +244,28 @@ export const act = <T>(
     },
     onRisks,
   );
+
+export type VaultAction = "unlock" | "lock" | "reload";
+
+/** Unlock, lock or reload the vault, report what came of it, and refresh the vault view. */
+export const vaultAction = async (action: VaultAction): Promise<void> => {
+  if (action === "reload") {
+    const r = await act("reading secrets again… (your secret store may ask)", api.reloadVault);
+    if (r) {
+      const failed = r.failed.length ? `; not read: ${r.failed.join("; ")}` : "";
+      say(`read ${r.read}: ${r.changed} changed${failed}`, r.failed.length > 0);
+    }
+  } else if (action === "unlock") {
+    await act(
+      "unlocking… (your secret store may ask to authorize)",
+      () => api.vault("unlock"),
+      "vault unlocked",
+    );
+  } else {
+    await act("locking…", () => api.vault("lock"), "vault locked; credentialed hosts now get 403");
+  }
+  if (app.view === "vault") await refreshVault();
+};
 
 /** Poll as a fallback and refresh promptly on live events. Returns a stop function. */
 export function startSync(): () => void {

@@ -436,7 +436,8 @@ fn compile_provider(
     }
     if server_tools && !p.server_tools.is_empty() {
         b.warnings.push(format!(
-            "{pname}: server_tools lets {pname} fetch URLs and call MCP servers for the sandbox"
+            "{pname}'s servers fetch URLs and call MCP servers for the env, past the gate \
+             (server_tools)"
         ));
     } else if !server_tools {
         for t in &p.server_tools {
@@ -470,8 +471,7 @@ fn compile_provider(
         // A provider with no credential the gate could add has no other way; `agent add` said so.
         if !p.auth.is_empty() {
             b.warnings.push(format!(
-                "{pname}: login_inside keeps the {pname} credential inside the sandbox (reduced \
-                 assurance)"
+                "the {pname} login is kept inside the env, where code in the env can read it"
             ));
         }
         return Ok(());
@@ -778,8 +778,9 @@ fn compile_github(b: &mut Builder, creds: &[GithubCred]) -> Result<Option<Github
     for t in creds.iter().filter_map(|c| c.token.as_deref()) {
         if !tokens.insert(t) {
             b.warnings.push(format!(
-                "credentials.github: two credentials use {t}; one listing all their repos lets \
-                 GraphQL (`gh pr create`) reach every one of them"
+                "GitHub: two credentials use {}; one listing all their repos lets \
+                 GraphQL (`gh pr create`) reach every one of them",
+                crate::secrets::shown_ref(t)
             ));
         }
     }
@@ -1505,9 +1506,8 @@ fn compile_azure_identity(b: &mut Builder, c: &AzureCred) -> Result<AzureIdentit
     }
     if c.access == AccessLevel::Write && own_login {
         b.warnings.push(
-            "credentials.azure: access = \"write\" with your own az login lets code in the env \
-             change whatever your Azure roles allow; a service principal with a narrow role \
-             keeps it smaller"
+            "Azure write access with your own az login lets code in the env change whatever \
+             your Azure roles allow; a service principal with a narrow role keeps it smaller"
                 .into(),
         );
     }

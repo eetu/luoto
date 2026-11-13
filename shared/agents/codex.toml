@@ -11,6 +11,14 @@ tools = { node = "lts" }
 briefing = ["~/.codex/AGENTS.md"]
 mcp = "codex"
 
+# Its state for its terminal (OSC 7501): done at the end of a turn, through Codex's `notify`,
+# which takes one program; a `notify` of the user's own stays.
+[[status]]
+file = "~/.codex/config.toml"
+path = ["notify"]
+if_absent = true
+value = ["/opt/luoto/bin/sandbox", "state", "done", "--app", "codex"]
+
 [settings.model]
 file = "~/.codex/config.toml"
 path = ["model"]

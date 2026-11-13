@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from "$lib/api";
-  import { act, app, busyWhile, say } from "$lib/stores/app.svelte";
+  import CopyCommand from "$lib/components/CopyCommand.svelte";
+  import { act, app, busyWhile, plural, say } from "$lib/stores/app.svelte";
   import type { PullPlans } from "$lib/types";
 
   // The env's folder (or the remote its workspace is cloned from, in the env) and its repos,
@@ -34,13 +35,14 @@
     pull = null;
     if (!result) return;
     say(
-      `wrote ${result.written} file(s)${result.skipped ? `, skipped ${result.skipped} risky` : ""}`,
+      `wrote ${plural(result.written, "file")}${result.skipped ? `, skipped ${result.skipped} risky` : ""}`,
     );
   }
 
   const entries = $derived(pull?.plans.flatMap((p) => p.entries) ?? []);
   const anyRisky = $derived(entries.some((e) => e.risky));
   const anySafe = $derived(entries.some((e) => !e.risky));
+  const stopped = $derived(d?.dev !== "running");
 </script>
 
 <div class="section">
@@ -52,9 +54,10 @@
       {#if row?.branch}<span class="muted">({row.branch})</span>{/if}
     </p>
     <p class="small muted">
-      in the env, with nothing on this machine: its work leaves by git push, or
-      <code>luoto pull --to &lt;new folder&gt;</code>
+      in the env, with nothing on this machine: its work leaves by git push, or a copy to a new
+      folder:
     </p>
+    <CopyCommand cmd={`luoto pull -e ${app.env} --to <new folder>`} />
   {:else}
     <p class="label">folder</p>
     <p class="small path">{dir ?? "none"}</p>
@@ -75,9 +78,16 @@
     {/each}
   {/if}
 
-  {#if dir && d?.dev === "running"}
-    {#if !pull}
-      <button class="btn" onclick={review}>pull changes…</button>
+  {#if dir}
+    {#if !pull || stopped}
+      <div class="actions">
+        <button
+          class="btn"
+          onclick={review}
+          disabled={stopped || !!app.busy}
+          title={stopped ? "start the env first" : undefined}>Pull changes…</button
+        >
+      </div>
     {:else}
       <div class="plan">
         {#if entries.length === 0}
@@ -122,10 +132,10 @@
           <button
             class="btn primary"
             onclick={apply}
-            disabled={!anySafe && !(includeRisky && anyRisky)}
-            >write to {pull.plans.length > 1 ? "folders" : "folder"}</button
+            disabled={(!anySafe && !(includeRisky && anyRisky)) || !!app.busy}
+            >Write to {pull.plans.length > 1 ? "folders" : "folder"}</button
           >
-          <button class="btn" onclick={() => (pull = null)}>cancel</button>
+          <button class="btn" onclick={() => (pull = null)}>Cancel</button>
         </div>
       </div>
     {/if}

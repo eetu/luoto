@@ -5,6 +5,7 @@
 
   // The button sits in the env header's action row; the report wraps onto its own line.
   let report = $state<SelftestReport | null>(null);
+  const stopped = $derived(app.detail?.dev !== "running");
 
   async function run() {
     const env = app.env;
@@ -16,11 +17,16 @@
   }
 </script>
 
-<button class="btn" onclick={run} disabled={app.detail?.dev !== "running"}>self-test</button>
+<button
+  class="btn"
+  onclick={run}
+  disabled={stopped || !!app.busy}
+  title={stopped ? "start the env first" : undefined}>Self-test</button
+>
 {#if report}
   <ul class="checks">
     {#each report.checks as c, n (n)}
-      <li class:fail={!c.ok}>
+      <li class:error={!c.ok}>
         <b>{c.ok ? "ok" : "FAIL"}</b>
         {c.name} <span class="muted">{c.detail}</span>
       </li>
@@ -35,9 +41,5 @@
     padding: 0;
     list-style: none;
     font-size: 12px;
-  }
-
-  .fail {
-    color: var(--halo-error);
   }
 </style>

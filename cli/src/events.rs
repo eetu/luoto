@@ -90,6 +90,11 @@ fn in_window(rt: &Runtime, cut: Option<DateTime<Utc>>, e: &Event) -> bool {
     rt.flavor != Flavor::Apple || cut.is_none_or(|c| e.ts.is_none_or(|t| t >= c))
 }
 
+/// What a stopped gate whose events are in its file means for reading them.
+pub fn gate_down(env: &str) -> String {
+    format!("`{env}`'s gate isn't running: its events show once it is (`luoto up -e {env}`)")
+}
+
 pub fn gate_events(rt: &Runtime, env: &str, since: Option<&str>) -> Result<Vec<Event>> {
     let _waiting = crate::progress::waiting("reading the gate's log");
     let container = &names::gate(env);
@@ -101,9 +106,7 @@ pub fn gate_events(rt: &Runtime, env: &str, since: Option<&str>) -> Result<Vec<E
         .context("read logs")?;
     if in_file(rt, container) && !out.status.success() {
         if rt.container_state(container).as_deref() != Some("running") {
-            bail!(
-                "`{env}`'s gate isn't running, and its events show once it is (`luoto up -e {env}`)"
-            );
+            bail!("{}", gate_down(env));
         }
         bail!(
             "reading {container}'s events failed: {}",

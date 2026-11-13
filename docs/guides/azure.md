@@ -4,7 +4,8 @@
 on your subscriptions while the tokens stay outside the sandbox. To them the env looks like an
 Azure VM with a managed identity: the gate answers the instance metadata service
 (`169.254.169.254`) itself and hands out placeholder tokens, then puts the real token on the
-requests to Azure that the env is allowed to make.
+requests to Azure that the env is allowed to make. Other clouds' APIs (Hetzner, UpCloud,
+DigitalOcean, Cloudflare): [Cloud APIs](cloud-apis.md).
 
 ## Set it up
 
@@ -163,8 +164,9 @@ What it reads does reach the sandbox: Key Vault secret values, blobs, and with w
   `--tenant` if you set one) on your machine, then `luoto vault reload -e <env>` or `luoto up`.
 - **`gave no answer within 30 s`**: `az account get-access-token` hung on your machine and was
   stopped; run it yourself to see why.
-- **401 from Azure after the laptop slept**: the token expired while the watcher wasn't
-  running. It is read again within a minute; `luoto vault reload` does it at once.
+- **401 from Azure after the laptop slept**: the token expired while the background watcher
+  wasn't running (`luoto logs watcher`). It is read again within a minute; `luoto vault
+  reload` does it at once.
 - **403 with `AuthorizationFailed`** in the body (JSON from Azure): Azure's RBAC refused the
   identity, not luoto. Give it a role on that scope, or use an identity that has one. A 403
   from luoto has the header `x-proxy-error: blocked-by-luoto` and says why in plain text.

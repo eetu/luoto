@@ -519,7 +519,25 @@ fn present(ctx: &Ctx, env: &str, names: &[&str]) -> Result<BTreeSet<String>> {
 /// Copy in or clone each of `ws`'s repos that isn't in `done`, and return the names now in
 /// the workspace. One the workspace has a folder for already is left as it is. A repo that
 /// fails is a warning, and the next `up` tries it again.
-pub fn seed(ctx: &Ctx, env: &str, ws: &Workspace, done: &BTreeSet<String>) -> BTreeSet<String> {
+/// The env's repos after [`seed`]: those in place, and why each of the others isn't, as
+/// `name: why` with the command that fixes it.
+pub struct Seeded {
+    pub done: BTreeSet<String>,
+    pub failed: Vec<String>,
+}
+
+impl Seeded {
+    /// Each failure as a warning, for a command whose own summary doesn't list them.
+    pub fn warn(&self) {
+        for f in &self.failed {
+            crate::progress::warn(&format!("repo {f}"));
+        }
+    }
+}
+
+pub fn seed(ctx: &Ctx, env: &str, cfg: &EnvConfig, done: &BTreeSet<String>) -> Seeded {
+    let ws = &cfg.workspace;
+    let mut failed = Vec::new();
     let mut now: BTreeSet<String> = done
         .iter()
         .filter(|n| ws.repos.contains_key(*n))
@@ -531,14 +549,17 @@ pub fn seed(ctx: &Ctx, env: &str, ws: &Workspace, done: &BTreeSet<String>) -> BT
         .filter(|(n, _)| !done.contains(*n))
         .collect();
     if pending.is_empty() {
-        return now;
+        return Seeded { done: now, failed };
     }
     let names: Vec<&str> = pending.iter().map(|(n, _)| n.as_str()).collect();
     let found = match present(ctx, env, &names) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("warning: repos not set up ({e:#}); `luoto up -e {env}` tries again");
-            return now;
+            failed.push(format!(
+                "{}: not set up ({e:#}); `luoto up -e {env}` tries again",
+                names.join(", ")
+            ));
+            return Seeded { done: now, failed };
         }
     };
     let locked = pending.iter().any(|(_, r)| r.url.is_some()) && creds_locked(ctx, env);
@@ -548,11 +569,11 @@ pub fn seed(ctx: &Ctx, env: &str, ws: &Workspace, done: &BTreeSet<String>) -> BT
     let own = own_entries(ctx, env, ws);
     for (name, r) in pending {
         if own.contains(&name.to_lowercase()) {
-            eprintln!(
-                "warning: repo {name}: the env's {} has its own `{name}`, so the repo is left \
-                 out; give it another name",
+            failed.push(format!(
+                "{name}: left out, as the env's {} has its own `{name}`; give the repo another \
+                 name",
                 if ws.dir.is_some() { "folder" } else { "clone" }
-            );
+            ));
             continue;
         }
         if found.contains(name) {
@@ -567,7 +588,7 @@ pub fn seed(ctx: &Ctx, env: &str, ws: &Workspace, done: &BTreeSet<String>) -> BT
         let result = match (&r.dir, &r.url) {
             (Some(dir), _) => copy_in(ctx, env, ws, name, dir),
             (None, Some(url)) if waits(env, url) => continue,
-            (None, Some(url)) => clone(ctx, env, name, url, r.branch.as_deref(), locked),
+            (None, Some(url)) => clone(ctx, env, name, url, r.branch.as_deref(), locked, cfg),
             (None, None) => continue,
         };
         match result {
@@ -575,13 +596,15 @@ pub fn seed(ctx: &Ctx, env: &str, ws: &Workspace, done: &BTreeSet<String>) -> BT
                 now.insert(name.clone());
                 added.push(name.as_str());
             }
-            Err(e) => eprintln!("warning: repo {name}: {e:#}"),
+            Err(e) => failed.push(format!("{name}: {e:#}")),
         }
     }
     if let Err(e) = exclude_from_folder(ctx, env, &added) {
-        eprintln!("warning: repos not added to the folder's .git/info/exclude ({e:#})");
+        crate::progress::warn(&format!(
+            "repos not added to the folder's .git/info/exclude ({e:#})"
+        ));
     }
-    now
+    Seeded { done: now, failed }
 }
 
 /// Whether some of the env's credentials didn't load (the vault is locked, or a reference
@@ -667,6 +690,7 @@ pub fn clone_workspace(
     url: &str,
     branch: Option<&str>,
     locked: bool,
+    cfg: &EnvConfig,
 ) -> Result<()> {
     let what = format!(
         "cloning {}{} into the env",
@@ -694,12 +718,13 @@ pub fn clone_workspace(
              `luoto up -e {env}`"
         );
     }
-    clone_failed(env, url, status.success(), locked)
+    clone_failed(env, url, status.success(), locked, cfg)
 }
 
 /// Why a clone of `url` failed, and what to run next: unlock the env's credentials, or give
-/// the repo access, then `up` again.
-fn clone_failed(env: &str, url: &str, ok: bool, locked: bool) -> Result<()> {
+/// the repo access, then `up` again. With a credential for the repo, the remote refused it:
+/// a token for another forge or account, or one that expired.
+fn clone_failed(env: &str, url: &str, ok: bool, locked: bool, cfg: &EnvConfig) -> Result<()> {
     if ok {
         return Ok(());
     }
@@ -710,6 +735,13 @@ fn clone_failed(env: &str, url: &str, ok: bool, locked: bool) -> Result<()> {
         );
     }
     let repo = forge_repo(url).map_or_else(|| display(url), |(_, r)| display(&r));
+    if uncovered(&[url.to_string()], &cfg.credentials).is_empty() && !is_ssh(url) {
+        bail!(
+            "the remote refused the env's credential for {repo}: a token for another forge or \
+             account, or one that expired\n`luoto repo auth -e {env} {repo}` gives it another, \
+             then `luoto up -e {env}`"
+        );
+    }
     bail!(
         "git clone failed\n  if private, a token: `luoto repo auth -e {env} {repo}`\n  what the \
          gate blocked: `luoto egress -e {env} --denied --since 10m`\n  `luoto up -e {env}` tries \
@@ -870,6 +902,7 @@ fn clone(
     url: &str,
     branch: Option<&str>,
     locked: bool,
+    cfg: &EnvConfig,
 ) -> Result<()> {
     let what = format!("cloning {} into /workspace/{name}", display(url));
     // No prompts: a remote that wants a password or an unknown host key fails instead.
@@ -896,7 +929,7 @@ fn clone(
                 .argv(["sh", "-c", connect::LOGIN, &script]),
         )
     })?;
-    clone_failed(env, url, status.success(), locked)
+    clone_failed(env, url, status.success(), locked, cfg)
 }
 
 /// Keep the repos out of `git status` in the env's folder when it is a repository itself (a
@@ -1138,8 +1171,8 @@ fn hint(
     };
     Some(format!(
         "Public repos need none of these. For a private one, or to push from the env, give it \
-         HTTPS credentials (`luoto repo auth -e {env} <repo>` on a terminal, or `luoto edit -e \
-         {env}`); each reaches only the repos it lists:\n\n{}{ssh_note}",
+         HTTPS credentials (`luoto repo auth -e {env} <repo>` on a terminal); each reaches only \
+         the repos it lists:\n\n{}{ssh_note}",
         blocks
             .iter()
             .map(|b| format!("  {}", b.replace('\n', "\n  ")))
@@ -1263,6 +1296,14 @@ impl Forge {
         match self {
             Forge::Github(_) => "GitHub".into(),
             Forge::Azure(_) => "Azure DevOps".into(),
+            Forge::Git(h) => display(h),
+        }
+    }
+
+    /// The forge account, as people name it: "GitHub acme", "Azure DevOps org", a host.
+    fn account(&self) -> String {
+        match self {
+            Forge::Github(o) | Forge::Azure(o) => format!("{} {}", self.name(), display(o)),
             Forge::Git(h) => display(h),
         }
     }
@@ -1408,15 +1449,16 @@ fn access_of(
         .then_some((Access::Public, None))
 }
 
-/// The closing summary of a repo's access step.
+/// The closing summary of a repo's access step; `replaced`, the token it had before.
 fn access_summary(
     env: &str,
     forge: &Forge,
     repo: &str,
     now: Option<&(Access, Option<String>)>,
+    replaced: Option<&str>,
 ) -> String {
     let token = |t: &Option<String>| match (t, forge) {
-        (Some(t), _) => format!("token {}", crate::secrets::shown_ref(t)),
+        (Some(t), _) => format!("token {}", crate::wizard::shown_ref(t)),
         (None, Forge::Github(_)) => "with the GitHub App".into(),
         (None, _) => "no token".into(),
     };
@@ -1427,12 +1469,60 @@ fn access_summary(
         Some((Access::Push, t)) => format!("read and push, {}", token(t)),
     };
     let repo = display(repo);
-    crate::prompt::summary(
-        &repo,
-        &[
-            ("access", access),
-            ("change it", format!("luoto repo auth -e {env} {repo}")),
-        ],
+    let mut rows = vec![("access", access)];
+    if let Some(r) = replaced {
+        rows.push(("replaces", format!("token {}", crate::wizard::shown_ref(r))));
+    }
+    rows.push(("change it", format!("luoto repo auth -e {env} {repo}")));
+    crate::prompt::summary(&repo, &rows)
+}
+
+/// The token `before` had that `after` replaced: a token gone for another, not one added or
+/// dropped.
+fn replaced<'a>(
+    before: Option<&'a (Access, Option<String>)>,
+    after: Option<&(Access, Option<String>)>,
+) -> Option<&'a str> {
+    let old = before?.1.as_deref()?;
+    let new = after?.1.as_deref()?;
+    (old != new).then_some(old)
+}
+
+/// A GitHub token's documented prefixes (fine-grained, classic, OAuth, user-to-server,
+/// server-to-server, refresh).
+const GITHUB_TOKEN: crate::wizard::Shape<'static> = crate::wizard::Shape {
+    what: "a GitHub token",
+    prefixes: &["github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"],
+    hint: "github_pat_ or ghp_",
+};
+
+/// The line before the first repo's question when there are several: how many, by account.
+fn overview(needs: &BTreeMap<Forge, Vec<String>>) -> Option<String> {
+    let total: usize = needs.values().map(Vec::len).sum();
+    if total < 2 {
+        return None;
+    }
+    let accounts: Vec<String> = needs
+        .iter()
+        .map(|(f, r)| format!("{} ({})", f.account(), r.len()))
+        .collect();
+    Some(format!(
+        "{total} repos need access: {}",
+        accounts.join(", ")
+    ))
+}
+
+/// The line before a repo's question in [`ask_missing`]: `n` of `total`, when there are several.
+fn missing_line(n: usize, total: usize, repo: &str, forge: &Forge, note: &str) -> String {
+    let count = if total > 1 {
+        format!("({n}/{total}) ")
+    } else {
+        String::new()
+    };
+    format!(
+        "{count}{} ({}{note}) has no credential, so the env can only fetch it if it is public.",
+        display(repo),
+        forge.name()
     )
 }
 
@@ -1635,7 +1725,10 @@ fn known_tokens(creds: &Credentials, forge: &Forge) -> Vec<(String, String)> {
                     .chain(&c.read_repos)
                     .filter_map(|r| r.split('/').next())
                     .collect();
-                offer(owners.into_iter().collect::<Vec<_>>().join(", "), &c.token);
+                offer(
+                    owners.into_iter().collect::<Vec<_>>().join(" and "),
+                    &c.token,
+                );
             }
         }
         // Another host's token would go to this host's server.
@@ -1662,19 +1755,38 @@ pub(crate) fn ask_repo(
     repo: &str,
     mode: Mode,
 ) -> Result<bool> {
+    Ok(matches!(
+        ask_repo_step(ctx, env, forge, repo, mode, false)?,
+        Step::Got(true)
+    ))
+}
+
+/// [`ask_repo`]; with `back`, another repo's question came before this one, so Esc at its
+/// first question is `Back` instead of "later".
+fn ask_repo_step(
+    ctx: &Ctx,
+    env: &str,
+    forge: &Forge,
+    repo: &str,
+    mode: Mode,
+    back: bool,
+) -> Result<Step<bool>> {
     let f = EnvFile::load(&ctx.paths, env)?;
     let now = access_of(&f.cfg.credentials, &declined(ctx, env), forge, repo);
-    let later = || -> Result<bool> {
+    let later = || -> Result<Step<bool>> {
         if let Ok(mut s) = LATER.lock() {
             s.insert(forge.key(repo));
         }
-        println!("{}", access_summary(env, forge, repo, None));
-        Ok(false)
+        println!("{}", access_summary(env, forge, repo, None, None));
+        Ok(Step::Got(false))
     };
     // Back from where its token is kept, the menu opens on what was picked.
     let mut picked: Option<Access> = None;
     loop {
         let mut q = access_question(forge, repo, now.as_ref().map(|n| n.0), mode);
+        if back {
+            q.help = menu_help("back");
+        }
         if let Some(i) = q
             .rows
             .iter()
@@ -1688,10 +1800,11 @@ pub(crate) fn ask_repo(
                 a
             }
             Some(None) => return later(),
+            None if back => return Ok(Step::Back),
             None if mode == Mode::Missing => return later(),
             None => {
                 println!("unchanged");
-                return Ok(false);
+                return Ok(Step::Got(false));
             }
         };
         let mut f = EnvFile::load(&ctx.paths, env)?;
@@ -1703,17 +1816,19 @@ pub(crate) fn ask_repo(
         let (have, app) = account_token(&f.cfg.credentials, forge);
         let token = if access == Access::Public || app {
             None
-        } else if mode == Mode::Missing && have.is_some() {
-            println!(
-                "  the {} credential you have now reaches {} too, with its token",
+        } else if let Some(t) = have.as_deref().filter(|_| mode == Mode::Missing) {
+            let line = format!(
+                "the {} credential you have now reaches {} too, with its token {}",
                 forge.name(),
-                display(repo)
+                display(repo),
+                crate::wizard::shown_ref(t)
             );
+            println!("{}", text::wrap(&line, "  ", text::columns()));
             None
         } else {
             let read = access == Access::Read;
             let (label, acct, how) = token_ask(forge, repo, read);
-            println!("{}", text::wrap(&display(&how), "  ", text::columns()));
+            let mut how = text::wrap(&display(&how), "  ", text::columns());
             let shared = token_shared_with(&f.cfg.credentials, forge, repo);
             if !shared.is_empty() {
                 let note = format!(
@@ -1722,7 +1837,7 @@ pub(crate) fn ask_repo(
                     forge.name(),
                     shared.join(", ")
                 );
-                println!("{}", text::wrap(&note, "  ", text::columns()));
+                how = format!("{how}\n{}", text::wrap(&note, "  ", text::columns()));
             }
             let title = format!("luoto {label}");
             let known = known_tokens(&f.cfg.credentials, forge);
@@ -1736,6 +1851,8 @@ pub(crate) fn ask_repo(
                 current: have.as_deref(),
                 help: &help,
                 kind: None,
+                how: Some(&how),
+                shape: matches!(forge, Forge::Github(_)).then_some(GITHUB_TOKEN),
             };
             match crate::wizard::secret(&ask, &ctx.global)? {
                 Step::Got(crate::wizard::Secret::Ref(r)) => Some(r),
@@ -1749,21 +1866,27 @@ pub(crate) fn ask_repo(
             .as_ref()
             .is_some_and(|(a, t)| *a == access && (token.is_none() || *t == token))
         {
-            println!("{}", access_summary(env, forge, repo, now.as_ref()));
-            return Ok(false);
+            println!("{}", access_summary(env, forge, repo, now.as_ref(), None));
+            return Ok(Step::Got(false));
         }
         let public = access == Access::Public && !matches!(forge, Forge::Git(_));
         set_declined(ctx, env, &forge.key(repo), public)?;
         write_access(&mut f, forge, repo, access, token.as_deref(), &git)?;
+        // Answered now, so `up` clones it after all.
+        if let Ok(mut s) = LATER.lock() {
+            s.remove(&forge.key(repo));
+        }
         let after = access_of(&f.cfg.credentials, &declined(ctx, env), forge, repo);
-        println!("{}", access_summary(env, forge, repo, after.as_ref()));
-        return Ok(true);
+        let was = replaced(now.as_ref(), after.as_ref());
+        println!("{}", access_summary(env, forge, repo, after.as_ref(), was));
+        return Ok(Step::Got(true));
     }
 }
 
 /// For each repo no credential covers: on a terminal, ask what the env may do with it (and
 /// for a private one, where its token is kept) and write it into the env's config, or note it
-/// as public so it isn't asked again; without one, say what to add. Whether the config
+/// as public so it isn't asked again; without one, say what to add. Esc at a repo after the
+/// first goes back to the one before, asked again from what it has now. Whether the config
 /// changed.
 pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
     let all = remotes(&cfg.workspace);
@@ -1790,23 +1913,39 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
         &own_ws.url.iter().map(|u| clone_url(u)).collect::<Vec<_>>(),
         &cfg.credentials,
     );
+    if let Some(o) = overview(&needs) {
+        println!("\n{}", text::wrap(&o, "", text::columns()));
+    }
+    let items: Vec<(Forge, String)> = needs
+        .into_iter()
+        .flat_map(|(f, repos)| repos.into_iter().map(move |r| (f.clone(), r)))
+        .collect();
+    let total = items.len();
     let mut changed = false;
-    for (forge, repos) in needs {
-        for repo in repos {
-            let note = if !own.get(&forge).is_some_and(|o| o.contains(&repo)) {
-                ", named by the project's luoto.toml"
-            } else if cloned_from.get(&forge).is_some_and(|w| w.contains(&repo)) {
-                ", the env is cloned from it"
-            } else {
-                ""
-            };
-            let line = format!(
-                "{} ({}{note}) has no credential, so the env can only fetch it if it is public.",
-                display(&repo),
-                forge.name()
-            );
-            println!("\n{}", text::wrap(&line, "", text::columns()));
-            changed |= ask_repo(ctx, env, &forge, &repo, Mode::Missing)?;
+    let mut i = 0;
+    while let Some((forge, repo)) = items.get(i) {
+        let note = if !own.get(forge).is_some_and(|o| o.contains(repo)) {
+            ", named by the project's luoto.toml"
+        } else if cloned_from.get(forge).is_some_and(|w| w.contains(repo)) {
+            ", the env is cloned from it"
+        } else {
+            ""
+        };
+        let line = missing_line(i + 1, total, repo, forge, note);
+        println!("\n{}", text::wrap(&line, "", text::columns()));
+        match ask_repo_step(ctx, env, forge, repo, Mode::Missing, i > 0)? {
+            Step::Got(c) => {
+                changed |= c;
+                i += 1;
+            }
+            // The one before, from what it has now; then this one again.
+            Step::Back => {
+                let Some((prev, prev_repo)) = i.checked_sub(1).and_then(|p| items.get(p)) else {
+                    continue;
+                };
+                println!("\nback to {} ({i}/{total})", display(prev_repo));
+                changed |= ask_repo(ctx, env, prev, prev_repo, Mode::Change)?;
+            }
         }
     }
     Ok(changed)
@@ -1837,7 +1976,7 @@ pub fn add(
     let repo = match &src {
         Source::Folder(d) => {
             if branch.is_some() {
-                bail!("--branch is for remotes; a folder is copied as it is");
+                bail!("--branch is for a remote; a folder is copied as it is");
             }
             check_folder(f.cfg.workspace.dir.as_deref(), d)?;
             Repo {
@@ -1874,8 +2013,9 @@ pub fn add(
         let done = EnvState::load(&ctx.paths, env_name)?
             .map(|s| s.repos)
             .unwrap_or_default();
-        let now = seed(&ctx, env_name, &cfg.workspace, &done);
-        EnvState::update(&ctx.paths, env_name, |s| s.repos = now)?;
+        let now = seed(&ctx, env_name, &cfg, &done);
+        now.warn();
+        EnvState::update(&ctx.paths, env_name, |s| s.repos = now.done)?;
     } else {
         println!(
             "`luoto up -e {env_name}` {} it",
@@ -1983,8 +2123,8 @@ pub fn auth(env_name: &str, which: &str) -> Result<ExitCode> {
     }
     if !crate::prompt::interactive() {
         bail!(
-            "repo auth needs a terminal; without one, `luoto edit -e {env_name}` sets a repo's \
-             access in its [credentials]"
+            "`luoto repo auth` asks on a terminal; without one, a repo's access is what the \
+             env's [credentials] give it"
         );
     }
     if !ask_repo(&ctx, env_name, &forge, &repo, Mode::Change)? {
@@ -2002,9 +2142,10 @@ pub fn auth(env_name: &str, which: &str) -> Result<ExitCode> {
     crate::sync::reapply(&ctx, env_name)?;
     let cfg = env::layered(&ctx, env_name)?;
     let done = state.map(|s| s.repos).unwrap_or_default();
-    let now = seed(&ctx, env_name, &cfg.workspace, &done);
-    if now != done {
-        EnvState::update(&ctx.paths, env_name, |s| s.repos = now)?;
+    let now = seed(&ctx, env_name, &cfg, &done);
+    now.warn();
+    if now.done != done {
+        EnvState::update(&ctx.paths, env_name, |s| s.repos = now.done)?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -2681,20 +2822,80 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
         let gh = Forge::Github("acme".into());
         let token = Some("keyring:luoto/github.acme".to_string());
         assert_eq!(
-            access_summary("web", &gh, "acme/api", Some(&(Access::Read, token.clone()))),
+            access_summary(
+                "web",
+                &gh,
+                "acme/api",
+                Some(&(Access::Read, token.clone())),
+                None
+            ),
             "acme/api\n  access       read, token keyring:luoto/github.acme\n  \
              change it    luoto repo auth -e web acme/api"
         );
         assert_eq!(
-            access_summary("web", &gh, "acme/api", Some(&(Access::Push, token))),
+            access_summary("web", &gh, "acme/api", Some(&(Access::Push, token)), None),
             "acme/api\n  access       read and push, token keyring:luoto/github.acme\n  \
              change it    luoto repo auth -e web acme/api"
         );
         assert!(
-            access_summary("web", &gh, "acme/api", Some(&(Access::Public, None)))
+            access_summary("web", &gh, "acme/api", Some(&(Access::Public, None)), None)
                 .contains("access       fetch only (public)\n")
         );
-        assert!(access_summary("web", &gh, "acme/api", None).contains("access       none yet\n"));
+        assert!(
+            access_summary("web", &gh, "acme/api", None, None).contains("access       none yet\n")
+        );
+    }
+
+    #[test]
+    fn a_new_token_names_the_one_it_replaces() {
+        let gh = Forge::Github("acme".into());
+        let old = (Access::Push, Some("env:OLD".to_string()));
+        let new = (Access::Push, Some("env:NEW".to_string()));
+        let was = replaced(Some(&old), Some(&new));
+        assert_eq!(was, Some("env:OLD"));
+        assert_eq!(
+            access_summary("web", &gh, "acme/api", Some(&new), was),
+            "acme/api\n  access       read and push, token env:NEW\n  \
+             replaces     token env:OLD\n  \
+             change it    luoto repo auth -e web acme/api"
+        );
+        // Kept, added or dropped: nothing replaced.
+        assert_eq!(replaced(Some(&old), Some(&old)), None);
+        assert_eq!(replaced(None, Some(&new)), None);
+        assert_eq!(replaced(Some(&old), Some(&(Access::Public, None))), None);
+    }
+
+    #[test]
+    fn several_repos_are_counted_by_account_before_the_first() {
+        let mut needs: BTreeMap<Forge, Vec<String>> = BTreeMap::new();
+        needs.insert(Forge::Azure("org".into()), vec!["org/p/r".into()]);
+        assert_eq!(overview(&needs), None);
+        needs.insert(
+            Forge::Github("acme".into()),
+            vec!["acme/api".into(), "acme/web".into()],
+        );
+        needs.insert(Forge::Github("beta".into()), vec!["beta/x".into()]);
+        assert_eq!(
+            overview(&needs).as_deref(),
+            Some("4 repos need access: GitHub acme (2), GitHub beta (1), Azure DevOps org (1)")
+        );
+        let gh = Forge::Github("acme".into());
+        assert_eq!(
+            missing_line(2, 4, "acme/web", &gh, ""),
+            "(2/4) acme/web (GitHub) has no credential, so the env can only fetch it if it is \
+             public."
+        );
+        assert!(missing_line(1, 1, "acme/web", &gh, "").starts_with("acme/web (GitHub)"));
+    }
+
+    #[test]
+    fn a_github_token_is_known_by_its_prefix() {
+        let fits = |v: &str| GITHUB_TOKEN.fits(v);
+        assert!(fits("github_pat_11ABC"));
+        assert!(fits("ghp_abc"));
+        assert!(fits("ghs_abc"));
+        // An Azure DevOps PAT has no such prefix.
+        assert!(!fits("3x7kq2abcdefghijklmnopqrstuvwxyz0123456789abcdefgh"));
     }
 
     #[test]

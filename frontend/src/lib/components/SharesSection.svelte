@@ -87,7 +87,7 @@
           class="btn"
           class:primary={changed > 0}
           disabled={app.busy !== null}
-          onclick={() => void sync(d.name)}>sync</button
+          onclick={() => void sync(d.name)}>Sync</button
         >
       </div>
       <p class="muted small">Read-only in the env; a change here reaches it at sync or start.</p>
@@ -118,9 +118,5 @@
 
   .changed {
     color: var(--halo-accent);
-  }
-
-  .error {
-    color: var(--halo-error);
   }
 </style>
