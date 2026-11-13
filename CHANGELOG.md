@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.5
+## 0.4.5 (2026-11-13)
 
 - **Clone failures:** listed last, after "is up", each with why and the command that fixes it.
   A clone the remote refused with the env's credential says so (a token for another forge or
