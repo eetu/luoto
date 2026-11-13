@@ -465,9 +465,13 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
     {
         bail!("aborted (`luoto rm -e {name} --yes` skips the question)");
     }
-    // Volumes live in the VM, which may have stopped on idle.
-    env::ensure_vm(&ctx)?;
-    env::remove(&ctx, name)?;
+    // Volumes live in the VM, which may have stopped on idle; a deleted VM took them along.
+    if machine::gone(&ctx.rt) {
+        env::forget(&ctx, name)?;
+    } else {
+        env::ensure_vm(&ctx)?;
+        env::remove(&ctx, name)?;
+    }
     crate::ssh::forget_host_key(&ctx, name)?;
     std::fs::remove_file(&cfg)?;
     crate::ssh::write_config(&ctx)?;

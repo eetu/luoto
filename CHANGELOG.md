@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.6
+
+- **A deleted VM:** `luoto rm` removes an env whose VM was deleted by hand (its containers and
+  volumes went with the VM); commands that start the VM name `luoto setup`, which creates it
+  again.
+
 ## 0.4.5 (2026-11-13)
 
 - **Clone failures:** listed last, after "is up", each with why and the command that fixes it.

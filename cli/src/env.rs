@@ -1465,6 +1465,11 @@ pub fn remove(ctx: &Ctx, env: &str) -> Result<()> {
             &luoto_shared::ctl::VaultCtl::Unbind { env: env.into() },
         );
     }
+    forget(ctx, env)
+}
+
+/// Delete what this machine keeps of the env: its state and its shares' clones.
+pub fn forget(ctx: &Ctx, env: &str) -> Result<()> {
     let state = ctx.paths.env_state(env);
     if state.exists() {
         std::fs::remove_dir_all(&state)?;

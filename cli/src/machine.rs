@@ -39,6 +39,12 @@ pub fn stopped(rt: &Runtime) -> bool {
     is_luoto(rt.connection.as_deref()) && !running(&rt.bin)
 }
 
+/// Whether the runtime is luoto's VM and the VM was deleted, taking every env's containers
+/// and volumes with it.
+pub fn gone(rt: &Runtime) -> bool {
+    is_luoto(rt.connection.as_deref()) && !exists(&rt.bin)
+}
+
 /// The oldest Apple `container` luoto runs on.
 pub const APPLE_MIN: (u32, u32, u32) = (1, 7, 1);
 
@@ -238,6 +244,9 @@ pub fn start(bin: &str, yes: bool) -> Result<()> {
     let all = machines(bin);
     if all.iter().any(|(n, r)| n == NAME && *r) {
         return Ok(());
+    }
+    if !all.iter().any(|(n, _)| n == NAME) {
+        bail!("luoto's VM `{NAME}` is gone: `luoto setup` creates it again");
     }
     if let Some((other, _)) = all.into_iter().find(|(n, r)| *r && n != NAME) {
         let ok = yes
