@@ -11,8 +11,8 @@ release (`packaging/README.md`). CI runs on pull requests (path-filtered) and we
 ## Layout
 
 ```text
-shared/      types + policy engine (no I/O but `tun`: the tun link, Linux-only, behind its feature;
-             `frame` frames its packets); presets/, agents/, providers/, editors/ are TOML data
+shared/      types + policy engine + zeroizing `ctl` framing/client (`tun`, Linux-only, behind its
+             feature; `frame` frames its packets); presets/, agents/, providers/, editors/ are TOML data
 gate/        luoto-gate: explicit proxy, TLS interception, DNS, transparent catch-all, ctl socket
 vault/       luoto-vault: in-memory secrets, per-env bindings, GitHub App token minting
 tools/       `sandbox` helper (status/check/request/relay/mcp/selftest, internal ssh-agent,
@@ -118,8 +118,12 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   only through a container in the env's user namespace (`env::dev_id_map`), never onto the
   host; secrets, the CA and the vault token never go in.
 - `ssh.rs` owns `<config>/ssh_config`; never edit the user's `~/.ssh/config`.
-- Secret values never touch disk or argv: host resolves refs and pipes them over `exec -i`
-  stdin to the vault. Per-run env for the sandbox goes to its `/run/luoto` tmpfs.
+- Secret values never touch disk or argv: host resolves refs into a zeroizing batch
+  (`secrets::ResolvedBatch`) and pipes them over `exec -i` stdin to the vault;
+  `luoto_shared::ctl` reads control lines and stdin into a single `Zeroizing` buffer
+  (`LineAccumulator`) that wipes on drop, error or `SIGTERM`/`SIGINT`, and the vault runs
+  undumpable (`PR_SET_DUMPABLE`) and wipes on `SIGTERM`/`SIGINT`. Per-run env for the sandbox
+  goes to its `/run/luoto` tmpfs.
 - `machine.rs` owns luoto's podman VM on macOS/Windows: no host mounts but the shares root
   (read-only, once a share needs it), a subordinate ID range per env, gVisor plus the `luoto-runsc` wrapper (podman keeps a container's runtime path but
   not its flags). The remote podman client can't choose a runtime, so gVisor containers are

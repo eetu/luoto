@@ -43,8 +43,11 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   sandbox, and `luoto import` lists it.
 - **Path matching.** A path is matched and forwarded in one canonical form; dot segments, empty
   segments and backslashes are refused.
-- **Secrets.** Root secrets live only in the vault's memory, loaded from the host's secret
-  store at unlock and wiped by `luoto vault lock` or a VM restart. `luoto vault reload` reads
+- **Secrets.** Root secrets live only in the vault's memory (`PR_SET_DUMPABLE` off from
+  start), held with the tokens minted from them in volatile-zeroized buffers, loaded from the
+  host's secret store at unlock and wiped by `luoto vault lock`, `SIGTERM`/`SIGINT` or a VM
+  restart; the host and the `ctl` sockets read them through buffers that zeroize on drop,
+  error or signal. `luoto vault reload` reads
   them again; one an upstream refuses (401) is read again on its own, at most every 10
   minutes, when its source needs no one (the keychain, a 1Password service account, `file:`,
   Vault, `az`). Those background reads only replace what the vault holds, so a locked vault

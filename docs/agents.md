@@ -42,14 +42,17 @@ keeps it in memory, and the gate adds it to the agent's requests to that provide
 sees a placeholder of the right format. Without one, the env's first `up` (also after `init`),
 `agent add` and `agent run` ask how the agent signs in, the provider's usual kind first and
 marked (recommended), then say where to get the one you pick and ask where it is kept: pasted
-into your OS keychain (`keyring:luoto/<provider>.<kind>`, reused by later envs) or into a new
-1Password item (the secret reaches `op` on stdin), found by browsing 1Password, or somewhere
-else (`op://`, `vault://`, `keyring:`, `env:`, `file:`), read once you press enter. A pasted
-or referenced value that doesn't start as its kind does (`sk-ant-oat` for a Claude
-subscription token, `sk-ant-api` for an Anthropic API key) is asked for again. Browsing goes
-account, vault and item, filtered as you type, then the field the item's kind keeps a secret
-in (or one you type); with several 1Password accounts it asks which one, and the ref names it
-by ID (`?account=<account ID>`). `agent add` asks only about the agent it adds.
+into your OS keychain (`keyring:luoto/<provider>.<kind>`, or `.2`, `.3`, … when an entry is
+already there) or into a new 1Password item (the secret reaches `op` on stdin), found by
+browsing the keychain, 1Password or Vault (queried only when you pick `(browse)`), or
+somewhere else (`op://`, `vault://`, `keyring:`, `env:`, `file:`), read once you press enter.
+A pasted or referenced value that doesn't start as its kind does (`sk-ant-oat` for a Claude
+subscription token, `sk-ant-api` for an Anthropic API key) is asked for again. Browsing the
+keychain lists `luoto`'s entries there; browsing 1Password goes account, vault and item,
+filtered as you type, then the field the item's kind keeps a secret in (or one you type), with
+the ref naming the account, vault and item by ID (`?account=<account ID>`); browsing Vault
+(`[sources.vault]`) goes KV mount, path and field name without reading values. `agent add`
+asks only about the agent it adds.
 
 Esc goes back a question. At the first, Esc or "Later" writes nothing, and the next `up` or
 `agent run` asks again. The questions end with a summary: the credential the env has now

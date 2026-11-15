@@ -136,9 +136,10 @@ Sources are configured in `~/.config/luoto/config.toml`; with several 1Password 
 `?account=<account ID>` on a ref (or `[sources.op] account`) picks one. `[credentials.azure]`
 reads your `az` login itself, with no ref.
 
-When you give a reference, the wizard can browse 1Password for it and writes the vault and
-item by ID, so a rename doesn't break it; with the app's CLI integration on, `op` unlocks with
-Touch ID in any terminal ([how the questions go](agents.md#credentials)).
+The wizard offers pasting into your OS keychain or 1Password first, and queries the keychain,
+1Password or OpenBao / Vault only when you pick its `(browse)` entry (1Password refs name the
+vault and item by ID, so a rename doesn't break them; with the app's CLI integration on, `op`
+unlocks with Touch ID in any terminal: [how the questions go](agents.md#credentials)).
 
 `[sandbox_secrets]` are resolved on your machine at `up` and written to a memory-only file in
 the dev container that every shell loads; they leave with the container. Anything that only
