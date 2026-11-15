@@ -47,13 +47,6 @@ async fn serve() -> Result<()> {
         std::fs::set_permissions(&ctl_path, std::fs::Permissions::from_mode(0o600))?;
     }
 
-    // Keep secrets out of core dumps and ptrace.
-    #[cfg(target_os = "linux")]
-    // SAFETY: plain prctl call with valid constant arguments.
-    unsafe {
-        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
-    }
-
     let vault = Arc::new(Vault::new(client_tls()));
     vault.emit(Event {
         kind: Some(EventKind::Lifecycle),
@@ -63,11 +56,38 @@ async fn serve() -> Result<()> {
     if let Some(listener) = shared {
         tokio::spawn(http::serve_shared(vault.clone(), listener));
     }
-    ctl::serve(vault, Arc::new(channels), ctl).await;
+
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        tokio::select! {
+            _ = ctl::serve(vault.clone(), Arc::new(channels), ctl) => {},
+            _ = sigterm.recv() => {},
+            _ = sigint.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::select! {
+            _ = ctl::serve(vault.clone(), Arc::new(channels), ctl) => {},
+            _ = tokio::signal::ctrl_c() => {},
+        }
+    }
+
+    vault.wipe();
     Ok(())
 }
 
 fn main() -> ExitCode {
+    // Keep secrets out of core dumps and ptrace.
+    #[cfg(target_os = "linux")]
+    // SAFETY: plain prctl call with valid constant arguments.
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+    }
+
     match std::env::args().nth(1).as_deref() {
         Some("ctl") => ctl::client(),
         Some("version" | "--version") => {

@@ -9,6 +9,7 @@ use luoto_shared::ctl::{GateCtl, VaultCtl};
 use luoto_shared::policy::Rule;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::azure_identity::{self, AZCLI};
 use crate::compile::Compiled;
@@ -45,38 +46,26 @@ pub fn load_secrets(ctx: &Ctx, refs: &BTreeSet<String>, whose: &str, renew: bool
         .cloned()
         .collect();
     if !missing.is_empty() {
-        let (values, failed) = crate::progress::step(
+        let mut batch = crate::progress::step(
             &format!(
                 "unlocking {} secret(s) for {whose} from your secret store",
                 missing.len()
             ),
-            || {
-                let mut values = BTreeMap::new();
-                let mut failed = Vec::new();
-                for r in &missing {
-                    match secrets::resolve(&ctx.global, r) {
-                        Ok(v) => {
-                            values.insert(r.clone(), v);
-                        }
-                        Err(e) => failed.push((secrets::shown_ref(r), format!("{e:#}"))),
-                    }
-                }
-                (values, failed)
-            },
+            || secrets::resolve_batch(&ctx.global, &missing),
         );
-        if !values.is_empty() {
+        if !batch.values.is_empty() {
             let load = VaultCtl::Load {
-                secrets: values,
+                secrets: std::mem::take(&mut batch.values),
                 held_only: false,
             };
             ctl::vault::<usize>(&ctx.rt, &load)?;
         }
-        if !failed.is_empty() {
+        if !batch.failed.is_empty() {
             bail!(
                 "{} of {} secret(s) not loaded, so the credentials using them stay locked: {}",
-                failed.len(),
+                batch.failed.len(),
                 missing.len(),
-                grouped(&failed)
+                grouped(&batch.failed)
             );
         }
     }
@@ -191,30 +180,22 @@ pub struct Reloaded {
 /// keeps the value the vault has. With `held_only` the vault takes only refs it still holds,
 /// so one locked meanwhile stays empty.
 pub fn reload(ctx: &Ctx, refs: &BTreeSet<String>, held_only: bool) -> Result<Reloaded> {
-    let mut values = BTreeMap::new();
-    let mut failed = Vec::new();
-    let mut expires = BTreeMap::new();
-    for r in refs {
-        match secrets::resolve_expiring(&ctx.global, r) {
-            Ok((v, exp)) => {
-                values.insert(r.clone(), v);
-                if let Some(exp) = exp {
-                    expires.insert(r.clone(), exp);
-                }
-            }
-            Err(e) => failed.push(format!("{}: {e:#}", secrets::shown_ref(r))),
-        }
-    }
-    let read = values.len();
-    let changed = if values.is_empty() {
+    let mut batch = secrets::resolve_batch(&ctx.global, refs);
+    let read = batch.values.len();
+    let changed = if batch.values.is_empty() {
         0
     } else {
         let load = VaultCtl::Load {
-            secrets: values,
+            secrets: std::mem::take(&mut batch.values),
             held_only,
         };
         ctl::vault::<usize>(&ctx.rt, &load)?
     };
+    let mut failed: Vec<String> = batch
+        .failed
+        .iter()
+        .map(|(r, e)| format!("{r}: {e}"))
+        .collect();
     if changed > 0 {
         failed.extend(flush_gates(ctx)?);
     }
@@ -222,7 +203,7 @@ pub fn reload(ctx: &Ctx, refs: &BTreeSet<String>, held_only: bool) -> Result<Rel
         read,
         changed,
         failed,
-        expires,
+        expires: std::mem::take(&mut batch.expires),
     })
 }
 
@@ -295,11 +276,15 @@ fn runtime_env(ctx: &Ctx, compiled: &Compiled) -> Result<BTreeMap<String, String
     }
     if !compiled.sandbox_refs.is_empty() {
         let refs: BTreeSet<String> = compiled.sandbox_refs.values().cloned().collect();
-        let values = secrets::resolve_all(&ctx.global, &refs)?;
+        let mut values = secrets::resolve_all(&ctx.global, &refs)?;
         for (k, r) in &compiled.sandbox_refs {
             if let Some(v) = values.get(r) {
                 env.insert(k.clone(), v.clone());
             }
+        }
+        for (mut k, mut v) in std::mem::take(&mut values) {
+            k.zeroize();
+            v.zeroize();
         }
     }
     Ok(env)
@@ -364,20 +349,26 @@ fn env_scripts(vars: &BTreeMap<String, String>, sum: &str) -> (String, String) {
 }
 
 pub fn write_runtime_env(ctx: &Ctx, env: &str, compiled: &Compiled) -> Result<()> {
-    let vars = runtime_env(ctx, compiled)?;
+    let mut vars = runtime_env(ctx, compiled)?;
     let shells = vars_sum(compiled);
     let (script, fish) = env_scripts(&vars, &shells);
+    for (mut k, mut v) in std::mem::take(&mut vars) {
+        k.zeroize();
+        v.zeroize();
+    }
+    let script = Zeroizing::new(script);
+    let fish = Zeroizing::new(fish);
     // Git's remote rewrites and SSH's pinned host keys (the system configs init.sh writes read
     // them from here), the shells' env and last its fingerprint, in one extraction. The tar
     // goes over stdin, so the secrets in env.sh touch neither argv nor a disk.
-    let tar = runtime_tar(&[
+    let tar = Zeroizing::new(runtime_tar(&[
         ("gitconfig", compiled.git_config.as_bytes()),
         ("ssh_known_hosts", compiled.known_hosts.as_bytes()),
         ("env.fish", fish.as_bytes()),
         ("env.sh", script.as_bytes()),
         (VARS_SUM, shells.as_bytes()),
         (ENV_SUM, runtime_env_sum(compiled).as_bytes()),
-    ])?;
+    ])?);
     ctx.rt.run_stdin(
         exec(&names::dev(env))
             .stdin()

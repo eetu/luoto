@@ -15,10 +15,11 @@ toml.workspace = true
 psl.workspace = true
 idna.workspace = true
 ipnet.workspace = true
+zeroize.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = { workspace = true, optional = true }
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [features]
 # The tun link of an env without a network card (gate and sandbox helper, Linux only).
-tun = ["dep:libc"]
+tun = []

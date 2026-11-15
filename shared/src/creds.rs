@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::glob;
 
@@ -117,9 +118,10 @@ impl Injection {
 }
 
 /// What the vault hands the gate for one binding.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct CredentialValue {
     pub value: String,
+    #[zeroize(skip)]
     pub expires_at: Option<DateTime<Utc>>,
 }
 

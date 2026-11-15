@@ -1,18 +1,36 @@
 //! Control socket (host → vault, via `exec -i luoto-vault ctl`). One JSON line each way.
 
-use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use luoto_shared::ctl::{CTL_SOCKET, CtlResponse, VaultCtl};
+use luoto_shared::ctl::{CtlResponse, LineAccumulator, MAX_REQUEST, VaultCtl};
 use luoto_shared::events::{Event, EventKind};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
+use zeroize::Zeroizing;
 
 use crate::http::{self, Channels};
 use crate::state::Vault;
 
-const MAX_REQUEST: u64 = 16 << 20;
+async fn read_stream_line<R: tokio::io::AsyncRead + Unpin>(
+    mut r: R,
+    max: usize,
+) -> std::io::Result<Zeroizing<Vec<u8>>> {
+    let mut acc = LineAccumulator::new(max);
+    loop {
+        let chunk = acc.chunk_mut();
+        if chunk.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("request exceeds max limit of {max} bytes"),
+            ));
+        }
+        let n = r.read(chunk).await?;
+        if let Some(line) = acc.feed(n)? {
+            return Ok(line);
+        }
+    }
+}
 
 pub async fn serve(vault: Arc<Vault>, channels: Arc<Channels>, listener: UnixListener) {
     loop {
@@ -22,13 +40,12 @@ pub async fn serve(vault: Arc<Vault>, channels: Arc<Channels>, listener: UnixLis
         let vault = vault.clone();
         let channels = channels.clone();
         tokio::spawn(async move {
-            let (r, mut w) = stream.into_split();
-            let mut line = String::new();
-            let mut reader = BufReader::new(r.take(MAX_REQUEST));
-            if reader.read_line(&mut line).await.is_err() {
-                return;
-            }
-            let resp = match serde_json::from_str::<VaultCtl>(&line) {
+            let (mut r, mut w) = stream.into_split();
+            let buf = match read_stream_line(&mut r, MAX_REQUEST).await {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+            let resp = match serde_json::from_slice::<VaultCtl>(&buf) {
                 Ok(op) => dispatch(&vault, &channels, op),
                 Err(e) => CtlResponse::err(format!("bad request: {e}")),
             };
@@ -48,11 +65,11 @@ fn lifecycle(vault: &Vault, env: &str, msg: String) {
     });
 }
 
-fn dispatch(vault: &Arc<Vault>, channels: &Channels, op: VaultCtl) -> CtlResponse {
-    match op {
+fn dispatch(vault: &Arc<Vault>, channels: &Channels, mut op: VaultCtl) -> CtlResponse {
+    match &mut op {
         VaultCtl::Status => CtlResponse::ok(vault.status()),
         VaultCtl::Load { secrets, held_only } => {
-            let n = vault.load(secrets, held_only);
+            let n = vault.load(std::mem::take(secrets), *held_only);
             lifecycle(vault, "", format!("{n} secret(s) loaded or changed"));
             CtlResponse::ok(n)
         }
@@ -61,35 +78,35 @@ fn dispatch(vault: &Arc<Vault>, channels: &Channels, op: VaultCtl) -> CtlRespons
             token_sha256,
             bindings,
         } => {
-            if !http::valid_env(&env) {
+            if !http::valid_env(env) {
                 return CtlResponse::err("env names are 1-64 chars of a-z, 0-9 and '-'");
             }
-            let Ok(raw) = hex::decode(&token_sha256) else {
+            let Ok(raw) = hex::decode(&*token_sha256) else {
                 return CtlResponse::err("token_sha256 is not hex");
             };
             let Ok(hash) = <[u8; 32]>::try_from(raw.as_slice()) else {
                 return CtlResponse::err("token_sha256 must be 32 bytes");
             };
             let names: Vec<String> = bindings.keys().cloned().collect();
-            vault.bind(&env, hash, bindings);
+            vault.bind(env, hash, std::mem::take(bindings));
             if let Channels::PerEnv(sockets) = channels
-                && let Err(e) = sockets.open(vault, &env)
+                && let Err(e) = sockets.open(vault, env)
             {
                 return CtlResponse::err(format!("{e:#}"));
             }
             lifecycle(
                 vault,
-                &env,
+                env,
                 format!("bindings registered: {}", names.join(", ")),
             );
             CtlResponse::ok(true)
         }
         VaultCtl::Unbind { env } => {
-            vault.unbind(&env);
+            vault.unbind(env);
             if let Channels::PerEnv(sockets) = channels
-                && http::valid_env(&env)
+                && http::valid_env(env)
             {
-                sockets.close(&env);
+                sockets.close(env);
             }
             CtlResponse::ok(true)
         }
@@ -103,27 +120,5 @@ fn dispatch(vault: &Arc<Vault>, channels: &Channels, op: VaultCtl) -> CtlRespons
 
 /// `luoto-vault ctl`: forward one request from stdin to the socket, print the response.
 pub fn client() -> ExitCode {
-    let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() {
-        return ExitCode::from(2);
-    }
-    let socket = std::env::var("LUOTO_CTL_SOCKET").unwrap_or_else(|_| CTL_SOCKET.into());
-    let mut stream = match std::os::unix::net::UnixStream::connect(&socket) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("luoto-vault ctl: connect {socket}: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    let line = input.trim().replace('\n', " ");
-    if stream.write_all(format!("{line}\n").as_bytes()).is_err() {
-        return ExitCode::from(2);
-    }
-    let mut out = String::new();
-    let _ = stream.read_to_string(&mut out);
-    print!("{out}");
-    match serde_json::from_str::<CtlResponse>(&out) {
-        Ok(r) if r.ok => ExitCode::SUCCESS,
-        _ => ExitCode::from(1),
-    }
+    luoto_shared::ctl::client("luoto-vault")
 }

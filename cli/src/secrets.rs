@@ -19,21 +19,74 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::azure_identity::{self, AZCLI};
 use crate::config::GlobalConfig;
 use crate::text::display;
 
+/// Resolved secrets and any failures or expiry times, zeroizing held secret values on drop
+/// (including when an error or SIGTERM/SIGINT stops the caller before they are moved out).
+#[derive(Default)]
+pub struct ResolvedBatch {
+    pub values: BTreeMap<String, String>,
+    pub expires: BTreeMap<String, DateTime<Utc>>,
+    pub failed: Vec<(String, String)>,
+}
+
+impl Drop for ResolvedBatch {
+    fn drop(&mut self) {
+        for (mut k, mut v) in std::mem::take(&mut self.values) {
+            k.zeroize();
+            v.zeroize();
+        }
+    }
+}
+
+/// Resolve every ref in `refs` in one pass, recording expiry times and `(shown_ref, error)`
+/// failures while zeroizing held values on drop or signal interruption.
+pub fn resolve_batch(global: &GlobalConfig, refs: &BTreeSet<String>) -> ResolvedBatch {
+    luoto_shared::ctl::install_sigterm_handler();
+    let mut batch = ResolvedBatch::default();
+    for r in refs {
+        if luoto_shared::ctl::is_interrupted() {
+            batch.failed.push((shown_ref(r), "interrupted".into()));
+            break;
+        }
+        match resolve_expiring(global, r) {
+            Ok((v, exp)) => {
+                batch.values.insert(r.clone(), v);
+                if let Some(exp) = exp {
+                    batch.expires.insert(r.clone(), exp);
+                }
+            }
+            Err(e) => batch.failed.push((shown_ref(r), format!("{e:#}"))),
+        }
+    }
+    batch
+}
+
 pub fn resolve_all(
     global: &GlobalConfig,
     refs: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, String>> {
-    let mut out = BTreeMap::new();
+    luoto_shared::ctl::install_sigterm_handler();
+    let mut batch = ResolvedBatch::default();
     for r in refs {
+        if luoto_shared::ctl::is_interrupted() {
+            bail!("resolve secret {r}: interrupted");
+        }
         let v = resolve(global, r).with_context(|| format!("resolve secret {r}"))?;
-        out.insert(r.clone(), v);
+        batch.values.insert(r.clone(), v);
     }
-    Ok(out)
+    Ok(std::mem::take(&mut batch.values))
+}
+
+fn trim_secret(raw: Vec<u8>) -> String {
+    let raw = Zeroizing::new(raw);
+    String::from_utf8_lossy(&raw)
+        .trim_end_matches(['\r', '\n'])
+        .to_string()
 }
 
 fn scheme_ok(r: &str) -> bool {
@@ -197,10 +250,8 @@ pub fn resolve(global: &GlobalConfig, r: &str) -> Result<String> {
     }
     if let Some(path) = r.strip_prefix("file:") {
         let path = file_path(path)?;
-        return Ok(std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .trim_end_matches(['\r', '\n'])
-            .to_string());
+        let raw = std::fs::read(&path).map_err(|e| anyhow::anyhow!("{e}"))?;
+        return Ok(trim_secret(raw));
     }
     bail!("unknown secret ref scheme (use op://, vault://, keyring:, env: or file:)")
 }
@@ -413,9 +464,7 @@ fn op_read(global: &GlobalConfig, r: &str) -> Result<String> {
         "op read",
         None,
     )?;
-    Ok(String::from_utf8_lossy(&out)
-        .trim_end_matches(['\r', '\n'])
-        .to_string())
+    Ok(trim_secret(out))
 }
 
 /// The 1Password CLI is installed.
@@ -780,9 +829,7 @@ fn vault_read(global: &GlobalConfig, rest: &str) -> Result<String> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .trim_end_matches('\n')
-        .to_string())
+    Ok(trim_secret(out.stdout))
 }
 
 #[cfg(test)]

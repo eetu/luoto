@@ -25,6 +25,7 @@ use luoto_shared::events::{Event, EventKind, Verdict};
 use tokio::io::AsyncReadExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::AbortHandle;
+use zeroize::Zeroizing;
 
 use crate::agent;
 use crate::state::Vault;
@@ -224,7 +225,10 @@ async fn credential(vault: &Vault, env: &str, body: &[u8]) -> Response<Full<Byte
                 Some(e) => format!("issued, expires {}", e.format("%H:%M:%S UTC")),
                 None => "issued".into(),
             });
-            reply(StatusCode::OK, serde_json::to_vec(&v).unwrap_or_default())
+            let payload = serde_json::to_vec(&v)
+                .map(Zeroizing::new)
+                .unwrap_or_default();
+            reply(StatusCode::OK, Bytes::copy_from_slice(&payload))
         }
         Err(e) => refuse(&mut ev, e, "mint_failed"),
     };

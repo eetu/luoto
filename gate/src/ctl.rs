@@ -1,17 +1,35 @@
 //! Control socket (host → gate, via `exec -i luoto-gate ctl`). One JSON line each way.
 
-use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use luoto_shared::ctl::{CTL_SOCKET, CtlResponse, GateCtl, GateStatus};
+use luoto_shared::ctl::{CtlResponse, GateCtl, GateStatus, LineAccumulator, MAX_REQUEST};
 use luoto_shared::events::{Event, EventKind};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
+use zeroize::Zeroizing;
 
 use crate::state::State;
 
-const MAX_REQUEST: u64 = 16 << 20;
+async fn read_stream_line<R: tokio::io::AsyncRead + Unpin>(
+    mut r: R,
+    max: usize,
+) -> std::io::Result<Zeroizing<Vec<u8>>> {
+    let mut acc = LineAccumulator::new(max);
+    loop {
+        let chunk = acc.chunk_mut();
+        if chunk.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("request exceeds max limit of {max} bytes"),
+            ));
+        }
+        let n = r.read(chunk).await?;
+        if let Some(line) = acc.feed(n)? {
+            return Ok(line);
+        }
+    }
+}
 
 pub async fn serve(state: Arc<State>, listener: UnixListener) {
     loop {
@@ -25,13 +43,12 @@ pub async fn serve(state: Arc<State>, listener: UnixListener) {
         };
         let state = state.clone();
         tokio::spawn(async move {
-            let (r, mut w) = stream.into_split();
-            let mut line = String::new();
-            let mut reader = BufReader::new(r.take(MAX_REQUEST));
-            if reader.read_line(&mut line).await.is_err() {
-                return;
-            }
-            let resp = match serde_json::from_str::<GateCtl>(&line) {
+            let (mut r, mut w) = stream.into_split();
+            let buf = match read_stream_line(&mut r, MAX_REQUEST).await {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+            let resp = match serde_json::from_slice::<GateCtl>(&buf) {
                 Ok(op) => dispatch(&state, op),
                 Err(e) => CtlResponse::err(format!("bad request: {e}")),
             };
@@ -50,8 +67,8 @@ fn lifecycle(state: &State, msg: String) {
     });
 }
 
-fn dispatch(state: &State, op: GateCtl) -> CtlResponse {
-    match op {
+fn dispatch(state: &State, mut op: GateCtl) -> CtlResponse {
+    match &mut op {
         GateCtl::Status => CtlResponse::ok(GateStatus {
             rules: state.policy().rules.len(),
             ca_installed: state.ca().is_some(),
@@ -67,7 +84,7 @@ fn dispatch(state: &State, op: GateCtl) -> CtlResponse {
                 ));
             }
             let n = policy.rules.len();
-            match state.set_policy(*policy) {
+            match state.set_policy(std::mem::take(&mut **policy)) {
                 Ok(()) => {
                     lifecycle(state, format!("policy applied ({n} rules)"));
                     CtlResponse::ok(n)
@@ -75,14 +92,14 @@ fn dispatch(state: &State, op: GateCtl) -> CtlResponse {
                 Err(e) => CtlResponse::err(format!("{e:#}")),
             }
         }
-        GateCtl::InstallCa { cert_pem, key_pem } => match state.set_ca(&cert_pem, &key_pem) {
+        GateCtl::InstallCa { cert_pem, key_pem } => match state.set_ca(cert_pem, key_pem) {
             Ok(()) => {
                 lifecycle(state, "CA installed".into());
                 CtlResponse::ok(true)
             }
             Err(e) => CtlResponse::err(format!("{e:#}")),
         },
-        GateCtl::SetVault { token } => match state.set_vault(token) {
+        GateCtl::SetVault { token } => match state.set_vault(token.clone()) {
             Ok(()) => {
                 lifecycle(state, "vault configured".into());
                 CtlResponse::ok(true)
@@ -91,15 +108,15 @@ fn dispatch(state: &State, op: GateCtl) -> CtlResponse {
         },
         GateCtl::Requests => CtlResponse::ok(state.requests().list()),
         GateCtl::Resolve { id, approved, note } => {
-            let res = state.requests().resolve(id, approved, note);
+            let res = state.requests().resolve(*id, *approved, note.take());
             match res {
                 Ok(r) => {
                     state.events.emit(Event {
                         kind: Some(EventKind::Resolve),
                         host: Some(r.host.clone()),
                         port: r.port,
-                        request_id: Some(id),
-                        message: Some(if approved { "approved" } else { "rejected" }.into()),
+                        request_id: Some(*id),
+                        message: Some(if *approved { "approved" } else { "rejected" }.into()),
                         ..Default::default()
                     });
                     CtlResponse::ok(r)
@@ -118,28 +135,5 @@ fn dispatch(state: &State, op: GateCtl) -> CtlResponse {
 
 /// `luoto-gate ctl`: forward one request from stdin to the socket, print the response.
 pub fn client() -> ExitCode {
-    let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() {
-        eprintln!("luoto-gate ctl: could not read stdin");
-        return ExitCode::from(2);
-    }
-    let line = input.trim().replace('\n', " ");
-    let socket = std::env::var("LUOTO_CTL_SOCKET").unwrap_or_else(|_| CTL_SOCKET.into());
-    let mut stream = match std::os::unix::net::UnixStream::connect(&socket) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("luoto-gate ctl: connect {socket}: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    if stream.write_all(format!("{line}\n").as_bytes()).is_err() {
-        return ExitCode::from(2);
-    }
-    let mut out = String::new();
-    let _ = stream.read_to_string(&mut out);
-    print!("{out}");
-    match serde_json::from_str::<CtlResponse>(&out) {
-        Ok(r) if r.ok => ExitCode::SUCCESS,
-        _ => ExitCode::from(1),
-    }
+    luoto_shared::ctl::client("luoto-gate")
 }

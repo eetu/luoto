@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::upstream;
 
@@ -20,11 +21,11 @@ struct Claims {
 
 #[derive(Deserialize)]
 struct TokenResponse {
-    token: String,
+    token: Zeroizing<String>,
     expires_at: DateTime<Utc>,
 }
 
-pub fn app_jwt(app_id: &str, key_pem: &str) -> Result<String> {
+pub fn app_jwt(app_id: &str, key_pem: &str) -> Result<Zeroizing<String>> {
     let now = Utc::now().timestamp();
     let claims = Claims {
         iat: now - 60,
@@ -32,7 +33,9 @@ pub fn app_jwt(app_id: &str, key_pem: &str) -> Result<String> {
         iss: app_id.to_string(),
     };
     let key = EncodingKey::from_rsa_pem(key_pem.as_bytes()).context("GitHub App private key")?;
-    encode(&Header::new(Algorithm::RS256), &claims, &key).context("sign GitHub App JWT")
+    let jwt =
+        encode(&Header::new(Algorithm::RS256), &claims, &key).context("sign GitHub App JWT")?;
+    Ok(Zeroizing::new(jwt))
 }
 
 pub async fn installation_token(
@@ -43,14 +46,14 @@ pub async fn installation_token(
     key_pem: &str,
     repos: &[String],
     permissions: &BTreeMap<String, String>,
-) -> Result<(String, DateTime<Utc>)> {
+) -> Result<(Zeroizing<String>, DateTime<Utc>)> {
     let jwt = app_jwt(app_id, key_pem)?;
     let body = serde_json::json!({ "repositories": repos, "permissions": permissions });
     let url = format!(
         "{}/app/installations/{installation_id}/access_tokens",
         api_base.trim_end_matches('/')
     );
-    let bearer = format!("Bearer {jwt}");
+    let bearer = Zeroizing::new(format!("Bearer {}", *jwt));
     let headers = [
         ("authorization", bearer.as_str()),
         ("accept", "application/vnd.github+json"),
