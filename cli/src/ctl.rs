@@ -4,7 +4,6 @@ use anyhow::{Context, Result, bail};
 use luoto_shared::ctl::{CtlResponse, GateCtl, GateStatus, VaultCtl, VaultStatus};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use zeroize::Zeroizing;
 
 use crate::names;
 use crate::runtime::{Runtime, exec};
@@ -15,8 +14,8 @@ fn call<T: DeserializeOwned>(
     argv: &[&str],
     op: &impl Serialize,
 ) -> Result<T> {
-    let mut body = Zeroizing::new(serde_json::to_vec(op)?);
-    body.push(b'\n');
+    // `ctl` reads stdin to its end: no line break needed, so the buffer is exactly the JSON.
+    let body = luoto_shared::ctl::to_json(op)?;
     let args = exec(container).stdin().argv(argv);
     let res = rt.run_stdin(&args, &body);
     drop(body);

@@ -41,13 +41,6 @@ struct Inner {
     generation: u64,
 }
 
-impl Drop for Inner {
-    fn drop(&mut self) {
-        self.secrets.clear();
-        self.minted.clear();
-    }
-}
-
 impl Inner {
     fn next_generation(&mut self) -> u64 {
         self.generation += 1;
@@ -303,6 +296,13 @@ impl Vault {
             locked: inner.secrets.is_empty(),
             loaded_refs,
             envs,
+            swap_kib: std::fs::read_to_string("/proc/meminfo")
+                .ok()
+                .and_then(|m| swap_total_kib(&m))
+                .unwrap_or(0),
+            swap_max: std::fs::read_to_string("/sys/fs/cgroup/memory.swap.max")
+                .ok()
+                .map(|s| s.trim().to_string()),
         }
     }
 
@@ -394,9 +394,29 @@ impl Vault {
     }
 }
 
+/// `SwapTotal` of `/proc/meminfo`, in KiB.
+fn swap_total_kib(meminfo: &str) -> Option<u64> {
+    meminfo
+        .lines()
+        .find_map(|l| l.strip_prefix("SwapTotal:"))?
+        .trim()
+        .strip_suffix("kB")?
+        .trim()
+        .parse()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_kernels_swap() {
+        let meminfo = "MemTotal:  2000000 kB\nSwapCached:  0 kB\nSwapTotal:  1048572 kB\n";
+        assert_eq!(swap_total_kib(meminfo), Some(1_048_572));
+        assert_eq!(swap_total_kib("SwapTotal:  0 kB\n"), Some(0));
+        assert_eq!(swap_total_kib("MemTotal: 1 kB\n"), None);
+    }
 
     #[test]
     fn binds_and_wipes_never_repeat_a_generation() {

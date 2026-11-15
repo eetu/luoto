@@ -7,7 +7,8 @@ sockets, then drops to uid 65534 (`system.rs`).
 - `proxy.rs` explicit proxy on gate:3128 (CONNECT → `mitm.rs` or an opaque tunnel for
   tunnel-mode rules; absolute-form HTTP; origin-form → `api.rs`, the in-sandbox API).
 - `transparent.rs` catch-all on :15001 for TCP that bypassed the proxy; destination name from
-  the fake-IP map (`dns.rs`) or SNI/Host. Never dials the client's chosen IP. A connection
+  the fake-IP map (`dns.rs`) or SNI/Host. Never dials the address the client connected to; an
+  IP named as the host (no SNI, `Host: <ip>`) is dialed only where the policy allows it. A connection
   whose name and port have a tunnel rule passes through unread before any byte is sniffed
   (any protocol, server-first ones and pinned TLS too; SSH under `[credentials.ssh]`, whose
   login the vault signs).
@@ -16,7 +17,8 @@ sockets, then drops to uid 65534 (`system.rs`).
   decoded), matched and forwarded alike; upper-case methods only (`canonical_request`, which
   `/_sandbox/check` shares) → Host agreement → policy → `guards.rs`: push guard for GitHub,
   Azure DevOps and `[[credentials.git]]` hosts (granted repos, protected branches, tags, no
-  deletes), GitHub GraphQL mutations, matched without case like the rules, and model API
+  deletes, no signed pushes; each command exactly `old new ref`), GitHub GraphQL mutations,
+  matched without case like the rules, and model API
   bodies asking for server tools (`body_denies`, read whole up to 32 MiB) → credential
   strip on the host, inject for the injection's paths and methods, over TLS only (`creds.rs`,
   vault client) → `upstream.rs` (resolve, vet every

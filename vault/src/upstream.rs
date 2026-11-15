@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper_util::rt::TokioIo;
 use rustls_pki_types::ServerName;
@@ -86,7 +86,9 @@ async fn send(
     };
     let status = resp.status().as_u16();
     let mut resp_body = Limited::new(resp.into_body(), MAX_BODY);
-    let mut out = Zeroizing::new(Vec::new());
+    // Room for the whole capped body up front, so the buffer never moves and leaves an unwiped
+    // copy of the token behind.
+    let mut out = Zeroizing::new(Vec::with_capacity(MAX_BODY));
     while let Some(frame_res) = resp_body.frame().await {
         let frame = frame_res
             .map_err(|e| anyhow!("reading {host}'s answer (at most {MAX_BODY} bytes): {e}"))?;
@@ -94,12 +96,14 @@ async fn send(
             out.extend_from_slice(&data);
         }
     }
-    std::str::from_utf8(&out)
-        .map_err(|e| anyhow!("response from {host} is not valid UTF-8: {e}"))?;
-    // SAFETY: out is valid UTF-8 as verified above.
-    let vec = std::mem::take(&mut *out);
-    let s = unsafe { String::from_utf8_unchecked(vec) };
-    Ok((status, Zeroizing::new(s)))
+    match String::from_utf8(std::mem::take(&mut *out)) {
+        Ok(s) => Ok((status, Zeroizing::new(s))),
+        Err(e) => {
+            let why = e.utf8_error();
+            drop(Zeroizing::new(e.into_bytes()));
+            bail!("response from {host} is not valid UTF-8: {why}")
+        }
+    }
 }
 
 #[cfg(test)]

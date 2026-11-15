@@ -24,3 +24,8 @@ env = { OPENAI_API_KEY = "sk-proj-luotoplaceholder000000000000000000000000000000
 what = "a remote MCP server"
 paths = ["/v1/responses"]
 tool_types = ["mcp"]
+
+[[server_tool]]
+what = "an image or file fetched from a URL"
+paths = ["/v1/responses", "/v1/chat/completions"]
+url_keys = ["image_url", "image_url.url", "file_url"]

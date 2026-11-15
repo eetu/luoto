@@ -221,6 +221,8 @@ secret = "op://Dev/billing/key"
                 bindings: vec![],
                 missing: vec!["keyring:luoto/gh".into()],
             }],
+            swap_kib: 0,
+            swap_max: None,
         };
         let rows = of("web", &cfg, &c, Some(&vault));
         let row = |b: &str| rows.iter().find(|r| r.binding == b).unwrap();

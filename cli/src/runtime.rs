@@ -60,6 +60,9 @@ pub struct RunSpec {
     pub tmpfs: Vec<String>,
     pub read_only: bool,
     pub memory: Option<String>,
+    /// With `memory`, its memory is never swapped (podman and Docker: swap limited to the
+    /// memory limit; Apple's VMs have no swap device).
+    pub no_swap: bool,
     pub cpus: Option<f64>,
     /// OCI runtime binary (e.g. luoto's runsc wrapper).
     pub oci_runtime: Option<String>,
@@ -838,6 +841,10 @@ impl Runtime {
         }
         if let Some(m) = &spec.memory {
             a.extend(["--memory".into(), m.clone()]);
+            // Memory plus swap no more than memory: cgroup v2's `memory.swap.max` is 0.
+            if spec.no_swap {
+                a.extend(["--memory-swap".into(), m.clone()]);
+            }
         }
         if let Some(c) = spec.cpus {
             a.extend(["--cpus".into(), c.to_string()]);
@@ -1356,6 +1363,27 @@ mod tests {
         assert!(
             docker.contains("--mount type=volume,source=v,target=/run/x,volume-subpath=web,ro")
         );
+    }
+
+    #[test]
+    fn no_swap_limits_swap_to_the_memory_where_a_runtime_has_swap() {
+        let s = RunSpec {
+            memory: Some("512M".into()),
+            no_swap: true,
+            ..spec()
+        };
+        for flavor in [Flavor::Podman, Flavor::Docker] {
+            let a = rt(flavor).run_args(&s, false).join(" ");
+            assert!(a.contains("--memory 512M --memory-swap 512M"), "{a}");
+        }
+        let apple = rt(Flavor::Apple).run_args(&s, false).join(" ");
+        assert!(apple.contains("--memory 512M") && !apple.contains("--memory-swap"));
+        let swaps = RunSpec {
+            no_swap: false,
+            ..s
+        };
+        let podman = rt(Flavor::Podman).run_args(&swaps, false).join(" ");
+        assert!(!podman.contains("--memory-swap"));
     }
 
     #[test]

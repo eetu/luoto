@@ -51,8 +51,8 @@ subscription token, `sk-ant-api` for an Anthropic API key) is asked for again. B
 keychain lists `luoto`'s entries there; browsing 1Password goes account, vault and item,
 filtered as you type, then the field the item's kind keeps a secret in (or one you type), with
 the ref naming the account, vault and item by ID (`?account=<account ID>`); browsing Vault
-(`[sources.vault]`) goes KV mount, path and field name without reading values. `agent add`
-asks only about the agent it adds.
+(`[sources.vault]`) goes KV mount, path and field name, showing and keeping no value.
+`agent add` asks only about the agent it adds.
 
 Esc goes back a question. At the first, Esc or "Later" writes nothing, and the next `up` or
 `agent run` asks again. The questions end with a summary: the credential the env has now
@@ -79,10 +79,10 @@ MCP servers on their own side, through the gate. `server_tools = true` under
 
 | provider | hosts the credential goes to | kinds | where to get one | kept out of reach |
 | --- | --- | --- | --- | --- |
-| `anthropic` | `api.anthropic.com` | `oauth_token`, `api_key`, login inside | `claude setup-token` on your machine (Claude plan); platform.claude.com (API billing) | files, message batches, organization admin, skills; server tools: web fetch, the MCP connector |
-| `openai` | `api.openai.com` (over WebSocket only with server tools) | `api_key`, login inside | platform.openai.com/api-keys; a ChatGPT plan only through login inside | files, uploads, batches, organization, fine-tuning, vector stores; server tools: remote MCP servers |
+| `anthropic` | `api.anthropic.com` | `oauth_token`, `api_key`, login inside | `claude setup-token` on your machine (Claude plan); platform.claude.com (API billing) | files, message batches, organization admin, skills, managed agents (agents, sessions, environments); server tools: web fetch, the MCP connector, images and documents by URL |
+| `openai` | `api.openai.com` (over WebSocket only with server tools) | `api_key`, login inside | platform.openai.com/api-keys; a ChatGPT plan only through login inside | files, uploads, batches, organization, fine-tuning, vector stores; server tools: remote MCP servers, images and files by URL |
 | `openrouter` | `openrouter.ai` `/api/**` | `api_key` | openrouter.ai/keys | |
-| `gemini` | `generativelanguage.googleapis.com` | `api_key` | aistudio.google.com/apikey | uploads, files, cached contents, batches; server tools: URL context, remote MCP servers |
+| `gemini` | `generativelanguage.googleapis.com` | `api_key` | aistudio.google.com/apikey | uploads, files, cached contents, batches (any API version); server tools: URL context, remote MCP servers, files by URL |
 | `mistral` | `api.mistral.ai` | `api_key` | console.mistral.ai/api-keys | |
 | `groq` | `api.groq.com` | `api_key` | console.groq.com/keys | |
 | `copilot` | `api.githubcopilot.com` and its `individual`, `business`, `enterprise` hosts; `api.github.com` `/copilot_internal/**`, `/user` | `token` | github.com/settings/personal-access-tokens (fine-grained, Copilot Requests) | |

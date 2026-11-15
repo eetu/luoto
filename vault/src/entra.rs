@@ -86,35 +86,42 @@ pub async fn client_credentials(
     Ok((t.access_token, Utc::now() + TimeDelta::seconds(secs)))
 }
 
-/// `application/x-www-form-urlencoded` pairs.
+/// `application/x-www-form-urlencoded` pairs, in a buffer sized up front so that it never moves
+/// and leaves an unwiped copy of the secret behind.
 fn form(pairs: &[(&str, &str)]) -> Zeroizing<String> {
-    let mut out = Zeroizing::new(String::new());
+    let len = pairs
+        .iter()
+        .map(|(k, v)| encoded_len(k) + 1 + encoded_len(v))
+        .sum::<usize>()
+        + pairs.len().saturating_sub(1);
+    let mut out = Zeroizing::new(String::with_capacity(len));
     for (i, (k, v)) in pairs.iter().enumerate() {
         if i > 0 {
             out.push('&');
         }
-        let enc_k = encode(k);
-        let enc_v = encode(v);
-        out.push_str(&enc_k);
+        encode(&mut out, k);
         out.push('=');
-        out.push_str(&enc_v);
+        encode(&mut out, v);
     }
     out
 }
 
-fn encode(s: &str) -> Zeroizing<String> {
-    let mut out = Zeroizing::new(String::with_capacity(s.len()));
+fn unreserved(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~')
+}
+
+fn encoded_len(s: &str) -> usize {
+    s.bytes().map(|b| if unreserved(b) { 1 } else { 3 }).sum()
+}
+
+fn encode(out: &mut String, s: &str) {
     for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                let _ = write!(out, "%{b:02X}");
-            }
+        if unreserved(b) {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
         }
     }
-    out
 }
 
 #[cfg(test)]

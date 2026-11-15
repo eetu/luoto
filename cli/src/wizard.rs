@@ -1462,7 +1462,20 @@ fn browse_vault(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> 
     const ANOTHER_PATH: &str = "another path (type its name)";
     const ANOTHER_FIELD: &str = "another field (type its name)";
 
-    let cached_mounts = secrets::vault_mounts(global).ok().filter(|m| !m.is_empty());
+    // Only the token can fail here: `[sources.vault]` is why this was offered.
+    let cli = match secrets::VaultCli::new(global) {
+        Ok(cli) => cli,
+        Err(e) => {
+            let token = global
+                .sources
+                .vault
+                .as_ref()
+                .map_or("", |v| v.token.as_str());
+            ref_error(token, &e);
+            return Ok(Step::Back);
+        }
+    };
+    let cached_mounts = cli.mounts().ok().filter(|m| !m.is_empty());
     let mut mount = String::new();
     let mut at_mount = 0;
     let mut prefix = String::new();
@@ -1536,7 +1549,7 @@ fn browse_vault(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> 
                 }
             }
             At::Path => {
-                let listed = secrets::vault_list(global, &mount, &prefix).ok();
+                let listed = cli.list(&mount, &prefix).ok();
                 if let Some(list) = listed.filter(|l| !l.is_empty()) {
                     let mut shown: Vec<String> = list.iter().map(|s| display(s)).collect();
                     shown.push(ANOTHER_PATH.into());
@@ -1617,7 +1630,7 @@ fn browse_vault(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> 
                 }
             }
             At::Field => {
-                let listed = secrets::vault_fields(global, &mount, &path).ok();
+                let listed = cli.fields(&mount, &path).ok();
                 let field = if let Some(fields) = listed.filter(|f| !f.is_empty()) {
                     let mut shown: Vec<String> = fields.iter().map(|f| display(f)).collect();
                     shown.push(ANOTHER_FIELD.into());

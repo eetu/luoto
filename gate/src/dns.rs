@@ -83,6 +83,12 @@ fn answer(state: &State, query: &[u8]) -> Option<Vec<u8>> {
     let mut resp = Message::response(msg.metadata.id, msg.metadata.op_code);
     resp.metadata.recursion_desired = msg.metadata.recursion_desired;
     resp.metadata.recursion_available = true;
+    // One question a message, as resolvers take it: hundreds in one would each take a fake
+    // address and write an event, flushing addresses in use and the events before them.
+    if msg.queries.len() != 1 {
+        resp.metadata.response_code = ResponseCode::FormErr;
+        return resp.to_vec().ok();
+    }
     let policy = state.policy();
     for q in &msg.queries {
         resp.add_query(q.clone());

@@ -16,7 +16,9 @@ export default {
         "bindings": ["anthropic.oauth_token", "github", "custom.billing"],
         "missing": ["op://Dev/billing/key"]
       }
-    ]
+    ],
+    "swap_kib": 0,
+    "swap_max": "0"
   },
   "credentials": [
     {

@@ -67,6 +67,10 @@ pub struct ServerTool {
     /// Keys of a `tools[]` entry that ask for it (`url_context`).
     #[serde(default)]
     pub tool_keys: Vec<String>,
+    /// Keys at any depth whose http(s) URL it fetches (`file_uri`; `source.url` for an
+    /// object's `url`).
+    #[serde(default)]
+    pub url_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

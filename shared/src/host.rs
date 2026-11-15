@@ -40,6 +40,11 @@ pub fn normalize_host(raw: &str) -> Result<String, HostError> {
         return Err(HostError::Invalid(raw.to_string()));
     }
     let ascii = idna::domain_to_ascii(without_dot).map_err(|_| HostError::Invalid(raw.into()))?;
+    if let Some(v4) = numeric_ipv4(&ascii) {
+        return v4
+            .map(|ip| ip.to_string())
+            .ok_or_else(|| HostError::Invalid(raw.to_string()));
+    }
     let valid = !ascii.is_empty()
         && ascii.len() <= 253
         && ascii.split('.').all(|label| {
@@ -53,6 +58,54 @@ pub fn normalize_host(raw: &str) -> Result<String, HostError> {
         return Err(HostError::Invalid(raw.to_string()));
     }
     Ok(ascii)
+}
+
+/// A host whose last label is a number is an IPv4 address in a form resolvers take
+/// (`3405803777`, `0x7f.1`, `0251.0376.0251.0376`): `Some` of it, read as the WHATWG URL
+/// standard does, or `Some(None)` when it is no address at all. Kept as a name, the policy
+/// would match it as one while the resolver dials the address.
+fn numeric_ipv4(host: &str) -> Option<Option<Ipv4Addr>> {
+    fn number(part: &str) -> Option<u64> {
+        let (digits, radix) =
+            if let Some(hex) = part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
+                (hex, 16)
+            } else if part.len() > 1 && part.starts_with('0') {
+                (&part[1..], 8)
+            } else {
+                (part, 10)
+            };
+        if digits.is_empty() {
+            return (radix != 10).then_some(0);
+        }
+        if !digits.chars().all(|c| c.is_digit(radix)) {
+            return None;
+        }
+        u64::from_str_radix(digits, radix).ok()
+    }
+    let last = host.rsplit('.').next()?;
+    if last.is_empty() || !(last.bytes().all(|b| b.is_ascii_digit()) || number(last).is_some()) {
+        return None;
+    }
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() > 4 {
+        return Some(None);
+    }
+    let Some(numbers) = parts
+        .iter()
+        .map(|p| number(p))
+        .collect::<Option<Vec<u64>>>()
+    else {
+        return Some(None);
+    };
+    let (last, init) = numbers.split_last()?;
+    if init.iter().any(|&n| n > 255) || *last >= 1 << (8 * (5 - numbers.len())) {
+        return Some(None);
+    }
+    let addr = init
+        .iter()
+        .enumerate()
+        .fold(*last, |a, (i, &n)| a + (n << (8 * (3 - i))));
+    Some(u32::try_from(addr).ok().map(Ipv4Addr::from))
 }
 
 /// Split `host[:port]` / `[v6]:port` into a canonical host and optional port.
@@ -222,28 +275,12 @@ fn is_private_v4(ip: Ipv4Addr) -> bool {
 }
 
 fn is_private_v6(ip: Ipv6Addr) -> bool {
-    if let Some(v4) = ip.to_ipv4_mapped() {
-        return is_private_v4(v4);
-    }
     let seg = ip.segments();
-    // NAT64 well-known prefix 64:ff9b::/96 and local-use 64:ff9b:1::/48
-    if seg[0] == 0x64 && seg[1] == 0xff9b {
-        let v4 = Ipv4Addr::new(
-            (seg[6] >> 8) as u8,
-            seg[6] as u8,
-            (seg[7] >> 8) as u8,
-            seg[7] as u8,
-        );
-        return seg[2] == 1 || is_private_v4(v4);
+    // NAT64 local-use 64:ff9b:1::/48, whose operator picks where the v4 address goes.
+    if seg[0] == 0x64 && seg[1] == 0xff9b && seg[2] == 1 {
+        return true;
     }
-    // 6to4 2002::/16 embeds a v4 address
-    if seg[0] == 0x2002 {
-        let v4 = Ipv4Addr::new(
-            (seg[1] >> 8) as u8,
-            seg[1] as u8,
-            (seg[2] >> 8) as u8,
-            seg[2] as u8,
-        );
+    if let Some(v4) = embedded_v4(ip) {
         return is_private_v4(v4);
     }
     ip.is_unspecified()
@@ -254,25 +291,46 @@ fn is_private_v6(ip: Ipv6Addr) -> bool {
         || (seg[0] & 0xffc0) == 0xfec0 // site local (deprecated)
         || (seg[0] == 0x2001 && seg[1] == 0x0db8) // documentation
         || (seg[0] == 0x0100 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0) // discard 100::/64
-        || ip.to_ipv4().is_some_and(|v4| ip.segments()[..6] == [0; 6] && is_private_v4(v4))
+}
+
+/// The IPv4 address an IPv6 one carries: mapped (::ffff:0:0/96), NAT64 (64:ff9b::/96), 6to4
+/// (2002::/16) or compatible (::/96, but :: and ::1).
+fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return Some(v4);
+    }
+    let seg = ip.segments();
+    let v4 = |hi: u16, lo: u16| Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
+    if seg[0] == 0x64 && seg[1] == 0xff9b {
+        return Some(v4(seg[6], seg[7]));
+    }
+    if seg[0] == 0x2002 {
+        return Some(v4(seg[1], seg[2]));
+    }
+    (seg[..6] == [0; 6] && !ip.is_unspecified() && !ip.is_loopback()).then(|| v4(seg[6], seg[7]))
 }
 
 /// Addresses the gate never dials, even for a rule that allows private ones: itself
 /// (loopback, unspecified), cloud metadata, multicast, luoto's own vault and env networks
 /// (10.212.0.0/16, 10.213.0.0/16) and the gate's fake addresses.
 pub fn is_never_dialed(ip: IpAddr) -> bool {
-    let v4 = match ip {
-        IpAddr::V4(v4) => v4,
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => v4,
-            None => {
-                return v6.is_unspecified()
-                    || v6.is_loopback()
-                    || v6.is_multicast()
-                    || v6 == Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254);
-            }
-        },
-    };
+    match ip {
+        IpAddr::V4(v4) => is_never_dialed_v4(v4),
+        IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_multicast()
+                || v6 == Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254)
+                // NAT64 local-use and Teredo carry a v4 address where their operator puts it.
+                || (seg[0] == 0x64 && seg[1] == 0xff9b && seg[2] == 1)
+                || (seg[0] == 0x2001 && seg[1] == 0)
+                || embedded_v4(v6).is_some_and(is_never_dialed_v4)
+        }
+    }
+}
+
+fn is_never_dialed_v4(v4: Ipv4Addr) -> bool {
     let o = v4.octets();
     v4.is_unspecified()
         || v4.is_loopback()
@@ -510,11 +568,54 @@ mod tests {
             "::1",
             "::ffff:127.0.0.1",
             "fd00:ec2::254",
+            // The same addresses inside IPv6: NAT64, 6to4, compatible; local-use NAT64, Teredo.
+            "64:ff9b::a9fe:a9fe",
+            "2002:a9fe:a9fe::1",
+            "::a9fe:a9fe",
+            "64:ff9b::ad4:101",
+            "64:ff9b:1::a9fe:a9fe",
+            "2001:0:4136:e378::1",
         ] {
             assert!(is_never_dialed(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["10.1.2.3", "192.168.127.254", "169.254.1.2", "fd12::1"] {
+        for ip in [
+            "10.1.2.3",
+            "192.168.127.254",
+            "169.254.1.2",
+            "fd12::1",
+            "64:ff9b::c0a8:7ffe",
+            "2002:c0a8:0101::1",
+            "2001:db8::1",
+        ] {
             assert!(!is_never_dialed(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn a_numeric_host_is_the_address_a_resolver_reads() {
+        for (raw, ip) in [
+            ("3405803777", "203.0.113.1"),
+            ("1.2.772", "1.2.3.4"),
+            ("0x7f.1", "127.0.0.1"),
+            ("0X7F.0.0.1", "127.0.0.1"),
+            ("0251.0376.0251.0376", "169.254.169.254"),
+            ("0", "0.0.0.0"),
+            ("1.2.3.4.", "1.2.3.4"),
+            ("\u{ff11}.\u{ff12}.\u{ff13}.\u{ff14}", "1.2.3.4"),
+        ] {
+            assert_eq!(normalize_host(raw).as_deref(), Ok(ip), "{raw}");
+        }
+        for bad in ["1.2.3.256", "1.2.3.4.5", "08", "example.123", "4294967296"] {
+            assert!(normalize_host(bad).is_err(), "{bad}");
+        }
+        for name in [
+            "123.example",
+            "0x7f.example",
+            "1-2.example",
+            "example",
+            "0x1g",
+        ] {
+            assert_eq!(normalize_host(name).as_deref(), Ok(name), "{name}");
         }
     }
 

@@ -16,7 +16,7 @@ path = "src/main.rs"
 test-hooks = []
 
 [dependencies]
-luoto-shared.workspace = true
+luoto-shared = { workspace = true, features = ["ctl-server"] }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

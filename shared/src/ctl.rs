@@ -149,12 +149,38 @@ pub struct VaultStatus {
     pub locked: bool,
     pub loaded_refs: Vec<String>,
     pub envs: Vec<VaultEnvSummary>,
+    /// Swap on the kernel the vault runs on, in KiB.
+    #[serde(default)]
+    pub swap_kib: u64,
+    /// The vault's cgroup's `memory.swap.max` (`0`: its memory is never swapped); `None` where
+    /// no cgroup v2 memory controller limits it.
+    #[serde(default)]
+    pub swap_max: Option<String>,
 }
 
-/// Chunks and reads secret-bearing control payloads into `Zeroizing<Vec<u8>>` using an internal
-/// `Zeroizing<[u8; 4096]>` buffer, ensuring that buffers are volatile-zeroized on drop in all
-/// error, signal, and success paths.
-pub struct LineAccumulator {
+/// `v` as JSON in a buffer of exactly its size, wiped on drop. Serializing into a growing `Vec`
+/// would leave each smaller copy of any secret in it unwiped in freed memory.
+pub fn to_json(v: &impl Serialize) -> serde_json::Result<Zeroizing<Vec<u8>>> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0 += b.len();
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, v)?;
+    let mut out = Zeroizing::new(Vec::with_capacity(count.0));
+    serde_json::to_writer(&mut *out, v)?;
+    Ok(out)
+}
+
+/// A control request read into one buffer that is wiped on drop. The buffer grows by moving
+/// into a larger one and wiping the old, so no copy of a secret is left in freed memory.
+struct LineAccumulator {
     buf: Zeroizing<Vec<u8>>,
     chunk: Zeroizing<[u8; 4096]>,
     max: usize,
@@ -162,34 +188,43 @@ pub struct LineAccumulator {
 }
 
 impl LineAccumulator {
-    pub fn new(max: usize) -> Self {
+    fn new(max: usize, until_eof: bool) -> Self {
         LineAccumulator {
             buf: Zeroizing::new(Vec::new()),
             chunk: Zeroizing::new([0u8; 4096]),
             max,
-            until_eof: false,
+            until_eof,
         }
     }
 
-    pub fn until_eof(max: usize) -> Self {
-        LineAccumulator {
-            until_eof: true,
-            ..Self::new(max)
+    /// Where the next read goes: never more than `max` in all.
+    fn chunk_mut(&mut self) -> std::io::Result<&mut [u8]> {
+        let cap = self
+            .max
+            .saturating_sub(self.buf.len())
+            .min(self.chunk.len());
+        if cap == 0 {
+            return Err(too_long(self.max));
         }
+        Ok(&mut self.chunk[..cap])
     }
 
-    /// Slice of the chunk buffer available for reading next.
-    pub fn chunk_mut(&mut self) -> &mut [u8] {
-        let remaining = self.max.saturating_sub(self.buf.len());
-        let cap = remaining.min(self.chunk.len());
-        &mut self.chunk[..cap]
+    fn push(&mut self, n: usize) {
+        let need = self.buf.len() + n;
+        if need > self.buf.capacity() {
+            let mut grown = Zeroizing::new(Vec::with_capacity(
+                need.max(2 * self.buf.capacity()).min(self.max),
+            ));
+            grown.extend_from_slice(&self.buf);
+            self.buf = grown;
+        }
+        self.buf.extend_from_slice(&self.chunk[..n]);
     }
 
-    /// Feeds `n` bytes read into `chunk_mut()`.
-    /// - Returns `Ok(Some(line))` when newline `b'\n'` is encountered (unless `until_eof`) or EOF.
-    /// - Returns `Ok(None)` when more data is needed.
-    /// - Returns `Err` on EOF with empty buffer (when `!until_eof`) or when `max` is exceeded.
-    pub fn feed(&mut self, n: usize) -> std::io::Result<Option<Zeroizing<Vec<u8>>>> {
+    /// Takes the `n` bytes read into `chunk_mut()`: the request once a line ends (but
+    /// `until_eof`) or at EOF, `None` while more is to come. Until EOF, the request is trimmed
+    /// and its line breaks become spaces.
+    fn feed(&mut self, n: usize) -> std::io::Result<Option<Zeroizing<Vec<u8>>>> {
         if n == 0 {
             if self.until_eof {
                 let start = self
@@ -201,14 +236,9 @@ impl LineAccumulator {
                     .buf
                     .iter()
                     .rposition(|b| !b.is_ascii_whitespace())
-                    .map(|p| p + 1)
-                    .unwrap_or(0);
-                if start >= end {
-                    self.buf.clear();
-                    return Ok(Some(std::mem::take(&mut self.buf)));
-                }
-                let len = end - start;
-                self.buf.copy_within(start..end, 0);
+                    .map_or(0, |p| p + 1);
+                let len = end.saturating_sub(start);
+                self.buf.copy_within(start..start + len, 0);
                 self.buf[len..].zeroize();
                 self.buf.truncate(len);
                 for b in self.buf.iter_mut() {
@@ -216,9 +246,7 @@ impl LineAccumulator {
                         *b = b' ';
                     }
                 }
-                return Ok(Some(std::mem::take(&mut self.buf)));
-            }
-            if self.buf.is_empty() {
+            } else if self.buf.is_empty() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "empty request",
@@ -229,18 +257,19 @@ impl LineAccumulator {
         if !self.until_eof
             && let Some(pos) = self.chunk[..n].iter().position(|&b| b == b'\n')
         {
-            self.buf.extend_from_slice(&self.chunk[..pos]);
+            self.push(pos);
             return Ok(Some(std::mem::take(&mut self.buf)));
         }
-        self.buf.extend_from_slice(&self.chunk[..n]);
-        if self.buf.len() >= self.max {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("request exceeds max limit of {} bytes", self.max),
-            ));
-        }
+        self.push(n);
         Ok(None)
     }
+}
+
+fn too_long(max: usize) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("request exceeds max limit of {max} bytes"),
+    )
 }
 
 fn read_accumulated(
@@ -248,22 +277,9 @@ fn read_accumulated(
     mut acc: LineAccumulator,
 ) -> std::io::Result<Zeroizing<Vec<u8>>> {
     loop {
-        if is_interrupted() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "interrupted by signal",
-            ));
-        }
-        let chunk = acc.chunk_mut();
-        if chunk.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("request exceeds max limit of {} bytes", acc.max),
-            ));
-        }
-        let n = match r.read(chunk) {
+        let n = match r.read(acc.chunk_mut()?) {
             Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted && !is_interrupted() => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
         if let Some(line) = acc.feed(n)? {
@@ -272,71 +288,35 @@ fn read_accumulated(
     }
 }
 
-/// Reads a single line (up to `b'\n'` or EOF, capped at `max` bytes) from synchronous reader `r`.
-/// All intermediate stack buffers and the returned buffer are volatile-zeroized on drop.
-pub fn read_line(r: impl std::io::Read, max: usize) -> std::io::Result<Zeroizing<Vec<u8>>> {
-    read_accumulated(r, LineAccumulator::new(max))
-}
-
-/// Reads stdin payload up to `max` bytes until EOF (for `ctl::client`) via [`LineAccumulator`].
-/// Trims leading and trailing whitespace and replaces interior newline/carriage return characters
-/// with spaces in-place without allocating a second buffer.
-pub fn read_stdin_payload(
-    r: impl std::io::Read,
-    max: usize,
+/// One request line (to `\n` or EOF, at most [`MAX_REQUEST`] bytes) from a ctl socket.
+#[cfg(feature = "ctl-server")]
+pub async fn read_request<R: tokio::io::AsyncRead + Unpin>(
+    mut r: R,
 ) -> std::io::Result<Zeroizing<Vec<u8>>> {
-    read_accumulated(r, LineAccumulator::until_eof(max))
-}
-
-static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(unix)]
-extern "C" fn handle_signal(_: libc::c_int) {
-    INTERRUPTED.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub fn install_sigterm_handler() {
-    #[cfg(unix)]
-    unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = handle_signal as *const () as usize;
-        // Do NOT set SA_RESTART so blocking syscalls return EINTR.
-        sa.sa_flags = 0;
-        libc::sigemptyset(&mut sa.sa_mask);
-        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
-        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+    use tokio::io::AsyncReadExt;
+    let mut acc = LineAccumulator::new(MAX_REQUEST, false);
+    loop {
+        let n = r.read(acc.chunk_mut()?).await?;
+        if let Some(line) = acc.feed(n)? {
+            return Ok(line);
+        }
     }
 }
 
-pub fn is_interrupted() -> bool {
-    INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Unified control client (`luoto-vault ctl` / `luoto-gate ctl`):
-/// Reads request payload from stdin into `Zeroizing<Vec<u8>>`, sends over unix socket, prints response.
-/// Zeroizes secret buffers on drop in error, exit, or SIGTERM/SIGINT signal paths.
+/// `luoto-vault ctl` / `luoto-gate ctl`: forward the request on stdin to the socket and print
+/// the response.
 pub fn client(bin: &str) -> std::process::ExitCode {
     use std::io::{Read, Write};
     use std::process::ExitCode;
 
-    install_sigterm_handler();
-
-    let payload = match read_stdin_payload(std::io::stdin(), MAX_REQUEST) {
+    let payload = match read_accumulated(std::io::stdin(), LineAccumulator::new(MAX_REQUEST, true))
+    {
         Ok(p) => p,
         Err(e) => {
-            if is_interrupted() {
-                eprintln!("{bin} ctl: interrupted");
-                return ExitCode::from(130);
-            }
             eprintln!("{bin} ctl: could not read stdin: {e}");
             return ExitCode::from(2);
         }
     };
-
-    if is_interrupted() {
-        return ExitCode::from(130);
-    }
-
     let socket = std::env::var("LUOTO_CTL_SOCKET").unwrap_or_else(|_| CTL_SOCKET.into());
     let mut stream = match std::os::unix::net::UnixStream::connect(&socket) {
         Ok(s) => s,
@@ -345,18 +325,13 @@ pub fn client(bin: &str) -> std::process::ExitCode {
             return ExitCode::from(2);
         }
     };
-
-    let write_res = stream
+    let sent = stream
         .write_all(&payload)
         .and_then(|_| stream.write_all(b"\n"));
     drop(payload);
-    if write_res.is_err() {
-        if is_interrupted() {
-            return ExitCode::from(130);
-        }
+    if sent.is_err() {
         return ExitCode::from(2);
     }
-
     let mut out = String::new();
     let _ = stream.read_to_string(&mut out);
     print!("{out}");
@@ -370,15 +345,44 @@ pub fn client(bin: &str) -> std::process::ExitCode {
 mod tests {
     use super::*;
 
+    fn read(input: &[u8], max: usize, until_eof: bool) -> std::io::Result<Zeroizing<Vec<u8>>> {
+        read_accumulated(input, LineAccumulator::new(max, until_eof))
+    }
+
     #[test]
     fn line_accumulator_reads_lines_and_normalizes_stdin_payloads() {
-        let line = read_line(&b"{\"op\":\"status\"}\nextra"[..], 1024).unwrap();
+        let line = read(b"{\"op\":\"status\"}\nextra", 1024, false).unwrap();
         assert_eq!(&*line, b"{\"op\":\"status\"}");
 
-        let payload = read_stdin_payload(&b"  {\n\"op\": \"lock\"\r\n}\n  "[..], 1024).unwrap();
+        let payload = read(b"  {\n\"op\": \"lock\"\r\n}\n  ", 1024, true).unwrap();
         assert_eq!(&*payload, b"{ \"op\": \"lock\"  }");
+        assert!(read(b" \n ", 1024, true).unwrap().is_empty());
 
-        let err = read_line(&b"123456"[..], 5).unwrap_err();
+        assert_eq!(read(b"1234", 5, false).unwrap().as_slice(), b"1234");
+        let err = read(b"12345", 5, false).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        let err = read(b"", 5, false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn line_accumulator_grows_past_a_chunk() {
+        let mut input = vec![b'a'; 10_000];
+        input.push(b'\n');
+        input.extend_from_slice(b"next");
+        let line = read(&input, MAX_REQUEST, false).unwrap();
+        assert_eq!(line.len(), 10_000);
+        assert!(line.iter().all(|&b| b == b'a'));
+    }
+
+    #[test]
+    fn to_json_is_exactly_the_json() {
+        let op = VaultCtl::Load {
+            secrets: BTreeMap::from([("op://a/b/c".into(), "line\none\"".into())]),
+            held_only: true,
+        };
+        let out = to_json(&op).unwrap();
+        assert_eq!(out.as_slice(), serde_json::to_vec(&op).unwrap().as_slice());
+        assert_eq!(out.capacity(), out.len());
     }
 }

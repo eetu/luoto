@@ -119,11 +119,13 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   host; secrets, the CA and the vault token never go in.
 - `ssh.rs` owns `<config>/ssh_config`; never edit the user's `~/.ssh/config`.
 - Secret values never touch disk or argv: host resolves refs into a zeroizing batch
-  (`secrets::ResolvedBatch`) and pipes them over `exec -i` stdin to the vault;
-  `luoto_shared::ctl` reads control lines and stdin into a single `Zeroizing` buffer
-  (`LineAccumulator`) that wipes on drop, error or `SIGTERM`/`SIGINT`, and the vault runs
-  undumpable (`PR_SET_DUMPABLE`) and wipes on `SIGTERM`/`SIGINT`. Per-run env for the sandbox
-  goes to its `/run/luoto` tmpfs.
+  (`secrets::ResolvedBatch`) and pipes them over `exec -i` stdin to the vault as
+  `ctl::to_json` (sized exactly: a growing buffer leaves unwiped copies when it moves);
+  `luoto_shared::ctl` reads requests into one `Zeroizing` buffer that wipes the old as it
+  grows. The vault runs undumpable (`PR_SET_DUMPABLE`) and wipes on `SIGTERM`/`SIGINT`; `luoto`
+  sets no signal handler for this (the kernel clears an ended process's memory, and a handler
+  would outlive the step that set it). Per-run env for the sandbox goes to its `/run/luoto`
+  tmpfs.
 - `machine.rs` owns luoto's podman VM on macOS/Windows: no host mounts but the shares root
   (read-only, once a share needs it), a subordinate ID range per env, gVisor plus the `luoto-runsc` wrapper (podman keeps a container's runtime path but
   not its flags). The remote podman client can't choose a runtime, so gVisor containers are

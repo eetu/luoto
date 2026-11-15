@@ -3,33 +3,12 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use luoto_shared::ctl::{CtlResponse, GateCtl, GateStatus, LineAccumulator, MAX_REQUEST};
+use luoto_shared::ctl::{CtlResponse, GateCtl, GateStatus, read_request};
 use luoto_shared::events::{Event, EventKind};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
-use zeroize::Zeroizing;
 
 use crate::state::State;
-
-async fn read_stream_line<R: tokio::io::AsyncRead + Unpin>(
-    mut r: R,
-    max: usize,
-) -> std::io::Result<Zeroizing<Vec<u8>>> {
-    let mut acc = LineAccumulator::new(max);
-    loop {
-        let chunk = acc.chunk_mut();
-        if chunk.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("request exceeds max limit of {max} bytes"),
-            ));
-        }
-        let n = r.read(chunk).await?;
-        if let Some(line) = acc.feed(n)? {
-            return Ok(line);
-        }
-    }
-}
 
 pub async fn serve(state: Arc<State>, listener: UnixListener) {
     loop {
@@ -44,7 +23,7 @@ pub async fn serve(state: Arc<State>, listener: UnixListener) {
         let state = state.clone();
         tokio::spawn(async move {
             let (mut r, mut w) = stream.into_split();
-            let buf = match read_stream_line(&mut r, MAX_REQUEST).await {
+            let buf = match read_request(&mut r).await {
                 Ok(b) => b,
                 Err(_) => return,
             };
@@ -99,7 +78,7 @@ fn dispatch(state: &State, mut op: GateCtl) -> CtlResponse {
             }
             Err(e) => CtlResponse::err(format!("{e:#}")),
         },
-        GateCtl::SetVault { token } => match state.set_vault(token.clone()) {
+        GateCtl::SetVault { token } => match state.set_vault(std::mem::take(token)) {
             Ok(()) => {
                 lifecycle(state, "vault configured".into());
                 CtlResponse::ok(true)

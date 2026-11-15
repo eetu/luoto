@@ -24,6 +24,8 @@ export default {
     "loaded_refs": [],
     "locked": true,
     "started": "2026-11-03T14:51:04.846862344Z",
+    "swap_kib": 0,
+    "swap_max": "0",
     "version": "0.1.0"
   }
 } satisfies Overview;

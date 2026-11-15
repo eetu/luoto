@@ -44,10 +44,14 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Path matching.** A path is matched and forwarded in one canonical form; dot segments, empty
   segments and backslashes are refused.
 - **Secrets.** Root secrets live only in the vault's memory (`PR_SET_DUMPABLE` off from
-  start), held with the tokens minted from them in volatile-zeroized buffers, loaded from the
-  host's secret store at unlock and wiped by `luoto vault lock`, `SIGTERM`/`SIGINT` or a VM
-  restart; the host and the `ctl` sockets read them through buffers that zeroize on drop,
-  error or signal. `luoto vault reload` reads
+  start), loaded from the host's secret store at unlock and wiped by `luoto vault lock`,
+  `SIGTERM`/`SIGINT` or a VM restart. The vault, the host and the `ctl` path keep them and the
+  tokens minted from them in buffers wiped on drop and sized so none leaves a copy as it
+  grows; copies inside the HTTP and JSON libraries are not wiped. The vault and gates never
+  swap: luoto's VM and Apple's VMs have no swap, and on podman and Docker elsewhere (Docker
+  Desktop, WSL2, a Linux host) their swap is limited to none. `[sandbox_secrets]` in an env's
+  shells can be paged to such swap; `luoto doctor` reports it, and a vault the runtime can't
+  keep out of it (cgroup v1). `luoto vault reload` reads
   them again; one an upstream refuses (401) is read again on its own, at most every 10
   minutes, when its source needs no one (the keychain, a 1Password service account, `file:`,
   Vault, `az`). Those background reads only replace what the vault holds, so a locked vault
@@ -57,15 +61,18 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   to the vault under the env's name), and the vault takes only that env's token there. A gate
   receives only its env's bindings, as short-lived values
   (GitHub installation tokens restricted to the env's repositories and permissions). On a
-  credentialed host the gate removes any credential the client sent before injecting its own,
-  so a dependency carrying an attacker's token cannot use it, and it injects only over TLS:
+  credentialed host the gate removes any credential the client sent before injecting its own
+  (the usual auth headers and token query parameters, and every header or parameter that
+  host's credentials go in, on any path, in any spelling), so a dependency carrying an
+  attacker's token cannot use it, and it injects only over TLS:
   plain HTTP to a credentialed host is refused, except to a model server on this machine
   (`[model_servers]`), whose requests never leave it; the gate dials one only where every
   address of its name is private. A credential goes only on the methods and
   paths its own rules allow: a wider rule (one you add, an approved request) lets more
   requests through, but they go without it.
 - **GitHub writes.** Pushes only to the granted repositories, never to protected branches
-  (default `main`, `master`), tags or branch deletions. REST writes are an allowlist — pull
+  (default `main`, `master`, in any case), tags or branch deletions; signed pushes, whose
+  certificate carries commands of its own, are refused. REST writes are an allowlist — pull
   requests, reviews, issues and comments — so the contents, git-data, ref, merge, release and
   settings endpoints can't route around the push guard; GraphQL mutations outside an
   allowlist are refused. Workflows/Actions/Secrets/Administration permissions are refused at
@@ -212,8 +219,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   `luoto egress --open` shows where requests went; keep the window short.
 - **Model APIs.** Prompts to an allowed model API can carry data, and the API key can be
   spent by anything in the sandbox. Anthropic's, OpenAI's and Gemini's file and batch
-  endpoints are denied, and so are requests asking them to fetch a URL or call an MCP server
-  (unless `server_tools = true`); the other providers' are not.
+  endpoints are denied, as are Anthropic's managed agents, sessions and environments (code
+  run in Anthropic's cloud with a network of its own), and so are requests asking them to
+  fetch a URL (a tool, or an image or file given by URL) or call an MCP server (unless
+  `server_tools = true`); the other providers' are not.
 - **Model servers on this machine** (`[model_servers]`). The gate lets the sandbox reach only
   the server's port and model endpoints, but the server runs with your privileges outside the
   VM, so its request parsing is in reach of code in the env; its token may go there over

@@ -8,6 +8,11 @@ suggested = "oauth_token"
 paths = ["/v1/files", "/v1/files/**", "/v1/messages/batches", "/v1/messages/batches/**", "/v1/organizations/**", "/v1/skills/**"]
 reason = "file storage, batches and admin endpoints of the Anthropic API are not reachable from the sandbox"
 
+# Managed agents run code in Anthropic's cloud, with network access of their own.
+[[deny]]
+paths = ["/v1/agents", "/v1/agents/**", "/v1/sessions", "/v1/sessions/**", "/v1/environments", "/v1/environments/**", "/v1/vaults", "/v1/vaults/**", "/v1/deployments", "/v1/deployments/**", "/v1/memory_stores", "/v1/memory_stores/**"]
+reason = "managed agents, sessions and environments of the Anthropic API run in Anthropic's cloud with their own network: not reachable from the sandbox"
+
 [auth.api_key]
 label = "Anthropic API key"
 short = "billed per use (platform.claude.com)"
@@ -38,3 +43,8 @@ what = "the MCP connector"
 paths = ["/v1/messages"]
 keys = ["mcp_servers"]
 tool_types = ["mcp_toolset"]
+
+[[server_tool]]
+what = "an image or document fetched from a URL"
+paths = ["/v1/messages", "/v1/messages/count_tokens"]
+url_keys = ["source.url"]
