@@ -42,14 +42,17 @@ keeps it in memory, and the gate adds it to the agent's requests to that provide
 sees a placeholder of the right format. Without one, the env's first `up` (also after `init`),
 `agent add` and `agent run` ask how the agent signs in, the provider's usual kind first and
 marked (recommended), then say where to get the one you pick and ask where it is kept: pasted
-into your OS keychain (`keyring:luoto/<provider>.<kind>`, reused by later envs) or into a new
-1Password item (the secret reaches `op` on stdin), found by browsing 1Password, or somewhere
-else (`op://`, `vault://`, `keyring:`, `env:`, `file:`), read once you press enter. A pasted
-or referenced value that doesn't start as its kind does (`sk-ant-oat` for a Claude
-subscription token, `sk-ant-api` for an Anthropic API key) is asked for again. Browsing goes
-account, vault and item, filtered as you type, then the field the item's kind keeps a secret
-in (or one you type); with several 1Password accounts it asks which one, and the ref names it
-by ID (`?account=<account ID>`). `agent add` asks only about the agent it adds.
+into your OS keychain (`keyring:luoto/<provider>.<kind>`, or `.2`, `.3`, … when an entry is
+already there) or into a new 1Password item (the secret reaches `op` on stdin), found by
+browsing the keychain, 1Password or Vault (queried only when you pick `(browse)`), or
+somewhere else (`op://`, `vault://`, `keyring:`, `env:`, `file:`), read once you press enter.
+A pasted or referenced value that doesn't start as its kind does (`sk-ant-oat` for a Claude
+subscription token, `sk-ant-api` for an Anthropic API key) is asked for again. Browsing the
+keychain lists `luoto`'s entries there; browsing 1Password goes account, vault and item,
+filtered as you type, then the field the item's kind keeps a secret in (or one you type), with
+the ref naming the account, vault and item by ID (`?account=<account ID>`); browsing Vault
+(`[sources.vault]`) goes KV mount, path and field name, showing and keeping no value.
+`agent add` asks only about the agent it adds.
 
 Esc goes back a question. At the first, Esc or "Later" writes nothing, and the next `up` or
 `agent run` asks again. The questions end with a summary: the credential the env has now
@@ -76,10 +79,10 @@ MCP servers on their own side, through the gate. `server_tools = true` under
 
 | provider | hosts the credential goes to | kinds | where to get one | kept out of reach |
 | --- | --- | --- | --- | --- |
-| `anthropic` | `api.anthropic.com` | `oauth_token`, `api_key`, login inside | `claude setup-token` on your machine (Claude plan); platform.claude.com (API billing) | files, message batches, organization admin, skills; server tools: web fetch, the MCP connector |
-| `openai` | `api.openai.com` (over WebSocket only with server tools) | `api_key`, login inside | platform.openai.com/api-keys; a ChatGPT plan only through login inside | files, uploads, batches, organization, fine-tuning, vector stores; server tools: remote MCP servers |
+| `anthropic` | `api.anthropic.com` | `oauth_token`, `api_key`, login inside | `claude setup-token` on your machine (Claude plan); platform.claude.com (API billing) | files, message batches, organization admin, skills, managed agents (agents, sessions, environments); server tools: web fetch, the MCP connector, images and documents by URL |
+| `openai` | `api.openai.com` (over WebSocket only with server tools) | `api_key`, login inside | platform.openai.com/api-keys; a ChatGPT plan only through login inside | files, uploads, batches, organization, fine-tuning, vector stores; server tools: remote MCP servers, images and files by URL |
 | `openrouter` | `openrouter.ai` `/api/**` | `api_key` | openrouter.ai/keys | |
-| `gemini` | `generativelanguage.googleapis.com` | `api_key` | aistudio.google.com/apikey | uploads, files, cached contents, batches; server tools: URL context, remote MCP servers |
+| `gemini` | `generativelanguage.googleapis.com` | `api_key` | aistudio.google.com/apikey | uploads, files, cached contents, batches (any API version); server tools: URL context, remote MCP servers, files by URL |
 | `mistral` | `api.mistral.ai` | `api_key` | console.mistral.ai/api-keys | |
 | `groq` | `api.groq.com` | `api_key` | console.groq.com/keys | |
 | `copilot` | `api.githubcopilot.com` and its `individual`, `business`, `enterprise` hosts; `api.github.com` `/copilot_internal/**`, `/user` | `token` | github.com/settings/personal-access-tokens (fine-grained, Copilot Requests) | |

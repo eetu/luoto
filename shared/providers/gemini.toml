@@ -3,7 +3,8 @@ host = "generativelanguage.googleapis.com"
 suggested = "api_key"
 
 [[deny]]
-paths = ["/upload/**", "/v1beta/files", "/v1beta/files/**", "/v1beta/cachedContents/**", "/v1beta/batches/**"]
+# `*` for the API version: v1, v1beta and v1alpha serve the same endpoints.
+paths = ["/upload/**", "/*/files", "/*/files/**", "/*/cachedContents/**", "/*/batches/**"]
 reason = "file upload, cache and batch endpoints of the Gemini API are not reachable from the sandbox"
 
 [auth.api_key]
@@ -20,11 +21,16 @@ env = { GEMINI_API_KEY = "AIzaSyLuotoPlaceholder0000000000000000000" }
 # `server_tools = true` under [credentials.gemini].
 [[server_tool]]
 what = "URL context"
-paths = ["/v1beta/models/*", "/v1/models/*", "/v1beta/tunedModels/*", "/v1beta/interactions"]
+paths = ["/*/models/*", "/*/tunedModels/*", "/*/interactions"]
 tool_keys = ["url_context", "urlContext"]
 tool_types = ["url_context"]
 
 [[server_tool]]
 what = "a remote MCP server"
-paths = ["/v1beta/interactions"]
+paths = ["/*/interactions"]
 tool_types = ["mcp_server"]
+
+[[server_tool]]
+what = "a file fetched from a URL"
+paths = ["/*/models/*", "/*/tunedModels/*", "/*/interactions"]
+url_keys = ["file_uri", "fileUri"]

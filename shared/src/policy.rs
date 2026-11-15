@@ -307,6 +307,10 @@ pub struct BodyDeny {
     /// Keys of a `tools[]` entry that ask for it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_keys: Vec<String>,
+    /// Keys at any depth that ask for it with an http(s) URL as their value (`file_uri`), or,
+    /// written `key.url`, an object whose `url` is one (`source.url`): content fetched from it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub url_keys: Vec<String>,
     pub reason: String,
 }
 
@@ -338,13 +342,90 @@ impl BodyDeny {
                     .is_some_and(tool_type)
                     || self.tool_keys.iter().any(|k| t.contains_key(k))
             })
+            || self.url_keys.iter().any(|k| body.urls.contains(k))
     }
 }
 
-/// What [`BodyDeny`] looks at in a JSON request body: its top-level keys and `tools` entries.
+/// What [`BodyDeny`] looks at in a JSON request body: its top-level keys, `tools` entries and
+/// the keys anywhere in it that hold an http(s) URL.
 pub struct JsonBody {
     keys: std::collections::HashSet<String>,
     tools: Vec<serde_json::Map<String, serde_json::Value>>,
+    /// `key` for a string value that is an http(s) URL, `key.url` for an object whose `url`
+    /// is one.
+    urls: std::collections::HashSet<String>,
+}
+
+/// What a JSON value is to the key holding it, for [`JsonBody`]'s `urls`.
+enum UrlValue {
+    Url,
+    Object { url: bool },
+    Other,
+}
+
+/// Walks a JSON value and adds to the set the keys that hold URLs. Nothing is copied but key
+/// names: a body of base64 images costs no second copy.
+struct UrlKeys<'s>(&'s mut std::collections::HashSet<String>);
+
+impl<'de> serde::de::DeserializeSeed<'de> for UrlKeys<'_> {
+    type Value = UrlValue;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<UrlValue, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for UrlKeys<'_> {
+    type Value = UrlValue;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+    fn visit_str<E>(self, v: &str) -> Result<UrlValue, E> {
+        let v = v.trim_start().as_bytes();
+        let http = |scheme: &[u8]| {
+            v.get(..scheme.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(scheme))
+        };
+        Ok(if http(b"http://") || http(b"https://") {
+            UrlValue::Url
+        } else {
+            UrlValue::Other
+        })
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<UrlValue, A::Error> {
+        let mut url = false;
+        while let Some(k) = m.next_key::<String>()? {
+            match m.next_value_seed(UrlKeys(&mut *self.0))? {
+                UrlValue::Url => {
+                    url |= k == "url";
+                    self.0.insert(k);
+                }
+                UrlValue::Object { url: true } => {
+                    self.0.insert(format!("{k}.url"));
+                }
+                _ => {}
+            }
+        }
+        Ok(UrlValue::Object { url })
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut s: A) -> Result<UrlValue, A::Error> {
+        while s.next_element_seed(UrlKeys(&mut *self.0))?.is_some() {}
+        Ok(UrlValue::Other)
+    }
+    fn visit_bool<E>(self, _: bool) -> Result<UrlValue, E> {
+        Ok(UrlValue::Other)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<UrlValue, E> {
+        Ok(UrlValue::Other)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<UrlValue, E> {
+        Ok(UrlValue::Other)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<UrlValue, E> {
+        Ok(UrlValue::Other)
+    }
+    fn visit_unit<E>(self) -> Result<UrlValue, E> {
+        Ok(UrlValue::Other)
+    }
 }
 
 impl JsonBody {
@@ -360,9 +441,13 @@ impl JsonBody {
         let keys: std::collections::HashMap<String, serde::de::IgnoredAny> =
             serde_json::from_slice(bytes).ok()?;
         let Tools { tools } = serde_json::from_slice(bytes).ok()?;
+        let mut urls = std::collections::HashSet::new();
+        let mut de = serde_json::Deserializer::from_slice(bytes);
+        serde::de::DeserializeSeed::deserialize(UrlKeys(&mut urls), &mut de).ok()?;
         Some(JsonBody {
             keys: keys.into_keys().collect(),
             tools: tools.unwrap_or_default(),
+            urls,
         })
     }
 }
@@ -696,6 +781,25 @@ impl Policy {
         self.injections.iter().any(|i| host_matches(&i.host, host))
     }
 
+    /// The header and query parameter names `host`'s credentials go in, on any path and
+    /// method: a client's own there would reach the host where the gate adds none.
+    pub fn credential_names(&self, host: &str) -> (Vec<&str>, Vec<&str>) {
+        let mut headers = Vec::new();
+        let mut params = Vec::new();
+        for i in self
+            .injections
+            .iter()
+            .filter(|i| host_matches(&i.host, host))
+        {
+            match &i.place {
+                crate::creds::Placement::Header { name, .. } => headers.push(name.as_str()),
+                crate::creds::Placement::Basic { .. } => headers.push("authorization"),
+                crate::creds::Placement::Query { param } => params.push(param.as_str()),
+            }
+        }
+        (headers, params)
+    }
+
     /// Why `rule` would put a credential on requests, one line per credential: it covers a
     /// host the gate adds that credential on, with a method the credential goes with. Paths
     /// aren't compared, so it may name one the rule's paths keep clear of.
@@ -901,6 +1005,53 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_names_cover_every_injection_on_a_host() {
+        use crate::creds::{Injection, Placement};
+        let inj = |host: &str, place| Injection {
+            binding: "b".into(),
+            host: host.into(),
+            paths: vec!["/read/**".into()],
+            methods: vec!["GET".into()],
+            place,
+            ignore_case: false,
+        };
+        let p = Policy {
+            injections: vec![
+                inj(
+                    "api.example.com",
+                    Placement::Header {
+                        name: "X-Figma-Token".into(),
+                        format: "{secret}".into(),
+                    },
+                ),
+                inj(
+                    "api.example.com",
+                    Placement::Query {
+                        param: "key".into(),
+                    },
+                ),
+                inj(
+                    "git.example.com",
+                    Placement::Basic {
+                        username: "x".into(),
+                    },
+                ),
+            ],
+            ..Default::default()
+        };
+        // Paths and methods aside: a POST elsewhere on the host loses the client's own too.
+        assert_eq!(
+            p.credential_names("api.example.com"),
+            (vec!["X-Figma-Token"], vec!["key"])
+        );
+        assert_eq!(
+            p.credential_names("git.example.com"),
+            (vec!["authorization"], vec![])
+        );
+        assert_eq!(p.credential_names("other.example"), (vec![], vec![]));
+    }
 
     #[test]
     fn a_host_is_wholly_denied_only_by_a_deny_on_every_path_and_method() {
@@ -1490,6 +1641,57 @@ mod tests {
             p.credentials_reached(&rule("example.com", Access::Level(AccessLevel::Write)))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn body_denies_find_urls_the_provider_would_fetch() {
+        let d = |keys: &[&str]| BodyDeny {
+            host: "api.example.com".into(),
+            paths: vec!["/v1/messages".into()],
+            url_keys: keys.iter().map(|k| k.to_string()).collect(),
+            reason: "fetch".into(),
+            ..Default::default()
+        };
+        let asks = |d: &BodyDeny, body: &str| d.asks(&JsonBody::parse(body.as_bytes()).unwrap());
+        let anthropic = d(&["source.url"]);
+        let image = r#"{"messages":[{"role":"user","content":[{"type":"image",
+            "source":{"type":"url","url":"https://evil.example/?d=secret"}}]}]}"#;
+        assert!(asks(&anthropic, image));
+        assert!(asks(&anthropic, &image.replace("https://", " HTTP://")));
+        for fine in [
+            r#"{"messages":[{"content":[{"type":"image","source":{"type":"base64","data":"aGk="}}]}]}"#,
+            // A search result names its source; a tool's input may hold any URL.
+            r#"{"messages":[{"content":[{"type":"search_result","source":"https://a.example"}]}]}"#,
+            r#"{"messages":[{"content":[{"type":"tool_use","input":{"url":"https://a.example"}}]}]}"#,
+        ] {
+            assert!(!asks(&anthropic, fine), "{fine}");
+        }
+        let openai = d(&["image_url", "image_url.url", "file_url"]);
+        assert!(asks(
+            &openai,
+            r#"{"input":[{"content":[{"type":"input_image","image_url":"https://e.example"}]}]}"#
+        ));
+        assert!(asks(
+            &openai,
+            r#"{"messages":[{"content":[{"image_url":{"url":"https://e.example"}}]}]}"#
+        ));
+        assert!(asks(
+            &openai,
+            r#"{"input":[{"content":[{"file_url":"http://e.example/f.pdf"}]}]}"#
+        ));
+        assert!(!asks(
+            &openai,
+            r#"{"input":[{"content":[{"image_url":"data:image/png;base64,aGk="}]}]}"#
+        ));
+        let gemini = d(&["file_uri", "fileUri"]);
+        assert!(asks(
+            &gemini,
+            r#"{"contents":[{"parts":[{"fileData":{"fileUri":"https://e.example"}}]}]}"#
+        ));
+        assert!(!asks(
+            &gemini,
+            r#"{"contents":[{"parts":[{"text":"https://e.example"}]}]}"#
+        ));
     }
 
     #[test]

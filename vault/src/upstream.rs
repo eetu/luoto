@@ -4,11 +4,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper_util::rt::TokioIo;
 use rustls_pki_types::ServerName;
 use tokio::net::TcpStream;
+use zeroize::Zeroizing;
 
 /// The longest a mint may take, from connecting to the answer's last byte. A token endpoint
 /// answers in a second or two; the gate waits 20 s for the vault, so a mint ends first and its
@@ -23,9 +24,9 @@ pub async fn post(
     url: &str,
     headers: &[(&str, &str)],
     content_type: &str,
-    body: String,
-) -> Result<(u16, String)> {
-    post_within(TIMEOUT, tls, url, headers, content_type, body).await
+    body: impl Into<Zeroizing<String>>,
+) -> Result<(u16, Zeroizing<String>)> {
+    post_within(TIMEOUT, tls, url, headers, content_type, body.into()).await
 }
 
 async fn post_within(
@@ -34,8 +35,8 @@ async fn post_within(
     url: &str,
     headers: &[(&str, &str)],
     content_type: &str,
-    body: String,
-) -> Result<(u16, String)> {
+    body: Zeroizing<String>,
+) -> Result<(u16, Zeroizing<String>)> {
     let uri: http::Uri = url.parse().context("token endpoint url")?;
     let host = uri
         .host()
@@ -52,8 +53,8 @@ async fn send(
     host: &str,
     headers: &[(&str, &str)],
     content_type: &str,
-    body: String,
-) -> Result<(u16, String)> {
+    body: Zeroizing<String>,
+) -> Result<(u16, Zeroizing<String>)> {
     let https = uri.scheme_str() != Some("http");
     let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
     #[cfg(not(any(test, feature = "test-hooks")))]
@@ -68,7 +69,7 @@ async fn send(
     for (name, value) in headers {
         req = req.header(*name, *value);
     }
-    let req = req.body(Full::new(bytes::Bytes::from(body)))?;
+    let req = req.body(Full::new(bytes::Bytes::copy_from_slice(body.as_bytes())))?;
     let resp = if https {
         let name = ServerName::try_from(host.to_string())?;
         let stream = tokio_rustls::TlsConnector::from(tls.clone())
@@ -84,12 +85,25 @@ async fn send(
         sender.send_request(req).await?
     };
     let status = resp.status().as_u16();
-    let bytes = Limited::new(resp.into_body(), MAX_BODY)
-        .collect()
-        .await
-        .map_err(|e| anyhow!("reading {host}'s answer (at most {MAX_BODY} bytes): {e}"))?
-        .to_bytes();
-    Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
+    let mut resp_body = Limited::new(resp.into_body(), MAX_BODY);
+    // Room for the whole capped body up front, so the buffer never moves and leaves an unwiped
+    // copy of the token behind.
+    let mut out = Zeroizing::new(Vec::with_capacity(MAX_BODY));
+    while let Some(frame_res) = resp_body.frame().await {
+        let frame = frame_res
+            .map_err(|e| anyhow!("reading {host}'s answer (at most {MAX_BODY} bytes): {e}"))?;
+        if let Ok(data) = frame.into_data() {
+            out.extend_from_slice(&data);
+        }
+    }
+    match String::from_utf8(std::mem::take(&mut *out)) {
+        Ok(s) => Ok((status, Zeroizing::new(s))),
+        Err(e) => {
+            let why = e.utf8_error();
+            drop(Zeroizing::new(e.into_bytes()));
+            bail!("response from {host} is not valid UTF-8: {why}")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -119,9 +133,17 @@ mod tests {
         format!("http://{addr}/token")
     }
 
-    async fn post_to(url: &str, limit: Duration) -> Result<(u16, String)> {
+    async fn post_to(url: &str, limit: Duration) -> Result<(u16, Zeroizing<String>)> {
         let tls = Arc::new(crate::state::client_tls());
-        post_within(limit, &tls, url, &[], "text/plain", "x".into()).await
+        post_within(
+            limit,
+            &tls,
+            url,
+            &[],
+            "text/plain",
+            Zeroizing::new("x".into()),
+        )
+        .await
     }
 
     #[tokio::test]

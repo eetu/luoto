@@ -290,14 +290,29 @@ fn parse_ref_updates(buf: &[u8]) -> Result<Vec<RefUpdate>, Parse> {
         let line = std::str::from_utf8(line)
             .map_err(|_| Parse::Invalid("non-UTF-8 ref update".into()))?
             .trim_end_matches('\n');
-        if line.starts_with("shallow ") || line.starts_with("push-cert") {
+        if line.starts_with("shallow ") {
             pos += len;
             continue;
         }
-        let mut parts = line.split(' ');
-        let (Some(old), Some(new), Some(name)) = (parts.next(), parts.next(), parts.next()) else {
-            return Err(Parse::Invalid(format!("unexpected push command `{line}`")));
+        // git runs the commands inside a certificate, which this parser would not see.
+        if line.starts_with("push-cert") {
+            return Err(Parse::Invalid(
+                "signed pushes are not allowed from the sandbox".into(),
+            ));
+        }
+        let parts: Vec<&str> = line.split(' ').collect();
+        let [old, new, name] = parts[..] else {
+            return Err(Parse::Invalid(format!(
+                "unexpected push command `{}`",
+                line.escape_debug()
+            )));
         };
+        if !is_oid(old) || !is_oid(new) || !is_ref_name(name) {
+            return Err(Parse::Invalid(format!(
+                "unexpected push command `{}`",
+                line.escape_debug()
+            )));
+        }
         updates.push(RefUpdate {
             old: old.to_string(),
             new: new.to_string(),
@@ -311,6 +326,33 @@ fn is_zero(oid: &str) -> bool {
     !oid.is_empty() && oid.bytes().all(|b| b == b'0')
 }
 
+/// A SHA-1 or SHA-256 object ID.
+fn is_oid(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A ref name git's `check-ref-format` would take: one the guard and git read alike.
+fn is_ref_name(s: &str) -> bool {
+    s.starts_with("refs/")
+        && !s.ends_with(['/', '.'])
+        && !s.ends_with(".lock")
+        && !s.contains("..")
+        && !s.contains("//")
+        && !s.contains("/.")
+        && !s.contains("@{")
+        && !s
+            .bytes()
+            .any(|b| b < 0x20 || b == 0x7f || b" ~^:?*[\\".contains(&b))
+}
+
+/// `name` without `prefix`, compared without case: refs on a case-insensitive store (macOS,
+/// Windows, Azure DevOps) are one ref in any case.
+fn strip_prefix_ci<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = name.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &name[prefix.len()..])
+}
+
 fn check_updates(guard: PushRules<'_>, updates: &[RefUpdate]) -> Result<(), String> {
     for u in updates {
         if is_zero(&u.new) {
@@ -319,7 +361,7 @@ fn check_updates(guard: PushRules<'_>, updates: &[RefUpdate]) -> Result<(), Stri
                 u.name
             ));
         }
-        if let Some(tag) = u.name.strip_prefix("refs/tags/") {
+        if let Some(tag) = strip_prefix_ci(&u.name, "refs/tags/") {
             if !guard.allow_tags {
                 return Err(format!(
                     "pushing tag `{tag}` is not allowed from the sandbox"
@@ -327,13 +369,17 @@ fn check_updates(guard: PushRules<'_>, updates: &[RefUpdate]) -> Result<(), Stri
             }
             continue;
         }
-        let Some(branch) = u.name.strip_prefix("refs/heads/") else {
+        let Some(branch) = strip_prefix_ci(&u.name, "refs/heads/") else {
             return Err(format!(
                 "pushing `{}` is not allowed (branches only)",
                 u.name
             ));
         };
-        if guard.protected_branches.iter().any(|p| p == branch) {
+        if guard
+            .protected_branches
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(branch))
+        {
             return Err(format!(
                 "`{branch}` is protected: push a feature branch and open a pull request"
             ));
@@ -483,6 +529,63 @@ mod tests {
                 &parse_ref_updates(tag.as_bytes()).unwrap()
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn signed_pushes_and_smuggled_commands_are_refused() {
+        // git runs the commands after the certificate's blank line.
+        let cert = format!(
+            "{}{}{}0000",
+            pkt("push-cert\0report-status\n"),
+            pkt(&format!(
+                "{A} {A} refs/heads/ok\n\n{A} {Z} refs/heads/main\n"
+            )),
+            pkt("push-cert-end\n")
+        );
+        assert!(matches!(
+            parse_ref_updates(cert.as_bytes()),
+            Err(Parse::Invalid(m)) if m.contains("signed pushes")
+        ));
+        for line in [
+            format!("{A} {A} refs/heads/ok\n\n{A} {Z} refs/heads/main\n"),
+            format!("{A} {A} refs/heads/ok extra\n"),
+            format!("{A} {A}\n"),
+            format!("{A} xyz refs/heads/ok\n"),
+            format!("{A} {A} heads/ok\n"),
+            format!("{A} {A} refs/heads/a..b\n"),
+            format!("{A} {A} refs/heads/a\tb\n"),
+            format!("{A} {A} refs/heads/x.lock\n"),
+        ] {
+            let body = format!("{}0000", pkt(&line));
+            assert!(
+                matches!(parse_ref_updates(body.as_bytes()), Err(Parse::Invalid(_))),
+                "{line:?}"
+            );
+        }
+        let sha256 = "a".repeat(64);
+        let ok = format!("{}0000", pkt(&format!("{sha256} {sha256} refs/heads/x\n")));
+        assert!(parse_ref_updates(ok.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn protected_branches_and_tags_match_without_case() {
+        for name in ["refs/heads/MAIN", "refs/HEADS/Main", "refs/Heads/main"] {
+            let body = format!("{}0000", pkt(&format!("{A} {A} {name}\n")));
+            let ups = parse_ref_updates(body.as_bytes()).unwrap();
+            assert!(
+                check_updates((&guard()).into(), &ups)
+                    .unwrap_err()
+                    .contains("protected"),
+                "{name}"
+            );
+        }
+        let tag = format!("{}0000", pkt(&format!("{Z} {A} refs/TAGS/v1\n")));
+        let ups = parse_ref_updates(tag.as_bytes()).unwrap();
+        assert!(
+            check_updates((&guard()).into(), &ups)
+                .unwrap_err()
+                .contains("tag")
         );
     }
 

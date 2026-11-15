@@ -935,13 +935,18 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
     for line in crate::progress::wait("measuring disk use", || crate::disk::doctor_lines(ctx)) {
         out.say(line);
     }
-    out.say(match crate::ctl::vault_status(&ctx.rt) {
-        Ok(v) => format!(
-            "vault: running, {}",
-            if v.locked { "locked" } else { "unlocked" }
-        ),
-        Err(_) => "vault: not running (starts with the first `luoto up`)".into(),
-    });
+    match crate::ctl::vault_status(&ctx.rt) {
+        Ok(v) => {
+            out.say(format!(
+                "vault: running, {}",
+                if v.locked { "locked" } else { "unlocked" }
+            ));
+            if let Some(line) = swap_line(&v) {
+                out.say(line);
+            }
+        }
+        Err(_) => out.say("vault: not running (starts with the first `luoto up`)".into()),
+    }
     let probe_port = 47_000 + (rand::random::<u16>() % 1000);
     let probe_name = format!("luoto-probe-{probe_port}");
     // A host-network listener on the env's gateway; Apple's dev containers have no network.
@@ -1006,6 +1011,30 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
     Ok(ok)
 }
 
+/// Where luoto's containers run has swap: whether the vault stays out of it, and what can be
+/// paged to it anyway. Nothing without swap (luoto's VM, Apple's VMs).
+fn swap_line(v: &luoto_shared::ctl::VaultStatus) -> Option<String> {
+    if v.swap_kib == 0 {
+        return None;
+    }
+    let swap = format!(
+        "swap: {} MiB where luoto's containers run",
+        v.swap_kib / 1024
+    );
+    Some(match v.swap_max.as_deref() {
+        Some("0") => format!(
+            "{swap}; the vault and gates never swap, but `[sandbox_secrets]` in env shells can"
+        ),
+        Some(_) => format!(
+            "{swap}, and THE VAULT CAN BE SWAPPED to it: the next `luoto up` recreates it without"
+        ),
+        None => format!(
+            "{swap}, and THE VAULT CAN BE SWAPPED to it: the runtime limits no swap (cgroup v1); \
+             turn swap off there"
+        ),
+    })
+}
+
 /// Full path of `bin` on PATH.
 fn which(bin: &str) -> Option<String> {
     std::env::var_os("PATH").and_then(|p| {
@@ -1019,6 +1048,26 @@ fn which(bin: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn swap_is_named_only_where_there_is_some() {
+        let v = |swap_kib, swap_max: Option<&str>| luoto_shared::ctl::VaultStatus {
+            version: "x".into(),
+            started: chrono::Utc::now(),
+            locked: false,
+            loaded_refs: vec![],
+            envs: vec![],
+            swap_kib,
+            swap_max: swap_max.map(str::to_string),
+        };
+        assert_eq!(swap_line(&v(0, Some("max"))), None);
+        let off = swap_line(&v(1_048_576, Some("0"))).unwrap();
+        assert!(off.starts_with("swap: 1024 MiB") && off.contains("never swap"));
+        let old = swap_line(&v(1_048_576, Some("max"))).unwrap();
+        assert!(old.contains("THE VAULT CAN BE SWAPPED") && old.contains("`luoto up`"));
+        let v1 = swap_line(&v(1_048_576, None)).unwrap();
+        assert!(v1.contains("THE VAULT CAN BE SWAPPED") && v1.contains("cgroup v1"));
+    }
 
     fn det(os: &str, runtimes: Vec<RuntimeInfo>, pm: Option<&str>) -> Detection {
         Detection {

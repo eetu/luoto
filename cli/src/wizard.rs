@@ -883,22 +883,23 @@ enum Source {
     Current,
     /// A reference the config has already, for another account (index into `known`).
     Known(usize),
-    InKeychain,
     PasteKeychain,
     Paste1Password,
-    Browse,
+    BrowseKeychain,
+    Browse1Password,
+    BrowseVault,
     Reference,
     Later,
 }
 
 /// What this machine offers to keep a secret in.
 struct Stores {
-    /// luoto's keychain entry for it holds one already.
-    in_keychain: bool,
-    /// `op` works: paste into 1Password.
+    /// The OS keychain store is available.
+    keychain: bool,
+    /// `op` works: paste into or browse 1Password.
     op: bool,
-    /// `op` can list vaults: browse 1Password.
-    browse: bool,
+    /// `[sources.vault]` is configured in config.toml: browse Vault.
+    vault: bool,
 }
 
 /// The OS keychain, as its OS names it.
@@ -912,11 +913,11 @@ pub fn keychain() -> &'static str {
     }
 }
 
-/// The source menu: what the config has first, then the keychain, 1Password where `op`
-/// works, any other reference, another account's token (a reuse, never preselected), and
-/// "Later" where it is the step's first question.
+/// The source menu: what the config has first, then manual input (keychain, 1Password where
+/// `op` works), browsing external stores (keychain, 1Password, Vault), any other reference,
+/// another account's token (a reuse, never preselected), and "Later" where it is the step's
+/// first question.
 fn sources(ask: &SecretAsk, stores: &Stores) -> Vec<Choice<Source>> {
-    let svc = crate::names::instance();
     let kc = keychain();
     let mut options: Vec<Choice<Source>> = Vec::new();
     if let Some(r) = ask.current {
@@ -924,13 +925,6 @@ fn sources(ask: &SecretAsk, stores: &Stores) -> Vec<Choice<Source>> {
             Source::Current,
             "the current one",
             format!("Keep the current one ({})", shown_ref(r)),
-        ));
-    }
-    if stores.in_keychain {
-        options.push(choice(
-            Source::InKeychain,
-            format!("the one in {kc}"),
-            format!("Already in {kc} ({svc}/{})", ask.acct),
         ));
     }
     options.push(choice(
@@ -945,11 +939,25 @@ fn sources(ask: &SecretAsk, stores: &Stores) -> Vec<Choice<Source>> {
             "Paste it now (stored in 1Password)",
         ));
     }
-    if stores.browse {
+    if stores.keychain {
         options.push(choice(
-            Source::Browse,
+            Source::BrowseKeychain,
+            format!("in {kc}"),
+            format!("It's already in {kc} (browse)"),
+        ));
+    }
+    if stores.op {
+        options.push(choice(
+            Source::Browse1Password,
             "in 1Password",
             "It's already in 1Password (browse)",
+        ));
+    }
+    if stores.vault {
+        options.push(choice(
+            Source::BrowseVault,
+            "in Vault",
+            "It's already in Vault (browse)",
         ));
     }
     options.push(choice(
@@ -982,18 +990,15 @@ fn sources(ask: &SecretAsk, stores: &Stores) -> Vec<Choice<Source>> {
 }
 
 /// Where a secret is kept, as a reference the host resolves: the one the config has, one of
-/// the `known` ones, the keychain entry `acct` of luoto's service, pasted into the keychain or
-/// into 1Password, found in 1Password, or a reference to where it is. Esc goes back a
-/// question; `Back` is Esc at the first.
+/// the `known` ones, pasted into the keychain or 1Password, found in the keychain, 1Password
+/// or Vault, or a reference to where it is. Esc goes back a question; `Back` is Esc at the
+/// first.
 pub fn secret(ask: &SecretAsk, global: &GlobalConfig) -> Result<Step<Secret>> {
     let svc = crate::names::instance();
-    let in_keychain = format!("keyring:{svc}/{}", ask.acct);
-    let op = secrets::op_available();
     let stores = Stores {
-        in_keychain: ask.current != Some(in_keychain.as_str()) && keychain_has(ask.acct),
-        op,
-        browse: op
-            && (!secrets::op_service_account(global) || secrets::op_vaults(global, None).is_ok()),
+        keychain: keyring::Entry::store_status().is_ok(),
+        op: secrets::op_available(),
+        vault: global.sources.vault.is_some(),
     };
     let options = sources(ask, &stores);
     let question = format!("Where is the {} kept?", ask.label);
@@ -1010,7 +1015,12 @@ pub fn secret(ask: &SecretAsk, global: &GlobalConfig) -> Result<Step<Secret>> {
         // How to make one matters only for a new one, and is said once.
         if matches!(
             source,
-            Source::PasteKeychain | Source::Paste1Password | Source::Browse | Source::Reference
+            Source::PasteKeychain
+                | Source::Paste1Password
+                | Source::BrowseKeychain
+                | Source::Browse1Password
+                | Source::BrowseVault
+                | Source::Reference
         ) && let Some(h) = how.take()
         {
             println!("{h}");
@@ -1019,7 +1029,6 @@ pub fn secret(ask: &SecretAsk, global: &GlobalConfig) -> Result<Step<Secret>> {
             Source::Current => ask.current.unwrap_or_default().to_string(),
             Source::Known(i) => ask.known[i].1.clone(),
             Source::Later => return Ok(Step::Got(Secret::Later)),
-            Source::InKeychain => in_keychain.clone(),
             Source::PasteKeychain => {
                 let Step::Got(secret) = paste(ask)? else {
                     continue;
@@ -1046,7 +1055,15 @@ pub fn secret(ask: &SecretAsk, global: &GlobalConfig) -> Result<Step<Secret>> {
                 Step::Got(r) => r,
                 Step::Back => continue,
             },
-            Source::Browse => match browse(global, ask)? {
+            Source::BrowseKeychain => match browse_keychain(global, ask)? {
+                Step::Got(r) => r,
+                Step::Back => continue,
+            },
+            Source::Browse1Password => match browse(global, ask)? {
+                Step::Got(r) => r,
+                Step::Back => continue,
+            },
+            Source::BrowseVault => match browse_vault(global, ask)? {
                 Step::Got(r) => r,
                 Step::Back => continue,
             },
@@ -1347,6 +1364,328 @@ fn browse(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> {
                     }
                     Ok(false) => return Ok(Step::Back),
                     Err(e) => ref_error(&r, &e),
+                }
+            }
+        }
+    }
+}
+
+/// A secret found in the OS keychain: one of the entries under this instance's service name,
+/// or one typed (`keyring:service/account`). Esc goes back a step; `Back` returns to the
+/// source menu.
+fn browse_keychain(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> {
+    let svc = crate::names::instance();
+    let mut accounts = secrets::keychain_accounts(svc).unwrap_or_default();
+    if keychain_has(ask.acct) && !accounts.contains(&ask.acct.to_string()) {
+        accounts.push(ask.acct.to_string());
+    }
+    accounts.sort();
+    accounts.dedup();
+    if let Some(pos) = accounts.iter().position(|a| a == ask.acct) {
+        let default_acct = accounts.remove(pos);
+        accounts.insert(0, default_acct);
+    }
+    const ANOTHER: &str = "another entry (type service/account)";
+    let mut at = 0;
+    loop {
+        let r = if accounts.is_empty() {
+            println!("  no entries found under {svc}");
+            let Some(typed) = Text::new("Keychain entry:")
+                .with_placeholder("service/account")
+                .with_help_message("service/account as your keychain names it; Esc: back")
+                .with_validator(|s: &str| {
+                    Ok(match secrets::check_ref(&format!("keyring:{}", s.trim())) {
+                        Ok(()) => Validation::Valid,
+                        Err(e) => Validation::Invalid(format!("{e:#}").into()),
+                    })
+                })
+                .ask()?
+            else {
+                return Ok(Step::Back);
+            };
+            format!("keyring:{}", typed.trim())
+        } else {
+            let mut shown: Vec<String> = accounts
+                .iter()
+                .map(|a| display(&format!("{svc}/{a}")))
+                .collect();
+            shown.push(ANOTHER.into());
+            let q = format!("Keychain entry holding the {}:", ask.label);
+            match pick_index(&q, shown, at)? {
+                Step::Got(i) => {
+                    at = i;
+                    if i < accounts.len() {
+                        format!("keyring:{svc}/{}", accounts[i])
+                    } else {
+                        let Some(typed) = Text::new("Keychain entry:")
+                            .with_placeholder("service/account")
+                            .with_help_message(
+                                "service/account as your keychain names it; Esc: back",
+                            )
+                            .with_validator(|s: &str| {
+                                Ok(match secrets::check_ref(&format!("keyring:{}", s.trim())) {
+                                    Ok(()) => Validation::Valid,
+                                    Err(e) => Validation::Invalid(format!("{e:#}").into()),
+                                })
+                            })
+                            .ask()?
+                        else {
+                            continue;
+                        };
+                        format!("keyring:{}", typed.trim())
+                    }
+                }
+                Step::Back => return Ok(Step::Back),
+            }
+        };
+        match readable(global, &r, ask) {
+            Ok(true) => return Ok(Step::Got(r)),
+            Ok(false) => return Ok(Step::Back),
+            Err(e) => {
+                ref_error(&r, &e);
+                continue;
+            }
+        }
+    }
+}
+
+/// A secret found in OpenBao or HashiCorp Vault: the mount, the path in that mount, and the
+/// field name. Esc goes back a step; `Back` returns to the source menu.
+fn browse_vault(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> {
+    #[derive(Clone, Copy)]
+    enum At {
+        Mount,
+        Path,
+        Field,
+    }
+    const ANOTHER_MOUNT: &str = "another mount (type its name)";
+    const ANOTHER_PATH: &str = "another path (type its name)";
+    const ANOTHER_FIELD: &str = "another field (type its name)";
+
+    // Only the token can fail here: `[sources.vault]` is why this was offered.
+    let cli = match secrets::VaultCli::new(global) {
+        Ok(cli) => cli,
+        Err(e) => {
+            let token = global
+                .sources
+                .vault
+                .as_ref()
+                .map_or("", |v| v.token.as_str());
+            ref_error(token, &e);
+            return Ok(Step::Back);
+        }
+    };
+    let cached_mounts = cli.mounts().ok().filter(|m| !m.is_empty());
+    let mut mount = String::new();
+    let mut at_mount = 0;
+    let mut prefix = String::new();
+    let mut path = String::new();
+    let mut at_path = 0;
+    let mut at_field = 0;
+    let mut at = At::Mount;
+
+    let pop_prefix = |p: &mut String| {
+        if let Some(w) = p.strip_suffix('/') {
+            if let Some((parent, _)) = w.rsplit_once('/') {
+                *p = format!("{parent}/");
+            } else {
+                p.clear();
+            }
+        } else {
+            p.clear();
+        }
+    };
+
+    loop {
+        match at {
+            At::Mount => {
+                if let Some(mounts) = &cached_mounts {
+                    let mut shown: Vec<String> = mounts.iter().map(|m| display(m)).collect();
+                    shown.push(ANOTHER_MOUNT.into());
+                    match pick_index("Vault mount:", shown, at_mount)? {
+                        Step::Got(i) => {
+                            at_mount = i;
+                            if i < mounts.len() {
+                                mount = mounts[i].clone();
+                                prefix.clear();
+                                at_path = 0;
+                                at = At::Path;
+                            } else {
+                                let typed = Text::new("Vault mount:")
+                                    .with_initial_value("secret")
+                                    .with_help_message("Esc: back")
+                                    .ask()?;
+                                let Some(typed) = typed else {
+                                    continue;
+                                };
+                                let m = typed.trim().trim_matches('/').to_string();
+                                if m.is_empty() {
+                                    continue;
+                                }
+                                mount = m;
+                                prefix.clear();
+                                at_path = 0;
+                                at = At::Path;
+                            }
+                        }
+                        Step::Back => return Ok(Step::Back),
+                    }
+                } else {
+                    let typed = Text::new("Vault mount:")
+                        .with_initial_value("secret")
+                        .with_help_message("Esc: back")
+                        .ask()?;
+                    let Some(typed) = typed else {
+                        return Ok(Step::Back);
+                    };
+                    let m = typed.trim().trim_matches('/').to_string();
+                    if m.is_empty() {
+                        continue;
+                    }
+                    mount = m;
+                    prefix.clear();
+                    at_path = 0;
+                    at = At::Path;
+                }
+            }
+            At::Path => {
+                let listed = cli.list(&mount, &prefix).ok();
+                if let Some(list) = listed.filter(|l| !l.is_empty()) {
+                    let mut shown: Vec<String> = list.iter().map(|s| display(s)).collect();
+                    shown.push(ANOTHER_PATH.into());
+                    let q = if prefix.is_empty() {
+                        format!("Path in {}:", display(&mount))
+                    } else {
+                        format!("Path in {}/{}:", display(&mount), display(&prefix))
+                    };
+                    match pick_index(&q, shown, at_path)? {
+                        Step::Got(i) => {
+                            at_path = i;
+                            if i < list.len() {
+                                let picked = &list[i];
+                                if picked.ends_with('/') {
+                                    prefix.push_str(picked);
+                                    at_path = 0;
+                                    continue;
+                                } else {
+                                    path =
+                                        format!("{prefix}{picked}").trim_matches('/').to_string();
+                                    at_field = 0;
+                                    at = At::Field;
+                                }
+                            } else {
+                                let typed = Text::new("Path in mount:")
+                                    .with_initial_value(&prefix)
+                                    .with_placeholder("path/to/secret")
+                                    .with_help_message("Esc: back")
+                                    .ask()?;
+                                let Some(typed) = typed else {
+                                    continue;
+                                };
+                                let p = typed.trim().trim_matches('/').to_string();
+                                if p.is_empty() {
+                                    continue;
+                                }
+                                path = p;
+                                at_field = 0;
+                                at = At::Field;
+                            }
+                        }
+                        Step::Back => {
+                            if !prefix.is_empty() {
+                                pop_prefix(&mut prefix);
+                                at_path = 0;
+                            } else if cached_mounts.is_some() {
+                                at = At::Mount;
+                            } else {
+                                return Ok(Step::Back);
+                            }
+                        }
+                    }
+                } else {
+                    let typed = Text::new("Path in mount:")
+                        .with_initial_value(&prefix)
+                        .with_placeholder("path/to/secret")
+                        .with_help_message("Esc: back")
+                        .ask()?;
+                    let Some(typed) = typed else {
+                        if !prefix.is_empty() {
+                            pop_prefix(&mut prefix);
+                            at_path = 0;
+                            continue;
+                        } else if cached_mounts.is_some() {
+                            at = At::Mount;
+                            continue;
+                        } else {
+                            return Ok(Step::Back);
+                        }
+                    };
+                    let p = typed.trim().trim_matches('/').to_string();
+                    if p.is_empty() {
+                        continue;
+                    }
+                    path = p;
+                    at_field = 0;
+                    at = At::Field;
+                }
+            }
+            At::Field => {
+                let listed = cli.fields(&mount, &path).ok();
+                let field = if let Some(fields) = listed.filter(|f| !f.is_empty()) {
+                    let mut shown: Vec<String> = fields.iter().map(|f| display(f)).collect();
+                    shown.push(ANOTHER_FIELD.into());
+                    let q = format!("Field in {}:", display(&path));
+                    match pick_index(&q, shown, at_field)? {
+                        Step::Got(i) => {
+                            at_field = i;
+                            if i < fields.len() {
+                                fields[i].clone()
+                            } else {
+                                let typed = Text::new("Field:")
+                                    .with_help_message("field name in the secret; Esc: back")
+                                    .ask()?;
+                                let Some(typed) = typed else {
+                                    continue;
+                                };
+                                let f = typed.trim().to_string();
+                                if f.is_empty() {
+                                    continue;
+                                }
+                                f
+                            }
+                        }
+                        Step::Back => {
+                            at = At::Path;
+                            continue;
+                        }
+                    }
+                } else {
+                    let typed = Text::new("Field:")
+                        .with_help_message("field name in the secret; Esc: back")
+                        .ask()?;
+                    let Some(typed) = typed else {
+                        at = At::Path;
+                        continue;
+                    };
+                    let f = typed.trim().to_string();
+                    if f.is_empty() {
+                        continue;
+                    }
+                    f
+                };
+
+                let r = format!("vault://{mount}/{path}#{field}");
+                if let Err(e) = secrets::check_ref(&r) {
+                    ref_error(&r, &e);
+                    continue;
+                }
+                match readable(global, &r, ask) {
+                    Ok(true) => return Ok(Step::Got(r)),
+                    Ok(false) => return Ok(Step::Back),
+                    Err(e) => {
+                        ref_error(&r, &e);
+                        continue;
+                    }
                 }
             }
         }
@@ -1942,22 +2281,22 @@ mod tests {
             shape: None,
         };
         let all = Stores {
-            in_keychain: true,
+            keychain: true,
             op: true,
-            browse: true,
+            vault: true,
         };
         let kc = keychain();
         let labels: Vec<String> = sources(&ask, &all).into_iter().map(|c| c.label).collect();
-        let svc = crate::names::instance();
         // Another account's token is a reuse: after the new ones, never preselected.
         assert_eq!(
             labels,
             [
                 "Keep the current one (env:NOW)".to_string(),
-                format!("Already in {kc} ({svc}/github.acme)"),
                 format!("Paste it now (stored in {kc})"),
                 "Paste it now (stored in 1Password)".into(),
+                format!("It's already in {kc} (browse)"),
                 "It's already in 1Password (browse)".into(),
+                "It's already in Vault (browse)".into(),
                 "It's somewhere else (op://, env:, file:, keyring:)".into(),
                 "Reuse beta's token (env:A)".into(),
                 "Later".into(),
@@ -1971,19 +2310,20 @@ mod tests {
         assert_eq!(
             values,
             [
-                Source::InKeychain,
                 Source::PasteKeychain,
                 Source::Paste1Password,
-                Source::Browse,
+                Source::BrowseKeychain,
+                Source::Browse1Password,
+                Source::BrowseVault,
                 Source::Reference,
                 Source::Known(0),
                 Source::Later,
             ]
         );
         let none = Stores {
-            in_keychain: false,
+            keychain: false,
             op: false,
-            browse: false,
+            vault: false,
         };
         let first = SecretAsk {
             current: None,

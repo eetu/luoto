@@ -2,18 +2,20 @@
 //! `client_id`), by the client-credentials flow. The client secret never leaves the vault, and
 //! the one host the vault reaches for these is login.microsoftonline.com.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
 use luoto_shared::azure_identity::{LOGIN_HOST, tenant_ok};
 use serde::Deserialize;
+use zeroize::Zeroizing;
 
 use crate::upstream;
 
 #[derive(Deserialize)]
 struct TokenResponse {
-    access_token: String,
+    access_token: Zeroizing<String>,
     /// Seconds; a number from the v2.0 endpoint, a string from some others.
     expires_in: serde_json::Value,
 }
@@ -41,7 +43,7 @@ pub async fn client_credentials(
     client_id: &str,
     secret: &str,
     audience: &str,
-) -> Result<(String, DateTime<Utc>)> {
+) -> Result<(Zeroizing<String>, DateTime<Utc>)> {
     // It becomes a path segment of the request.
     if !tenant_ok(tenant) {
         bail!("tenant `{tenant}` is not a tenant ID or domain");
@@ -67,7 +69,7 @@ pub async fn client_credentials(
         // Entra's error names what went wrong (an AADSTS code), never the secret.
         let why = match serde_json::from_str::<ErrorResponse>(&text) {
             Ok(e) => format!("{}: {}", e.error, e.error_description),
-            Err(_) => text,
+            Err(_) => text.as_str().to_string(),
         };
         bail!(
             "Microsoft Entra ID refused the token request ({status}): {}",
@@ -84,24 +86,42 @@ pub async fn client_credentials(
     Ok((t.access_token, Utc::now() + TimeDelta::seconds(secs)))
 }
 
-/// `application/x-www-form-urlencoded` pairs.
-fn form(pairs: &[(&str, &str)]) -> String {
-    pairs
+/// `application/x-www-form-urlencoded` pairs, in a buffer sized up front so that it never moves
+/// and leaves an unwiped copy of the secret behind.
+fn form(pairs: &[(&str, &str)]) -> Zeroizing<String> {
+    let len = pairs
         .iter()
-        .map(|(k, v)| format!("{}={}", encode(k), encode(v)))
-        .collect::<Vec<_>>()
-        .join("&")
+        .map(|(k, v)| encoded_len(k) + 1 + encoded_len(v))
+        .sum::<usize>()
+        + pairs.len().saturating_sub(1);
+    let mut out = Zeroizing::new(String::with_capacity(len));
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        encode(&mut out, k);
+        out.push('=');
+        encode(&mut out, v);
+    }
+    out
 }
 
-fn encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
+fn unreserved(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~')
+}
+
+fn encoded_len(s: &str) -> usize {
+    s.bytes().map(|b| if unreserved(b) { 1 } else { 3 }).sum()
+}
+
+fn encode(out: &mut String, s: &str) {
+    for b in s.bytes() {
+        if unreserved(b) {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -114,7 +134,8 @@ mod tests {
             form(&[
                 ("client_secret", "a+b/c=d&e f~"),
                 ("scope", "https://x/.default")
-            ]),
+            ])
+            .as_str(),
             "client_secret=a%2Bb%2Fc%3Dd%26e%20f~&scope=https%3A%2F%2Fx%2F.default"
         );
     }

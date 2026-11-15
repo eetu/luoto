@@ -181,18 +181,18 @@ pub fn apply(parts: &mut Parts, inj: &Injection, secret: &str) -> Result<Vec<Str
         }
         Placement::Query { param } => {
             let path = parts.uri.path().to_string();
-            let mut pairs: Vec<String> = parts
-                .uri
-                .query()
-                .unwrap_or("")
-                .split('&')
-                .filter(|kv| !kv.is_empty())
-                .filter(|kv| kv.split('=').next() != Some(param.as_str()))
-                .map(str::to_string)
-                .collect();
-            pairs.push(format!("{param}={}", urlencode(secret)));
+            let query = parts.uri.query().unwrap_or("");
+            // The client's own, in any spelling the server reads as `param`, goes first.
+            let kept = luoto_shared::creds::strip_query(query, &[param.as_str()])
+                .unwrap_or_else(|| query.to_string());
+            let ours = format!("{param}={}", urlencode(secret));
+            let query = if kept.is_empty() {
+                ours
+            } else {
+                format!("{kept}&{ours}")
+            };
             placed.push(urlencode(secret));
-            parts.uri = format!("{path}?{}", pairs.join("&"))
+            parts.uri = format!("{path}?{query}")
                 .parse()
                 .map_err(|e: http::uri::InvalidUri| e.to_string())?;
         }
@@ -268,5 +268,24 @@ mod tests {
         };
         apply(&mut p, &inj, "AIza real").unwrap();
         assert_eq!(p.uri.query(), Some("alt=sse&key=AIza%20real"));
+        // The client's own key, in spellings the server reads as `key`, never goes with it.
+        let mut p = parts("/v1beta/models?KEY=a&k%65y=b&alt=sse");
+        apply(&mut p, &inj, "real").unwrap();
+        assert_eq!(p.uri.query(), Some("alt=sse&key=real"));
+        let mut p = parts("/v1beta/models");
+        apply(&mut p, &inj, "real").unwrap();
+        assert_eq!(p.uri.query(), Some("key=real"));
+    }
+
+    #[test]
+    fn strips_token_parameters_in_any_spelling() {
+        use luoto_shared::creds::strip_query;
+        let names = ["access_token", "key"];
+        assert_eq!(
+            strip_query("a=1&ACCESS_TOKEN=x&access%5Ftoken=y&b=2&k%65y=z", &names).as_deref(),
+            Some("a=1&b=2")
+        );
+        assert_eq!(strip_query("access_token=x", &names).as_deref(), Some(""));
+        assert_eq!(strip_query("a=1&keys=2", &names), None);
     }
 }

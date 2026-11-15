@@ -104,9 +104,9 @@ private = true                      # on a private network
 ca = "~/certs/acme-ca.pem"          # its internal CA
 ```
 
-When it asks for a token, the references the config already has come first: one token that
-reaches several owners (a classic token) becomes one credential listing all their repos, which
-also lets `gh pr create` reach every one of them.
+When it asks for a token, the menu also offers the references the config already has: one
+token that reaches several owners (a classic token) becomes one credential listing all their
+repos, which also lets `gh pr create` reach every one of them.
 
 A public GitHub repo needs none to be cloned. SSH remotes to GitHub, Azure DevOps or a
 `[[credentials.git]]` host are rewritten to HTTPS in the env and use these; with

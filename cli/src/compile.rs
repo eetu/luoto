@@ -447,6 +447,7 @@ fn compile_provider(
                 keys: t.keys.clone(),
                 tool_types: t.tool_types.clone(),
                 tool_keys: t.tool_keys.clone(),
+                url_keys: t.url_keys.clone(),
                 reason: format!(
                     "{} has {pname} reach the network for the request; the env allows it with \
                      `server_tools = true` under [credentials.{pname}]",
@@ -1001,10 +1002,10 @@ fn compile_github_one(
                 .collect();
             b.injections.push(api(writes, &["POST", "PATCH"]));
         }
-        // GraphQL reads are POSTs too; the guard decides which mutations pass.
+        // GraphQL reads are POSTs too, and only POSTs: the guard, which decides which mutations
+        // pass, reads POST bodies.
         if graphql && (write || repos.is_empty()) {
-            b.injections
-                .push(api(vec!["/graphql".into()], &["GET", "POST"]));
+            b.injections.push(api(vec!["/graphql".into()], &["POST"]));
         }
         b.injections.push(Injection {
             binding: binding.clone(),
@@ -2432,7 +2433,15 @@ protected_branches = ["prod"]
             binding("api.github.com", "/repos/initech/portal/pulls"),
             ["github-2"]
         );
-        assert_eq!(binding("api.github.com", "/graphql"), ["github"]);
+        let graphql = |method| {
+            p.injections_for(method, "api.github.com", "/graphql")
+                .iter()
+                .map(|i| i.binding.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(graphql("POST"), ["github"]);
+        // The guard reads POST bodies only: a GET gets no token.
+        assert!(graphql("GET").is_empty());
         for path in [
             "/repos/globex/infra-dev/pulls",
             "/repos/initech/portal/pulls",
@@ -2540,7 +2549,7 @@ ca = '{}'
         .unwrap();
         let p = &c.policy;
         let graphql: Vec<&str> = p
-            .injections_for("GET", "api.github.com", "/graphql")
+            .injections_for("POST", "api.github.com", "/graphql")
             .iter()
             .map(|i| i.binding.as_str())
             .collect();
@@ -2629,10 +2638,20 @@ oauth_token = "op://p/claude/token"
             decide(p, "api.anthropic.com", "POST", "/v1/messages"),
             Decision::Allow { .. }
         ));
-        assert!(matches!(
-            decide(p, "api.anthropic.com", "POST", "/v1/files"),
-            Decision::Deny(DenyReason::Explicit { .. })
-        ));
+        for path in [
+            "/v1/files",
+            "/v1/agents",
+            "/v1/sessions/s1/events",
+            "/v1/environments",
+        ] {
+            assert!(
+                matches!(
+                    decide(p, "api.anthropic.com", "POST", path),
+                    Decision::Deny(DenyReason::Explicit { .. })
+                ),
+                "{path}"
+            );
+        }
         assert!(p.is_credentialed_host("api.anthropic.com"));
         assert_eq!(c.dev_env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1");
         assert!(c.dev_env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
@@ -2644,6 +2663,37 @@ oauth_token = "op://p/claude/token"
             "POST",
             "/v1/messages"
         ) && d.asks(&json)));
+    }
+
+    #[test]
+    fn gemini_guards_every_api_version() {
+        let c = compile(
+            "t",
+            &cfg("[credentials.gemini]\napi_key = \"op://p/gemini/key\"\n"),
+            GATE,
+            &[],
+        )
+        .unwrap();
+        let p = &c.policy;
+        let url =
+            luoto_shared::policy::JsonBody::parse(br#"{"tools":[{"url_context":{}}]}"#).unwrap();
+        let host = "generativelanguage.googleapis.com";
+        for version in ["v1", "v1beta", "v1alpha"] {
+            let path = format!("/{version}/models/gemini-2.5-flash:generateContent");
+            assert!(
+                p.body_denies
+                    .iter()
+                    .any(|d| d.applies(host, "POST", &path) && d.asks(&url)),
+                "{path}"
+            );
+            assert!(
+                matches!(
+                    decide(p, host, "POST", &format!("/{version}/files")),
+                    Decision::Deny(DenyReason::Explicit { .. })
+                ),
+                "{version}"
+            );
+        }
     }
 
     #[test]

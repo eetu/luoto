@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use luoto_shared::ctl::{CtlResponse, GateCtl, GateStatus, VaultCtl, VaultStatus};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::names;
@@ -11,10 +12,14 @@ fn call<T: DeserializeOwned>(
     rt: &Runtime,
     container: &str,
     argv: &[&str],
-    body: String,
+    op: &impl Serialize,
 ) -> Result<T> {
+    // `ctl` reads stdin to its end: no line break needed, so the buffer is exactly the JSON.
+    let body = luoto_shared::ctl::to_json(op)?;
     let args = exec(container).stdin().argv(argv);
-    let out = match rt.run_stdin(&args, format!("{body}\n").as_bytes()) {
+    let res = rt.run_stdin(&args, &body);
+    drop(body);
+    let out = match res {
         Ok(o) => o,
         Err(e) => {
             // ctl prints a JSON error body with a non-zero exit; surface it if present.
@@ -40,17 +45,12 @@ pub fn gate<T: DeserializeOwned>(rt: &Runtime, env: &str, op: &GateCtl) -> Resul
         rt,
         &names::gate(env),
         &["/usr/local/bin/luoto-gate", "ctl"],
-        serde_json::to_string(op)?,
+        op,
     )
 }
 
 pub fn vault<T: DeserializeOwned>(rt: &Runtime, op: &VaultCtl) -> Result<T> {
-    call(
-        rt,
-        &names::vault(),
-        &["/luoto-vault", "ctl"],
-        serde_json::to_string(op)?,
-    )
+    call(rt, &names::vault(), &["/luoto-vault", "ctl"], op)
 }
 
 pub fn gate_status(rt: &Runtime, env: &str) -> Result<GateStatus> {

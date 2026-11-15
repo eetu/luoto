@@ -121,12 +121,14 @@ pub fn tun_link(socket: &Path) -> Result<(std::fs::File, std::os::unix::net::Uni
     Ok((dev, listener))
 }
 
+/// Give `dir` and what it holds to `uid`, as root: links themselves, never what they point to,
+/// which a gate that once ran as `uid` could have aimed anywhere.
 pub fn chown_tree(dir: &Path, uid: u32) -> Result<()> {
-    std::os::unix::fs::chown(dir, Some(uid), Some(uid))
+    std::os::unix::fs::lchown(dir, Some(uid), Some(uid))
         .with_context(|| format!("chown {}", dir.display()))?;
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
-        std::os::unix::fs::chown(&path, Some(uid), Some(uid))
+        std::os::unix::fs::lchown(&path, Some(uid), Some(uid))
             .with_context(|| format!("chown {}", path.display()))?;
     }
     Ok(())
@@ -144,8 +146,11 @@ pub fn drop_privileges(uid: u32) -> Result<()> {
         if libc::setuid(uid) != 0 {
             bail!("setuid: {}", std::io::Error::last_os_error());
         }
-        libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+        // no_new_privs is set for every thread at start (`main`); dumpable is the process's,
+        // and the uid change reset it.
+        if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 {
+            bail!("prctl dumpable: {}", std::io::Error::last_os_error());
+        }
         if libc::setuid(0) == 0 {
             bail!("privilege drop did not stick");
         }

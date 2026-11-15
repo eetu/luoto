@@ -224,7 +224,9 @@ async fn credential(vault: &Vault, env: &str, body: &[u8]) -> Response<Full<Byte
                 Some(e) => format!("issued, expires {}", e.format("%H:%M:%S UTC")),
                 None => "issued".into(),
             });
-            reply(StatusCode::OK, serde_json::to_vec(&v).unwrap_or_default())
+            // hyper's copy can't be wiped; moving the exactly sized buffer in leaves no other.
+            let mut payload = luoto_shared::ctl::to_json(&v).unwrap_or_default();
+            reply(StatusCode::OK, Bytes::from(std::mem::take(&mut *payload)))
         }
         Err(e) => refuse(&mut ev, e, "mint_failed"),
     };

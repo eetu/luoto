@@ -11,7 +11,7 @@
 //! - `file:/path` or `file:~/path` — a file readable by the user
 //! - `azcli:<resource>[?tenant=<tenant>]` — a token from the Azure CLI's login on this machine
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -19,21 +19,65 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::azure_identity::{self, AZCLI};
 use crate::config::GlobalConfig;
 use crate::text::display;
 
+/// Resolved secrets and any failures or expiry times, zeroizing held secret values on drop
+/// (also when an error stops the caller before they are moved out).
+#[derive(Default)]
+pub struct ResolvedBatch {
+    pub values: BTreeMap<String, String>,
+    pub expires: BTreeMap<String, DateTime<Utc>>,
+    pub failed: Vec<(String, String)>,
+}
+
+impl Drop for ResolvedBatch {
+    fn drop(&mut self) {
+        for (mut k, mut v) in std::mem::take(&mut self.values) {
+            k.zeroize();
+            v.zeroize();
+        }
+    }
+}
+
+/// Resolve every ref in `refs` in one pass, recording expiry times and `(shown_ref, error)`
+/// failures.
+pub fn resolve_batch(global: &GlobalConfig, refs: &BTreeSet<String>) -> ResolvedBatch {
+    let mut batch = ResolvedBatch::default();
+    for r in refs {
+        match resolve_expiring(global, r) {
+            Ok((v, exp)) => {
+                batch.values.insert(r.clone(), v);
+                if let Some(exp) = exp {
+                    batch.expires.insert(r.clone(), exp);
+                }
+            }
+            Err(e) => batch.failed.push((shown_ref(r), format!("{e:#}"))),
+        }
+    }
+    batch
+}
+
 pub fn resolve_all(
     global: &GlobalConfig,
     refs: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, String>> {
-    let mut out = BTreeMap::new();
+    let mut batch = ResolvedBatch::default();
     for r in refs {
         let v = resolve(global, r).with_context(|| format!("resolve secret {r}"))?;
-        out.insert(r.clone(), v);
+        batch.values.insert(r.clone(), v);
     }
-    Ok(out)
+    Ok(std::mem::take(&mut batch.values))
+}
+
+fn trim_secret(raw: Vec<u8>) -> String {
+    let raw = Zeroizing::new(raw);
+    String::from_utf8_lossy(&raw)
+        .trim_end_matches(['\r', '\n'])
+        .to_string()
 }
 
 fn scheme_ok(r: &str) -> bool {
@@ -64,6 +108,25 @@ pub fn check_ref(r: &str) -> Result<()> {
         && let (_, Some(account)) = op_parts(r)
     {
         check_op_account(&account)?;
+    }
+    if let Some(rest) = r.strip_prefix("keyring:") {
+        let (service, account) = rest
+            .split_once('/')
+            .context("keyring refs are keyring:<service>/<account>")?;
+        if service.is_empty() || account.is_empty() {
+            bail!("keyring refs are keyring:<service>/<account>");
+        }
+    }
+    if let Some(rest) = r.strip_prefix("vault://") {
+        let (path, field) = rest
+            .split_once('#')
+            .context("vault refs are vault://<mount>/<path>#<field>")?;
+        let (mount, key) = path
+            .split_once('/')
+            .context("vault refs are vault://<mount>/<path>#<field>")?;
+        if mount.is_empty() || key.is_empty() || field.is_empty() {
+            bail!("vault refs are vault://<mount>/<path>#<field>");
+        }
     }
     Ok(())
 }
@@ -197,10 +260,8 @@ pub fn resolve(global: &GlobalConfig, r: &str) -> Result<String> {
     }
     if let Some(path) = r.strip_prefix("file:") {
         let path = file_path(path)?;
-        return Ok(std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .trim_end_matches(['\r', '\n'])
-            .to_string());
+        let raw = std::fs::read(&path).map_err(|e| anyhow::anyhow!("{e}"))?;
+        return Ok(trim_secret(raw));
     }
     bail!("unknown secret ref scheme (use op://, vault://, keyring:, env: or file:)")
 }
@@ -413,9 +474,7 @@ fn op_read(global: &GlobalConfig, r: &str) -> Result<String> {
         "op read",
         None,
     )?;
-    Ok(String::from_utf8_lossy(&out)
-        .trim_end_matches(['\r', '\n'])
-        .to_string())
+    Ok(trim_secret(out))
 }
 
 /// The 1Password CLI is installed.
@@ -738,51 +797,266 @@ pub fn op_save(
     op_item_ref(account, &vault, &created, "credential")
 }
 
+/// The keychain entries found under `service`.
+pub fn keychain_entries(service: &str) -> Result<Vec<(String, keyring_core::Entry)>> {
+    if let Err(e) = keyring::Entry::store_status() {
+        bail!("{e}");
+    }
+    let spec = HashMap::from([("service", service)]);
+    let found = keyring_core::Entry::search(&spec).map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(found
+        .into_iter()
+        .filter_map(|e| {
+            let account = e.get_specifiers().map(|(_, a)| a).or_else(|| {
+                e.get_attributes()
+                    .ok()
+                    .and_then(|a| a.get("username").cloned())
+            })?;
+            Some((account, e))
+        })
+        .collect())
+}
+
+/// The account names of keychain entries found under `service`.
+pub fn keychain_accounts(service: &str) -> Result<Vec<String>> {
+    Ok(keychain_entries(service)?
+        .into_iter()
+        .map(|(account, _)| account)
+        .collect())
+}
+
+/// The OpenBao or Vault CLI with `[sources.vault]`'s token, read once for every call.
+pub struct VaultCli {
+    bin: &'static str,
+    addr: String,
+    namespace: Option<String>,
+    token: Zeroizing<String>,
+}
+
+impl VaultCli {
+    pub fn new(global: &GlobalConfig) -> Result<Self> {
+        let src = global
+            .sources
+            .vault
+            .as_ref()
+            .context("vault:// refs need [sources.vault] in config.toml")?;
+        let bin = if Command::new("bao").arg("version").output().is_ok() {
+            "bao"
+        } else {
+            "vault"
+        };
+        Ok(VaultCli {
+            bin,
+            addr: src.addr.clone(),
+            namespace: src.namespace.clone(),
+            token: Zeroizing::new(resolve(global, &src.token)?),
+        })
+    }
+
+    /// What `<bin> <what> <args>` prints. Paths go after `--`, so none is read as a flag.
+    fn run(&self, what: &[&str], args: &[&str]) -> Result<Zeroizing<Vec<u8>>> {
+        let mut cmd = Command::new(self.bin);
+        cmd.args(what)
+            .args(args)
+            .env("VAULT_ADDR", &self.addr)
+            .env("BAO_ADDR", &self.addr)
+            .env("VAULT_TOKEN", &*self.token)
+            .env("BAO_TOKEN", &*self.token);
+        if let Some(ns) = &self.namespace {
+            cmd.env("VAULT_NAMESPACE", ns).env("BAO_NAMESPACE", ns);
+        }
+        let out = cmd
+            .output()
+            .with_context(|| format!("run `{}` (install the OpenBao or Vault CLI)", self.bin))?;
+        let stdout = Zeroizing::new(out.stdout);
+        if !out.status.success() {
+            bail!(
+                "{} {} failed: {}",
+                self.bin,
+                what.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(stdout)
+    }
+
+    fn read(&self, mount: &str, key: &str, field: &str) -> Result<String> {
+        let mut out = self.run(
+            &["kv", "get"],
+            &[
+                &format!("-mount={mount}"),
+                &format!("-field={field}"),
+                "--",
+                key,
+            ],
+        )?;
+        Ok(trim_secret(std::mem::take(&mut *out)))
+    }
+
+    /// The KV mounts, without trailing slashes and sorted.
+    pub fn mounts(&self) -> Result<Vec<String>> {
+        parse_vault_mounts(&self.run(&["secrets", "list"], &["-format=json"])?)
+    }
+
+    /// The keys and subfolders under `prefix` in mount `mount`, sorted.
+    pub fn list(&self, mount: &str, prefix: &str) -> Result<Vec<String>> {
+        let mount_arg = format!("-mount={mount}");
+        let mut args = vec![mount_arg.as_str(), "-format=json"];
+        if !prefix.is_empty() {
+            args.extend(["--", prefix]);
+        }
+        parse_vault_list(&self.run(&["kv", "list"], &args)?)
+    }
+
+    /// The field names of the secret at `path` in mount `mount`, sorted. The CLI prints the
+    /// values too: they stay in a buffer wiped on drop and are skipped, never parsed.
+    pub fn fields(&self, mount: &str, path: &str) -> Result<Vec<String>> {
+        let out = self.run(
+            &["kv", "get"],
+            &[&format!("-mount={mount}"), "-format=json", "--", path],
+        )?;
+        parse_vault_fields(&out)
+    }
+}
+
 fn vault_read(global: &GlobalConfig, rest: &str) -> Result<String> {
-    let src = global
-        .sources
-        .vault
-        .as_ref()
-        .context("vault:// refs need [sources.vault] in config.toml")?;
     let (path, field) = rest
         .split_once('#')
         .context("vault refs are vault://<mount>/<path>#<field>")?;
     let (mount, key) = path
         .split_once('/')
         .context("vault refs are vault://<mount>/<path>#<field>")?;
-    let bin = if Command::new("bao").arg("version").output().is_ok() {
-        "bao"
-    } else {
-        "vault"
+    VaultCli::new(global)?.read(mount, key, field)
+}
+
+/// Parse KV mounts from `vault secrets list -format=json` output.
+pub fn parse_vault_mounts(json: &[u8]) -> Result<Vec<String>> {
+    let val: serde_json::Value =
+        serde_json::from_slice(json).context("vault secrets list: unexpected output")?;
+    let obj = match val.as_object() {
+        Some(o) => {
+            if let Some(d) = o.get("data").and_then(|d| d.as_object()) {
+                d
+            } else {
+                o
+            }
+        }
+        None => bail!("vault secrets list: expected JSON object"),
     };
-    let token = resolve(global, &src.token)?;
-    let mut cmd = Command::new(bin);
-    cmd.args([
-        "kv",
-        "get",
-        &format!("-mount={mount}"),
-        &format!("-field={field}"),
-        key,
-    ])
-    .env("VAULT_ADDR", &src.addr)
-    .env("BAO_ADDR", &src.addr)
-    .env("VAULT_TOKEN", &token)
-    .env("BAO_TOKEN", &token);
-    if let Some(ns) = &src.namespace {
-        cmd.env("VAULT_NAMESPACE", ns).env("BAO_NAMESPACE", ns);
+    let mut mounts: Vec<String> = obj
+        .iter()
+        .filter_map(|(k, v)| {
+            let ty = v.get("type").and_then(|t| t.as_str())?;
+            if ty == "kv" || ty == "generic" {
+                let stripped = k.trim_end_matches('/');
+                if !stripped.is_empty() {
+                    return Some(stripped.to_string());
+                }
+            }
+            None
+        })
+        .collect();
+    mounts.sort();
+    mounts.dedup();
+    Ok(mounts)
+}
+
+/// Parse keys and subpaths from `vault kv list -mount=<mount> -format=json [prefix]` output.
+pub fn parse_vault_list(json: &[u8]) -> Result<Vec<String>> {
+    let val: serde_json::Value =
+        serde_json::from_slice(json).context("vault kv list: unexpected output")?;
+    let arr = if let Some(arr) = val.as_array() {
+        arr
+    } else if let Some(arr) = val
+        .get("data")
+        .and_then(|d| d.get("keys"))
+        .and_then(|k| k.as_array())
+    {
+        arr
+    } else if let Some(arr) = val.get("data").and_then(|d| d.as_array()) {
+        arr
+    } else if let Some(arr) = val.get("keys").and_then(|k| k.as_array()) {
+        arr
+    } else {
+        bail!("vault kv list: expected JSON array");
+    };
+    let mut list: Vec<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    list.sort();
+    list.dedup();
+    Ok(list)
+}
+
+/// A value in `kv get`'s `data`: an object's keys, anything else skipped unread.
+enum KvValue {
+    Object(Vec<String>),
+    Other,
+}
+
+impl<'de> serde::Deserialize<'de> for KvValue {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = KvValue;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON value")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<KvValue, A::Error> {
+                let mut keys = Vec::new();
+                while let Some(k) = m.next_key::<String>()? {
+                    m.next_value::<IgnoredAny>()?;
+                    keys.push(k);
+                }
+                Ok(KvValue::Object(keys))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<KvValue, A::Error> {
+                while s.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(KvValue::Other)
+            }
+            fn visit_str<E>(self, _: &str) -> Result<KvValue, E> {
+                Ok(KvValue::Other)
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<KvValue, E> {
+                Ok(KvValue::Other)
+            }
+            fn visit_i64<E>(self, _: i64) -> Result<KvValue, E> {
+                Ok(KvValue::Other)
+            }
+            fn visit_u64<E>(self, _: u64) -> Result<KvValue, E> {
+                Ok(KvValue::Other)
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<KvValue, E> {
+                Ok(KvValue::Other)
+            }
+            fn visit_unit<E>(self) -> Result<KvValue, E> {
+                Ok(KvValue::Other)
+            }
+        }
+        d.deserialize_any(V)
     }
-    let out = cmd
-        .output()
-        .with_context(|| format!("run `{bin}` (install the OpenBao or Vault CLI)"))?;
-    if !out.status.success() {
-        bail!(
-            "{bin} kv get failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+}
+
+/// Parse field names from `vault kv get -mount=<mount> -format=json <path>` output: the keys
+/// of `data.data` (KV v2) or else of `data` (KV v1). No value is kept.
+pub fn parse_vault_fields(json: &[u8]) -> Result<Vec<String>> {
+    #[derive(serde::Deserialize)]
+    struct KvGet {
+        data: BTreeMap<String, KvValue>,
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .trim_end_matches('\n')
-        .to_string())
+    let KvGet { mut data } =
+        serde_json::from_slice(json).context("vault kv get: unexpected output")?;
+    let mut fields = match data.remove("data") {
+        Some(KvValue::Object(keys)) => keys,
+        Some(KvValue::Other) => data.into_keys().chain(["data".into()]).collect(),
+        None => data.into_keys().collect(),
+    };
+    fields.sort();
+    fields.dedup();
+    Ok(fields)
 }
 
 #[cfg(test)]
@@ -1141,5 +1415,75 @@ mod tests {
         assert!(check_vault_ref(azcli).is_ok());
         assert!(check_vault_ref("azcli:https://x?tenant=a/b").is_err());
         assert!(check_vault_ref("http://x").is_err());
+    }
+
+    #[test]
+    fn vault_mounts_lists_and_fields_parse_from_json() {
+        let mounts_json = br#"{
+            "secret/": {"type": "kv", "description": "key/value secret storage"},
+            "kv/": {"type": "kv"},
+            "generic-store/": {"type": "generic"},
+            "cubbyhole/": {"type": "cubbyhole"},
+            "identity/": {"type": "identity"},
+            "sys/": {"type": "system"}
+        }"#;
+        assert_eq!(
+            parse_vault_mounts(mounts_json).unwrap(),
+            ["generic-store", "kv", "secret"]
+        );
+
+        let mounts_data_json = br#"{
+            "data": {
+                "custom/": {"type": "kv"},
+                "other/": {"type": "pki"}
+            }
+        }"#;
+        assert_eq!(parse_vault_mounts(mounts_data_json).unwrap(), ["custom"]);
+        assert!(parse_vault_mounts(b"not json").is_err());
+
+        let list_array = br#"["folder/", "secret_b", "secret_a"]"#;
+        assert_eq!(
+            parse_vault_list(list_array).unwrap(),
+            ["folder/", "secret_a", "secret_b"]
+        );
+
+        let list_wrapped = br#"{"data": {"keys": ["subfolder/", "item"]}}"#;
+        assert_eq!(
+            parse_vault_list(list_wrapped).unwrap(),
+            ["item", "subfolder/"]
+        );
+        assert!(parse_vault_list(b"not json").is_err());
+
+        let v2_fields = br#"{
+            "data": {
+                "data": {
+                    "username": "admin",
+                    "password": "secret-value-do-not-leak",
+                    "api_key": "12345"
+                },
+                "metadata": {"version": 2}
+            }
+        }"#;
+        let fields = parse_vault_fields(v2_fields).unwrap();
+        assert_eq!(fields, ["api_key", "password", "username"]);
+
+        let v1_fields = br#"{
+            "data": {
+                "token": "tok-123",
+                "host": "example.com"
+            }
+        }"#;
+        assert_eq!(parse_vault_fields(v1_fields).unwrap(), ["host", "token"]);
+        // KV v1 with a field named `data`, and values of every JSON kind.
+        let v1_data = br#"{"lease_id": "", "data": {
+            "data": "x\n", "n": 1, "f": 1.5, "b": true, "z": null, "a": [1, {"k": "v"}],
+            "o": {"k": "v"}
+        }}"#;
+        assert_eq!(
+            parse_vault_fields(v1_data).unwrap(),
+            ["a", "b", "data", "f", "n", "o", "z"]
+        );
+        assert!(parse_vault_fields(br#"{"warnings": null}"#).is_err());
+        assert!(parse_vault_fields(b"not json").is_err());
     }
 }

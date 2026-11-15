@@ -39,6 +39,13 @@ pub fn stopped(rt: &Runtime) -> bool {
     is_luoto(rt.connection.as_deref()) && !running(&rt.bin)
 }
 
+/// Whether the runtime is luoto's VM and the VM was deleted, taking every env's containers
+/// and volumes with it. A listing podman couldn't give is no proof: then it isn't gone.
+pub fn gone(rt: &Runtime) -> bool {
+    is_luoto(rt.connection.as_deref())
+        && machines(&rt.bin).is_some_and(|all| !all.iter().any(|(n, _)| n == NAME))
+}
+
 /// The oldest Apple `container` luoto runs on.
 pub const APPLE_MIN: (u32, u32, u32) = (1, 7, 1);
 
@@ -156,25 +163,28 @@ pub fn dev_id_start(octet: u8) -> u32 {
     1 + u32::from(octet) * ID_RANGE
 }
 
-fn machines(bin: &str) -> Vec<(String, bool)> {
-    let Ok(out) = Command::new(bin)
+/// Podman's machines and whether each runs; `None` when podman couldn't list them.
+fn machines(bin: &str) -> Option<Vec<(String, bool)>> {
+    let out = Command::new(bin)
         .args(["machine", "ls", "--format", "json"])
         .output()
-    else {
-        return Vec::new();
-    };
-    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
-    v.as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|m| {
-                    let name = m.get("Name")?.as_str()?.trim_end_matches('*').to_string();
-                    let running = m.get("Running").and_then(Value::as_bool).unwrap_or(false);
-                    Some((name, running))
-                })
-                .collect()
+        .ok()
+        .filter(|o| o.status.success())?;
+    parse_machines(&out.stdout)
+}
+
+fn parse_machines(json: &[u8]) -> Option<Vec<(String, bool)>> {
+    let v: Value = serde_json::from_slice(json).ok()?;
+    let machines = v
+        .as_array()?
+        .iter()
+        .filter_map(|m| {
+            let name = m.get("Name")?.as_str()?.trim_end_matches('*').to_string();
+            let running = m.get("Running").and_then(Value::as_bool).unwrap_or(false);
+            Some((name, running))
         })
-        .unwrap_or_default()
+        .collect();
+    Some(machines)
 }
 
 /// The host's RAM, to size the VM (macOS and Windows; elsewhere luoto creates no VM).
@@ -201,11 +211,11 @@ pub fn host_memory_mib() -> Option<u64> {
 }
 
 pub fn exists(bin: &str) -> bool {
-    machines(bin).iter().any(|(n, _)| n == NAME)
+    machines(bin).is_some_and(|all| all.iter().any(|(n, _)| n == NAME))
 }
 
 pub fn running(bin: &str) -> bool {
-    machines(bin).iter().any(|(n, r)| n == NAME && *r)
+    machines(bin).is_some_and(|all| all.iter().any(|(n, r)| n == NAME && *r))
 }
 
 /// Run `c`, a `podman machine` command: what it prints stays off the terminal, but for its
@@ -236,6 +246,13 @@ pub fn create(bin: &str, cpus: u32, memory_mib: u64) -> Result<()> {
 /// stopped first: `yes`, or a yes on the terminal, allows that.
 pub fn start(bin: &str, yes: bool) -> Result<()> {
     let all = machines(bin);
+    if all
+        .as_ref()
+        .is_some_and(|all| !all.iter().any(|(n, _)| n == NAME))
+    {
+        bail!("luoto's VM `{NAME}` is gone: `luoto setup` creates it again");
+    }
+    let all = all.unwrap_or_default();
     if all.iter().any(|(n, r)| n == NAME && *r) {
         return Ok(());
     }
@@ -577,6 +594,18 @@ mod tests {
         let status = "FIELD   VALUE\nstatus  running\nclient.version  1.7.1\n";
         assert!(super::apple_service_running(status));
         assert!(!super::apple_service_running("status  stopped\n"));
+    }
+
+    #[test]
+    fn a_listing_podman_could_not_give_names_no_machine_gone() {
+        let listed = br#"[{"Name": "luoto*", "Running": true}, {"Name": "other"}]"#;
+        assert_eq!(
+            super::parse_machines(listed).unwrap(),
+            [("luoto".to_string(), true), ("other".to_string(), false)]
+        );
+        assert_eq!(super::parse_machines(b"[]").unwrap(), []);
+        assert!(super::parse_machines(b"").is_none());
+        assert!(super::parse_machines(b"Error: cannot connect").is_none());
     }
 
     #[test]

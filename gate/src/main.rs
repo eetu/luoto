@@ -106,6 +106,19 @@ fn run() -> ExitCode {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
+    // Before any thread starts: each thread has its own, and tokio's workers are the ones that
+    // serve the sandbox.
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: plain prctl call with constant arguments.
+        if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+            eprintln!(
+                "luoto-gate: no_new_privs: {}",
+                std::io::Error::last_os_error()
+            );
+            return ExitCode::FAILURE;
+        }
+    }
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

@@ -168,6 +168,8 @@ fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
         read_only: true,
         tmpfs: vec!["/run/luoto:rw,mode=1777,size=1m".into()],
         ulimits: vec!["core=0".into()],
+        memory: Some(SMALL_MEMORY.into()),
+        no_swap: true,
         restart: Some("on-failure".into()),
         labels: labels("", "vault"),
         log_mb: Some(VAULT_LOG_MB),
@@ -188,7 +190,6 @@ fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
         spec.mounts.clear();
         spec.read_only = false;
         spec.published_sockets = vec![(host.display().to_string(), APPLE_VAULT_SOCKET.into())];
-        spec.memory = Some(APPLE_SMALL_MEMORY.into());
     } else {
         rt.create_volume(&names::vault_sockets(), &labels("", "vault"))?;
     }
@@ -209,8 +210,9 @@ fn remove_old_vault_net(ctx: &Ctx) {
     }
 }
 
-/// Memory of the gate and vault VMs on Apple (its default is 1 GB a container).
-const APPLE_SMALL_MEMORY: &str = "512M";
+/// Memory of the gate and vault: their VMs on Apple (its default is 1 GB a container), their
+/// limit elsewhere, which also keeps them out of swap.
+const SMALL_MEMORY: &str = "512M";
 /// The dev VM's memory on Apple when the env sets none.
 const APPLE_DEV_MEMORY: &str = "8G";
 
@@ -985,6 +987,8 @@ fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
             .map(str::to_string)
             .collect(),
         ulimits: vec!["core=0".into()],
+        memory: Some(SMALL_MEMORY.into()),
+        no_swap: true,
         sysctls: vec!["net.ipv4.ip_forward=0".into()],
         restart: Some("on-failure".into()),
         labels: labels(env, "gate"),
@@ -1014,7 +1018,6 @@ fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
             (socks.gate.display().to_string(), APPLE_GATE_SOCKET.into()),
             (socks.uplink.display().to_string(), APPLE_GATE_UPLINK.into()),
         ];
-        spec.memory = Some(APPLE_SMALL_MEMORY.into());
     } else if ctx.rt.mounts_folders() {
         // Only the env's own folder of the vault's sockets.
         spec.folder_mounts = vec![(names::vault_sockets(), env.into(), vault_dir)];
@@ -1465,6 +1468,11 @@ pub fn remove(ctx: &Ctx, env: &str) -> Result<()> {
             &luoto_shared::ctl::VaultCtl::Unbind { env: env.into() },
         );
     }
+    forget(ctx, env)
+}
+
+/// Delete what this machine keeps of the env: its state and its shares' clones.
+pub fn forget(ctx: &Ctx, env: &str) -> Result<()> {
     let state = ctx.paths.env_state(env);
     if state.exists() {
         std::fs::remove_dir_all(&state)?;

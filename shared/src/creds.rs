@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::glob;
 
@@ -77,6 +78,55 @@ pub const AUTH_HEADERS: &[&str] = &[
     "x-auth-user-service-key",
 ];
 
+/// Query parameters removed from every client request on a credentialed host, as
+/// [`AUTH_HEADERS`]: the token parameters forges and APIs read.
+pub const AUTH_QUERY_PARAMS: &[&str] = &["access_token", "private_token", "job_token", "api_key"];
+
+/// `query` without the parameters named in `names`, compared as a server reads them:
+/// percent-decoded and in any case. `None` when nothing was removed.
+pub fn strip_query(query: &str, names: &[&str]) -> Option<String> {
+    let mut removed = false;
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|kv| !kv.is_empty())
+        .filter(|kv| {
+            let name = percent_decode(kv.split('=').next().unwrap_or(""));
+            let hit = names.iter().any(|n| n.eq_ignore_ascii_case(&name));
+            removed |= hit;
+            !hit
+        })
+        .collect();
+    removed.then(|| kept.join("&"))
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        match (
+            b[i],
+            b.get(i + 1).copied().and_then(hex),
+            b.get(i + 2).copied().and_then(hex),
+        ) {
+            (b'%', Some(h), Some(l)) => {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            }
+            (b'+', ..) => {
+                out.push(b' ');
+                i += 1;
+            }
+            (c, ..) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Placement {
@@ -117,9 +167,10 @@ impl Injection {
 }
 
 /// What the vault hands the gate for one binding.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct CredentialValue {
     pub value: String,
+    #[zeroize(skip)]
     pub expires_at: Option<DateTime<Utc>>,
 }
 

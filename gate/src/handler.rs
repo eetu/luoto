@@ -16,7 +16,7 @@ use hyper::client::conn::http1::SendRequest;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
-use luoto_shared::creds::{AUTH_HEADERS, CredentialError};
+use luoto_shared::creds::{AUTH_HEADERS, AUTH_QUERY_PARAMS, CredentialError, strip_query};
 use luoto_shared::events::{Event, EventKind, Intake, Verdict, clip_path};
 use luoto_shared::host::{canonical_path, split_authority};
 use luoto_shared::policy::{Decision, DenyReason, RequestInfo};
@@ -184,7 +184,15 @@ fn strip_hop_by_hop(headers: &mut HeaderMap, keep_upgrade: bool) {
 /// The path the gate matches and forwards for a request, or why the request is refused before
 /// any rule. The path is canonical (`host::canonical_path`). Only upper-case methods pass:
 /// methods are case-sensitive, and the policy compares them without case, the guards with it.
+/// The longest method the gate forwards: every real one (WebDAV's included) is far shorter.
+const MAX_METHOD: usize = 32;
+
 pub fn canonical_request(method: &str, raw_path: &str) -> Result<String, DenyReason> {
+    if method.len() > MAX_METHOD {
+        return Err(DenyReason::Guard {
+            reason: format!("a method of over {MAX_METHOD} bytes is not allowed"),
+        });
+    }
     let path = canonical_path(raw_path).map_err(|why| DenyReason::Guard {
         reason: format!("the path has {why}, which servers resolve differently"),
     })?;
@@ -271,7 +279,8 @@ async fn handle_inner(
     let ev = Event {
         kind: Some(EventKind::Http),
         intake: Some(ctx.intake),
-        method: Some(method.clone()),
+        // HTTP takes a method of any length; an event line keeps a bounded one.
+        method: Some(method.get(..MAX_METHOD).unwrap_or(&method).to_string()),
         host: Some(target.host.clone()),
         port: Some(target.port),
         path: Some(clip_path(&path)),
@@ -401,6 +410,26 @@ async fn handle_inner(
         // a credential's goes without any.
         for h in AUTH_HEADERS {
             parts.headers.remove(*h);
+        }
+        let (headers, params) = policy.credential_names(&target.host);
+        for h in headers {
+            parts.headers.remove(h);
+        }
+        let params: Vec<&str> = AUTH_QUERY_PARAMS.iter().copied().chain(params).collect();
+        if let Some(query) = parts.uri.query().and_then(|q| strip_query(q, &params)) {
+            let path = parts.uri.path();
+            let uri = if query.is_empty() {
+                path.to_string()
+            } else {
+                format!("{path}?{query}")
+            };
+            let Ok(uri) = uri.parse() else {
+                let reason = DenyReason::Guard {
+                    reason: "the request's query could not be rewritten".into(),
+                };
+                return deny(ev, reason);
+            };
+            parts.uri = uri;
         }
         let injections = policy.injections_for(&method, &target.host, &path);
         if !injections.is_empty() {
@@ -629,6 +658,17 @@ fn redact(v: &mut serde_json::Value, carries: &dyn Fn(&[u8]) -> bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn methods_are_upper_case_and_short() {
+        assert!(canonical_request("PROPFIND", "/").is_ok());
+        assert!(canonical_request("get", "/").is_err());
+        let long = "A".repeat(MAX_METHOD + 1);
+        let Err(DenyReason::Guard { reason }) = canonical_request(&long, "/") else {
+            panic!("a long method passed");
+        };
+        assert!(!reason.contains(&long));
+    }
 
     #[test]
     fn an_echoed_credential_is_taken_out_of_json() {

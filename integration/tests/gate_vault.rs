@@ -535,6 +535,25 @@ async fn credentials_replace_whatever_the_sandbox_sent() {
         .respond_with(ResponseTemplate::new(401))
         .mount(&upstream)
         .await;
+    // Off its credential's paths, a custom credential's header and token parameters the
+    // sandbox sends must not arrive either.
+    Mock::given(method("GET"))
+        .and(path("/other"))
+        .and(header_exists("x-custom-token"))
+        .respond_with(ResponseTemplate::new(418))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/other"))
+        .and(query_param("access_token", "attacker"))
+        .respond_with(ResponseTemplate::new(418))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/other"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
     let env = Env::start(&[("api.test", *upstream.address())]);
     env.credentials(
         &[(
@@ -566,6 +585,17 @@ async fn credentials_replace_whatever_the_sandbox_sent() {
     );
     assert_eq!(r.status, 200, "{}", r.head);
     let r = env.get("http://api.test/qsecret?key=attacker&alt=json");
+    assert_eq!(r.status, 200, "{}", r.head);
+    let r = env.request(
+        "GET",
+        "http://api.test/other",
+        &[("x-custom-token", "attacker")],
+        b"",
+    );
+    assert_eq!(r.status, 200, "{}", r.head);
+    let r = env.get("http://api.test/other?ACCESS%5FTOKEN=attacker");
+    assert_eq!(r.status, 200, "{}", r.head);
+    let r = env.get("http://api.test/other?access_token=attacker");
     assert_eq!(r.status, 200, "{}", r.head);
 }
 
@@ -654,8 +684,8 @@ async fn credentials_come_over_the_links_the_host_joins_to_the_vault() {
     );
 }
 
-/// `api.test` readable, with the `t.key` credential on `/secret` (a header) and `/qsecret`
-/// (the `key` query parameter).
+/// `api.test` readable, with the `t.key` credential on `/secret` (a header), `/qsecret` (the
+/// `key` query parameter) and `/custom` (a header of a custom credential's own).
 fn credentialed_policy() -> Policy {
     let injection = |path: &str, place| Injection {
         binding: "t.key".into(),
@@ -679,6 +709,13 @@ fn credentialed_policy() -> Policy {
                 "/qsecret",
                 Placement::Query {
                     param: "key".into(),
+                },
+            ),
+            injection(
+                "/custom",
+                Placement::Header {
+                    name: "X-Custom-Token".into(),
+                    format: "{secret}".into(),
                 },
             ),
         ],
@@ -1004,6 +1041,23 @@ async fn pushes_go_only_to_granted_repos_and_unprotected_branches() {
         &receive("/o/r.git/git-receive-pack", &[], &delete),
         "deleting",
     );
+    // A signed push: git runs the commands inside its certificate, unseen by a parser that
+    // skips it.
+    let mut cert = pkt("push-cert\0report-status\n");
+    cert.extend(pkt(&format!(
+        "{ONE} {ONE} refs/heads/ok\n\n{ONE} {ZERO} refs/heads/main\n"
+    )));
+    cert.extend(pkt("push-cert-end\n"));
+    cert.extend_from_slice(b"0000");
+    refused(
+        &receive("/o/r.git/git-receive-pack", &[], &cert),
+        "signed pushes",
+    );
+    let upper = push(&[&format!("{ONE} {ONE} refs/heads/MAIN")]);
+    refused(
+        &receive("/o/r.git/git-receive-pack", &[], &upper),
+        "protected",
+    );
     let gzip = [("content-encoding", "gzip")];
     refused(
         &receive("/o/r.git/git-receive-pack", &gzip, &feature),
@@ -1018,7 +1072,11 @@ async fn pushes_go_only_to_granted_repos_and_unprotected_branches() {
         endless.extend(pkt(&filler));
     }
     let rest = (1 << 20) + 1 - endless.len() - 4;
-    endless.extend(pkt(&format!("a b {}\n", "c".repeat(rest - 5))));
+    let prefix = format!("{ZERO} {ONE} refs/heads/");
+    endless.extend(pkt(&format!(
+        "{prefix}{}\n",
+        "c".repeat(rest - prefix.len() - 1)
+    )));
     assert_eq!(endless.len(), (1 << 20) + 1);
     refused(
         &receive("/o/r.git/git-receive-pack", &[], &endless),

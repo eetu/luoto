@@ -25,7 +25,8 @@ The value is in your shell history and the env's file; keep secrets out of it.
 luoto var set DATABASE_URL
 ```
 
-luoto asks where the secret is kept: a 1Password item, the OS keychain, or pasted into either.
+luoto asks where the secret is kept: pasted into the OS keychain or 1Password, or browsed in
+the keychain, 1Password or Vault.
 The env's file keeps only the ref. Without a terminal, give the ref:
 
 ```sh

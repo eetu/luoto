@@ -638,6 +638,13 @@ export type VaultStatus = {
   locked: boolean;
   loaded_refs: string[];
   envs: VaultEnvSummary[];
+  /** Swap on the kernel the vault runs on, in KiB. */
+  swap_kib: number;
+  /**
+   * The vault's cgroup's `memory.swap.max` (`0`: its memory is never swapped); `None` where
+   * no cgroup v2 memory controller limits it.
+   */
+  swap_max: string | null;
 };
 
 /**

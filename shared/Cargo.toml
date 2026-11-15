@@ -15,6 +15,8 @@ toml.workspace = true
 psl.workspace = true
 idna.workspace = true
 ipnet.workspace = true
+zeroize.workspace = true
+tokio = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true, optional = true }
@@ -22,3 +24,5 @@ libc = { workspace = true, optional = true }
 [features]
 # The tun link of an env without a network card (gate and sandbox helper, Linux only).
 tun = ["dep:libc"]
+# Reading requests on the gate's and vault's ctl sockets.
+ctl-server = ["dep:tokio"]

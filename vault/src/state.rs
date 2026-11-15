@@ -15,6 +15,7 @@ use luoto_shared::ctl::{VaultEnvSummary, VaultStatus};
 use luoto_shared::events::{Event, Source};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{agent, entra, github};
 
@@ -30,9 +31,9 @@ type Key = (String, String);
 
 #[derive(Default)]
 struct Inner {
-    secrets: HashMap<String, String>,
+    secrets: HashMap<String, Zeroizing<String>>,
     envs: HashMap<String, EnvEntry>,
-    minted: HashMap<Key, (String, DateTime<Utc>)>,
+    minted: HashMap<Key, (Zeroizing<String>, DateTime<Utc>)>,
     /// The last mint that failed for each binding: its error, when, and the env's generation
     /// then (a new one, from a bind, a wipe or a changed secret, tries again at once).
     failed: HashMap<Key, (String, Instant, u64)>,
@@ -146,11 +147,9 @@ impl Vault {
                 if let BindingSpec::SshAgent { .. } = spec {
                     return Err(CredentialError::NotBound);
                 }
-                let secret = inner
-                    .secrets
-                    .get(spec.secret_ref())
-                    .ok_or(CredentialError::Locked)?
-                    .clone();
+                if !inner.secrets.contains_key(spec.secret_ref()) {
+                    return Err(CredentialError::Locked);
+                }
                 if let BindingSpec::GithubApp { .. } | BindingSpec::AzureServicePrincipal { .. } =
                     spec
                 {
@@ -158,7 +157,7 @@ impl Vault {
                         && *exp - Utc::now() > chrono::TimeDelta::minutes(10)
                     {
                         return Ok(CredentialValue {
-                            value: tok.clone(),
+                            value: tok.as_str().to_string(),
                             expires_at: Some(*exp),
                         });
                     }
@@ -169,6 +168,11 @@ impl Vault {
                         return Err(CredentialError::Failed(why.clone()));
                     }
                 }
+                let secret = inner
+                    .secrets
+                    .get(spec.secret_ref())
+                    .cloned()
+                    .ok_or(CredentialError::Locked)?;
                 (spec.clone(), secret, entry.generation)
             };
             let minted = match &spec {
@@ -201,7 +205,7 @@ impl Vault {
                 }
                 BindingSpec::Static { .. } | BindingSpec::SshAgent { .. } => {
                     return Ok(CredentialValue {
-                        value: secret,
+                        value: secret.as_str().to_string(),
                         expires_at: None,
                     });
                 }
@@ -224,7 +228,7 @@ impl Vault {
             inner.failed.remove(&key);
             inner.minted.insert(key, (token.clone(), exp));
             return Ok(CredentialValue {
-                value: token,
+                value: token.as_str().to_string(),
                 expires_at: Some(exp),
             });
         }
@@ -251,8 +255,8 @@ impl Vault {
             let pem = inner
                 .secrets
                 .get(key_ref)
-                .ok_or(CredentialError::Locked)?
-                .clone();
+                .cloned()
+                .ok_or(CredentialError::Locked)?;
             (pem, host_keys.clone())
         };
         let key = agent::Key::from_openssh(&pem).map_err(CredentialError::Failed)?;
@@ -292,6 +296,13 @@ impl Vault {
             locked: inner.secrets.is_empty(),
             loaded_refs,
             envs,
+            swap_kib: std::fs::read_to_string("/proc/meminfo")
+                .ok()
+                .and_then(|m| swap_total_kib(&m))
+                .unwrap_or(0),
+            swap_max: std::fs::read_to_string("/sys/fs/cgroup/memory.swap.max")
+                .ok()
+                .map(|s| s.trim().to_string()),
         }
     }
 
@@ -304,17 +315,20 @@ impl Vault {
         let mut inner = self.lock();
         let mut n = 0;
         let mut rotated: BTreeSet<String> = BTreeSet::new();
-        for (r, value) in secrets {
+        for (mut r, value) in secrets {
+            let value = Zeroizing::new(value);
             match inner.secrets.get_mut(&r) {
-                Some(old) if *old == value => {}
+                Some(old) if **old == *value => {
+                    r.zeroize();
+                }
                 Some(old) => {
-                    // SAFETY: zero bytes keep the String valid UTF-8.
-                    unsafe { old.as_bytes_mut().fill(0) };
                     *old = value;
                     rotated.insert(r);
                     n += 1;
                 }
-                None if held_only => {}
+                None if held_only => {
+                    r.zeroize();
+                }
                 None => {
                     inner.secrets.insert(r, value);
                     n += 1;
@@ -371,11 +385,6 @@ impl Vault {
     /// Wipe every secret and minted token from memory.
     pub fn wipe(&self) {
         let mut inner = self.lock();
-        for v in inner.secrets.values_mut() {
-            // Overwrite before dropping so the plaintext does not linger in freed memory.
-            // SAFETY: zero bytes keep the String valid UTF-8.
-            unsafe { v.as_bytes_mut().fill(0) };
-        }
         inner.secrets.clear();
         inner.minted.clear();
         let generation = inner.next_generation();
@@ -385,9 +394,29 @@ impl Vault {
     }
 }
 
+/// `SwapTotal` of `/proc/meminfo`, in KiB.
+fn swap_total_kib(meminfo: &str) -> Option<u64> {
+    meminfo
+        .lines()
+        .find_map(|l| l.strip_prefix("SwapTotal:"))?
+        .trim()
+        .strip_suffix("kB")?
+        .trim()
+        .parse()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_kernels_swap() {
+        let meminfo = "MemTotal:  2000000 kB\nSwapCached:  0 kB\nSwapTotal:  1048572 kB\n";
+        assert_eq!(swap_total_kib(meminfo), Some(1_048_572));
+        assert_eq!(swap_total_kib("SwapTotal:  0 kB\n"), Some(0));
+        assert_eq!(swap_total_kib("MemTotal: 1 kB\n"), None);
+    }
 
     #[test]
     fn binds_and_wipes_never_repeat_a_generation() {
@@ -421,7 +450,7 @@ mod tests {
         assert!(v.status().locked);
         assert_eq!(v.load(secrets("t1"), false), 1);
         assert_eq!(v.load(secrets("t2"), true), 1);
-        assert_eq!(v.lock().secrets[arm], "t2");
+        assert_eq!(v.lock().secrets[arm].as_str(), "t2");
         // Locked while it was read: the vault stays empty.
         v.wipe();
         assert_eq!(v.load(secrets("t3"), true), 0);
@@ -447,9 +476,10 @@ mod tests {
         );
         let load = |r: &str, val: &str| v.load(BTreeMap::from([(r.into(), val.into())]), false);
         let mint = || {
-            v.lock()
-                .minted
-                .insert(("e".into(), "github".into()), ("ghs_x".into(), Utc::now()));
+            v.lock().minted.insert(
+                ("e".into(), "github".into()),
+                (Zeroizing::new("ghs_x".into()), Utc::now()),
+            );
         };
         assert_eq!(load("op://a/b/c", "one"), 1);
         assert_eq!(load("azcli:https://management.azure.com/", "t1"), 1);
@@ -465,6 +495,80 @@ mod tests {
         assert!(v.lock().minted.is_empty());
         assert_ne!(v.lock().generation_of("e"), kept);
         assert_ne!(v.lock().generation_of("e"), before);
-        assert_eq!(v.lock().secrets["op://a/b/c"], "two");
+        assert_eq!(v.lock().secrets["op://a/b/c"].as_str(), "two");
+    }
+
+    #[test]
+    fn load_held_only_and_unchanged_secrets() {
+        let v = Vault::new(client_tls());
+        let sec1 = "op://vault/sec1";
+        let sec2 = "op://vault/sec2";
+
+        // held_only on empty vault loads nothing
+        let mut initial = BTreeMap::new();
+        initial.insert(sec1.to_string(), "val1".to_string());
+        assert_eq!(v.load(initial.clone(), true), 0);
+        assert!(v.status().locked);
+
+        // initial load inserts sec1
+        assert_eq!(v.load(initial.clone(), false), 1);
+        assert!(!v.status().locked);
+        assert_eq!(v.lock().secrets[sec1].as_str(), "val1");
+
+        // reloading unchanged value with held_only=false returns 0
+        assert_eq!(v.load(initial.clone(), false), 0);
+
+        // reloading unchanged value with held_only=true returns 0
+        assert_eq!(v.load(initial.clone(), true), 0);
+
+        // load with sec1 unchanged and sec2 with held_only=true inserts nothing for sec2
+        let mut mixed = BTreeMap::new();
+        mixed.insert(sec1.to_string(), "val1".to_string());
+        mixed.insert(sec2.to_string(), "val2".to_string());
+        assert_eq!(v.load(mixed.clone(), true), 0);
+        assert!(!v.lock().secrets.contains_key(sec2));
+
+        // updating sec1 value returns 1
+        let mut update = BTreeMap::new();
+        update.insert(sec1.to_string(), "val1_updated".to_string());
+        assert_eq!(v.load(update, true), 1);
+        assert_eq!(v.lock().secrets[sec1].as_str(), "val1_updated");
+    }
+
+    #[tokio::test]
+    async fn issue_cache_hit_and_missing_secret() {
+        let v = Vault::new(client_tls());
+        let spec = BindingSpec::GithubApp {
+            app_id: "123".into(),
+            installation_id: 456,
+            key_ref: "gh_key".into(),
+            repos: vec!["repo1".into()],
+            permissions: BTreeMap::new(),
+            api_base: "https://api.github.com".into(),
+        };
+
+        v.bind("env1", [0; 32], BTreeMap::from([("github".into(), spec)]));
+
+        // When secret is missing from vault, issue returns Locked
+        let err = v.issue("env1", "github").await.unwrap_err();
+        assert_eq!(err, CredentialError::Locked);
+
+        // Load secret
+        v.load(
+            BTreeMap::from([("gh_key".into(), "dummy_pem".into())]),
+            false,
+        );
+
+        // Insert minted token in cache with future expiry
+        let future = Utc::now() + chrono::TimeDelta::hours(1);
+        v.lock().minted.insert(
+            ("env1".into(), "github".into()),
+            (Zeroizing::new("cached_token_123".into()), future),
+        );
+
+        // issue() must return cached token on cache hit without re-minting
+        let cred = v.issue("env1", "github").await.unwrap();
+        assert_eq!(cred.value, "cached_token_123");
+        assert_eq!(cred.expires_at, Some(future));
     }
 }

@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.4.6 (2026-11-15)
+
+- **A deleted VM:** `luoto rm` removes an env whose VM was deleted by hand (its containers and
+  volumes went with the VM); commands that start the VM name `luoto setup`, which creates it
+  again.
+- **Secret wizards:** pasting a secret comes first, and external secret stores (the OS
+  keychain, 1Password, OpenBao / Vault) are queried only when you pick their `(browse)` entry.
+- **Secrets in memory:** the vault, `luoto` and the `ctl` path keep secrets and minted tokens
+  in buffers wiped when dropped, sized so none leaves a copy as it grows; the vault also wipes
+  on `SIGTERM`/`SIGINT`, so it stops at once. Copies inside the HTTP and JSON libraries are not
+  wiped.
+- **No swap for secrets:** on podman and Docker the vault and gates get 512 MB and no swap
+  (Docker Desktop and WSL2 swap by default); the next `luoto up` recreates them. `luoto doctor`
+  names swap where the containers run and whether the vault can still reach it.
+- **Push guard:** signed pushes are refused (git runs the commands inside their certificate),
+  each command must be exactly `old new ref`, and protected branches and tags match in any
+  case.
+- **Credentials:** on a credentialed host the gate also removes the client's own copy of every
+  header and query parameter that host's credentials go in, on any path, and token parameters
+  (`access_token`, `private_token`, `job_token`, `api_key`) in any spelling. GitHub's
+  `/graphql` gets the token on POST only, where its mutation guard reads.
+- **Model APIs:** Anthropic's managed agents, sessions and environments are denied; images,
+  documents and files given by URL to Anthropic, OpenAI and Gemini are server tools (refused
+  without `server_tools = true`); Gemini's denies and server tools cover every API version.
+- **Hosts:** a host spelled as a number (`3405803777`, `0x7f.1`) is the IPv4 address resolvers
+  read it as, so IP rules, denies and credentialed hosts match it; IPv6 forms (NAT64, 6to4) of
+  addresses the gate never dials are never dialed either.
+- **Gate:** a DNS message with more than one question is refused, methods over 32 bytes are
+  refused, `no_new_privs` covers every thread, and the state folder's ownership is set without
+  following links.
+
 ## 0.4.5 (2026-11-13)
 
 - **Clone failures:** listed last, after "is up", each with why and the command that fixes it.
