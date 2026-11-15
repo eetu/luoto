@@ -180,6 +180,8 @@ pub fn to_json(v: &impl Serialize) -> serde_json::Result<Zeroizing<Vec<u8>>> {
 
 /// A control request read into one buffer that is wiped on drop. The buffer grows by moving
 /// into a larger one and wiping the old, so no copy of a secret is left in freed memory.
+// The CLI (Windows too) builds this crate without the gate's and vault's readers.
+#[cfg_attr(not(unix), allow(dead_code))]
 struct LineAccumulator {
     buf: Zeroizing<Vec<u8>>,
     chunk: Zeroizing<[u8; 4096]>,
@@ -187,6 +189,7 @@ struct LineAccumulator {
     until_eof: bool,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 impl LineAccumulator {
     fn new(max: usize, until_eof: bool) -> Self {
         LineAccumulator {
@@ -265,6 +268,7 @@ impl LineAccumulator {
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn too_long(max: usize) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
@@ -272,6 +276,7 @@ fn too_long(max: usize) -> std::io::Error {
     )
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn read_accumulated(
     mut r: impl std::io::Read,
     mut acc: LineAccumulator,
@@ -305,6 +310,7 @@ pub async fn read_request<R: tokio::io::AsyncRead + Unpin>(
 
 /// `luoto-vault ctl` / `luoto-gate ctl`: forward the request on stdin to the socket and print
 /// the response.
+#[cfg(unix)]
 pub fn client(bin: &str) -> std::process::ExitCode {
     use std::io::{Read, Write};
     use std::process::ExitCode;
