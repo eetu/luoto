@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.6
+## 0.4.6 (2026-11-15)
 
 - **A deleted VM:** `luoto rm` removes an env whose VM was deleted by hand (its containers and
   volumes went with the VM); commands that start the VM name `luoto setup`, which creates it
