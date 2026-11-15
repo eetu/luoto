@@ -6,7 +6,7 @@
 //! reports its result and a failure leaves the rest to run; the binary stays, and the last
 //! line says how to remove it.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -696,22 +696,7 @@ fn keychain(paths: &Paths, inst: &str) -> (Vec<Key>, Option<String>) {
 }
 
 fn search(service: &str) -> Result<Vec<(String, keyring_core::Entry)>, String> {
-    if let Err(e) = keyring::Entry::store_status() {
-        return Err(e.to_string());
-    }
-    let spec = HashMap::from([("service", service)]);
-    let found = keyring_core::Entry::search(&spec).map_err(|e| e.to_string())?;
-    Ok(found
-        .into_iter()
-        .filter_map(|e| {
-            let account = e.get_specifiers().map(|(_, a)| a).or_else(|| {
-                e.get_attributes()
-                    .ok()
-                    .and_then(|a| a.get("username").cloned())
-            })?;
-            Some((account, e))
-        })
-        .collect())
+    crate::secrets::keychain_entries(service).map_err(|e| e.to_string())
 }
 
 /// config.toml and every file in envs/ (older formats kept beside an env's file included).

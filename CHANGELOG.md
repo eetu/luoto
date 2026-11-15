@@ -5,6 +5,8 @@
 - **A deleted VM:** `luoto rm` removes an env whose VM was deleted by hand (its containers and
   volumes went with the VM); commands that start the VM name `luoto setup`, which creates it
   again.
+- **Secret wizards:** pasting a secret comes first, and external secret stores (the OS
+  keychain, 1Password, OpenBao / Vault) are queried only when you pick their `(browse)` entry.
 - **Secrets in memory:** `luoto-vault`, `luoto-gate`, and `luoto` read, hold, and mint secrets
   through volatile-zeroized buffers and wipe them on exit, error, `SIGTERM`, or `SIGINT`.
 
