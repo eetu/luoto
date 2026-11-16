@@ -379,7 +379,11 @@ mod tests {
             let mut rest = Vec::new();
             let read =
                 tokio::time::timeout(Duration::from_secs(5), link.read_to_end(&mut rest)).await;
-            assert!(matches!(read, Ok(Ok(0))), "{line:?} got {rest:?}");
+            // Closed unanswered: an end, or on Linux a reset (the host left bytes unread).
+            assert!(
+                read.is_ok() && rest.is_empty(),
+                "{line:?} got {read:?} {rest:?}"
+            );
         }
         drop(d);
     }
