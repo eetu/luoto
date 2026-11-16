@@ -894,7 +894,11 @@ impl Runtime {
     pub fn create_and_start(&self, spec: &RunSpec) -> Result<()> {
         match self.flavor {
             Flavor::Podman if spec.oci_runtime.is_some() => self.run_on_runtime(spec),
-            Flavor::Podman | Flavor::Apple => self.run(self.run_args(spec, false)).map(|_| ()),
+            Flavor::Podman => self.run(self.run_args(spec, false)).map(|_| ()),
+            Flavor::Apple => {
+                clear_dead_sockets(spec);
+                self.run(self.run_args(spec, false)).map(|_| ())
+            }
             Flavor::Docker => {
                 self.run(self.run_args(spec, true))?;
                 for (net, ip) in spec.networks.iter().skip(1) {
@@ -1204,9 +1208,53 @@ fn apple_subnets(out: &str) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// Apple's `container` leaves a published socket's host end behind when its container dies
+/// without stopping (the service stopped, the Mac restarted), and refuses to create a container
+/// that publishes over it. One that nothing answers is removed.
+fn clear_dead_sockets(spec: &RunSpec) {
+    #[cfg(unix)]
+    for (host, _) in &spec.published_sockets {
+        use std::os::unix::fs::FileTypeExt;
+        let path = std::path::Path::new(host);
+        let socket = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket());
+        let dead = socket
+            && std::os::unix::net::UnixStream::connect(path)
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused);
+        if dead {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = spec;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn only_dead_published_sockets_are_cleared() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let dead = dir.path().join("dead.sock");
+        drop(UnixListener::bind(&dead).unwrap());
+        let live = dir.path().join("live.sock");
+        let _listener = UnixListener::bind(&live).unwrap();
+        let file = dir.path().join("file.sock");
+        std::fs::write(&file, "").unwrap();
+        let spec = RunSpec {
+            published_sockets: [&dead, &live, &file]
+                .iter()
+                .map(|p| (p.display().to_string(), "/run/x.sock".into()))
+                .collect(),
+            ..Default::default()
+        };
+        clear_dead_sockets(&spec);
+        assert!(!dead.exists());
+        assert!(live.exists());
+        assert!(file.exists());
+    }
 
     const APPLE_LS: &str = r#"[{"configuration":{"id":"luoto-dev-web-gate","labels":{"luoto.role":"gate","luoto.spec":"abc"},"networks":[{"network":"luoto-dev-web-out","options":{"hostname":"luoto-dev-web-gate"}}]},"id":"luoto-dev-web-gate","status":{"networks":[{"hostname":"luoto-dev-web-gate","ipv4Address":"192.168.65.2/24","ipv4Gateway":"192.168.65.1","macAddress":"fe:61:8f:72:cc:9d","mtu":1280,"network":"luoto-dev-web-out","variant":"reserved"}],"startedDate":"2026-11-11T20:57:10Z","state":"running"}},{"configuration":{"id":"luoto-dev-web","labels":{"luoto.role":"dev"}},"id":"luoto-dev-web","status":{"networks":[],"state":"stopped"}},{"configuration":{"id":"buildkit","labels":{"com.apple.container.resource.role":"builder"}},"id":"buildkit","status":{"networks":[],"state":"stopped"}}]"#;
 

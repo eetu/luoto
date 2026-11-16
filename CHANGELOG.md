@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.7 (2026-11-16)
+
+- **Apple's `container`:** creating the vault, a gate or a dev container no longer fails with
+  "host socket … already exists" after the container service stopped or the Mac restarted
+  with containers running; luoto removes a published socket nothing answers on.
+- **`luoto setup --build`:** refused before anything is set up when the binary wasn't built
+  from a checkout, and only such a binary suggests it.
+
 ## 0.4.6 (2026-11-15)
 
 - **A deleted VM:** `luoto rm` removes an env whose VM was deleted by hand (its containers and
