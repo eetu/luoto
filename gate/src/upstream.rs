@@ -126,6 +126,7 @@ pub async fn dial_tcp_to(
         .filter(|_| allow_private && !private_only);
     // Every address and how it failed: why one family can't connect shows beside the other.
     let mut failed = Vec::new();
+    let mut private_timed_out = false;
     for addr in addrs {
         if let Some(hd) = host_dial
             && leaves_host(addr.ip())
@@ -156,13 +157,30 @@ pub async fn dial_tcp_to(
                 return Ok(Box::new(s));
             }
             Ok(Err(e)) => failed.push(format!("{addr}: {e}")),
-            Err(_) => failed.push(format!("{addr}: connect timed out")),
+            Err(_) => {
+                private_timed_out |= is_private(addr.ip());
+                failed.push(format!("{addr}: connect timed out"));
+            }
         }
     }
-    Err(DialError::Failed(format!(
-        "could not connect to {host}:{port} ({})",
-        failed.join("; ")
+    Err(DialError::Failed(cannot_connect(
+        host,
+        port,
+        &failed,
+        private_timed_out,
     )))
+}
+
+/// Why `host:port` can't be reached: each address's failure, and for a private address that
+/// timed out, what usually causes that.
+fn cannot_connect(host: &str, port: u16, failed: &[String], private_timed_out: bool) -> String {
+    let mut msg = format!("could not connect to {host}:{port} ({})", failed.join("; "));
+    if private_timed_out {
+        msg.push_str(
+            "; a private address: is the network or VPN that reaches it up on this machine?",
+        );
+    }
+    msg
 }
 
 pub async fn dial(
@@ -200,6 +218,26 @@ pub async fn http1_sender(io: Box<dyn Io>) -> Result<SendRequest<Body>, DialErro
         let _ = conn.with_upgrades().await;
     });
     Ok(sender)
+}
+
+#[cfg(test)]
+mod connect_tests {
+    use super::cannot_connect;
+
+    #[test]
+    fn a_private_address_that_timed_out_asks_about_the_network() {
+        let failed = ["10.10.0.8:443: connect timed out".to_string()];
+        assert_eq!(
+            cannot_connect("kb.example", 443, &failed, true),
+            "could not connect to kb.example:443 (10.10.0.8:443: connect timed out); a private \
+             address: is the network or VPN that reaches it up on this machine?"
+        );
+        let failed = ["203.0.113.5:443: connect timed out".to_string()];
+        assert_eq!(
+            cannot_connect("api.example", 443, &failed, false),
+            "could not connect to api.example:443 (203.0.113.5:443: connect timed out)"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -13,7 +13,8 @@
   the private address (the first rule used to win). In the UI, a host whose name the gate
   found resolving to a private address offers "allow private address" and says a rule
   without it doesn't reach it; the host reads as blocked, naming the rule that lacks it,
-  until a rule allows one; rules that allow one say "private".
+  until a rule allows one; rules that allow one say "private". A private address that times
+  out asks whether the network or VPN that reaches it is up on this machine.
 
 ## 0.4.8 (2026-11-16)
 
