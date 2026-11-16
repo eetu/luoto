@@ -1,5 +1,6 @@
 //! The host's part of a gate's dials to private addresses on Apple (`gate/src/hostdial.rs`),
-//! whose VMs leave through macOS's NAT, which carries nothing onto a VPN: [`IDLE`] links open
+//! whose VMs leave through macOS's NAT, which translates only out of the primary interface,
+//! never onto a VPN: [`IDLE`] links open
 //! to each gate's `dial.sock`; on a line naming an address, check it again, connect from this
 //! Mac (its routes, a VPN's among them) and join the link to the connection. The gate decided
 //! already; this side takes only an address, never a name, and refuses any that isn't a plain

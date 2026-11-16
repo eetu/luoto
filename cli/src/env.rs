@@ -1019,8 +1019,8 @@ fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
         set_env(&mut spec.env, "LUOTO_EVENTS_FILE", APPLE_GATE_EVENTS);
         set_env(&mut spec.env, "LUOTO_EVENTS_MB", &GATE_LOG_MB.to_string());
         set_env(&mut spec.env, "LUOTO_VAULT_UPLINK", APPLE_GATE_UPLINK);
-        // Its VM leaves through macOS's NAT, which carries nothing onto a VPN: private
-        // addresses are dialed from the Mac (`hostdial.rs`).
+        // Its VM leaves through macOS's NAT, which translates only out of the primary
+        // interface, never onto a VPN: private addresses are dialed from the Mac (`hostdial.rs`).
         set_env(&mut spec.env, "LUOTO_HOST_DIAL", APPLE_GATE_DIAL);
         spec.published_sockets = vec![
             (socks.gate.display().to_string(), APPLE_GATE_SOCKET.into()),

@@ -34,7 +34,7 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   this machine or your network), and a connection dialed for one carries no request another
   rule or open egress allowed.
 - **Private addresses on Apple's `container`.** A gate's VM leaves through macOS's NAT, which
-  carries nothing onto a VPN. There, a connection a rule allows to a private address (10/8,
+  translates only out of the Mac's primary interface, never onto a VPN. There, a connection a rule allows to a private address (10/8,
   172.16/12, 192.168/16, 100.64/10, fc00::/7) is opened by the background watcher on your Mac,
   over a socket of the gate's that only your user reaches, so it follows your Mac's routes and
   arrives as your Mac. The gate decides as everywhere: policy, then every address vetted. The

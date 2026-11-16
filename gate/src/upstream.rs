@@ -118,8 +118,8 @@ pub async fn dial_tcp_to(
     // IPv4 first: many networks (CI runners among them) have no IPv6 route, and each address
     // that can't connect costs a timeout.
     addrs.sort_by_key(|a| a.is_ipv6());
-    // Apple: a private address a rule allows leaves through the host, whose routes (a VPN's)
-    // the gate's VM lacks. Not a credential over plain HTTP: that goes to this machine.
+    // Apple: a private address a rule allows leaves through the host, whose VPN routes the VM's
+    // NAT doesn't follow. Not a credential over plain HTTP: that goes to this machine.
     let host_dial = state
         .host_dial
         .get()
@@ -146,6 +146,7 @@ pub async fn dial_tcp_to(
                     )));
                 }
                 Err(HostDialError::Failed(why)) => {
+                    private_timed_out |= why == "connect timed out";
                     failed.push(format!("{addr} from this Mac: {why}"));
                     continue;
                 }
