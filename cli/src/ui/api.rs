@@ -72,6 +72,7 @@ pub fn routes() -> Router<Ui> {
         .route("/envs", post(create_env))
         .route("/detect", post(detect))
         .route("/disk", get(vm_disk))
+        .route("/resolve", get(resolve))
         .route("/disk/envs", get(envs_disk))
         .route("/envs/{name}", get(env_detail))
         .route("/envs/{name}/egress", get(egress))
@@ -80,7 +81,10 @@ pub fn routes() -> Router<Ui> {
         .route("/envs/{name}/requests/{id}/approve", post(approve))
         .route("/envs/{name}/requests/{id}/reject", post(reject))
         .route("/envs/{name}/rules", post(add_rule))
-        .route("/envs/{name}/rules/{id}", delete(delete_rule))
+        .route(
+            "/envs/{name}/rules/{id}",
+            delete(delete_rule).put(replace_rule),
+        )
         .route(
             "/envs/{name}/project",
             get(project_status).post(project_action),
@@ -576,6 +580,18 @@ async fn shares_sync(Path(name): Path<String>) -> ApiResult<crate::shares::Synce
 }
 
 #[derive(Deserialize)]
+struct HostQuery {
+    host: String,
+}
+
+/// What a host a rule is being made for resolves to here: its private addresses.
+async fn resolve(Query(q): Query<HostQuery>) -> ApiResult<rules::Resolved> {
+    blocking(move || Ok(rules::resolve(&q.host)))
+        .await
+        .map(Json)
+}
+
+#[derive(Deserialize)]
 struct Since {
     /// Minutes back (default one day).
     minutes: Option<i64>,
@@ -703,6 +719,15 @@ async fn add_rule(Path(name): Path<String>, Json(n): Json<NewRule>) -> ApiResult
         .map(Json)
 }
 
+async fn replace_rule(
+    Path((name, id)): Path<(String, String)>,
+    Json(n): Json<NewRule>,
+) -> ApiResult<Rule> {
+    blocking(move || rules::replace(&Ctx::load()?, &name, &id, n.rule, n.force))
+        .await
+        .map(Json)
+}
+
 async fn delete_rule(Path((name, id)): Path<(String, String)>) -> ApiResult<usize> {
     blocking(move || rules::remove(&Ctx::load()?, &name, &id))
         .await
@@ -721,7 +746,9 @@ async fn env_action(Path((name, action)): Path<(String, String)>) -> ApiResult<V
                     ..Default::default()
                 },
             )?,
-            "down" => env::down(&ctx, &name)?,
+            "down" => {
+                env::down(&ctx, &name)?;
+            }
             "rebuild" => {
                 env::remove_dev(&ctx, &name)?;
                 env::up(

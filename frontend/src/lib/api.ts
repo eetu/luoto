@@ -24,6 +24,7 @@ import type {
   Pulled,
   PullPlans,
   Reloaded,
+  Resolved,
   Rule,
   RuntimeChoice,
   SelftestReport,
@@ -119,6 +120,8 @@ export const api = {
     request<ProjectStatus, ProjectAction>("POST", `${env(name)}/project`, { action, sha }),
   egress: (name: string, minutes: number) =>
     request<HostSummary[]>("GET", `${env(name)}/egress?minutes=${minutes}`),
+  /** What `host` resolves to on this machine: its private addresses. */
+  resolve: (host: string) => request<Resolved>("GET", `/resolve?host=${encodeURIComponent(host)}`),
   events: (name: string, host: string, minutes: number) =>
     request<LuotoEvent[]>(
       "GET",
@@ -144,6 +147,9 @@ export const api = {
     }),
   addRule: (name: string, rule: Rule, force = false) =>
     request<Rule, NewRule>("POST", `${env(name)}/rules`, { rule, force }),
+  /** Replace rule `id` with `rule` (under a new id); risks answer 409 as for `addRule`. */
+  replaceRule: (name: string, id: string, rule: Rule, force = false) =>
+    request<Rule, NewRule>("PUT", `${env(name)}/rules/${encodeURIComponent(id)}`, { rule, force }),
   deleteRule: (name: string, id: string) =>
     request<number>("DELETE", `${env(name)}/rules/${encodeURIComponent(id)}`),
   action: (name: string, action: "up" | "down" | "rebuild" | "open" | "close") =>

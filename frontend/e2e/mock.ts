@@ -35,7 +35,21 @@ const fixtures = {
 export const fixture = <K extends keyof typeof fixtures>(name: K): (typeof fixtures)[K] =>
   structuredClone(fixtures[name]);
 
-type Route = { method: string; path: RegExp; body: (req: Request) => unknown };
+type Route = {
+  method: string;
+  path: RegExp;
+  body: (req: Request) => unknown;
+  /** The status to answer with, 200 unless given. */
+  status?: (req: Request) => number;
+};
+
+type NewRuleBody = { rule: { allow_private?: boolean }; force?: boolean };
+
+/** As luoto answers a rule that reaches private addresses: its risk, until forced. */
+const privateRisk = (req: Request): boolean => {
+  const b = req.postDataJSON() as NewRuleBody;
+  return !!b.rule.allow_private && !b.force;
+};
 
 const routes: Route[] = [
   { method: "GET", path: /^\/api\/overview$/, body: () => fixture("overview") },
@@ -49,10 +63,19 @@ const routes: Route[] = [
   { method: "GET", path: /^\/api\/envs\/web\/requests$/, body: () => fixture("requests") },
   { method: "GET", path: /^\/api\/envs\/web\/project$/, body: () => fixture("project") },
   { method: "GET", path: /^\/api\/envs\/web\/shares$/, body: () => fixture("shares") },
+  // A public name, unless a test says otherwise.
+  { method: "GET", path: /^\/api\/resolve$/, body: () => ({ private: [], never: false }) },
   {
     method: "POST",
     path: /^\/api\/envs\/web\/rules$/,
-    body: (req) => ({ ...(req.postDataJSON() as { rule: object }).rule, id: "r1" }),
+    body: (req) =>
+      privateRisk(req)
+        ? {
+            error: "the rule has risks",
+            risks: ["allows dialing private/host addresses (e.g. services on your machine)"],
+          }
+        : { ...(req.postDataJSON() as { rule: object }).rule, id: "r1" },
+    status: (req) => (privateRisk(req) ? 409 : 200),
   },
 ];
 
@@ -73,7 +96,11 @@ export async function mockApi(
     const hit = routes.find((r) => r.method === req.method() && r.path.test(path));
     await route.fulfill(
       hit
-        ? { status: 200, contentType: "application/json", body: JSON.stringify(hit.body(req)) }
+        ? {
+            status: hit.status?.(req) ?? 200,
+            contentType: "application/json",
+            body: JSON.stringify(hit.body(req)),
+          }
         : { status: 404, contentType: "application/json", body: '{"error":"not mocked"}' },
     );
   });

@@ -121,8 +121,8 @@ enum Cmd {
     },
     /// Start the local web UI.
     Ui {
-        /// Outside the ports envs forward to this machine (1024–32767), so no env can serve
-        /// a page on the UI's origin.
+        /// One envs never forward to this machine, so no env can serve a page on the UI's
+        /// origin.
         #[arg(long, default_value_t = names::ui_port())]
         port: u16,
         /// Don't open it in the browser.

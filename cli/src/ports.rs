@@ -20,9 +20,19 @@ use crate::env::UID;
 use crate::paths::{Paths, write_private};
 use crate::runtime::{Runtime, exec};
 
-/// Ports the watcher forwards on its own: above the privileged ones, below Linux's ephemeral
-/// range (where servers asking for any free port land, editors' remote servers among them).
-pub const AUTO: std::ops::RangeInclusive<u16> = 1024..=32767;
+/// Where Linux's ephemeral range starts: a server asking for any free port lands at or above
+/// it (an editor's remote server, a login's loopback callback). Forwarded too, but quietly:
+/// summed up, never warned about when taken here.
+pub const QUIET_FROM: u16 = 32768;
+/// Quiet forwards per env at once, so a sandbox listening on thousands of ports can't use up
+/// this machine's.
+pub const MAX_QUIET: usize = 64;
+
+/// Whether the watcher forwards `port` on its own: any above the privileged ones but luoto's
+/// UI ports, so no env serves a page on the UI's origin.
+pub fn forwards_on_its_own(port: u16) -> bool {
+    port >= 1024 && !crate::names::ui_ports().contains(&port)
+}
 
 /// One env's ports as the watcher handles them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +72,8 @@ pub struct EnvPorts {
     pub published: BTreeSet<u16>,
     /// Forwarded by the watcher.
     pub forwarded: BTreeSet<u16>,
+    /// Forwarded by the watcher from [`QUIET_FROM`] up: servers on a port picked for them.
+    pub temporary: BTreeSet<u16>,
     /// Listened on in the env and not forwarded: the port is taken on this machine.
     pub taken: BTreeSet<u16>,
 }
@@ -81,10 +93,17 @@ pub fn of_env(paths: &Paths, env: &str, config_ports: &[u16], gate_running: bool
     } else {
         BTreeSet::new()
     };
+    let (temporary, forwarded) = w.forwarded.into_iter().partition(|p| *p >= QUIET_FROM);
     EnvPorts {
         // The gate's own publishing is what the watcher finds taken there.
-        taken: w.taken.difference(&published).copied().collect(),
-        forwarded: w.forwarded,
+        taken: w
+            .taken
+            .difference(&published)
+            .copied()
+            .filter(|p| *p < QUIET_FROM)
+            .collect(),
+        forwarded,
+        temporary,
         published,
     }
 }
@@ -323,6 +342,16 @@ mod tests {
     }
 
     #[test]
+    fn every_port_but_privileged_ones_and_the_uis_is_forwarded() {
+        for port in [1024, 5173, 32767, 32768, 54815, 65535] {
+            assert!(forwards_on_its_own(port), "{port}");
+        }
+        for port in [0, 22, 80, 1023, 47878, 47879] {
+            assert!(!forwards_on_its_own(port), "{port}");
+        }
+    }
+
+    #[test]
     fn forwards_are_listed_only_while_the_watcher_runs() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths {
@@ -330,8 +359,8 @@ mod tests {
             data: dir.path().join("data"),
         };
         let web = Watched {
-            forwarded: BTreeSet::from([5173]),
-            taken: BTreeSet::from([3000]),
+            forwarded: BTreeSet::from([5173, 54815]),
+            taken: BTreeSet::from([3000, 40001]),
         };
         save_watched(&paths, &BTreeMap::from([("web".to_string(), web)])).unwrap();
         let stopped = of_env(&paths, "web", &[8080], false);
@@ -341,6 +370,8 @@ mod tests {
         lock.try_lock().unwrap();
         let p = of_env(&paths, "web", &[8080], true);
         assert_eq!(p.open(), BTreeSet::from([5173, 8080]));
+        // A port picked for a server is forwarded quietly, and not warned about when taken.
+        assert_eq!(p.temporary, BTreeSet::from([54815]));
         assert_eq!(p.taken, BTreeSet::from([3000]));
         let published = of_env(&paths, "web", &[3000], true);
         assert_eq!(published.open(), BTreeSet::from([3000, 5173]));

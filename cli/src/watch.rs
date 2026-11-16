@@ -379,7 +379,14 @@ pub fn watch() -> Result<ExitCode> {
                 wanted.extend(kept.filter(|(e, _)| e == name).cloned());
                 continue;
             };
-            for port in open.into_iter().filter(|p| ports::AUTO.contains(p)) {
+            let mut quiet = 0;
+            for port in open.into_iter().filter(|p| ports::forwards_on_its_own(*p)) {
+                if port >= ports::QUIET_FROM {
+                    quiet += 1;
+                    if quiet > ports::MAX_QUIET {
+                        continue;
+                    }
+                }
                 let key = (name.clone(), port);
                 wanted.insert(key.clone());
                 if forwards.contains_key(&key) || refused.contains(&key) {
@@ -441,7 +448,7 @@ pub fn watch() -> Result<ExitCode> {
             }
             idle_since.remove(name);
             match env::down(&ctx, name) {
-                Ok(()) => println!("{} stopped `{name}`: idle for {limit:?}", Utc::now()),
+                Ok(_) => println!("{} stopped `{name}`: idle for {limit:?}", Utc::now()),
                 Err(e) => println!("{} could not stop `{name}`: {e:#}", Utc::now()),
             }
         }

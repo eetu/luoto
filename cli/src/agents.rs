@@ -1158,7 +1158,7 @@ pub fn headless(
     crate::disk::hint_growth(&ctx, env_name);
     if down {
         match env::down(&ctx, env_name) {
-            Ok(()) => eprintln!("env `{env_name}` stopped"),
+            Ok(_) => eprintln!("env `{env_name}` stopped"),
             Err(e) => crate::progress::warn(&format!("env `{env_name}` not stopped ({e:#})")),
         }
     }

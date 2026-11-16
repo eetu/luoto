@@ -159,6 +159,8 @@ export type EnvPorts = {
   published: number[];
   /** Forwarded by the watcher. */
   forwarded: number[];
+  /** Forwarded by the watcher from [`QUIET_FROM`] up: servers on a port picked for them. */
+  temporary: number[];
   /** Listened on in the env and not forwarded: the port is taken on this machine. */
   taken: number[];
 };
@@ -501,6 +503,21 @@ export type Repo = {
 export type RepoOrigin = "env" | "project";
 
 export type RequestStatus = "pending" | "approved" | "rejected";
+
+/**
+ * What a host resolves to on this machine, asked as a rule for it is made: a rule reaches a
+ * private address only with `allow_private`, and a normal-looking name may have one (a host on
+ * the user's network or behind a VPN). The gate vets every address again when it dials.
+ */
+export type Resolved = {
+  /** The private addresses it resolves to (your network, a VPN). */
+  private: string[];
+  /**
+   * It resolves to an address the gate never dials (loopback, cloud metadata), whatever
+   * a rule says.
+   */
+  never: boolean;
+};
 
 /** One allow rule. `port: None` means the standard ports 80 and 443. */
 export type Rule = {

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.1 (2026-11-16)
+
+- **Sign-ins with a callback to `localhost`:** every port a server in the env listens on is
+  forwarded, also above 32767, where a login's callback lands (MCP servers', cloud CLIs'), so
+  the browser's redirect reaches the env. Those ports are only counted in `luoto status` and
+  the UI, at most 64 at once, and never luoto's UI ports. `auto_forward = false` still turns
+  forwarding off.
+- **Rules in the UI:** an env's rules view (beside egress) lists every rule by origin. "Add
+  rule" opens the rule form for any host, with "allow private address"; a rule of yours is
+  edited from its pencil, its menu or a double-click, keeping its expiry unless another is
+  picked, and saved in place.
+- **Hosts on your network or VPN:** making a rule, the host is resolved on this machine; one
+  on a private address gets "allow private address" switched on in the UI, which asks before
+  saving any rule that reaches private addresses, and `luoto allow` asks on a terminal (and
+  says so without one).
+- **Host panel:** attempts alike in outcome, method and path are one row with a count, newest
+  first, their paths in full; a row expands to the gate's message, and its menu copies the path
+  or puts it in the rule form. The panel widens with the window.
+- **`luoto down`** says when the env wasn't running.
+- **UI header:** the browser notifications bell shows only without desktop notifications, where
+  it does something.
+
 ## 0.5.0 (2026-11-16)
 
 - **Apple's `container`: hosts behind a VPN.** macOS's NAT for VMs leaves only through the

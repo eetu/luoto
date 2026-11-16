@@ -9,6 +9,7 @@ use luoto_shared::policy::{
     Access, AccessLevel, Mode, Policy, Rule, RuleOrigin, Severity, validate_rule,
 };
 use serde::Serialize;
+use std::time::Duration;
 
 use crate::config::{EnvFile, new_rule_id};
 use crate::env::{self, Ctx};
@@ -156,6 +157,78 @@ pub fn add_rule_checked(ctx: &Ctx, name: &str, mut rule: Rule, force: bool) -> R
     }
     let mut f = EnvFile::load(&ctx.paths, name)?;
     f.add_rule(&rule)?;
+    sync::reapply(ctx, name)?;
+    Ok(rule)
+}
+
+/// What a host resolves to on this machine, asked as a rule for it is made: a rule reaches a
+/// private address only with `allow_private`, and a normal-looking name may have one (a host on
+/// the user's network or behind a VPN). The gate vets every address again when it dials.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Resolved {
+    /// The private addresses it resolves to (your network, a VPN).
+    pub private: Vec<String>,
+    /// It resolves to an address the gate never dials (loopback, cloud metadata), whatever
+    /// a rule says.
+    pub never: bool,
+}
+
+/// How long [`resolve`] waits for this machine's resolver.
+const RESOLVE_WAIT: Duration = Duration::from_secs(2);
+
+/// [`Resolved`] for `host`: nothing for a wildcard, a name that doesn't resolve in time or one
+/// that isn't a host.
+pub fn resolve(host: &str) -> Resolved {
+    let Ok(host) = luoto_shared::host::normalize_host(host) else {
+        return Resolved::default();
+    };
+    let addrs: Vec<std::net::IpAddr> = if let Ok(ip) = host.parse() {
+        vec![ip]
+    } else {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::net::ToSocketAddrs;
+            let found = (host.as_str(), 443)
+                .to_socket_addrs()
+                .map(|a| a.map(|s| s.ip()).collect::<Vec<_>>());
+            let _ = tx.send(found.unwrap_or_default());
+        });
+        rx.recv_timeout(RESOLVE_WAIT).unwrap_or_default()
+    };
+    classify(&addrs)
+}
+
+fn classify(addrs: &[std::net::IpAddr]) -> Resolved {
+    use luoto_shared::host::{is_never_dialed, is_private};
+    let mut private: Vec<String> = addrs
+        .iter()
+        .filter(|ip| is_private(**ip) && !is_never_dialed(**ip))
+        .map(ToString::to_string)
+        .collect();
+    private.dedup();
+    Resolved {
+        private,
+        never: addrs.iter().any(|ip| is_never_dialed(*ip)),
+    }
+}
+
+/// Replace the env's rule `id` with `rule`, under a new id (so past events' "allowed by rule"
+/// stays true of the rule they name), failing with [`Risks`] unless `force` accepts them; a
+/// refused rule leaves the old one in place. The rule as saved.
+pub fn replace(ctx: &Ctx, name: &str, id: &str, mut rule: Rule, force: bool) -> Result<Rule> {
+    let mut f = EnvFile::load(&ctx.paths, name)?;
+    if !f.cfg.allow.iter().any(|r| r.id.as_deref() == Some(id)) {
+        bail!(
+            "`{name}` has no rule of yours with id `{}` (`luoto status -e {name}` lists them)",
+            crate::text::display(id)
+        );
+    }
+    rule.id = Some(new_rule_id());
+    let risks = risks(&env::plan(ctx, name)?.compiled.policy, &rule)?;
+    if !risks.is_empty() && !force {
+        return Err(Risks(risks).into());
+    }
+    f.replace_rule(id, &rule)?;
     sync::reapply(ctx, name)?;
     Ok(rule)
 }
@@ -388,6 +461,20 @@ pub fn reject(ctx: &Ctx, name: &str, id: u64, note: Option<String>) -> Result<Ac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_on_a_private_address_is_told_and_one_never_dialed_is_flagged() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        assert_eq!(classify(&[ip("8.8.8.8")]), Resolved::default());
+        let vpn = classify(&[ip("10.10.0.8"), ip("100.64.1.2")]);
+        assert_eq!(vpn.private, ["10.10.0.8", "100.64.1.2"]);
+        assert!(!vpn.never);
+        // Loopback and metadata: no rule reaches them, so none is offered as private.
+        let never = classify(&[ip("127.0.0.1"), ip("169.254.169.254")]);
+        assert!(never.private.is_empty() && never.never);
+        assert_eq!(resolve("10.1.2.3").private, ["10.1.2.3"]);
+        assert_eq!(resolve("*.example.com"), Resolved::default());
+    }
 
     #[test]
     fn ttls() {
