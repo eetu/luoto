@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.8 (2026-11-16)
+
+- **SSH:** connecting to an env (`luoto open`, an editor, `ssh luoto-<env>`) failed with
+  "`luoto ssh-proxy` acts on no env; drop `-e`" since 0.4.5.
+
 ## 0.4.7 (2026-11-16)
 
 - **Apple's `container`:** creating the vault, a gate or a dev container no longer fails with
