@@ -269,7 +269,8 @@ pub struct SetupOpts {
     /// Install the recommended runtime with the platform package manager.
     #[arg(long)]
     pub install: bool,
-    /// Build luoto's images from this source tree instead of pulling them.
+    /// Build luoto's images from the checkout this binary was built from, instead of pulling
+    /// them (source builds only).
     #[arg(long)]
     pub build: bool,
     /// Run envs on this runtime: `container` (Apple's, on macOS 26 or later on Apple silicon)
@@ -560,6 +561,9 @@ pub fn build_images(rt: &Runtime, tag: &str) -> Result<()> {
 }
 
 pub fn setup(o: SetupOpts) -> Result<ExitCode> {
+    if o.build && source_root().is_none() {
+        bail!("`--build` needs luoto's source tree; this binary was not built from one");
+    }
     let paths = Paths::get()?;
     let mut global = config::load_global(&paths)?;
     // `apple` is None where Apple's `container` can't run, Some(None) where it isn't installed.
@@ -741,9 +745,6 @@ fn finish(
     if o.build {
         // Built images replace the release's pinned ones until `images` is removed again.
         let tag = global.images.get_or_insert_with(|| "dev".into()).clone();
-        if source_root().is_none() {
-            bail!("`--build` needs luoto's source tree; this binary was not built from one");
-        }
         build_images(&rt, &tag)?;
     } else {
         let refs: Vec<String> = release::COMPONENTS
@@ -755,7 +756,11 @@ fn finish(
         });
         if missing.is_empty() {
             new_images = false;
-            println!("\nimages present; `luoto setup --build` rebuilds them from source");
+            if source_root().is_some() {
+                println!("\nimages present; `luoto setup --build` rebuilds them from source");
+            } else {
+                println!("\nimages present");
+            }
         } else if release::pinned() && global.images.is_none() {
             for r in missing {
                 rt.pull(r)?;
