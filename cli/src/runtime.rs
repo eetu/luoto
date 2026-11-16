@@ -1210,16 +1210,14 @@ fn apple_subnets(out: &str) -> Result<Vec<(String, String)>> {
 
 /// Apple's `container` leaves a published socket's host end behind when its container dies
 /// without stopping (the service stopped, the Mac restarted), and refuses to create a container
-/// that publishes over it. One that nothing answers is removed.
+/// that publishes over it. One that takes no connection is removed.
 fn clear_dead_sockets(spec: &RunSpec) {
     #[cfg(unix)]
     for (host, _) in &spec.published_sockets {
         use std::os::unix::fs::FileTypeExt;
         let path = std::path::Path::new(host);
         let socket = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket());
-        let dead = socket
-            && std::os::unix::net::UnixStream::connect(path)
-                .is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused);
+        let dead = socket && std::os::unix::net::UnixStream::connect(path).is_err();
         if dead {
             let _ = std::fs::remove_file(path);
         }
@@ -1235,10 +1233,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn only_dead_published_sockets_are_cleared() {
-        use std::os::unix::net::UnixListener;
+        use std::os::unix::net::{UnixDatagram, UnixListener};
         let dir = tempfile::tempdir().unwrap();
         let dead = dir.path().join("dead.sock");
-        drop(UnixListener::bind(&dead).unwrap());
+        // Not a dropped listener: macOS sets close-on-exec only after creating a socket, so a
+        // process another test spawns meanwhile can keep it listening. A datagram socket takes
+        // no stream connection whoever holds it.
+        drop(UnixDatagram::bind(&dead).unwrap());
         let live = dir.path().join("live.sock");
         let _listener = UnixListener::bind(&live).unwrap();
         let file = dir.path().join("file.sock");

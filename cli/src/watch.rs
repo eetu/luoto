@@ -57,6 +57,9 @@ fn exe_file(paths: &Paths) -> PathBuf {
     paths.data.join("watch.exe")
 }
 
+/// What `start` runs: an older luoto's watcher may start a newer one with them.
+pub const ARGS: [&str; 1] = ["watch"];
+
 /// Start `exe watch` in the background, its output to the watcher's log.
 fn start(paths: &Paths, exe: &Path) {
     let Ok(log) = OpenOptions::new()
@@ -70,7 +73,7 @@ fn start(paths: &Paths, exe: &Path) {
         return;
     };
     let mut c = Command::new(exe);
-    c.arg("watch").stdin(Stdio::null()).stdout(log).stderr(err);
+    c.args(ARGS).stdin(Stdio::null()).stdout(log).stderr(err);
     // Out of the terminal's process group, so closing the terminal doesn't end it.
     #[cfg(unix)]
     {

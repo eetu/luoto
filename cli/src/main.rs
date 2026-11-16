@@ -423,7 +423,11 @@ enum Cmd {
     },
     /// Internal: stdio transport for SSH (`ProxyCommand luoto ssh-proxy <env>`).
     #[command(hide = true)]
-    SshProxy { env: String },
+    SshProxy {
+        /// Not `env`: that is the global `-e`'s id, which a positional of that id would fill.
+        #[arg(value_name = "ENV")]
+        name: String,
+    },
     /// Internal: the background watcher that forwards ports and stops idle envs.
     #[command(hide = true)]
     Watch,
@@ -685,7 +689,9 @@ fn refuses_env(cmd: &Cmd) -> Option<String> {
             action: Some(VaultCmd::Lock),
         } => none("vault lock"),
         Cmd::Watch => none("watch"),
-        Cmd::SshProxy { .. } => none("ssh-proxy"),
+        Cmd::SshProxy { .. } => {
+            Some("`luoto ssh-proxy` names the env as its argument, not -e".into())
+        }
         Cmd::Up { all: true, .. } | Cmd::Down { all: true } => {
             Some("`--all` acts on every env; drop `-e`".into())
         }
@@ -896,7 +902,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             VaultCmd::Lock => c::lock(),
             VaultCmd::Reload => c::reload(env_arg.as_deref()),
         },
-        Cmd::SshProxy { env: e } => connect::ssh_proxy(&e),
+        Cmd::SshProxy { name } => connect::ssh_proxy(&name),
         Cmd::Watch => watch::watch(),
     }
 }
@@ -1077,6 +1083,43 @@ mod tests {
             parse(&["list", "--size"]).cmd,
             Cmd::List { size: true }
         ));
+    }
+
+    #[test]
+    fn no_subcommand_argument_shares_the_global_env_id() {
+        fn walk(cmd: &clap::Command, path: &str) {
+            for sub in cmd.get_subcommands() {
+                let path = format!("{path} {}", sub.get_name());
+                let clash = sub.get_arguments().any(|a| a.get_id() == "env");
+                assert!(
+                    !clash,
+                    "`luoto{path}` has an argument `env`: it fills the global -e"
+                );
+                walk(sub, &path);
+            }
+        }
+        walk(&Cli::command(), "");
+    }
+
+    /// The command lines luoto runs of itself parse, reach their command with their env, and
+    /// pass `run`'s `-e` check.
+    #[test]
+    fn what_luoto_runs_of_itself_parses() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat()).unwrap();
+        // ssh_configs already written run exactly this.
+        assert_eq!(ssh::proxy_args("web"), ["ssh-proxy", "web"]);
+        let proxy = parse(&ssh::proxy_args("web"));
+        assert!(proxy.env.is_none());
+        assert!(matches!(&proxy.cmd, Cmd::SshProxy { name } if name == "web"));
+
+        let watch = parse(&watch::ARGS);
+        assert!(watch.env.is_none());
+        assert!(matches!(watch.cmd, Cmd::Watch));
+
+        let up = parse(&agents::up_args("web"));
+        assert_eq!(up.env.as_deref(), Some("web"));
+        assert!(matches!(up.cmd, Cmd::Up { all: false, .. }));
+        assert!(refuses_env(&up.cmd).is_none());
     }
 
     #[test]
