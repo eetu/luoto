@@ -1,20 +1,20 @@
 import type { Proposal } from "../../src/lib/types";
 
 export default {
-  "name": "api",
-  "new_folder": false,
-  "remote": null,
-  "presets": [
-    { "name": "debian", "reason": null },
-    { "name": "github", "reason": null },
-    { "name": "toolchains", "reason": null },
-    { "name": "npm", "reason": "package.json" }
+  name: "api",
+  new_folder: false,
+  remote: null,
+  presets: [
+    { name: "debian", reason: null },
+    { name: "github", reason: null },
+    { name: "toolchains", reason: null },
+    { name: "npm", reason: "package.json" },
   ],
-  "tools": [{ "tool": "node", "version": "22", "source": ".node-version" }],
-  "project": [
+  tools: [{ tool: "node", version: "22", source: ".node-version" }],
+  project: [
     ["presets", "npm"],
-    ["allow", "api.stripe.com (read)"]
+    ["allow", "api.stripe.com (read)"],
   ],
-  "project_sha": "2ce6dbf056e61e8ac8364bf72ca658eefc4b66767e0444ab1811c6a4c0858ef2",
-  "project_error": null
+  project_sha: "2ce6dbf056e61e8ac8364bf72ca658eefc4b66767e0444ab1811c6a4c0858ef2",
+  project_error: null,
 } satisfies Proposal;

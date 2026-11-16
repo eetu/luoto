@@ -12,8 +12,11 @@
   const wrote = $derived(
     summary?.methods.some((m) => !["GET", "HEAD", "OPTIONS"].includes(m)) ?? false,
   );
+  // A name that resolves to a private address only the gate's denial tells.
+  const resolvesPrivate = $derived(summary?.last_reason === "private_address");
   const isPrivate = $derived(
-    host.endsWith(".internal") ||
+    resolvesPrivate ||
+      host.endsWith(".internal") ||
       /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) ||
       host === "localhost",
   );
@@ -54,7 +57,12 @@
           : `${summary.denied} times`} before it
       </p>
     {:else}
-      {#if summary.last_message && summary.denied > 0}
+      {#if summary.allowed_not_private}
+        <p class="why">
+          Rule <code>{summary.allowed_not_private}</code> allows this host, not the private address it
+          resolves to. Allow it again with "allow private address" on.
+        </p>
+      {:else if summary.last_message && summary.denied > 0}
         <p class="why">{summary.last_message}</p>
       {/if}
       {#if opened}
@@ -76,6 +84,7 @@
       wantsWrite={opened ? wrote : (summary?.wants_write ?? false)}
       paths={summary?.top_paths.map(([p]) => p) ?? []}
       privateHost={isPrivate}
+      {resolvesPrivate}
       tlsRejected={summary?.tls_rejected ?? false}
     />
   </div>

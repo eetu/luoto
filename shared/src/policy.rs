@@ -643,16 +643,25 @@ impl Policy {
         })
     }
 
-    /// The live tunnel rule covering `host:port`. A CONNECT without one is intercepted, denied
-    /// hosts included, so the client gets a readable 403 instead of a TLS failure.
+    /// The live tunnel rule covering `host:port`, one that allows a private address first. A
+    /// CONNECT without one is intercepted, denied hosts included, so the client gets a readable
+    /// 403 instead of a TLS failure.
     pub fn tunnel_rule<'a>(
         &'a self,
         host: &'a str,
         port: u16,
         now: DateTime<Utc>,
     ) -> Option<&'a CompiledRule> {
-        self.live_rules(host, port, now)
-            .find(|r| r.rule.mode == Mode::Tunnel)
+        let mut tunnels = self
+            .live_rules(host, port, now)
+            .filter(|r| r.rule.mode == Mode::Tunnel);
+        let first = tunnels.next()?;
+        Some(
+            std::iter::once(first)
+                .chain(tunnels)
+                .find(|r| r.rule.allow_private)
+                .unwrap_or(first),
+        )
     }
 
     pub fn decide(&self, req: &RequestInfo<'_>, now: DateTime<Utc>) -> Decision {
@@ -699,6 +708,13 @@ impl Policy {
         let mut path_ok_method_bad: Vec<&CompiledRule> = Vec::new();
         let mut ws_bad = false;
         let mut body_bad: Option<u64> = None;
+        let fits_body = |r: &CompiledRule| !matches!((r.rule.max_body, req.content_length), (Some(max), Some(len)) if len > max);
+        let allows = |r: &CompiledRule| {
+            r.rule.path_matches(req.path)
+                && r.rule.access.allows(req.method)
+                && (!req.websocket || r.rule.ws)
+                && fits_body(r)
+        };
         for r in self.live_rules(req.host, req.port, now) {
             live = true;
             if !r.rule.path_matches(req.path) {
@@ -712,12 +728,16 @@ impl Policy {
                 ws_bad = true;
                 continue;
             }
-            if let (Some(max), Some(len)) = (r.rule.max_body, req.content_length)
-                && len > max
-            {
-                body_bad = Some(max);
+            if !fits_body(r) {
+                body_bad = r.rule.max_body;
                 continue;
             }
+            // Of the rules that allow the request, one that also allows a private address
+            // wins: a `--private` rule added beside an older one for the host must reach it.
+            let r = self
+                .live_rules(req.host, req.port, now)
+                .find(|o| o.rule.allow_private && allows(o))
+                .unwrap_or(r);
             // A rule's `idle` is for its host, whichever rule allows the request (a preset's
             // usually comes first).
             let idle = self
@@ -1137,6 +1157,55 @@ mod tests {
                 if rule == "preset" && d == std::time::Duration::from_secs(7200)
         ));
     }
+
+    #[test]
+    fn a_private_rule_beside_an_older_one_reaches_the_private_address() {
+        let private = Rule {
+            allow_private: true,
+            ..Rule::read("kb.example")
+        };
+        let p = Policy {
+            rules: vec![
+                rule(
+                    "old",
+                    Rule {
+                        access: Access::Level(AccessLevel::Write),
+                        ..Rule::read("kb.example")
+                    },
+                ),
+                rule("read-private", private.clone()),
+                rule(
+                    "tunnel",
+                    Rule {
+                        mode: Mode::Tunnel,
+                        ..Rule::read("kb.example")
+                    },
+                ),
+                rule(
+                    "tunnel-private",
+                    Rule {
+                        mode: Mode::Tunnel,
+                        ..private
+                    },
+                ),
+            ],
+            ..Default::default()
+        };
+        let allowed = |method| match p.decide(&req("kb.example", method, "/register"), Utc::now()) {
+            Decision::Allow {
+                rule,
+                allow_private,
+                ..
+            } => (rule, allow_private),
+            Decision::Deny(r) => panic!("{r:?}"),
+        };
+        assert_eq!(allowed("GET"), ("read-private".into(), true));
+        // The private rule doesn't allow a POST: the older one does, without private.
+        assert_eq!(allowed("POST"), ("old".into(), false));
+        let tunnel = p.tunnel_rule("kb.example", 443, Utc::now()).unwrap();
+        assert_eq!(tunnel.id, "tunnel-private");
+    }
+
     use chrono::Duration;
 
     fn rule(id: &str, r: Rule) -> CompiledRule {
