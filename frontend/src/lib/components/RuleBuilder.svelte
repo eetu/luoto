@@ -15,6 +15,7 @@
     wantsWrite = false,
     paths = [],
     privateHost = false,
+    resolvesPrivate = false,
     tlsRejected = false,
   }: {
     host: string;
@@ -22,6 +23,8 @@
     wantsWrite?: boolean;
     paths?: string[];
     privateHost?: boolean;
+    /** The gate found the name on a private address. */
+    resolvesPrivate?: boolean;
     tlsRejected?: boolean;
   } = $props();
 
@@ -138,6 +141,11 @@
         label="allow private address"
         onchange={(v) => (allowPrivate = v)}
       />
+      {#if resolvesPrivate}
+        <span class="muted small"
+          >this name resolved to a private address: without this, the rule doesn't reach it</span
+        >
+      {/if}
     </div>
   {/if}
 

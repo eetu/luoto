@@ -247,6 +247,57 @@ test("a TLS reject hints at a tunnel without choosing one", async ({ page }) => 
   expect(body.rule.mode).toBeUndefined();
 });
 
+test("a name the gate found private offers a private rule, off until chosen", async ({ page }) => {
+  const writes = await mockApi(page);
+  const [blocked] = fixture("egress");
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/egress",
+    (route) =>
+      route.fulfill({
+        json: [{ ...blocked, host: "kb.example", last_reason: "private_address" }],
+      }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("row", { name: /kb\.example/ }).click();
+
+  const private_ = page.getByRole("switch", { name: "allow private address" });
+  await expect(private_).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByText(/without this, the rule doesn't reach it/)).toBeVisible();
+  await private_.click();
+  await page.getByRole("button", { name: "Allow", exact: true }).click();
+
+  await expect.poll(() => writes.length).toBe(1);
+  expect(writes[0].body).toMatchObject({ rule: { host: "kb.example", allow_private: true } });
+});
+
+test("a rule without the private address reads as blocked, naming the rule", async ({ page }) => {
+  await mockApi(page);
+  const [blocked] = fixture("egress");
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/egress",
+    (route) =>
+      route.fulfill({
+        json: [
+          {
+            ...blocked,
+            host: "kb.example",
+            last_reason: "private_address",
+            allowed_not_private: "r1",
+          },
+        ],
+      }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  const row = page.getByRole("row", { name: /kb\.example/ });
+  await expect(row).toContainText("blocked");
+  await expect(row).toContainText("rule r1 doesn't allow its private address");
+  await row.click();
+  await expect(page.getByText(/allows this host, not the private address/)).toBeVisible();
+});
+
 test("approving a request whose rule has risks shows them and resends with force", async ({
   page,
 }) => {

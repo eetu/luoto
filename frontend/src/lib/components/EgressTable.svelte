@@ -101,6 +101,8 @@
               {h.host}
               {#if h.allowed_now}<div class="why">
                   blocked before rule {h.allowed_now}
+                </div>{:else if h.allowed_not_private}<div class="why">
+                  rule {h.allowed_not_private} doesn't allow its private address
                 </div>{:else if h.denied > 0 && h.last_message}<div class="why">
                   {h.last_message}
                 </div>{/if}

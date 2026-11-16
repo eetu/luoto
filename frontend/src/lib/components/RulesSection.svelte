@@ -53,9 +53,9 @@
       <div class="rule" oncontextmenu={(e) => ruleMenu(e, r)} role="listitem">
         <span class="host">{r.host}</span>
         <span class="muted small"
-          >{accessText(r.access)}{r.mode === "tunnel" ? ", tunnel" : ""}{r.paths?.length
-            ? `, ${r.paths.join(" ")}`
-            : ""}</span
+          >{accessText(r.access)}{r.mode === "tunnel" ? ", tunnel" : ""}{r.allow_private
+            ? ", private"
+            : ""}{r.paths?.length ? `, ${r.paths.join(" ")}` : ""}</span
         >
         <span class="muted small">{expiry(r)}</span>
         <button class="icon" title="revoke" aria-label="revoke {r.host}" onclick={() => revoke(r)}

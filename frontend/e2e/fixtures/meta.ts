@@ -1,40 +1,42 @@
 import type { Meta } from "../../src/lib/types";
 
 export default {
-  "agents": [
-    { "description": "Claude Code", "name": "claude" },
-    { "description": "OpenCode", "name": "opencode" },
-    { "description": "OpenAI Codex CLI", "name": "codex" },
-    { "description": "GitHub Copilot CLI (untested)", "name": "copilot" },
-    { "description": "Antigravity CLI (Google)", "name": "agy" }
+  agents: [
+    { description: "Claude Code", name: "claude" },
+    { description: "OpenCode", name: "opencode" },
+    { description: "OpenAI Codex CLI", name: "codex" },
+    { description: "GitHub Copilot CLI (untested)", name: "copilot" },
+    { description: "Antigravity CLI (Google)", name: "agy" },
   ],
-  "presets": [
-    { "description": "Debian apt mirrors (read-only)", "name": "debian" },
-    { "description": "Ubuntu apt mirrors (read-only)", "name": "ubuntu" },
-    { "description": "Alpine package mirror (read-only)", "name": "alpine" },
-    { "description": "npm, Yarn and JSR registries (read-only, plus npm audit)", "name": "npm" },
-    { "description": "PyPI (read-only)", "name": "pypi" },
-    { "description": "crates.io and rustup (read-only)", "name": "crates" },
-    { "description": "Go module proxy, checksum DB and toolchains (read-only)", "name": "go" },
+  presets: [
+    { description: "Debian apt mirrors (read-only)", name: "debian" },
+    { description: "Ubuntu apt mirrors (read-only)", name: "ubuntu" },
+    { description: "Alpine package mirror (read-only)", name: "alpine" },
+    { description: "npm, Yarn and JSR registries (read-only, plus npm audit)", name: "npm" },
+    { description: "PyPI (read-only)", name: "pypi" },
+    { description: "crates.io and rustup (read-only)", name: "crates" },
+    { description: "Go module proxy, checksum DB and toolchains (read-only)", name: "go" },
     {
-      "description": "GitHub reads: clone/fetch public repos, API reads, raw files, release assets",
-      "name": "github"
+      description: "GitHub reads: clone/fetch public repos, API reads, raw files, release assets",
+      name: "github",
     },
     {
-      "description": "Language runtimes and tools that mise installs: its metadata and the vendors' download servers (read-only)",
-      "name": "toolchains"
+      description:
+        "Language runtimes and tools that mise installs: its metadata and the vendors' download servers (read-only)",
+      name: "toolchains",
     },
-    { "description": "VS Code server download and extension marketplace", "name": "vscode" },
+    { description: "VS Code server download and extension marketplace", name: "vscode" },
     {
-      "description": "Common documentation sites (read-only) for agents reading API docs",
-      "name": "docs"
+      description: "Common documentation sites (read-only) for agents reading API docs",
+      name: "docs",
     },
-    { "description": "Maven Central (read-only)", "name": "maven" },
-    { "description": "Gradle distributions and plugin portal (read-only)", "name": "gradle" },
-    { "description": "RubyGems (read-only)", "name": "rubygems" },
+    { description: "Maven Central (read-only)", name: "maven" },
+    { description: "Gradle distributions and plugin portal (read-only)", name: "gradle" },
+    { description: "RubyGems (read-only)", name: "rubygems" },
     {
-      "description": "Packagist for Composer (read-only; package archives come from the github preset)",
-      "name": "composer"
-    }
-  ]
+      description:
+        "Packagist for Composer (read-only; package archives come from the github preset)",
+      name: "composer",
+    },
+  ],
 } satisfies Meta;

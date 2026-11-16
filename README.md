@@ -203,7 +203,17 @@ agent's answer, for a cron job or a CI step:
   falls under 10 GB and 3 GB.
 - On Apple's `container` ([Platforms](docs/how-it-works.md#platforms)): an env's egress
   history shows only while its gate runs, and a volume attaches to one running container at a
-  time, so refilling the tools volume stops the dev container briefly.
+  time, so refilling the tools volume stops the dev container briefly. The gate leaves through
+  macOS's NAT, which doesn't reach addresses only a VPN on your Mac routes: a private host
+  behind one times out. A NAT rule onto the VPN's interface (`netstat -rn` names it, here
+  `utun100`) lets the gate's VMs through as your Mac, until the next restart:
+
+  ```sh
+  echo 'nat on utun100 from 192.168.64/21 -> (utun100)' | sudo pfctl -a com.apple/luoto -f -
+  sudo pfctl -E
+  ```
+
+  `sudo pfctl -a com.apple/luoto -F nat` removes it.
 
 ## Development
 

@@ -238,6 +238,8 @@ export type HostSummary = {
   last_message: string | null;
   /** The rule that allows the last denial now: it was added since, so the denial is history. */
   allowed_now: string | null;
+  /** The rule that allows the host but not the private address its last denial was for. */
+  allowed_not_private: string | null;
   last_rule: string | null;
   bytes_up: number;
   bytes_down: number;

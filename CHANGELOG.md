@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.9 (2026-11-16)
+
+- **Private addresses:** a rule with `--private` beside an older one for the same host reaches
+  the private address (the first rule used to win). In the UI, a host whose name the gate
+  found resolving to a private address offers "allow private address" and says a rule
+  without it doesn't reach it; the host reads as blocked, naming the rule that lacks it,
+  until a rule allows one; rules that allow one say "private".
+
 ## 0.4.8 (2026-11-16)
 
 - **SSH:** connecting to an env (`luoto open`, an editor, `ssh luoto-<env>`) failed with

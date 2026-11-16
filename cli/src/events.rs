@@ -233,6 +233,8 @@ pub struct HostSummary {
     pub last_denied_at: Option<(String, u16)>,
     /// The rule that allows the last denial now: it was added since, so the denial is history.
     pub allowed_now: Option<String>,
+    /// The rule that allows the host but not the private address its last denial was for.
+    pub allowed_not_private: Option<String>,
     pub last_rule: Option<String>,
     pub bytes_up: u64,
     pub bytes_down: u64,
@@ -344,9 +346,12 @@ pub fn summarize(events: &[Event], mutes: &Mutes) -> Vec<HostSummary> {
 }
 
 /// Ask `policy` again about each host's last denial: one a rule allows now (an approved
-/// request, an allow since) gets that rule in `allowed_now`. Open egress doesn't count.
+/// request, an allow since) gets that rule in `allowed_now`. Open egress doesn't count, nor
+/// does a rule without `allow_private` for a denial of a private address: the gate refuses
+/// that after the policy allows.
 pub fn mark_allowed_now(summaries: &mut [HostSummary], policy: &luoto_shared::policy::Policy) {
-    use luoto_shared::policy::{Decision, RequestInfo};
+    use luoto_shared::policy::{Decision, DenyReason, RequestInfo};
+    let private = DenyReason::PrivateAddress.code();
     for s in summaries.iter_mut() {
         let Some((method, port)) = &s.last_denied_at else {
             continue;
@@ -359,10 +364,18 @@ pub fn mark_allowed_now(summaries: &mut [HostSummary], policy: &luoto_shared::po
             websocket: false,
             content_length: None,
         };
-        if let Decision::Allow { rule, .. } = policy.decide(&req, Utc::now())
+        if let Decision::Allow {
+            rule,
+            allow_private,
+            ..
+        } = policy.decide(&req, Utc::now())
             && rule != OPEN_RULE
         {
-            s.allowed_now = Some(rule);
+            if allow_private || s.last_reason.as_deref() != Some(private) {
+                s.allowed_now = Some(rule);
+            } else {
+                s.allowed_not_private = Some(rule);
+            }
         }
     }
 }
@@ -691,11 +704,22 @@ mod tests {
             verdict: Some(Verdict::Deny),
             ..Default::default()
         };
-        let evs = [denied("docs.example", "GET"), denied("api.example", "POST")];
+        let private = |host: &str| Event {
+            reason: Some("private_address".into()),
+            ..denied(host, "GET")
+        };
+        let evs = [
+            denied("docs.example", "GET"),
+            denied("api.example", "POST"),
+            private("kb.example"),
+            private("db.example"),
+        ];
         let mut s = summarize(&evs, &Mutes::default());
         let cfg: crate::config::EnvConfig = toml::from_str(
             "[[allow]]\nid = \"r1\"\nhost = \"docs.example\"\n\
-             [[allow]]\nid = \"r2\"\nhost = \"api.example\"\n",
+             [[allow]]\nid = \"r2\"\nhost = \"api.example\"\n\
+             [[allow]]\nid = \"r3\"\nhost = \"kb.example\"\n\
+             [[allow]]\nid = \"r4\"\nhost = \"db.example\"\nallow_private = true\n",
         )
         .unwrap();
         let c = crate::compile::compile("web", &cfg, None, &[]).unwrap();
@@ -704,6 +728,11 @@ mod tests {
         // A read rule allows the GET denied before it, not the POST.
         assert_eq!(at("docs.example").as_deref(), Some("r1"));
         assert_eq!(at("api.example"), None);
+        // A private address needs a rule that allows one; the rule that doesn't is named.
+        assert_eq!(at("kb.example"), None);
+        let kb = s.iter().find(|x| x.host == "kb.example").unwrap();
+        assert_eq!(kb.allowed_not_private.as_deref(), Some("r3"));
+        assert_eq!(at("db.example").as_deref(), Some("r4"));
     }
 
     #[test]
