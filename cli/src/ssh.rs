@@ -166,17 +166,21 @@ pub fn valid_user(s: &str) -> bool {
         && b.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-')
 }
 
+/// The arguments of the ProxyCommand. An ssh_config an older luoto wrote runs them with a newer
+/// one until the next `up`, so their form stays.
+pub fn proxy_args(env: &str) -> [&str; 2] {
+    ["ssh-proxy", env]
+}
+
 fn block(ctx: &Ctx, env: &str, user: &str) -> Result<String> {
     let exe = std::env::current_exe()?;
+    let args = proxy_args(env).join(" ");
     // Editors started from the GUI don't inherit the shell's LUOTO_HOME; carry it explicitly.
     let proxy = match std::env::var("LUOTO_HOME") {
         Ok(h) if !cfg!(windows) => {
-            format!(
-                "env LUOTO_HOME=\"{h}\" \"{}\" ssh-proxy {env}",
-                exe.display()
-            )
+            format!("env LUOTO_HOME=\"{h}\" \"{}\" {args}", exe.display())
         }
-        _ => format!("\"{}\" ssh-proxy {env}", exe.display()),
+        _ => format!("\"{}\" {args}", exe.display()),
     };
     Ok(format!(
         "Host {}\n  User {user}\n  ProxyCommand {proxy}\n  IdentityFile \"{}\"\n  IdentitiesOnly yes\n  \

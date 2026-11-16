@@ -976,6 +976,11 @@ fn parse_timeout(s: &str) -> Result<Duration> {
         .with_context(|| format!("--timeout {s}: give a duration above zero"))
 }
 
+/// How `headless` brings env `env` up, as a child luoto.
+pub fn up_args(env: &str) -> [&str; 4] {
+    ["up", "-e", env, "--quiet"]
+}
+
 /// `luoto run`: one prompt, no terminal. Lists the agent if the env doesn't, brings the env up
 /// (as a child whose output goes to stderr, with nothing to answer on), then runs the agent's
 /// headless command line: its answer on stdout or in `output`, its exit code returned, or
@@ -1010,7 +1015,7 @@ pub fn headless(
     list_agent(&ctx, env_name, agent)?;
     let progress = Stdio::from(std::io::stderr());
     let up = std::process::Command::new(std::env::current_exe()?)
-        .args(["up", "-e", env_name, "--quiet"])
+        .args(up_args(env_name))
         .stdin(Stdio::null())
         .stdout(progress)
         .status()?;

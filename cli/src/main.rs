@@ -1099,8 +1099,27 @@ mod tests {
             }
         }
         walk(&Cli::command(), "");
-        let cli = Cli::try_parse_from(["luoto", "ssh-proxy", "web"]).unwrap();
-        assert!(cli.env.is_none());
+    }
+
+    /// The command lines luoto runs of itself parse, reach their command with their env, and
+    /// pass `run`'s `-e` check.
+    #[test]
+    fn what_luoto_runs_of_itself_parses() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto"], args].concat()).unwrap();
+        // ssh_configs already written run exactly this.
+        assert_eq!(ssh::proxy_args("web"), ["ssh-proxy", "web"]);
+        let proxy = parse(&ssh::proxy_args("web"));
+        assert!(proxy.env.is_none());
+        assert!(matches!(&proxy.cmd, Cmd::SshProxy { name } if name == "web"));
+
+        let watch = parse(&watch::ARGS);
+        assert!(watch.env.is_none());
+        assert!(matches!(watch.cmd, Cmd::Watch));
+
+        let up = parse(&agents::up_args("web"));
+        assert_eq!(up.env.as_deref(), Some("web"));
+        assert!(matches!(up.cmd, Cmd::Up { all: false, .. }));
+        assert!(refuses_env(&up.cmd).is_none());
     }
 
     #[test]
