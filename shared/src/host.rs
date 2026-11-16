@@ -341,6 +341,21 @@ fn is_never_dialed_v4(v4: Ipv4Addr) -> bool {
         || (o[0] == 198 && (o[1] & 0xfe) == 18)
 }
 
+/// Private addresses a gate on Apple's `container` reaches through the Mac, whose routes (a
+/// VPN's among them) its VM doesn't have: RFC 1918, CGNAT and unique-local v6, written as
+/// themselves (no v4 inside a v6 form), and none the gate never dials. An allowlist: loopback,
+/// link-local and every public address are outside it.
+pub fn leaves_host(ip: IpAddr) -> bool {
+    let listed = match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_private() || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00,
+    };
+    listed && !is_never_dialed(ip)
+}
+
 /// A request path as the gate matches and forwards it. Percent-encoded unreserved characters
 /// (`%66` for `f`, `%2e` for `.`) are decoded, since RFC 3986 makes them the same path. A path
 /// with a dot segment, an empty segment or a backslash, in any spelling, is refused: servers
@@ -554,6 +569,76 @@ mod tests {
         assert_ne!(wildcard_risk("*.trycloudflare.com"), WildcardRisk::None);
         assert_eq!(wildcard_risk("*.sentry.io"), WildcardRisk::MultiTenant);
         assert_eq!(wildcard_risk("*.mycompany.dev"), WildcardRisk::None);
+    }
+
+    #[test]
+    fn only_plain_private_ranges_leave_through_the_host() {
+        use super::{is_private, leaves_host};
+        for ip in [
+            "10.0.0.1",
+            "10.10.0.8",
+            "10.255.255.255",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.0.1",
+            "192.168.255.254",
+            "100.64.0.1",
+            "100.127.255.255",
+            "fc00::1",
+            "fd12:3456::8",
+        ] {
+            assert!(leaves_host(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in [
+            // Loopback, unspecified, link-local and metadata: the host itself or its cloud.
+            "127.0.0.1",
+            "0.0.0.0",
+            "169.254.169.254",
+            "169.254.1.2",
+            "::1",
+            "::",
+            "fe80::1",
+            "fd00:ec2::254",
+            // luoto's own networks and the gate's fake addresses.
+            "10.212.0.5",
+            "10.213.3.2",
+            "198.18.0.5",
+            // Range edges.
+            "172.15.255.255",
+            "172.32.0.0",
+            "100.63.255.255",
+            "100.128.0.0",
+            "192.169.0.1",
+            // Private v4 inside v6 forms: mapped, NAT64, 6to4, compatible.
+            "::ffff:10.0.0.1",
+            "64:ff9b::a00:1",
+            "2002:a00:1::1",
+            "::a00:1",
+            // Multicast, broadcast, documentation, public.
+            "224.0.0.1",
+            "255.255.255.255",
+            "192.0.2.1",
+            "2001:db8::1",
+            "8.8.8.8",
+            "2606:4700::1111",
+        ] {
+            assert!(!leaves_host(ip.parse().unwrap()), "{ip}");
+        }
+        // Inside what the gate may dial for a private rule, for every v4 address and a v6 sweep.
+        for n in (0..=u32::MAX).step_by(65_521) {
+            let ip = std::net::IpAddr::V4(n.into());
+            assert!(
+                !leaves_host(ip) || (is_private(ip) && !is_never_dialed(ip)),
+                "{ip}"
+            );
+        }
+        for hi in (0..=u16::MAX).step_by(251) {
+            let ip = std::net::IpAddr::V6(std::net::Ipv6Addr::new(hi, 0, 0, 0, 0, 0, 0xa00, 1));
+            assert!(
+                !leaves_host(ip) || (is_private(ip) && !is_never_dialed(ip)),
+                "{ip}"
+            );
+        }
     }
 
     #[test]

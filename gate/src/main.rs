@@ -16,6 +16,7 @@ mod eventlog;
 mod events;
 mod guards;
 mod handler;
+mod hostdial;
 mod imds;
 mod limits;
 mod mitm;
@@ -216,6 +217,11 @@ async fn serve() -> Result<()> {
         )),
         None => None,
     };
+    let host_dial = cfg
+        .host_dial
+        .as_deref()
+        .map(|p| uplink::listen(p, None))
+        .transpose()?;
 
     #[cfg(target_os = "linux")]
     if let Some(uid) = cfg.run_as {
@@ -235,6 +241,9 @@ async fn serve() -> Result<()> {
     }
 
     let state = State::load(cfg)?;
+    if let Some(l) = host_dial {
+        let _ = state.host_dial.set(hostdial::HostDial::serve(l));
+    }
     tokio::spawn(proxy::serve(state.clone(), proxy));
     tokio::spawn(ctl::serve(state.clone(), ctl));
     if let Some((udp, tcp)) = dns {

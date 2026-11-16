@@ -173,7 +173,7 @@ async fn connect(state: Arc<State>, slot: Slot, req: Request<Incoming>) -> Respo
 pub async fn splice<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     state: Arc<State>,
     client: C,
-    upstream: tokio::net::TcpStream,
+    upstream: Box<dyn crate::upstream::Io>,
     host: String,
     port: u16,
     rule_id: String,

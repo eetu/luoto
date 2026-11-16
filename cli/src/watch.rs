@@ -186,6 +186,12 @@ pub fn watch() -> Result<ExitCode> {
     // Apple: each running gate's links to the vault.
     #[cfg(unix)]
     let mut uplinks: HashMap<String, crate::tunlink::Uplinks> = HashMap::new();
+    // Apple: each running gate's dials to private addresses, made from this Mac, and the gates
+    // the container networks they refuse were last read for.
+    #[cfg(unix)]
+    let mut dialers: Option<crate::hostdial::Dialers> = None;
+    #[cfg(unix)]
+    let mut dial_gates: Option<Vec<String>> = None;
     // Apple restarts nothing on its own: a gate seen stopped under a running dev container
     // (since when, and when it was last started here).
     let mut gate_down: HashMap<String, (Instant, Option<Instant>)> = HashMap::new();
@@ -228,6 +234,7 @@ pub fn watch() -> Result<ExitCode> {
             {
                 drop(links);
                 drop(uplinks);
+                drop(dialers);
             }
             drop(lock);
             start(&ctx.paths, exe);
@@ -275,6 +282,27 @@ pub fn watch() -> Result<ExitCode> {
                     let vault = env::vault_socket(&ctx);
                     crate::tunlink::Uplinks::start(s.uplink, vault, name.clone())
                 });
+            }
+            let gates: Vec<String> = running
+                .iter()
+                .filter(|e| states.running(&names::gate(e)))
+                .cloned()
+                .collect();
+            if dialers.is_none() && !gates.is_empty() {
+                dialers = crate::hostdial::Dialers::new().ok();
+            }
+            if let Some(d) = dialers.as_mut() {
+                if dial_gates.as_ref() != Some(&gates)
+                    && let Ok(nets) = ctx.rt.subnets()
+                {
+                    d.set_nets(&nets);
+                    dial_gates = Some(gates.clone());
+                }
+                let want: Vec<(String, PathBuf)> = gates
+                    .iter()
+                    .map(|e| (e.clone(), env::link_sockets(&ctx, e).dial))
+                    .collect();
+                d.keep(&want);
             }
         }
         if ctx.rt.flavor == crate::runtime::Flavor::Apple {

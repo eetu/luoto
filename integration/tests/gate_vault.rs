@@ -182,6 +182,10 @@ struct Env {
     gate_port: u16,
     /// Stops the links of `start_linked`.
     linked: Option<Arc<AtomicBool>>,
+    /// The gate's socket for dials from the host (`start_host_dial`).
+    dial_sock: PathBuf,
+    /// Stops the fake watcher of `dial_from_host`.
+    dialing: Arc<AtomicBool>,
     _gate: Proc,
     _vault: Proc,
     _dir: tempfile::TempDir,
@@ -192,6 +196,7 @@ impl Drop for Env {
         if let Some(stop) = &self.linked {
             stop.store(true, Ordering::Relaxed);
         }
+        self.dialing.store(true, Ordering::Relaxed);
     }
 }
 
@@ -216,14 +221,37 @@ impl Env {
         gate_env: &[(&str, &str)],
         vault_env: &[(&str, &str)],
     ) -> Env {
-        Env::launch(resolve, gate_env, vault_env, false)
+        Env::launch(resolve, gate_env, vault_env, false, false)
+    }
+
+    /// As on Apple: private addresses a rule allows are dialed by the host, over links to the
+    /// gate's dial socket (`dial_from_host` opens them).
+    fn start_host_dial(resolve: &[(&str, SocketAddr)]) -> Env {
+        Env::launch(resolve, &[], &[], false, true)
+    }
+
+    /// Answer the gate's dials as luoto's watcher does, connecting each requested address to
+    /// its test server in `targets`; the lines the gate wrote, in order.
+    fn dial_from_host(&self, targets: &[(SocketAddr, SocketAddr)]) -> Arc<Mutex<Vec<String>>> {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let targets: Arc<Vec<(SocketAddr, SocketAddr)>> = Arc::new(targets.to_vec());
+        for _ in 0..2 {
+            let (sock, targets, asked, stop) = (
+                self.dial_sock.clone(),
+                targets.clone(),
+                asked.clone(),
+                self.dialing.clone(),
+            );
+            std::thread::spawn(move || answer_dials(&sock, &targets, &asked, &stop));
+        }
+        asked
     }
 
     /// As on Apple: the vault serves one socket on which each connection names its env, and
     /// the gate serves its vault socket over links the test opens and joins, as luoto's watcher
     /// does.
     fn start_linked(resolve: &[(&str, SocketAddr)]) -> Env {
-        Env::launch(resolve, &[], &[], true)
+        Env::launch(resolve, &[], &[], true, false)
     }
 
     fn launch(
@@ -231,6 +259,7 @@ impl Env {
         gate_env: &[(&str, &str)],
         vault_env: &[(&str, &str)],
         linked: bool,
+        host_dial: bool,
     ) -> Env {
         build();
         let dir = tempfile::tempdir().unwrap();
@@ -239,6 +268,7 @@ impl Env {
         let vault_sockets = dir.path().join("vs");
         let shared = dir.path().join("shared.sock");
         let uplink = dir.path().join("up.sock");
+        let dial_sock = dir.path().join("dial.sock");
         let gate_port = free_port();
         let bin = root().join("target/debug");
         let mut vault = Command::new(bin.join("luoto-vault"));
@@ -266,6 +296,9 @@ impl Env {
                 "LUOTO_VAULT_SOCKET",
                 vault_sockets.join(ENV).join("vault.sock"),
             );
+        }
+        if host_dial {
+            gate.env("LUOTO_HOST_DIAL", &dial_sock);
         }
         let gate = Proc(
             gate.env("LUOTO_ENV", ENV)
@@ -295,6 +328,8 @@ impl Env {
             vault_sockets,
             gate_port,
             linked,
+            dial_sock,
+            dialing: Arc::new(AtomicBool::new(false)),
             _gate: gate,
             _vault: vault,
             _dir: dir,
@@ -445,7 +480,129 @@ fn link_to_vault(uplink: &Path, vault: &Path, stop: &AtomicBool) {
     }
 }
 
-impl Env {}
+/// What luoto's watcher does for a gate's dials on Apple: keep a link open to `sock`, record
+/// the line the gate writes, answer `ok` and join the link to the requested address's server.
+fn answer_dials(
+    sock: &Path,
+    targets: &[(SocketAddr, SocketAddr)],
+    asked: &Mutex<Vec<String>>,
+    stop: &AtomicBool,
+) {
+    while !stop.load(Ordering::Relaxed) {
+        let Ok(mut g) = UnixStream::connect(sock) else {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        };
+        g.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut line = Vec::new();
+        let complete = loop {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let mut b = [0u8; 1];
+            match g.read(&mut b) {
+                Ok(0) => break false,
+                Ok(_) if b[0] == b'\n' => break true,
+                Ok(_) => line.push(b[0]),
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(_) => break false,
+            }
+        };
+        if !complete {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        let line = String::from_utf8(line).unwrap();
+        asked.lock().unwrap().push(line.clone());
+        let requested: SocketAddr = line.strip_prefix("dial ").unwrap().parse().unwrap();
+        let (_, target) = targets.iter().find(|(r, _)| *r == requested).unwrap();
+        g.set_read_timeout(None).unwrap();
+        g.write_all(b"ok\n").unwrap();
+        let mut t = TcpStream::connect(target).unwrap();
+        let (mut g2, mut t2) = (g.try_clone().unwrap(), t.try_clone().unwrap());
+        let back = std::thread::spawn(move || {
+            let _ = std::io::copy(&mut t2, &mut g2);
+            let _ = g2.shutdown(std::net::Shutdown::Both);
+        });
+        let _ = std::io::copy(&mut g, &mut t);
+        let _ = t.shutdown(std::net::Shutdown::Both);
+        let _ = back.join();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn a_private_address_a_rule_allows_is_dialed_from_the_host() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ok"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+    let (kb, tunnel, closed): (SocketAddr, SocketAddr, SocketAddr) = (
+        "10.99.0.1:8080".parse().unwrap(),
+        "10.99.0.2:443".parse().unwrap(),
+        "10.99.0.3:8080".parse().unwrap(),
+    );
+    let env = Env::start_host_dial(&[
+        ("kb.test", kb),
+        ("tunnel.test", tunnel),
+        ("closed.test", closed),
+    ]);
+    let asked = env.dial_from_host(&[(kb, *upstream.address()), (tunnel, echo_server())]);
+    let private = |mut r: CompiledRule| {
+        r.rule.allow_private = true;
+        r
+    };
+    let mut tunnel_rule = private(read("tunnel", "tunnel.test"));
+    tunnel_rule.rule.access = Access::Level(AccessLevel::Write);
+    tunnel_rule.rule.mode = Mode::Tunnel;
+    env.apply(Policy {
+        rules: vec![
+            private(read("kb", "kb.test")),
+            tunnel_rule,
+            // No `allow_private`: dialed from the gate, never asked of the host.
+            read("closed", "closed.test"),
+        ],
+        ..Default::default()
+    });
+
+    assert_eq!(env.get("http://kb.test/ok").status, 200);
+    open_tunnel(&env);
+    // The gate dials this one itself, where nothing answers: the path is chosen before.
+    let port = env.gate_port;
+    std::thread::spawn(move || {
+        send(
+            port,
+            b"GET http://closed.test/ok HTTP/1.1\r\nHost: closed.test\r\n\r\n",
+        )
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(
+        *asked.lock().unwrap(),
+        ["dial 10.99.0.1:8080", "dial 10.99.0.2:443"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn without_the_host_a_private_dial_names_the_watcher() {
+    let env = Env::start_host_dial(&[("kb.test", "10.99.0.1:8080".parse().unwrap())]);
+    let mut kb = read("kb", "kb.test");
+    kb.rule.allow_private = true;
+    env.apply(Policy {
+        rules: vec![kb],
+        ..Default::default()
+    });
+    let r = env.get("http://kb.test/ok");
+    assert_eq!(r.status, 502, "{}", r.head);
+    assert!(
+        r.body.contains("background watcher isn't running"),
+        "{}",
+        r.body
+    );
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "spawns binaries; run with `just it`"]
