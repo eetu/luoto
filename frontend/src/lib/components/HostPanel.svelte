@@ -82,6 +82,7 @@
   // Attempts alike in outcome, method and path are one row, the newest group first: whether
   // a fix took effect reads as a recent 200 above an older 502.
   const groups = $derived.by(() => {
+    const at = (ts: string | null): number => (ts ? Date.parse(ts) : 0);
     const by: Record<string, Group> = {};
     for (const e of attempts) {
       const deny = e.verdict === "deny";
@@ -90,14 +91,15 @@
       const what = `${e.method ?? e.kind ?? ""} ${path}`.trim();
       const key = `${outcome}|${deny ? (e.reason ?? "") : ""}|${what}`;
       const g = by[key];
-      if (g) {
-        g.count += 1;
-        g.first = e.ts;
-      } else {
+      if (!g) {
         by[key] = { key, outcome, deny, what, path, count: 1, latest: e, first: e.ts };
+        continue;
       }
+      g.count += 1;
+      if (at(e.ts) > at(g.latest.ts)) g.latest = e;
+      if (at(e.ts) < at(g.first)) g.first = e.ts;
     }
-    return Object.values(by);
+    return Object.values(by).sort((a, b) => at(b.latest.ts) - at(a.latest.ts));
   });
 
   function attemptMenu(ev: MouseEvent, g: Group) {

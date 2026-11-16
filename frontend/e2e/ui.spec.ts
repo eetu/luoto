@@ -998,12 +998,13 @@ test("attempts alike are one row, newest first, wrapped and expandable", async (
     (url) => url.pathname === "/api/envs/web/events",
     (route) =>
       route.fulfill({
+        // Out of order on purpose: the rows sort newest first whatever order they come in.
         json: [
-          ev(200, at(5), `${long}?poll=3`),
-          ev(200, at(6), `${long}?poll=2`),
-          ev(502, at(50), long),
-          ev(502, at(51), long),
           ev(200, at(52), "/<b>raw</b>"),
+          ev(502, at(50), long),
+          ev(200, at(6), `${long}?poll=2`),
+          ev(502, at(51), long),
+          ev(200, at(5), `${long}?poll=3`),
         ],
       }),
   );
