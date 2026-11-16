@@ -2,6 +2,7 @@
   import EgressTable from "$lib/components/EgressTable.svelte";
   import PendingRequests from "$lib/components/PendingRequests.svelte";
   import Segmented from "$lib/components/Segmented.svelte";
+  import SurfaceTabs from "$lib/components/SurfaceTabs.svelte";
   import Switch from "$lib/components/Switch.svelte";
   import { app, refreshEnv, WINDOWS } from "$lib/stores/app.svelte";
 
@@ -13,7 +14,7 @@
 
 <section class="surface">
   <header class="bar">
-    <h1>{app.env ?? ""} <span class="muted">egress</span></h1>
+    <SurfaceTabs />
     <div class="tools">
       <Segmented
         label="time window"
@@ -35,6 +36,9 @@
         bind:value={app.search}
         aria-label="filter hosts"
       />
+      <button class="btn" onclick={() => (app.subject = { kind: "rule", id: null })}
+        >Add rule</button
+      >
     </div>
   </header>
 

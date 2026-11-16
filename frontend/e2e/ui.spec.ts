@@ -36,6 +36,11 @@ test("a blocked host is allowed from the egress view", async ({ page }) => {
 
   await blocked.click();
   await expect(page.getByRole("heading", { name: "example.com" })).toBeVisible();
+  // Offered for any host, since a blocked name was never resolved; off unless picked.
+  await expect(page.getByRole("switch", { name: "allow private address" })).toHaveAttribute(
+    "aria-checked",
+    "false",
+  );
   await page.getByRole("button", { name: "Allow", exact: true }).click();
 
   await expect.poll(() => writes.length).toBe(1);
@@ -44,6 +49,9 @@ test("a blocked host is allowed from the egress view", async ({ page }) => {
     path: "/api/envs/web/rules",
     body: { rule: { host: "example.com", access: "read" } },
   });
+  expect(
+    (writes[0].body as { rule: { allow_private?: boolean } }).rule.allow_private,
+  ).toBeUndefined();
 });
 
 test("open egress shows on the env and its hosts, kept until revoked", async ({ page }) => {
@@ -266,9 +274,17 @@ test("a name the gate found private offers a private rule, off until chosen", as
   await expect(page.getByText(/without this, the rule doesn't reach it/)).toBeVisible();
   await private_.click();
   await page.getByRole("button", { name: "Allow", exact: true }).click();
+  // luoto reports the rule's risk; the one question, then it is saved with the yes.
+  const ask = page.getByRole("alertdialog");
+  await expect(ask).toContainText("reach private addresses");
+  await expect(ask).not.toContainText("private/host addresses");
+  await ask.getByRole("button", { name: "Allow", exact: true }).click();
 
-  await expect.poll(() => writes.length).toBe(1);
-  expect(writes[0].body).toMatchObject({ rule: { host: "kb.example", allow_private: true } });
+  await expect.poll(() => writes.length).toBe(2);
+  expect(writes[1].body).toMatchObject({
+    rule: { host: "kb.example", allow_private: true },
+    force: true,
+  });
 });
 
 test("a rule without the private address reads as blocked, naming the rule", async ({ page }) => {
@@ -601,6 +617,11 @@ test("the env panel links the ports forwarded from the env", async ({ page }) =>
   );
   await expect(page.getByText("3000 is taken on this machine")).toBeVisible();
   await expect(page.getByText("luoto forward -e web <port>:3000")).toBeVisible();
+  // A port picked for a server (a login's callback) is forwarded, folded away.
+  const picked = page.getByRole("link", { name: "http://localhost:54815" });
+  await expect(picked).toBeHidden();
+  await page.getByText("and 1 port picked for a server").click();
+  await expect(picked).toBeVisible();
 });
 
 test("a new access request notifies once the user turned notifications on", async ({ page }) => {
@@ -658,9 +679,8 @@ test("with desktop notifications on, the page shows none of its own", async ({ p
     (route) => route.fulfill({ json: { ...fixture("overview"), desktop_notifications: true } }),
   );
   await open(page);
-  const bell = page.getByRole("button", { name: "browser notifications" });
-  await expect(bell).toBeDisabled();
-  await expect(bell).toHaveAttribute("title", /notifications = false/);
+  await expect(page.getByRole("button", { name: /^web/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "browser notifications" })).toHaveCount(0);
 });
 
 test("an env's disk use is measured when its panel shows and on refresh", async ({ page }) => {
@@ -920,24 +940,230 @@ test("a rule of yours is revoked by its button or its menu", async ({ page }) =>
   );
   await open(page);
   await page.getByRole("button", { name: /^web/ }).click();
+  // The env panel counts them; the rules view lists every one.
+  await expect(page.getByText("2 of yours")).toBeVisible();
+  await page.getByRole("button", { name: "Show rules" }).click();
 
   await page.getByRole("button", { name: "revoke api.example.com" }).click();
   await expect.poll(() => deleted).toEqual(["DELETE /api/envs/web/rules/u1"]);
   await expect(page.getByRole("status")).toHaveText("revoked api.example.com");
 
-  await page
-    .getByRole("listitem")
-    .filter({ hasText: "cdn.example.com" })
-    .click({ button: "right" });
+  await page.getByRole("row").filter({ hasText: "cdn.example.com" }).click({ button: "right" });
   await page.getByRole("menuitem", { name: "Revoke" }).click();
   await expect.poll(() => deleted).toHaveLength(2);
   expect(deleted[1]).toBe("DELETE /api/envs/web/rules/u2");
 
-  // A preset's rule shows in the group, not among yours.
-  const group = page.getByRole("button", { name: /preset:debian/ });
-  await expect(group).toHaveAttribute("aria-expanded", "false");
-  await group.click();
-  await expect(group).toHaveAttribute("aria-expanded", "true");
+  // A preset's rule is listed under its origin, with nothing to edit or revoke.
+  await expect(page.getByRole("region", { name: "preset:debian" })).toBeVisible();
+  const preset = page.getByRole("row").filter({ hasText: "deb.debian.org" }).first();
+  await expect(preset.getByRole("button")).toHaveCount(0);
+  await preset.click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: /Revoke/ })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  // Its row shows it in the panel, as it is.
+  await preset.click();
+  await expect(page.getByText("From preset:debian: luoto's own data")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toHaveCount(0);
+  // Its egress, and back to it: by the button, and by Escape.
+  await page.getByRole("button", { name: "Show its egress" }).click();
+  await expect(page.getByRole("heading", { name: "deb.debian.org" })).toBeVisible();
+  await page.getByRole("button", { name: "Back to the rule" }).click();
+  await expect(page.getByText("From preset:debian: luoto's own data")).toBeVisible();
+  await page.getByRole("button", { name: "Show its egress" }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByText("From preset:debian: luoto's own data")).toBeVisible();
+});
+
+test("attempts alike are one row, newest first, wrapped and expandable", async ({ page }) => {
+  await mockApi(page);
+  const [blocked] = fixture("egress");
+  const long = "/.well-known/oauth-protected-resource/mcp/with/a/rather/long/path";
+  const ev = (status: number, ts: string, path: string) => ({
+    seq: 1,
+    run: "a",
+    ts,
+    source: null,
+    env: "web",
+    kind: "http" as const,
+    verdict: "allow" as const,
+    method: "GET",
+    host: "example.com",
+    path,
+    status,
+    message: status === 502 ? "could not connect to example.com:443" : undefined,
+  });
+  const now = Date.now();
+  const at = (minAgo: number) => new Date(now - minAgo * 60_000).toISOString();
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/events",
+    (route) =>
+      route.fulfill({
+        json: [
+          ev(200, at(5), `${long}?poll=3`),
+          ev(200, at(6), `${long}?poll=2`),
+          ev(502, at(50), long),
+          ev(502, at(51), long),
+          ev(200, at(52), "/<b>raw</b>"),
+        ],
+      }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("row", { name: new RegExp(blocked.host.replace(".", "\\.")) }).click();
+
+  const rows = page.locator(".attempt");
+  await expect(rows).toHaveCount(3);
+  await expect(rows.nth(0)).toContainText(`GET ${long} 2×`);
+  await expect(rows.nth(1)).toContainText("502");
+  // Sandbox-written paths are text, never markup.
+  await expect(rows.nth(2)).toContainText("GET /<b>raw</b>");
+
+  await rows.nth(1).click();
+  await expect(rows.nth(1)).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByText("could not connect to example.com:443")).toBeVisible();
+});
+
+test("a host with a rule of yours offers it to edit, not a second allow", async ({ page }) => {
+  await mockApi(page);
+  const env = fixture("env");
+  const mine = { id: "u1", origin: "user", host: "example.com", access: "read" } as const;
+  await page.route(
+    (url) => url.pathname === "/api/envs/web",
+    (route) => route.fulfill({ json: { ...env, rules: [mine, ...env.rules] } }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("row", { name: /example\.com/ }).click();
+
+  await expect(page.getByText("your rule", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Add another rule" }).click();
+  await expect(page.getByRole("button", { name: "Allow", exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  // Cancel, and Escape, go back to the host it was opened from.
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByText("your rule", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByText("your rule", { exact: true })).toBeVisible();
+});
+
+test("a rule is added for any host from the rules list", async ({ page }) => {
+  const writes = await mockApi(page);
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: "Add rule" }).first().click();
+
+  await expect(page.getByRole("heading", { name: "new rule" })).toBeVisible();
+  const allow = page.getByRole("button", { name: "Allow", exact: true });
+  await expect(allow).toBeDisabled();
+  await page.getByRole("textbox", { name: "host", exact: true }).fill("kb.example");
+  await page.getByRole("switch", { name: "allow private address" }).click();
+  await allow.click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Allow", exact: true }).click();
+
+  await expect.poll(() => writes.length).toBe(2);
+  expect(writes[1]).toMatchObject({
+    method: "POST",
+    path: "/api/envs/web/rules",
+    body: { rule: { host: "kb.example", access: "read", allow_private: true }, force: true },
+  });
+  // Saved: back to the env.
+  await expect(page.getByRole("heading", { name: "new rule" })).toBeHidden();
+});
+
+test("a name on a private address gets the private switch on, and Allow asks first", async ({
+  page,
+}) => {
+  const writes = await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/resolve",
+    (route) => route.fulfill({ json: { private: ["10.10.0.8"], never: false } }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: "Add rule" }).first().click();
+  await page.getByRole("textbox", { name: "host", exact: true }).fill("kb.example");
+
+  const private_ = page.getByRole("switch", { name: "allow private address" });
+  await expect(private_).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByText("resolves to 10.10.0.8, a private address")).toBeVisible();
+  await page.getByRole("button", { name: "Allow", exact: true }).click();
+  const ask = page.getByRole("alertdialog");
+  await expect(ask).toContainText("reach its private address 10.10.0.8");
+
+  // Without it: saved as a plain rule.
+  await ask.getByRole("button", { name: "Allow without private" }).click();
+  await expect.poll(() => writes.length).toBe(2);
+  const rule = (writes[1].body as { rule: { host: string; allow_private?: boolean } }).rule;
+  expect(rule.host).toBe("kb.example");
+  expect(rule.allow_private).toBeUndefined();
+});
+
+test("a rule of yours is edited in place, its expiry and hidden fields kept", async ({ page }) => {
+  await mockApi(page);
+  const env = fixture("env");
+  const expires = new Date(Date.now() + 38 * 60_000).toISOString();
+  const mine = {
+    id: "u1",
+    origin: "user",
+    host: "api.example.com",
+    access: "read",
+    paths: ["/v1/**"],
+    expires,
+    idle: "2h",
+  } as const;
+  await page.route(
+    (url) => url.pathname === "/api/envs/web",
+    (route) => route.fulfill({ json: { ...env, rules: [mine, ...env.rules] } }),
+  );
+  const puts: { path: string; body: { rule: Record<string, unknown>; force: boolean } }[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/rules/u1",
+    (route, req) => {
+      const body = req.postDataJSON() as { rule: Record<string, unknown>; force: boolean };
+      puts.push({ path: new URL(req.url()).pathname, body });
+      return body.force
+        ? route.fulfill({ json: { ...body.rule, id: "u2" } })
+        : route.fulfill({ status: 409, json: { error: "risks", risks: ["write to a forge"] } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: "rules", exact: true }).click();
+  await expect(page.getByText("read-only, /v1/**")).toBeVisible();
+
+  // Escape leaves the form with nothing written.
+  await page.getByRole("button", { name: "edit api.example.com" }).click();
+  await expect(page.getByRole("heading", { name: "api.example.com" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "api.example.com" })).toBeHidden();
+  expect(puts).toHaveLength(0);
+
+  await page.getByRole("button", { name: "edit api.example.com" }).click();
+  await expect(page.getByRole("combobox", { name: "paths" })).toHaveValue("/v1/**");
+  await expect(
+    page.getByRole("group", { name: "for" }).getByRole("button", { name: "keep" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  // Nothing changed yet: nothing to save.
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "write", exact: true }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("write to a forge")).toBeVisible();
+  await page.getByRole("button", { name: "Save anyway" }).click();
+
+  await expect.poll(() => puts.length).toBe(2);
+  expect(puts[1].body.force).toBe(true);
+  expect(puts[1].body.rule).toMatchObject({
+    host: "api.example.com",
+    access: "write",
+    paths: ["/v1/**"],
+    expires,
+    idle: "2h",
+  });
+  expect(puts[1].body.rule.id).toBeUndefined();
 });
 
 test("the vault's unlock, reload and lock each report what came of them", async ({ page }) => {

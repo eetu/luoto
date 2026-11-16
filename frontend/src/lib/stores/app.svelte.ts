@@ -14,14 +14,19 @@ import type {
   OpenEgress,
   Overview,
   ProjectStatus,
+  Rule,
   VaultView,
   VmDisk,
 } from "$lib/types";
 
 export type Subject =
   | { kind: "env" }
-  | { kind: "host"; host: string }
+  /** `back`: the rule it was opened from, which the panel and Escape return to. */
+  | { kind: "host"; host: string; back?: { kind: "rule"; id: string } }
   | { kind: "request"; id: number }
+  /** A rule (a new one: `id` null); `back`, the host it was opened from, which saving,
+   * Cancel and Escape return to. */
+  | { kind: "rule"; id: string | null; back?: { kind: "host"; host: string } }
   /** The vault as a whole, or one of its credentials: the surface shows the vault. */
   | { kind: "vault" }
   | { kind: "credential"; env: string; binding: string };
@@ -57,6 +62,8 @@ class AppState {
   subject = $state<Subject>({ kind: "env" });
   /** What the surface shows: the selected env's egress, or the vault across envs. */
   view = $state<"env" | "vault">("env");
+  /** What the surface shows of the selected env: what it reached, or its rules. */
+  surface = $state<"egress" | "rules">("egress");
   vault = $state<VaultView | null>(null);
   minutes = $state(60);
   deniedOnly = $state(false);
@@ -368,3 +375,20 @@ export function accessText(a: unknown): string {
   if (Array.isArray(a)) return a.join(", ");
   return "read-only";
 }
+
+/** How long until `expires`: `38 min left`, `5 h left`. */
+export const leftText = (expires: string): string => {
+  const mins = Math.round((Date.parse(expires) - Date.now()) / 60_000);
+  return mins > 90 ? `${Math.round(mins / 60)} h left` : `${Math.max(mins, 0)} min left`;
+};
+
+/** What a rule allows, after its host: `read-only, /v1/**, private, tunnel`. */
+export const ruleText = (r: Rule): string =>
+  [
+    accessText(r.access),
+    ...(r.paths ?? []),
+    r.allow_private && "private",
+    r.mode === "tunnel" && "tunnel",
+  ]
+    .filter(Boolean)
+    .join(", ");

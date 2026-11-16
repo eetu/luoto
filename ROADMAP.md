@@ -22,9 +22,6 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
 
 ## Workflow
 
-- **OAuth logins with a loopback callback:** when the sandbox opens a URL whose `redirect_uri`
-  is `http://localhost:<port>`, forward that port, which the watcher skips in the ephemeral
-  range (MCP servers' sign-ins; `luoto forward` until then).
 - **Agent status for OpenCode,** as Claude Code and Codex report it (OSC 7501).
 - **An env as a machine for agent managers** that reach machines over SSH: through luoto's SSH,
   helpers they start run inside the env, behind its gate.

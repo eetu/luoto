@@ -954,14 +954,17 @@ impl Runtime {
 
     /// Stop the container if it runs. Like `remove_container`, a failure counts only while
     /// the container still runs (gVisor's network teardown).
-    pub fn stop(&self, name: &str) -> Result<()> {
-        if self.is_running(name)
-            && let Err(e) = self.run(["stop", "-t", "5", name])
+    /// Stop `name` if it runs; whether it did.
+    pub fn stop(&self, name: &str) -> Result<bool> {
+        if !self.is_running(name) {
+            return Ok(false);
+        }
+        if let Err(e) = self.run(["stop", "-t", "5", name])
             && self.is_running(name)
         {
             return Err(e);
         }
-        Ok(())
+        Ok(true)
     }
 
     pub fn is_running(&self, name: &str) -> bool {

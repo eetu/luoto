@@ -24,13 +24,19 @@ pub fn other_instance() -> &'static str {
     }
 }
 
-/// The `luoto ui` port, outside the ports envs forward (1024-32767).
+/// The `luoto ui` port, one envs never forward ([`ui_ports`]).
 pub fn ui_port() -> u16 {
     if crate::release::pinned() {
         47878
     } else {
         47879
     }
+}
+
+/// Both instances' UI ports: no env's server is forwarded to either, so none serves a page on
+/// a UI's origin.
+pub fn ui_ports() -> [u16; 2] {
+    [47878, 47879]
 }
 
 pub fn vault() -> String {

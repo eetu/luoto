@@ -1691,6 +1691,37 @@ impl EnvFile {
         self.retain_rules(|r| r.id.as_deref() != Some(id_or_host) && r.host != id_or_host)
     }
 
+    /// Put `rule` where the rule with id `id` is, in one save; false when there is none.
+    pub fn replace_rule(&mut self, id: &str, rule: &Rule) -> Result<bool> {
+        let Some(at) = self
+            .cfg
+            .allow
+            .iter()
+            .position(|r| r.id.as_deref() == Some(id))
+        else {
+            return Ok(false);
+        };
+        let table = toml_edit::ser::to_document(rule)
+            .context("serialize rule")?
+            .as_table()
+            .clone();
+        let len = self.cfg.allow.len();
+        let arr = self.allow_tables()?;
+        if arr.len() != len {
+            bail!("`allow` changed while it was being edited");
+        }
+        let slot = arr
+            .get_mut(at)
+            .context("`allow` changed while it was being edited")?;
+        // Comments above the old table (the file's own, when it is the first) stay.
+        let decor = slot.decor().clone();
+        *slot = table;
+        *slot.decor_mut() = decor;
+        self.cfg.allow[at] = rule.clone();
+        self.save()?;
+        Ok(true)
+    }
+
     /// Drop expired rules (keeps the file from accumulating stale grants), and an
     /// `open_until` that has passed.
     pub fn prune_expired(&mut self) -> Result<usize> {
@@ -2114,6 +2145,32 @@ host = "telemetry.example"
         assert_eq!(hosts, ["b.example", "d.example"]);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.starts_with("# my env") && !saved.contains("a.example"));
+    }
+
+    #[test]
+    fn a_rule_is_replaced_in_place_and_only_by_its_id() {
+        let text = "# my env\n[[allow]]\nid = \"a\"\nhost = \"same.example\"\n\n[[allow]]\nid = \"b\"\nhost = \"same.example\"\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        std::fs::write(&path, text).unwrap();
+        let mut f = EnvFile::parse(path.clone(), text).unwrap();
+        let new = Rule {
+            id: Some("c".into()),
+            allow_private: true,
+            ..Rule::read("same.example")
+        };
+        assert!(f.replace_rule("a", &new).unwrap());
+        let ids: Vec<&str> = f.cfg.allow.iter().filter_map(|r| r.id.as_deref()).collect();
+        // The other rule for the same host stays, and the replaced one keeps its place.
+        assert_eq!(ids, ["c", "b"]);
+        let saved = EnvFile::parse(path.clone(), &std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.cfg.allow, f.cfg.allow);
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .starts_with("# my env")
+        );
+        assert!(!f.replace_rule("gone", &new).unwrap());
     }
 
     #[test]

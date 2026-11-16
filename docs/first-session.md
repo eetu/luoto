@@ -74,11 +74,13 @@ attaches Zed, VS Code or Cursor over SSH, and `luoto shell` opens a terminal.
 Start the project as usual in the env's terminal: `yarn dev` prints
 `http://localhost:5173/`, and clicking it opens the app in your browser. The background
 watcher (started by `up`, `shell` and editor sessions; `luoto logs watcher` shows its log)
-forwards each port a server in the env listens on, 1024–32767, to the same port on your
-machine for as long as it listens. It goes through
-the runtime rather than a network path, so servers bound to the env's own localhost work too;
-a port already taken here is skipped (`luoto forward LOCAL:ENV` maps it elsewhere).
-`luoto status` and the env's panel in `luoto ui` list the forwarded ports as links.
+forwards each port a server in the env listens on, from 1024 up, to the same port on your
+machine for as long as it listens, so a sign-in's callback to `localhost` reaches the env. It
+goes through the runtime rather than a network path, so servers bound to the env's own
+localhost work too; a port already taken here is skipped (`luoto forward LOCAL:ENV` maps it
+elsewhere). `luoto status` and the env's panel in `luoto ui` list the forwarded ports as
+links, and only count those above 32767, ports a server was given rather than chose.
+`auto_forward = false` (an env's file or config.toml) turns forwarding off.
 
 ## 5. See what it reached
 

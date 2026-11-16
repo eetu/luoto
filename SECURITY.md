@@ -275,12 +275,14 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   the host, so install `runsc`. With Docker, an escape lands in Docker's VM, which shares your
   folders (on Linux, on the host). On Apple's `container`, an escape from the dev VM's kernel
   has to break out through Apple's virtualization, onto your Mac.
-- **Forwarded ports.** A server in the sandbox on ports 1024–32767 is reachable at localhost
-  on your machine while it listens. Code in the sandbox can hold a port a host tool expects
-  first (a local OAuth callback, say), and the tool's browser redirect then reaches the
-  sandbox. Ports already taken on the host are never taken over: a port anything on this
-  machine answers on at localhost is skipped. `luoto ui` defaults to a port outside the range,
-  so no env can serve a page on its origin. `auto_forward = false` turns this off.
+- **Forwarded ports.** A server in the sandbox on a port from 1024 up is reachable at
+  localhost on your machine while it listens (at most 64 at once above 32767). Code in the
+  sandbox can hold a port a host tool expects first (a local OAuth callback with a fixed
+  port, say), and the tool's browser redirect then reaches the sandbox; a tool that asks for
+  any free port is never given a forwarded one. Ports already taken on the host are never
+  taken over: a port anything on this machine answers on at localhost is skipped. luoto's UI
+  ports (47878, 47879) are never forwarded, so no env can serve a page on a UI's origin.
+  `auto_forward = false` turns this off.
 - **Notifications.** A desktop notification shows the host and reason of a request, and a
   denied host, as the sandbox wrote them: control and format characters become spaces, the
   text is capped, and it reaches the notifier as an argument, never as script. Denials notify

@@ -1445,12 +1445,14 @@ pub fn stop_vm_if_unused(ctx: &Ctx) -> Result<bool> {
     Ok(true)
 }
 
-pub fn down(ctx: &Ctx, env: &str) -> Result<()> {
+/// Stop the env's containers; whether any was running.
+pub fn down(ctx: &Ctx, env: &str) -> Result<bool> {
     let _waiting = crate::progress::waiting(&format!("stopping `{env}`"));
+    let mut was = false;
     for c in [names::dev(env), names::gate(env)] {
-        ctx.rt.stop(&c)?;
+        was |= ctx.rt.stop(&c)?;
     }
-    Ok(())
+    Ok(was)
 }
 
 /// Delete the env's containers, networks, volumes, vault binding and state (CA, vault token,

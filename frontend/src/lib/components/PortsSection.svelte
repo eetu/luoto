@@ -27,6 +27,21 @@
     {:else}
       <p class="small muted">none forwarded</p>
     {/each}
+    {#if d.ports.temporary.length > 0}
+      <!-- Ports a server asked for (an editor's, a login's callback): forwarded, not listed. -->
+      <details class="temporary">
+        <summary class="small muted"
+          >{d.ports.temporary.length === 1
+            ? "and 1 port picked for a server"
+            : `and ${d.ports.temporary.length} ports picked for servers`}</summary
+        >
+        {#each d.ports.temporary as port (port)}
+          <a class="link" href="http://localhost:{port}" target="_blank" rel="noopener noreferrer"
+            ><span class="mono">http://localhost:{port}</span><ExternalLink size={12} /></a
+          >
+        {/each}
+      </details>
+    {/if}
     {#each d.ports.taken as port (port)}
       {@const cmd = `luoto forward -e ${d.name} <port>:${port}`}
       <p class="small muted taken">{port} is taken on this machine; forward it to another:</p>

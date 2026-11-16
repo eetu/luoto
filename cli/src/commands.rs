@@ -404,8 +404,11 @@ pub fn down(name: &str) -> Result<ExitCode> {
     }
     // While its dev container still runs, to name its build folders.
     disk::hint_growth(&ctx, name);
-    env::down(&ctx, name)?;
-    println!("env `{name}` stopped");
+    if env::down(&ctx, name)? {
+        println!("env `{name}` stopped");
+    } else {
+        println!("env `{name}` was not running");
+    }
     // The VM stays up for a quick `up`; the watcher stops it after `idle_stop` without envs.
     crate::watch::spawn(&ctx);
     Ok(ExitCode::SUCCESS)
@@ -744,6 +747,11 @@ fn ports_text(name: &str, p: &ports::EnvPorts) -> String {
     } else {
         open.join(", ")
     };
+    match p.temporary.len() {
+        0 => {}
+        1 => out.push_str(", and 1 port picked for a server"),
+        n => out.push_str(&format!(", and {n} ports picked for servers")),
+    }
     for port in &p.taken {
         out.push_str(&format!(
             "\n{port} is taken on this machine: `luoto forward -e {name} <port>:{port}`"
@@ -815,7 +823,24 @@ fn print_rules(p: &env::Plan) {
 
 pub fn allow(name: &str, o: AllowOpts) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
-    let rule = rules::build_rule(&o)?;
+    let mut rule = rules::build_rule(&o)?;
+    // A normal-looking name on a private address (the user's network, a VPN) is reached only
+    // by a rule that says so: asked here, where it is decided.
+    let resolved = if rule.allow_private {
+        rules::Resolved::default()
+    } else {
+        rules::resolve(&rule.host)
+    };
+    let private = resolved.private.join(", ");
+    if !private.is_empty()
+        && crate::prompt::confirm(&format!(
+            "{} resolves to {private}, a private address (your network or a VPN). Let the rule \
+             reach it?",
+            rule.host
+        ))
+    {
+        rule.allow_private = true;
+    }
     let summary = format!(
         "{} {}{}{}",
         rule.host,
@@ -834,6 +859,13 @@ pub fn allow(name: &str, o: AllowOpts) -> Result<ExitCode> {
         rules::add_rule_checked(&ctx, name, rule.clone(), force)
     })?;
     println!("allowed {summary} (rule {id}); revoke with `luoto revoke -e {name} {id}`");
+    if !private.is_empty() && !rule.allow_private {
+        println!(
+            "{} resolves to {private}, which the rule doesn't reach: `luoto allow -e {name} {} \
+             --private` makes one that does",
+            rule.host, rule.host
+        );
+    }
     Ok(ExitCode::SUCCESS)
 }
 

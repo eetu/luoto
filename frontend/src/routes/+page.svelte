@@ -10,6 +10,8 @@
   import HostPanel from "$lib/components/HostPanel.svelte";
   import NewEnvDialog from "$lib/components/NewEnvDialog.svelte";
   import RequestPanel from "$lib/components/RequestPanel.svelte";
+  import RulePanel from "$lib/components/RulePanel.svelte";
+  import RulesView from "$lib/components/RulesView.svelte";
   import SetupView from "$lib/components/SetupView.svelte";
   import VaultPanel from "$lib/components/VaultPanel.svelte";
   import VaultView from "$lib/components/VaultView.svelte";
@@ -36,12 +38,14 @@
     return startSync();
   });
 
-  // Escape ladder for the page: a credential falls back to the vault, a host or request to
-  // the env.
+  // Escape ladder for the page: a credential falls back to the vault, a host or rule to where it
+  // was opened from, else (a request, a rule, nothing saved) to the env.
   function onKeydown(e: KeyboardEvent) {
     if (e.key !== "Escape" || showNew) return;
     if (app.subject.kind === "credential") app.subject = { kind: "vault" };
-    else if (app.subject.kind === "host" || app.subject.kind === "request") {
+    else if (app.subject.kind === "host" && app.subject.back) app.subject = app.subject.back;
+    else if (app.subject.kind === "rule" && app.subject.back) app.subject = app.subject.back;
+    else if (["host", "request", "rule"].includes(app.subject.kind)) {
       app.subject = { kind: "env" };
     }
   }
@@ -61,16 +65,8 @@
     <Wordmark name={app.overview?.instance} />
     <span class="spacer"></span>
     {#if app.busy}<span class="busy">{app.busy}</span>{/if}
-    {#if app.overview?.desktop_notifications}
-      <button
-        class="icon"
-        aria-label="browser notifications"
-        title="desktop notifications show access requests; notifications = false in config.toml hands them to this browser"
-        disabled
-      >
-        <Bell size={16} />
-      </button>
-    {:else}
+    <!-- With desktop notifications, luoto's watcher shows access requests already: no bell. -->
+    {#if !app.overview?.desktop_notifications}
       <button
         class="icon"
         class:active={notifications.on}
@@ -94,15 +90,19 @@
       <main class="center"><SetupView onNew={() => (showNew = true)} /></main>
     {:else if app.view === "vault"}
       <main class="center"><VaultView /></main>
+    {:else if app.surface === "rules"}
+      <main class="center"><RulesView /></main>
     {:else}
       <main class="center"><EgressView /></main>
     {/if}
     {#if hasEnvs || app.view === "vault"}
       <aside class="subject">
         {#if app.subject.kind === "host"}
-          <HostPanel host={app.subject.host} />
+          <HostPanel host={app.subject.host} back={app.subject.back} />
         {:else if app.subject.kind === "request"}
           <RequestPanel id={app.subject.id} />
+        {:else if app.subject.kind === "rule"}
+          <RulePanel id={app.subject.id} from={app.subject.back} />
         {:else if app.subject.kind === "vault" || app.subject.kind === "credential"}
           <VaultPanel />
         {:else}
@@ -167,7 +167,7 @@
   .shell {
     display: grid;
     flex: 1;
-    grid-template-columns: 220px minmax(0, 1fr) 340px;
+    grid-template-columns: 220px minmax(0, 1fr) clamp(340px, 30vw, 480px);
     min-height: 0;
   }
 
