@@ -41,6 +41,9 @@ pub struct Config {
     /// Apple: serve `vault_socket` here, over connections the host opens to this socket and
     /// joins to the vault (`uplink.rs`).
     pub vault_uplink: Option<PathBuf>,
+    /// Apple: private addresses a rule allows are dialed by the host, over connections it opens
+    /// to this socket (`hostdial.rs`).
+    pub host_dial: Option<PathBuf>,
     /// Events go to this file (`eventlog.rs`) instead of stdout, kept under `events_mb`.
     pub events_file: Option<PathBuf>,
     pub events_mb: u64,
@@ -112,6 +115,7 @@ impl Config {
                 var("LUOTO_VAULT_SOCKET").unwrap_or_else(|| luoto_shared::VAULT_SOCKET.into()),
             ),
             vault_uplink: var("LUOTO_VAULT_UPLINK").map(PathBuf::from),
+            host_dial: var("LUOTO_HOST_DIAL").map(PathBuf::from),
             events_file: var("LUOTO_EVENTS_FILE").map(PathBuf::from),
             events_mb: var("LUOTO_EVENTS_MB")
                 .map(|v| v.parse())

@@ -866,6 +866,8 @@ pub const APPLE_DEV_IP: &str = "169.254.1.2";
 const APPLE_GATE_SOCKET: &str = "/run/luoto-gate-net/net.sock";
 /// Where the gate takes the links to the vault the watcher opens, published to the host.
 const APPLE_GATE_UPLINK: &str = "/run/luoto-gate-net/vault.sock";
+/// Where the gate takes the links the watcher opens to dial private addresses from the host.
+const APPLE_GATE_DIAL: &str = "/run/luoto-gate-net/dial.sock";
 /// The gate's event file on Apple, in its state volume.
 const APPLE_GATE_EVENTS: &str = "/var/lib/luoto-gate/events.jsonl";
 /// Where the dev container's `sandbox` listens for its end.
@@ -891,6 +893,8 @@ pub struct LinkSockets {
     pub gate: PathBuf,
     /// Where the watcher opens the gate's links to the vault (`gate/src/uplink.rs`).
     pub uplink: PathBuf,
+    /// Where the watcher opens the gate's links to dial private addresses (`hostdial.rs`).
+    pub dial: PathBuf,
 }
 
 pub fn link_sockets(ctx: &Ctx, env: &str) -> LinkSockets {
@@ -899,6 +903,7 @@ pub fn link_sockets(ctx: &Ctx, env: &str) -> LinkSockets {
         dev: dir.join("dev.sock"),
         gate: dir.join("gate.sock"),
         uplink: dir.join("vault.sock"),
+        dial: dir.join("dial.sock"),
     }
 }
 
@@ -1014,9 +1019,13 @@ fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
         set_env(&mut spec.env, "LUOTO_EVENTS_FILE", APPLE_GATE_EVENTS);
         set_env(&mut spec.env, "LUOTO_EVENTS_MB", &GATE_LOG_MB.to_string());
         set_env(&mut spec.env, "LUOTO_VAULT_UPLINK", APPLE_GATE_UPLINK);
+        // Its VM leaves through macOS's NAT, which carries nothing onto a VPN: private
+        // addresses are dialed from the Mac (`hostdial.rs`).
+        set_env(&mut spec.env, "LUOTO_HOST_DIAL", APPLE_GATE_DIAL);
         spec.published_sockets = vec![
             (socks.gate.display().to_string(), APPLE_GATE_SOCKET.into()),
             (socks.uplink.display().to_string(), APPLE_GATE_UPLINK.into()),
+            (socks.dial.display().to_string(), APPLE_GATE_DIAL.into()),
         ];
     } else if ctx.rt.mounts_folders() {
         // Only the env's own folder of the vault's sockets.

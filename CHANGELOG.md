@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 (unreleased)
+
+- **Apple's `container`: hosts behind a VPN.** A host allowed with `--private` is reached
+  from your Mac, so hosts only a VPN on your Mac routes connect, whenever it is up; nothing to
+  set. The next `luoto up` recreates each gate. A `pfctl` NAT rule added for this can go:
+  `sudo pfctl -a com.apple/luoto -F nat`.
+
 ## 0.4.9 (2026-11-16)
 
 - **Private addresses:** a rule with `--private` beside an older one for the same host reaches

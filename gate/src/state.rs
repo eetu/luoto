@@ -49,6 +49,8 @@ pub struct State {
     /// For a host with its own CA (a self-hosted forge): the public roots and that CA, which no
     /// other host's certificate may chain to.
     pub host_tls: std::collections::HashMap<String, Arc<ClientConfig>>,
+    /// Apple: the host's dialer for private addresses (`hostdial.rs`), set once at start.
+    pub host_dial: std::sync::OnceLock<crate::hostdial::HostDial>,
 }
 
 impl State {
@@ -88,6 +90,7 @@ impl State {
             fake_ips: Mutex::new(FakeIps::new()),
             client_tls,
             host_tls,
+            host_dial: std::sync::OnceLock::new(),
             cfg,
         }))
     }

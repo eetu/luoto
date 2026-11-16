@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use hyper::client::conn::http1::{self, SendRequest};
 use hyper_util::rt::TokioIo;
-use luoto_shared::host::{is_never_dialed, is_private};
+use luoto_shared::host::{is_never_dialed, is_private, leaves_host};
 use luoto_shared::policy::DenyReason;
 use rustls_pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -15,6 +15,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
 use crate::body::Body;
+use crate::hostdial::HostDialError;
 use crate::state::State;
 
 pub trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -68,7 +69,7 @@ pub async fn dial_tcp(
     host: &str,
     port: u16,
     allow_private: bool,
-) -> Result<TcpStream, DialError> {
+) -> Result<Box<dyn Io>, DialError> {
     dial_tcp_to(state, host, port, allow_private, false).await
 }
 
@@ -81,7 +82,7 @@ pub async fn dial_tcp_to(
     port: u16,
     allow_private: bool,
     private_only: bool,
-) -> Result<TcpStream, DialError> {
+) -> Result<Box<dyn Io>, DialError> {
     let mut addrs: Vec<SocketAddr> = if let Some(addr) = test_server(state, host) {
         vec![addr]
     } else {
@@ -117,13 +118,42 @@ pub async fn dial_tcp_to(
     // IPv4 first: many networks (CI runners among them) have no IPv6 route, and each address
     // that can't connect costs a timeout.
     addrs.sort_by_key(|a| a.is_ipv6());
+    // Apple: a private address a rule allows leaves through the host, whose routes (a VPN's)
+    // the gate's VM lacks. Not a credential over plain HTTP: that goes to this machine.
+    let host_dial = state
+        .host_dial
+        .get()
+        .filter(|_| allow_private && !private_only);
     // Every address and how it failed: why one family can't connect shows beside the other.
     let mut failed = Vec::new();
     for addr in addrs {
+        if let Some(hd) = host_dial
+            && leaves_host(addr.ip())
+        {
+            match hd
+                .dial(addr, CONNECT_TIMEOUT + Duration::from_secs(2))
+                .await
+            {
+                Ok(link) => return Ok(Box::new(link)),
+                // The host's own address or a runtime network: dialed from here, as before.
+                Err(HostDialError::Refused(_)) => {}
+                Err(HostDialError::NoLink) => {
+                    return Err(DialError::Failed(format!(
+                        "no link to this Mac for {addr}: luoto's background watcher isn't \
+                         running; `luoto up {}` starts it",
+                        state.cfg.env
+                    )));
+                }
+                Err(HostDialError::Failed(why)) => {
+                    failed.push(format!("{addr} from this Mac: {why}"));
+                    continue;
+                }
+            }
+        }
         match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
             Ok(Ok(s)) => {
                 let _ = s.set_nodelay(true);
-                return Ok(s);
+                return Ok(Box::new(s));
             }
             Ok(Err(e)) => failed.push(format!("{addr}: {e}")),
             Err(_) => failed.push(format!("{addr}: connect timed out")),
@@ -144,7 +174,7 @@ pub async fn dial(
 ) -> Result<Box<dyn Io>, DialError> {
     let tcp = dial_tcp_to(state, host, port, reach.private, reach.private_only).await?;
     if !tls {
-        return Ok(Box::new(tcp));
+        return Ok(tcp);
     }
     let name = ServerName::try_from(host.to_string())
         .map_err(|_| DialError::Failed(format!("invalid TLS name {host}")))?;

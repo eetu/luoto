@@ -1861,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "luoto"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1874,6 +1874,7 @@ dependencies = [
  "futures-util",
  "hex",
  "inquire",
+ "ipnet",
  "keyring",
  "keyring-core",
  "libc",
@@ -1904,7 +1905,7 @@ dependencies = [
 
 [[package]]
 name = "luoto-gate"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1928,6 +1929,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "tempfile",
  "time",
  "tokio",
  "tokio-rustls",
@@ -1939,7 +1941,7 @@ dependencies = [
 
 [[package]]
 name = "luoto-integration"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1958,7 +1960,7 @@ dependencies = [
 
 [[package]]
 name = "luoto-shared"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "idna",
@@ -1975,7 +1977,7 @@ dependencies = [
 
 [[package]]
 name = "luoto-tools"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1990,7 +1992,7 @@ dependencies = [
 
 [[package]]
 name = "luoto-vault"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

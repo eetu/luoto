@@ -36,8 +36,9 @@ pub fn listen(path: &Path, owner: Option<u32>) -> Result<UnixListener> {
     Ok(listener)
 }
 
+/// Links the watcher opened, oldest first, waiting to carry a connection.
 #[derive(Default)]
-struct Idle {
+pub(crate) struct Idle {
     links: Mutex<VecDeque<UnixStream>>,
     ready: Notify,
 }
@@ -58,7 +59,7 @@ impl Idle {
         None
     }
 
-    fn push(&self, link: UnixStream) {
+    pub(crate) fn push(&self, link: UnixStream) {
         let mut links = self.links();
         links.retain(open);
         if links.len() < IDLE {
@@ -68,7 +69,8 @@ impl Idle {
         self.ready.notify_one();
     }
 
-    async fn take(&self) -> Option<UnixStream> {
+    /// The oldest open link, waiting up to [`WAIT`] for one.
+    pub(crate) async fn take(&self) -> Option<UnixStream> {
         let deadline = tokio::time::Instant::now() + WAIT;
         loop {
             let ready = self.ready.notified();
@@ -86,17 +88,23 @@ fn open(link: &UnixStream) -> bool {
     matches!(link.try_read(&mut [0u8; 1]), Err(e) if e.kind() == ErrorKind::WouldBlock)
 }
 
-/// Serve the vault client's connections on `local` over the links that come on `uplinks`.
-pub async fn serve(local: UnixListener, uplinks: UnixListener) {
+/// A pool filled with the links that come on `listener`.
+pub(crate) fn pool(listener: UnixListener) -> Arc<Idle> {
     let idle = Arc::new(Idle::default());
     let pool = idle.clone();
     tokio::spawn(async move {
         loop {
-            if let Ok((link, _)) = uplinks.accept().await {
+            if let Ok((link, _)) = listener.accept().await {
                 pool.push(link);
             }
         }
     });
+    idle
+}
+
+/// Serve the vault client's connections on `local` over the links that come on `uplinks`.
+pub async fn serve(local: UnixListener, uplinks: UnixListener) {
+    let idle = pool(uplinks);
     loop {
         let Ok((mut conn, _)) = local.accept().await else {
             continue;

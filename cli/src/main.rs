@@ -20,6 +20,8 @@ mod egress;
 mod env;
 mod events;
 mod format;
+#[cfg(unix)]
+mod hostdial;
 mod idle;
 mod init;
 mod logs;

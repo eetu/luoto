@@ -46,7 +46,11 @@ sockets, then drops to uid 65534 (`system.rs`).
   default `luoto_shared::VAULT_SOCKET`) with the env's token; a missing or refusing socket is
   an unbound env. With `LUOTO_VAULT_UPLINK` (Apple) `uplink.rs` serves that socket itself,
   pairing each connection with an idle link the host opened to the uplink socket (both bound
-  as root before the drop); with none within 8 s the call fails closed.
+  as root before the drop); with none within 8 s the call fails closed. With `LUOTO_HOST_DIAL`
+  (Apple) `hostdial.rs` dials a private address an `allow_private` rule allows
+  (`host::leaves_host`; not `private_only`) over a link the host opened to that socket: one
+  line `dial <addr>`, one answer (`ok`, `refused` → dial it here, `failed`); no link in 8 s
+  names the watcher.
 - `ctl.rs` unix socket; `state.rs` persists policy/CA/vault settings in the state volume so a
   restarted gate serves at once; secrets are never persisted.
 - `test-hooks` feature (integration tests only): `LUOTO_TEST_RESOLVE` maps names to local

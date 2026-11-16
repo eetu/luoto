@@ -33,6 +33,16 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   rule that says so reaches a private address (a self-hosted forge's, a model server's on
   this machine or your network), and a connection dialed for one carries no request another
   rule or open egress allowed.
+- **Private addresses on Apple's `container`.** A gate's VM leaves through macOS's NAT, which
+  carries nothing onto a VPN. There, a connection a rule allows to a private address (10/8,
+  172.16/12, 192.168/16, 100.64/10, fc00::/7) is opened by the background watcher on your Mac,
+  over a socket of the gate's that only your user reaches, so it follows your Mac's routes and
+  arrives as your Mac. The gate decides as everywhere: policy, then every address vetted. The
+  watcher takes only an address, never a name, checks the range again, and refuses loopback,
+  link-local and metadata addresses, your Mac's own addresses and the runtime's networks;
+  those the gate dials itself, as before. TLS, inspection and credentials stay in the gate. A
+  `--private` rule therefore reaches whatever your Mac's VPN and network let your Mac reach
+  at that name's address.
 - **Open egress.** `luoto egress open` (an hour unless told otherwise; `open = true` until
   removed) lets out over HTTP(S), as rule `open`, what no rule allows, to any host and port.
   It never widens a host that gets a credential (its rules stay its only access), a muted
@@ -183,7 +193,7 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   container is a VM of its own: the dev VM has no network card, only a tun link to its gate
   that the background watcher carries on your Mac, so it reaches neither your Mac nor your
   network but through the gate. A gate is on its env's NAT network only, and the vault on its
-  own.
+  own; a gate's connections to private addresses are opened by the watcher (above).
 - **Control plane.** Policy, CA and credentials reach the gate and vault through the
   runtime's `exec` into a unix socket — there is no admin port. The local UI binds
   127.0.0.1, requires a per-run token, checks Host (DNS rebinding) and Origin, and sets a

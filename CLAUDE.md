@@ -137,7 +137,12 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   are host-only and reach every Mac service listening on all interfaces. The gate is only on
   the env's NAT network; its vault socket is a broker (`gate/src/uplink.rs`) over links the
   watcher opens to the gate's published uplink socket and joins to the vault's published
-  socket after a line naming the env (`tunlink::Uplinks`). Apple caps no container's output: a gate writes its events to a capped file in its volume
+  socket after a line naming the env (`tunlink::Uplinks`). macOS's NAT carries nothing onto a
+  VPN, so the gate's dials to private addresses under an `allow_private` rule
+  (`host::leaves_host`) go over links the watcher opens to its published `dial.sock`
+  (`gate/src/hostdial.rs`); the watcher checks the address again and connects from the Mac
+  (`cli/src/hostdial.rs`), refusing its own addresses and the runtime's networks, which the
+  gate then dials itself. Apple caps no container's output: a gate writes its events to a capped file in its volume
   (`LUOTO_EVENTS_FILE`), which luoto reads through `luoto-gate events` (`events::in_file`),
   and init.sh closes the dev container's output once ready (`LUOTO_OUTPUT=startup`).
 - `disk.rs` reads sizes and free space (podman and docker print them differently; its parsers
