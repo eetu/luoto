@@ -13,6 +13,11 @@
   from a folder isn't set up over a `/workspace/<name>` the env already has; `luoto init` in a
   repo's folder updates its env rather than make a second; two envs with the same folder ask
   for `-e`.
+- **Terminal workspaces for agents:** `luoto open --with <name>` also opens a terminal
+  multiplexer or agent manager in the env (four to start with, listed by `luoto open --help`),
+  installed there with mise on first use and attached to over SSH; the agents it starts stay in
+  the sandbox, and the session outlives the terminal. A plain `luoto open` still picks an
+  editor.
 - **A restarted vault** reads as locked, with `luoto vault unlock`, rather than as a credential
   not registered with it.
 

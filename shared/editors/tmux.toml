@@ -1,0 +1,3 @@
+description = "tmux, a terminal multiplexer, run in the env (in its image)"
+launch = ["ssh", "-t", "{host}", "exec sh -lc 'cd {path} && exec tmux new -A -s main'"]
+hint = "tmux and what runs in its windows run in the sandbox; detach and come back to session `main` with `luoto open --with tmux`."

@@ -234,9 +234,11 @@ enum Cmd {
         #[arg(last = true)]
         cmd: Vec<String>,
     },
-    /// Open the env in your editor over SSH (zed, code, cursor).
+    /// Open the env in your editor, or a terminal workspace in it.
     ///
-    /// `--with ssh` prints how to connect.
+    /// `--with ssh` prints how to connect. A terminal workspace (herdr, zellij, tmux,
+    /// claude-squad) runs in the env, installed there on first use, and your terminal attaches
+    /// to it: the agents it starts stay in the sandbox.
     Open {
         /// Editor to use (default: `editor` in config.toml, else the first one installed).
         #[arg(long = "with", value_name = "EDITOR", add = ArgValueCandidates::new(complete::editors))]

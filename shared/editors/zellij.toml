@@ -1,0 +1,7 @@
+description = "zellij, a terminal multiplexer, run in the env"
+launch = ["ssh", "-t", "{host}", "exec sh -lc 'cd {path} && exec zellij attach --create main'"]
+hint = "zellij and what runs in its panes run in the sandbox; detach and come back to session `main` with `luoto open --with zellij`."
+
+[tool]
+mise = "zellij"
+program = "zellij"

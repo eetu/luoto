@@ -299,6 +299,13 @@ server from your machine instead of the sandbox downloading it (Zed's
 data: one TOML file each in `shared/editors/`. Install extensions in the remote window, where
 they are sandboxed; keep host-side ones to themes and keymaps.
 
+A terminal workspace for agents runs in the env instead: `luoto open --with <name>` (`luoto
+open --help` lists them; `up` prints them as `agents:`) installs it there with mise on first
+use, through the gate, and attaches your terminal to it over SSH, in `/workspace`. The agents
+it starts are processes of the env, behind the gate; its session outlives the terminal, so
+the same command reattaches. An entry's `[tool]` names what mise installs and the command it
+provides.
+
 The sandbox side refuses SSH agent forwarding and reverse port forwards, so a session can't
 reach back to your machine. Don't open the env's folder directly in a host editor: its
 language servers would run project code outside the sandbox.
