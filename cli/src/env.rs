@@ -478,7 +478,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     let a = names::addrs(state.octet);
     let (env_ca, made) = ca::ensure(&ctx.paths.env_state(env), env)?;
     if let ca::Made::Renewed(old) = made {
-        err!("{}", ca::renewal_note(old, &env_ca));
+        err_text!("{}", ca::renewal_note(old, &env_ca));
     }
     let ca_sha = env_ca.pem_sha256();
     // A renewal counts on its own: `dev_ca` is unset until a start records it.
@@ -777,7 +777,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         next("egress:", format!("luoto egress -e {env}"), String::new());
         if let Some(until) = open {
             let width = crate::text::columns().saturating_sub(11);
-            out!(
+            out_text!(
                 "           {}",
                 crate::egress::state_line(env, until, width)
             );

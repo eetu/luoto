@@ -40,15 +40,38 @@ pub fn err() -> Style {
     *S.get_or_init(|| Style::detect(std::io::stderr().is_terminal()))
 }
 
-/// `println!` with the commands the line names in bold.
+/// `println!` with the commands its own text names in bold: what stands between two
+/// backticks of the format string. A backtick in what it interpolates (text from the sandbox)
+/// opens and closes nothing ([`Style::literal`]).
 macro_rules! out {
+    ($fmt:literal $($arg:tt)*) => {
+        println!(
+            "{}",
+            $crate::style::out().literal($fmt, format_args!($fmt $($arg)*))
+        )
+    };
+}
+
+/// `eprintln!` as [`out!`] prints.
+macro_rules! err {
+    ($fmt:literal $($arg:tt)*) => {
+        eprintln!(
+            "{}",
+            $crate::style::err().literal($fmt, format_args!($fmt $($arg)*))
+        )
+    };
+}
+
+/// `println!` of text luoto composed before the print (a hint a function returns, wrapped
+/// prose), the commands it names in bold ([`Style::commands`]).
+macro_rules! out_text {
     ($($arg:tt)*) => {
         println!("{}", $crate::style::out().commands(&format!($($arg)*)))
     };
 }
 
-/// `eprintln!` with the commands the line names in bold.
-macro_rules! err {
+/// `eprintln!` as [`out_text!`] prints.
+macro_rules! err_text {
     ($($arg:tt)*) => {
         eprintln!("{}", $crate::style::err().commands(&format!($($arg)*)))
     };
@@ -147,6 +170,47 @@ impl Style {
             label,
             &format!("{DEFAULT}{NORMAL}"),
         )
+    }
+
+    /// What `args` formats, with bold between the backticks of `format`, their format string:
+    /// those written in luoto's source. What an argument writes is passed on as it is, so a
+    /// backtick in it neither starts nor ends the bold. The format string's pieces are told
+    /// from its arguments by the writes they arrive in; where an argument writes just what a
+    /// piece says, so that more than one reading fits, nothing is styled.
+    pub fn literal(self, format: &str, args: std::fmt::Arguments) -> String {
+        use std::fmt::Write;
+        if !self.on || !format.contains('`') {
+            return args.to_string();
+        }
+        let pieces = pieces(format);
+        let mut writes = Writes(Vec::new());
+        if pieces.iter().map(|p| p.matches('`').count()).sum::<usize>() % 2 == 1
+            || writes.write_fmt(args).is_err()
+            || !one_reading(&pieces, &writes.0)
+        {
+            return args.to_string();
+        }
+        let mut out = String::new();
+        let (mut next, mut open) = (0, false);
+        for w in &writes.0 {
+            if pieces.get(next) != Some(w) {
+                out.push_str(w);
+                continue;
+            }
+            next += 1;
+            for (i, part) in w.split('`').enumerate() {
+                if i > 0 && open {
+                    out.push_str(NORMAL);
+                    out.push('`');
+                } else if i > 0 {
+                    out.push('`');
+                    out.push_str(BOLD);
+                }
+                open ^= i > 0;
+                out.push_str(part);
+            }
+        }
+        out
     }
 
     /// `s` with each command it names in bold: what stands between two backticks of a line,
@@ -329,6 +393,65 @@ impl Style {
     }
 }
 
+/// The text of a format string between its arguments, in order, without the empty ones.
+fn pieces(format: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut piece = String::new();
+    let mut chars = format.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' | '}' if chars.peek() == Some(&c) => {
+                chars.next();
+                piece.push(c);
+            }
+            '{' => {
+                for a in chars.by_ref() {
+                    if a == '}' {
+                        break;
+                    }
+                }
+                if !piece.is_empty() {
+                    out.push(std::mem::take(&mut piece));
+                }
+            }
+            _ => piece.push(c),
+        }
+    }
+    if !piece.is_empty() {
+        out.push(piece);
+    }
+    out
+}
+
+/// What a format writes, write by write: each piece of its format string whole, and what
+/// each argument writes.
+struct Writes(Vec<String>);
+
+impl std::fmt::Write for Writes {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        if !s.is_empty() {
+            self.0.push(s.to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Whether `pieces` are among `writes`, in order, in exactly one way: then each piece is
+/// the write it equals, and every other write an argument's.
+fn one_reading(pieces: &[String], writes: &[String]) -> bool {
+    // ways[n]: how many ways the first n pieces are among the writes so far, up to two.
+    let mut ways = vec![0u8; pieces.len() + 1];
+    ways[0] = 1;
+    for w in writes {
+        for n in (1..=pieces.len()).rev() {
+            if &pieces[n - 1] == w {
+                ways[n] = (ways[n] + ways[n - 1]).min(2);
+            }
+        }
+    }
+    ways[pieces.len()] == 1
+}
+
 /// Whether the terminal reads escape sequences: on Windows, a console that can be told to.
 fn escapes() -> bool {
     #[cfg(windows)]
@@ -412,6 +535,60 @@ mod tests {
         );
         // A command ends with its line.
         assert_eq!(ON.commands("a ` b\nc ` d"), "a ` b\nc ` d");
+    }
+
+    #[test]
+    fn only_the_backticks_of_the_format_string_are_bold() {
+        let env = "web";
+        // From the sandbox: its backticks open and close nothing.
+        let theirs = "a`b` c";
+        assert_eq!(
+            ON.literal(
+                "{theirs}: run `luoto up -e {env}` for {}, then `{theirs}`",
+                format_args!(
+                    "{theirs}: run `luoto up -e {env}` for {}, then `{theirs}`",
+                    theirs
+                )
+            ),
+            "a`b` c: run `\x1b[1mluoto up -e web\x1b[22m` for a`b` c, then \
+             `\x1b[1ma`b` c\x1b[22m`"
+        );
+        // Braces written twice are text, and padding is the argument's.
+        assert_eq!(
+            ON.literal("{{}} `{:<4}`", format_args!("{{}} `{:<4}`", "a`")),
+            "{} `\x1b[1ma`  \x1b[22m`"
+        );
+        // An argument that writes what the piece after it says: either could be the piece,
+        // so nothing is bold rather than the wrong span.
+        assert_eq!(
+            ON.literal("`{}` and `up`", format_args!("`{}` and `up`", "` and `")),
+            "`` and `` and `up`"
+        );
+        // A long piece is one piece.
+        assert_eq!(
+            ON.literal(
+                "`up` xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+                 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+                 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx {env} `up`",
+                format_args!(
+                    "`up` xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+                 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+                 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx {env} `up`"
+                )
+            )
+            .matches("\x1b[1m")
+            .count(),
+            2
+        );
+        // An odd backtick opens nothing, and off is the text.
+        assert_eq!(
+            ON.literal("a ` {env}", format_args!("a ` {env}")),
+            "a ` web"
+        );
+        assert_eq!(
+            Style::PLAIN.literal("`{env}`", format_args!("`{env}`")),
+            "`web`"
+        );
     }
 
     #[test]

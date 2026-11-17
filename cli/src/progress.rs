@@ -239,10 +239,13 @@ fn labelled(label: &str, msg: &str) {
     say(|| eprintln!("{s}"));
 }
 
-/// Run `f` as a step: `label…` on a line of its own, then on a terminal the spinner, until it
-/// ends. A step inside another shows its own time.
+/// Run `f` as a step: `label…` on a line of its own (wrapped to the terminal, the lines after
+/// its first indented), then on a terminal the spinner, until it ends. A step inside another
+/// shows its own time.
 pub fn step<T>(label: &str, f: impl FnOnce() -> T) -> T {
-    say(|| println!("{label}…"));
+    let line = text::wrap(&format!("{label}…"), "  ", text::columns());
+    let line = crate::style::out().commands(line.strip_prefix("  ").unwrap_or(&line));
+    say(|| println!("{line}"));
     if !spins() {
         return f();
     }

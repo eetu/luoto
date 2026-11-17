@@ -115,7 +115,7 @@ pub fn set(paths: &Paths, env: &str, name: &str, value: &Value) -> Result<()> {
 /// Ask where the secret `name` is kept and write its ref; whether it wrote one.
 pub fn ask(ctx: &Ctx, mode: Mode, env: &str, name: &str, own: &EnvConfig) -> Result<bool> {
     check_free(ctx, env, name)?;
-    out!(
+    out_text!(
         "{}",
         text::wrap(
             &format!(

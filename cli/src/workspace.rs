@@ -1033,29 +1033,39 @@ fn ensure_parents_inside(root: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// What a plan writes, what it skips as risky and what it refuses, for a terminal.
-pub fn describe(plan: &PullPlan, w: &mut impl Write) -> std::io::Result<()> {
+/// What a plan writes, what it skips as risky and what it refuses, for a terminal: what
+/// it comes to and each heading in bold, what happens to a file dim before its path.
+pub fn describe(
+    plan: &PullPlan,
+    w: &mut impl Write,
+    style: crate::style::Style,
+) -> std::io::Result<()> {
     let risky: Vec<&PlanEntry> = plan.entries.iter().filter(|e| e.risky.is_some()).collect();
-    writeln!(
-        w,
+    let total = format!(
         "{} new or changed file(s), {} unchanged → {}",
         plan.entries.len(),
         plan.unchanged,
         crate::ssh::tilde(Path::new(&plan.dir))
-    )?;
+    );
+    writeln!(w, "{}", style.head(&total))?;
+    let change = |c: &str| style.dim(&format!("  {c:<7}"));
     for e in plan.entries.iter().filter(|e| e.risky.is_none()).take(30) {
-        writeln!(w, "  {:<7} {}", e.change, crate::text::display(&e.path))?;
+        writeln!(w, "{} {}", change(&e.change), crate::text::display(&e.path))?;
     }
     if plan.entries.len() - risky.len() > 30 {
         writeln!(w, "  … and {} more", plan.entries.len() - risky.len() - 30)?;
     }
     if !risky.is_empty() {
-        writeln!(w, "risky (skipped unless --include-risky):")?;
+        writeln!(
+            w,
+            "{}",
+            style.head("risky (skipped unless --include-risky):")
+        )?;
         for e in &risky {
             writeln!(
                 w,
-                "  {:<7} {} — {}",
-                e.change,
+                "{} {} — {}",
+                change(&e.change),
                 crate::text::display(&e.path),
                 e.risky.as_deref().unwrap_or("")
             )?;
@@ -1064,7 +1074,8 @@ pub fn describe(plan: &PullPlan, w: &mut impl Write) -> std::io::Result<()> {
     for (p, why) in &plan.refused {
         writeln!(
             w,
-            "refused  {} — {}",
+            "{}  {} — {}",
+            style.head("refused"),
             crate::text::display(p),
             crate::text::display(why)
         )?;

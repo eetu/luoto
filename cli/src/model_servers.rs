@@ -737,7 +737,7 @@ pub fn ask(global: &GlobalConfig, a: &profiles::Agent, cfg: &EnvConfig) -> Resul
                 let ep = match check(&name, &s) {
                     Ok(ep) => ep,
                     Err(e) => {
-                        out!("{}", text::wrap(&format!("{e:#}"), "  ", text::columns()));
+                        out_text!("{}", text::wrap(&format!("{e:#}"), "  ", text::columns()));
                         continue;
                     }
                 };
@@ -790,7 +790,7 @@ pub fn ask(global: &GlobalConfig, a: &profiles::Agent, cfg: &EnvConfig) -> Resul
                         m.endpoint,
                         a.title()
                     );
-                    out!("{}", text::wrap(&why, "  ", text::columns()));
+                    out_text!("{}", text::wrap(&why, "  ", text::columns()));
                     continue;
                 }
             }
@@ -820,7 +820,7 @@ fn new_server(
                 " On Linux it must listen on this machine's address, not only 127.0.0.1.",
             );
         }
-        out!("{}", text::wrap(&note, "  ", text::columns()));
+        out_text!("{}", text::wrap(&note, "  ", text::columns()));
     }
     let name = suggest_name(ep, p.owner.as_deref(), cfg);
     let takes_token = if p.needs_token {

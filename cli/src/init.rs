@@ -802,7 +802,7 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
         if let Some(hint) =
             repos::credential_hint(&name, &repos::remotes(&cfg.workspace), &cfg.credentials)
         {
-            out!("\n{hint}");
+            out_text!("\n{hint}");
         }
         if cfg.workspace.url.is_some() {
             out!("\n`luoto up -e {name}` clones it");
@@ -830,7 +830,7 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
          {}: copied in on each `up`, and readable by code in the env, so keep secrets out.",
         crate::ssh::tilde(&ctx.paths.home_files())
     );
-    println!(
+    out_text!(
         "\n{}",
         crate::text::wrap(&settings, "", crate::text::columns())
     );
@@ -913,7 +913,7 @@ pub fn offer(
         return Ok(false);
     }
     // Paths can come from the env's workspace: printed cleaned.
-    out!("{heading}");
+    out_text!("{heading}");
     for (p, f) in &presets {
         println!("  preset    + {p} ({})", crate::text::display(f));
     }

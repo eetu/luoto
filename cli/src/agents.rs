@@ -25,28 +25,34 @@ use crate::{events, model_servers, names, secrets, sync};
 use sha2::{Digest, Sha256};
 
 pub fn list() -> Result<ExitCode> {
+    let width = crate::text::columns();
+    // A name, then what it is, wrapped under itself.
+    let row = |name: &str, wide: usize, what: String| {
+        println!(
+            "{}",
+            crate::text::hang(&format!("  {name:<wide$}  "), &what, width)
+        );
+    };
+    let wide = |names: &mut dyn Iterator<Item = &str>| names.map(str::len).max().unwrap_or(0);
     head!("agents:");
+    let w = wide(&mut profiles::agent_names());
     for n in profiles::agent_names() {
         let a = profiles::agent(n).context("agent profile")?;
-        println!(
-            "  {n:<10} {} (providers: {})",
-            a.description,
-            a.providers.join(", ")
+        row(
+            n,
+            w,
+            format!("{} (providers: {})", a.description, a.providers.join(", ")),
         );
     }
     head!("\nproviders (configure under [credentials.<provider>]):");
+    let w = wide(&mut profiles::provider_names());
     for n in profiles::provider_names() {
         let p = profiles::provider(n).context("provider profile")?;
-        let kinds: Vec<&String> = p.auth.keys().collect();
-        println!(
-            "  {n:<10} {} — {} via {}",
-            p.description,
-            p.host,
-            kinds
-                .iter()
-                .map(|k| k.as_str())
-                .collect::<Vec<_>>()
-                .join(" | ")
+        let kinds: Vec<&str> = p.auth.keys().map(String::as_str).collect();
+        row(
+            n,
+            w,
+            format!("{} — {} via {}", p.description, p.host, kinds.join(" | ")),
         );
     }
     Ok(ExitCode::SUCCESS)
@@ -379,7 +385,7 @@ pub fn ensure(ctx: &Ctx, env_name: &str, agents: &[String], quiet: bool) -> Resu
             continue;
         }
         if !quiet {
-            out!("{}", installed_line(&cfg, env_name, name, a));
+            out_text!("{}", installed_line(&cfg, env_name, name, a));
         }
     }
     if !failed.is_empty() {
@@ -864,7 +870,7 @@ pub fn add(env_name: &str, agent: &str, credential: Option<&str>) -> Result<Exit
     env::up(&ctx, env_name, &up)?;
     if there {
         let cfg = EnvFile::load(&ctx.paths, env_name)?.cfg;
-        out!("{}", installed_line(&cfg, env_name, agent, &a));
+        out_text!("{}", installed_line(&cfg, env_name, agent, &a));
     }
     Ok(ExitCode::SUCCESS)
 }

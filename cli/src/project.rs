@@ -562,7 +562,7 @@ pub fn rule_line(r: &Rule) -> String {
         parts.push(format!("silent up to {}", display(i)));
     }
     if let Some(e) = r.expires {
-        parts.push(format!("until {}", e.to_rfc3339()));
+        parts.push(format!("until {}", crate::egress::at_text(e)));
     }
     if r.allow_private {
         parts.push("PRIVATE addresses".into());

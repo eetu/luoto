@@ -211,7 +211,29 @@ fn status(json: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// A moment as the env's clock shows it, with its offset: the zone of `TZ` or
+/// `/etc/localtime`. An env without one runs on UTC, and the time says so.
+fn at<Tz: chrono::TimeZone>(t: chrono::DateTime<chrono::Utc>, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::Offset;
+    let t = t.with_timezone(tz);
+    if t.offset().fix().local_minus_utc() == 0 {
+        t.format("%Y-%m-%d %H:%M UTC").to_string()
+    } else {
+        t.format("%Y-%m-%d %H:%M %:z").to_string()
+    }
+}
+
 pub fn render_status(s: &SandboxStatus) -> String {
+    render_status_in(s, &chrono::Local)
+}
+
+fn render_status_in<Tz: chrono::TimeZone>(s: &SandboxStatus, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
     let mut out = format!("luoto env: {}   (gate {})\n", s.env, s.gate_version);
     if s.credentials_locked {
         out.push_str("credentials: LOCKED — the user must run `luoto vault unlock` on the host\n");
@@ -219,7 +241,7 @@ pub fn render_status(s: &SandboxStatus) -> String {
     if let Some(open) = &s.open {
         let until = open
             .until
-            .map(|u| format!("until {}", u.format("%Y-%m-%d %H:%M UTC")))
+            .map(|u| format!("until {}", at(u, tz)))
             .unwrap_or_else(|| "until the user closes it".into());
         out.push_str(&format!(
             "egress: OPEN {until}: any HTTP(S) host no rule allows goes out too (rule \
@@ -238,7 +260,7 @@ pub fn render_status(s: &SandboxStatus) -> String {
         };
         let exp = r
             .expires
-            .map(|e| format!(" (expires {})", e.format("%Y-%m-%d %H:%M UTC")))
+            .map(|e| format!(" (expires {})", at(e, tz)))
             .unwrap_or_default();
         let to = match r.port {
             Some(port) => format!("{}:{port}", r.host),
@@ -668,10 +690,17 @@ mod tests {
         s.open = Some(luoto_shared::api::OpenEgress {
             until: "2026-11-11T14:05:00Z".parse().ok(),
         });
-        let open = render_status(&s);
+        let open = render_status_in(&s, &chrono::Utc);
         assert!(
             open.contains("egress: OPEN until 2026-11-11 14:05 UTC: any HTTP(S) host"),
             "{open}"
+        );
+        // An env with a zone of its own reads its own clock, with the offset.
+        let east = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        let local = render_status_in(&s, &east);
+        assert!(
+            local.contains("egress: OPEN until 2026-11-11 16:05 +02:00: any"),
+            "{local}"
         );
         assert!(!open.contains("every destination is blocked"));
     }

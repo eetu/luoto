@@ -1347,7 +1347,7 @@ pub fn waits(env: &str, url: &str) -> bool {
         &format!("luoto repo auth -e {env} {repo}"),
         text::columns(),
     );
-    out!("{line}");
+    out_text!("{line}");
     true
 }
 
@@ -1894,7 +1894,7 @@ fn ask_repo_step(
                 display(repo),
                 crate::wizard::shown_ref(t)
             );
-            out!("{}", text::wrap(&line, "  ", text::columns()));
+            out_text!("{}", text::wrap(&line, "  ", text::columns()));
             None
         } else {
             let read = access == Access::Read;
@@ -1972,7 +1972,7 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
     }
     if !crate::prompt::interactive() {
         if let Some(h) = hint(env, &needs, &cfg.credentials, all.iter().any(|u| is_ssh(u))) {
-            out!("\n{h}");
+            out_text!("\n{h}");
         }
         return Ok(false);
     }

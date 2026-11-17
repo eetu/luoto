@@ -232,7 +232,7 @@ impl Need {
                      env can only fetch it if it is public.",
                     display(r)
                 );
-                out!("{}", text::wrap(&line, "", text::columns()));
+                out_text!("{}", text::wrap(&line, "", text::columns()));
                 crate::repos::ask_repo(ctx, env, &Forge::Github(owner(r)), r, mode)
             }
             Need::Provider(n) => ask_provider(ctx, mode, env, n, own),

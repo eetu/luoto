@@ -262,9 +262,9 @@ pub fn pull(
             workspace::plan_pull(&ctx, name, &t, include_git)
         })?;
         if let Some(r) = &plan.repo {
-            println!("\nrepo {r}:");
+            head!("\nrepo {r}:");
         }
-        workspace::describe(&plan, &mut std::io::stdout())?;
+        workspace::describe(&plan, &mut std::io::stdout(), crate::style::out())?;
         plans.push(plan);
     }
     let changed = |p: &workspace::PullPlan| {
@@ -571,34 +571,91 @@ pub fn list(size: bool) -> Result<ExitCode> {
             ),
         })
         .collect();
-    let width = rows
-        .iter()
-        .map(|r| r.1.chars().count())
-        .max()
-        .unwrap_or(0)
-        .max(4);
-    let size_col = |text: &str| {
-        if size {
-            format!("{text:<10} ")
+    let rows: Vec<ListRow> = rows
+        .into_iter()
+        .map(|(env, from, image, presets)| {
+            let (dev, gate) = states.env(&env);
+            ListRow {
+                size: size.then(|| size_of(&env)),
+                env,
+                dev,
+                gate,
+                from,
+                image,
+                presets,
+            }
+        })
+        .collect();
+    let style = crate::style::out();
+    for (i, line) in list_lines(&rows, crate::text::columns()).iter().enumerate() {
+        // The heading, and each env's presets under it, step back for the envs.
+        if i == 0 || line.starts_with(' ') {
+            println!("{}", style.dim(line));
         } else {
-            String::new()
+            println!("{line}");
         }
-    };
-    heading!(
-        "{:<20} {:<10} {:<10} {}{:<width$} {:<28} PRESETS",
-        "ENV",
-        "DEV",
-        "GATE",
-        size_col("SIZE"),
-        "FROM",
-        "IMAGE"
-    );
-    for (e, from, image, presets) in rows {
-        let (dev, gate) = states.env(&e);
-        let sz = size_col(&size_of(&e));
-        println!("{e:<20} {dev:<10} {gate:<10} {sz}{from:<width$} {image:<28} {presets}");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// An env in `luoto list`.
+struct ListRow {
+    env: String,
+    dev: String,
+    gate: String,
+    /// With `--size`.
+    size: Option<String>,
+    from: String,
+    image: String,
+    presets: String,
+}
+
+/// `luoto list`: a heading, then each env on a line, its columns as wide as what they hold,
+/// and its presets on the lines under it, wrapped to `width`.
+fn list_lines(rows: &[ListRow], width: usize) -> Vec<String> {
+    let wide = |head: &str, of: &dyn Fn(&ListRow) -> &str| {
+        rows.iter()
+            .map(|r| of(r).chars().count())
+            .fold(head.len(), usize::max)
+    };
+    let (env_w, dev_w, gate_w, from_w) = (
+        wide("ENV", &|r| &r.env),
+        wide("DEV", &|r| &r.dev),
+        wide("GATE", &|r| &r.gate),
+        wide("FROM", &|r| &r.from),
+    );
+    let size_w = wide("SIZE", &|r| r.size.as_deref().unwrap_or(""));
+    let sized = rows.iter().any(|r| r.size.is_some());
+    let line = |env: &str, dev: &str, gate: &str, size: &str, from: &str, image: &str| {
+        let size = if sized {
+            format!("{size:<size_w$}  ")
+        } else {
+            String::new()
+        };
+        format!("{env:<env_w$}  {dev:<dev_w$}  {gate:<gate_w$}  {size}{from:<from_w$}  {image}")
+            .trim_end()
+            .to_string()
+    };
+    let mut out = vec![line("ENV", "DEV", "GATE", "SIZE", "FROM", "IMAGE")];
+    for r in rows {
+        out.push(line(
+            &r.env,
+            &r.dev,
+            &r.gate,
+            r.size.as_deref().unwrap_or(""),
+            &r.from,
+            &r.image,
+        ));
+        if !r.presets.is_empty() {
+            let presets = r.presets.replace(',', ", ");
+            out.extend(
+                crate::text::hang("  presets  ", &presets, width)
+                    .lines()
+                    .map(String::from),
+            );
+        }
+    }
+    out
 }
 
 /// Where an env's workspace comes from, for `list`: its folder (`~` for home), or the remote
@@ -796,31 +853,48 @@ fn ports_text(name: &str, p: &ports::EnvPorts) -> String {
 }
 
 fn print_rules(p: &env::Plan) {
-    heading!("\n{:<22} {:<38} {:<28} ORIGIN", "RULE", "HOST", "ACCESS");
-    for r in &p.compiled.policy.rules {
-        let mut access = r.rule.access.describe();
-        if r.rule.mode == Mode::Tunnel {
-            access = "tunnel (any)".into();
+    let rows: Vec<RuleRow> = p
+        .compiled
+        .policy
+        .rules
+        .iter()
+        .map(|r| RuleRow {
+            id: r.id.clone(),
+            host: match r.rule.port {
+                Some(port) => format!("{}:{port}", r.rule.host),
+                None => r.rule.host.clone(),
+            },
+            access: match (&r.rule.mode, &r.rule.access) {
+                (Mode::Tunnel, _) => "tunnel (any)".into(),
+                (
+                    _,
+                    luoto_shared::policy::Access::Level(luoto_shared::policy::AccessLevel::Read),
+                ) => READ_ONLY.into(),
+                (_, a) => a.describe(),
+            },
+            origin: r.origin.to_string(),
+            more: [
+                (!r.rule.paths.is_empty()).then(|| format!("paths {}", r.rule.paths.join(", "))),
+                r.rule.idle.as_ref().map(|i| format!("idle {i}")),
+                r.rule
+                    .expires
+                    .map(|e| format!("until {}", egress::at_text(e))),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        })
+        .collect();
+    let style = crate::style::out();
+    println!();
+    for (i, line) in rule_lines(&rows, crate::text::columns()).iter().enumerate() {
+        // The heading, the origins and what narrows a rule step back for the rules.
+        let rule = line.starts_with("  ") && !line.starts_with("    ");
+        if i > 0 && rule {
+            println!("{line}");
+        } else {
+            println!("{}", style.dim(line));
         }
-        let extra = [
-            (!r.rule.paths.is_empty()).then(|| format!("paths {}", r.rule.paths.join(","))),
-            r.rule.idle.as_ref().map(|i| format!("idle {i}")),
-            r.rule
-                .expires
-                .map(|e| format!("until {}", egress::at_text(e))),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" ");
-        let host = match r.rule.port {
-            Some(port) => format!("{}:{port}", r.rule.host),
-            None => r.rule.host.clone(),
-        };
-        println!(
-            "{:<22} {:<38} {:<28} {} {extra}",
-            r.id, host, access, r.origin
-        );
     }
     if !p.compiled.policy.injections.is_empty() {
         head!("\ncredentials injected by the gate:");
@@ -906,6 +980,56 @@ pub fn revoke(name: &str, rule: &str) -> Result<ExitCode> {
     let n = rules::remove(&Ctx::load()?, name, rule)?;
     head!("removed {n} rule(s)");
     Ok(ExitCode::SUCCESS)
+}
+
+/// A rule in `luoto status`.
+struct RuleRow {
+    id: String,
+    host: String,
+    access: String,
+    origin: String,
+    /// What narrows it: its paths, its idle limit, its expiry.
+    more: Vec<String>,
+}
+
+/// Read access in the rules table; a line under the table says which methods it is.
+const READ_ONLY: &str = "read-only";
+
+/// The rules of `luoto status`, in the policy's order: a heading, each origin on a line
+/// before the run of rules it made, each rule under it (id, host, access, in columns as wide
+/// as what they hold), and what narrows a rule on the lines under it, wrapped to `width`.
+fn rule_lines(rows: &[RuleRow], width: usize) -> Vec<String> {
+    let id_w = rows
+        .iter()
+        .map(|r| r.id.chars().count())
+        .fold("RULE".len(), usize::max);
+    let host_w = rows
+        .iter()
+        .map(|r| r.host.chars().count())
+        .fold("HOST".len(), usize::max);
+    let mut out = vec![format!("  {:<id_w$}  {:<host_w$}  ACCESS", "RULE", "HOST")];
+    let mut origin = None;
+    for r in rows {
+        if origin != Some(&r.origin) {
+            out.push(r.origin.clone());
+            origin = Some(&r.origin);
+        }
+        out.push(format!(
+            "  {:<id_w$}  {:<host_w$}  {}",
+            r.id, r.host, r.access
+        ));
+        for m in &r.more {
+            out.extend(
+                crate::text::hang("    ", m, width)
+                    .lines()
+                    .map(String::from),
+            );
+        }
+    }
+    if rows.iter().any(|r| r.access == READ_ONLY) {
+        out.push(format!("{READ_ONLY}: GET, HEAD, OPTIONS"));
+    }
+    out
 }
 
 /// What the sandbox asked for and why, escaped: the sandbox wrote all of it.
@@ -1041,7 +1165,7 @@ pub fn approve(
     match rules::accepting_risks(force, |force| {
         rules::approve(&ctx, name, &req, ttl, narrow, force)
     })? {
-        rules::Approved::Installed { installed } => out!("{installed}"),
+        rules::Approved::Installed { installed } => out_text!("{installed}"),
         rules::Approved::Rule(rule) => head!(
             "approved: {}{}",
             rules::describe(&rule),
@@ -1176,15 +1300,16 @@ pub fn egress(
                     .parse::<std::net::IpAddr>()
                     .is_ok_and(luoto_shared::host::is_private);
             format!(
-                "{} → luoto allow -e {name} {}{}{}",
+                "{}{} → luoto allow -e {name} {}{}{}",
                 s.last_message.clone().unwrap_or_default(),
-                s.host,
-                if s.wants_write { " --write" } else { "" },
                 if private {
-                    " --private (exposes a service on your machine/network)"
+                    " (--private exposes a service on your machine or network)"
                 } else {
                     ""
-                }
+                },
+                s.host,
+                if s.wants_write { " --write" } else { "" },
+                if private { " --private" } else { "" }
             )
         } else if s.opened > 0 {
             format!("open egress → luoto egress keep -e {name}")
@@ -1214,6 +1339,7 @@ pub fn egress(
         .map(|r| r.3.chars().count())
         .fold("METHODS".len(), usize::max);
     let style = crate::style::out();
+    let width = crate::text::columns();
     heading!(
         "{:<host_w$} {:>6} {:>6}  {:<methods_w$}  VIA",
         "HOST",
@@ -1230,12 +1356,35 @@ pub fn egress(
             count
         };
         println!("{host:<host_w$} {allowed:>6} {count}  {methods:<methods_w$}  {via}");
-        if !hint.is_empty() {
-            println!("{}", style.aside(&format!("  {hint}")));
+        for line in hint_lines(hint, width) {
+            println!("{}", style.aside(&line));
         }
     }
     footer();
     Ok(ExitCode::SUCCESS)
+}
+
+/// A host's hint under it in `luoto egress`, within `width`: on one line where it fits, else
+/// what happened wrapped, and the command that allows it (after ` → `) on a line of its own.
+fn hint_lines(hint: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+    if hint.is_empty() {
+        return Vec::new();
+    }
+    let one = format!("  {hint}");
+    if one.width() <= width {
+        return vec![one];
+    }
+    let (why, command) = match hint.rsplit_once(" → ") {
+        Some((why, command)) => (why, Some(command)),
+        None => (hint, None),
+    };
+    let mut out: Vec<String> = crate::text::wrap(why, "  ", width)
+        .lines()
+        .map(String::from)
+        .collect();
+    out.extend(command.map(|c| format!("  → {c}")));
+    out
 }
 
 /// `luoto egress open`: for `window` (default an hour), then the summary.
@@ -1621,6 +1770,120 @@ pub fn lock() -> Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fits(lines: &[String]) {
+        for l in lines {
+            assert!(l.chars().count() <= 79, "{l}");
+        }
+    }
+
+    #[test]
+    fn list_puts_an_envs_presets_under_it() {
+        let row = |env: &str, presets: &str| ListRow {
+            env: env.into(),
+            dev: "running".into(),
+            gate: "running".into(),
+            size: None,
+            from: "~/src/web".into(),
+            image: "localhost/luoto-base:dev".into(),
+            presets: presets.into(),
+        };
+        let lines = list_lines(
+            &[
+                row(
+                    "web",
+                    "debian,github,github-releases,toolchains,crates,npm,pypi,go,ruby",
+                ),
+                row("api", ""),
+            ],
+            79,
+        );
+        assert_eq!(
+            lines,
+            [
+                "ENV  DEV      GATE     FROM       IMAGE",
+                "web  running  running  ~/src/web  localhost/luoto-base:dev",
+                "  presets  debian, github, github-releases, toolchains, crates, npm, pypi, go,",
+                "           ruby",
+                "api  running  running  ~/src/web  localhost/luoto-base:dev",
+            ]
+        );
+    }
+
+    #[test]
+    fn rules_stand_under_their_origin_with_what_narrows_them() {
+        let row = |id: &str, host: &str, access: &str, origin: &str, more: &[&str]| RuleRow {
+            id: id.into(),
+            host: host.into(),
+            access: access.into(),
+            origin: origin.into(),
+            more: more.iter().map(|m| m.to_string()).collect(),
+        };
+        let lines = rule_lines(
+            &[
+                row(
+                    "github-releases-0",
+                    "github.com",
+                    READ_ONLY,
+                    "preset:github-releases",
+                    &[
+                        "paths /*/*/releases, /*/*/releases/**, /*/*/info/refs, /*/*.git/info/refs, /x",
+                    ],
+                ),
+                row(
+                    "github-releases-1",
+                    "release-assets.githubusercontent.com",
+                    READ_ONLY,
+                    "preset:github-releases",
+                    &[],
+                ),
+                row("r1", "a.example:8443", "POST", "host", &["until 14:05"]),
+            ],
+            79,
+        );
+        fits(&lines);
+        assert_eq!(
+            lines,
+            [
+                "  RULE               HOST                                  ACCESS",
+                "preset:github-releases",
+                "  github-releases-0  github.com                            read-only",
+                "    paths /*/*/releases, /*/*/releases/**, /*/*/info/refs, /*/*.git/info/refs,",
+                "    /x",
+                "  github-releases-1  release-assets.githubusercontent.com  read-only",
+                "host",
+                "  r1                 a.example:8443                        POST",
+                "    until 14:05",
+                "read-only: GET, HEAD, OPTIONS",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_hint_gives_its_command_a_line() {
+        assert_eq!(
+            hint_lines(
+                "no rule allows a.example → luoto allow -e web a.example",
+                79
+            ),
+            ["  no rule allows a.example → luoto allow -e web a.example"]
+        );
+        let long = hint_lines(
+            "no rule allows db.internal (--private exposes a service on your machine or \
+             network) → luoto allow -e web db.internal --private",
+            79,
+        );
+        fits(&long);
+        assert_eq!(
+            long,
+            [
+                "  no rule allows db.internal (--private exposes a service on your machine or",
+                "  network)",
+                "  → luoto allow -e web db.internal --private",
+            ]
+        );
+        assert!(hint_lines("", 79).is_empty());
+    }
 
     #[test]
     fn one_env_failing_leaves_the_rest_to_go() {

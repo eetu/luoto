@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 luoto-shared = { workspace = true, features = ["tun"] }
 anyhow.workspace = true
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml_edit.workspace = true

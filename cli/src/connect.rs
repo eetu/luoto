@@ -246,7 +246,7 @@ pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
         ensure_tool(&ctx, name, &user, tool)?;
     }
     if let Some(hint) = &editor.hint {
-        out!("{hint}");
+        out_text!("{hint}");
     }
     let mut argv: Vec<String> = editor.launch.iter().map(|a| fill(a)).collect();
     if cfg!(windows)
