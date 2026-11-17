@@ -502,7 +502,7 @@ fn credential_with(
             a.title()
         )
     };
-    println!("{}", text::wrap(&intro, "", text::columns()));
+    out_text!("{}", text::wrap(&intro, "", text::columns()));
     // What the agent starts on is current: a model server, else the cloud's.
     let current = |n: &str| {
         have.iter()
@@ -738,7 +738,7 @@ fn provider_auth(
             kinds[0].to_string()
         };
         let auth = &p.auth[&kind];
-        println!("{}", text::wrap(&auth.how, "  ", text::columns()));
+        out_text!("{}", text::wrap(&auth.how, "  ", text::columns()));
         let kept = match h.stored {
             Some(Auth::Kind {
                 kind: k, reference, ..
@@ -1023,7 +1023,7 @@ pub fn secret(ask: &SecretAsk, global: &GlobalConfig) -> Result<Step<Secret>> {
                 | Source::Reference
         ) && let Some(h) = how.take()
         {
-            println!("{h}");
+            out_text!("{h}");
         }
         let r = match source {
             Source::Current => ask.current.unwrap_or_default().to_string(),
@@ -1190,7 +1190,7 @@ fn typed_reference(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String
         if !last.starts_with("op://") {
             continue;
         }
-        println!("{}", text::wrap(OP_FIELDS, "  ", text::columns()));
+        out_text!("{}", text::wrap(OP_FIELDS, "  ", text::columns()));
         // A ref naming no account is read from op's default; the token may be in another.
         if secrets::op_parts(&last).1.is_none() {
             let accounts = op_accounts(global);
@@ -1761,7 +1761,7 @@ fn ref_error(r: &str, e: &anyhow::Error) {
         secrets::shown_ref(r),
         display(&format!("{e:#}").replace('\n', " "))
     );
-    println!("{}", text::wrap(&why, "  ", text::columns()));
+    out_text!("{}", text::wrap(&why, "  ", text::columns()));
 }
 
 /// Whether reference `r` reads, as the secret `ask` is for alone: an error when it doesn't,

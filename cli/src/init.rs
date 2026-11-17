@@ -399,21 +399,42 @@ fn credential_rows(p: &Proposal, specs: &[String], asks: bool) -> Vec<String> {
     rows
 }
 
+/// The proposal's rows within the terminal: a line too long for it goes on under its value,
+/// which starts in the fourteenth column.
+fn fit_rows(text: &str) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let width = crate::text::columns();
+    text.split('\n')
+        .map(|l| match l.char_indices().nth(13) {
+            Some((at, _)) if l.width() > width => crate::text::hang(&l[..at], &l[at..], width),
+            _ => l.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn print_proposal(p: &Proposal, specs: &[String], asks: bool) {
     const INDENT: &str = "             ";
+    let style = crate::style::out();
+    // A row: its key in the first twelve columns, or under one.
+    macro_rules! row {
+        ($($arg:tt)*) => {
+            println!("{}", style.keyed(&fit_rows(&format!($($arg)*)), 12))
+        };
+    }
     let ws = &p.cfg.workspace;
-    println!(
+    head!(
         "env `{}`{}",
         p.name,
         ws.dir
             .as_deref()
-            .map(|d| format!(" from {d}"))
+            .map(|d| format!(" from {}", crate::ssh::tilde(Path::new(d))))
             .or_else(|| ws.url.as_deref().map(|u| format!(" from {}", display(u))))
             .unwrap_or_default()
     );
     let exists = ws.dir.as_deref().is_some_and(|d| Path::new(d).exists());
     if let Some(url) = &ws.url {
-        println!(
+        row!(
             "  workspace  a remote: {}{} cloned in the env through the gate; nothing on this machine",
             display(url),
             ws.branch
@@ -422,15 +443,13 @@ fn print_proposal(p: &Proposal, specs: &[String], asks: bool) {
                 .unwrap_or_default()
         );
     } else if exists {
-        println!(
+        row!(
             "  workspace  copy: the env works on its own copy; changes leave by git push or `luoto pull`"
         );
     } else if ws.dir.is_none() {
-        println!(
-            "  workspace  virtual: no folder of its own; /workspace holds its repos side by side"
-        );
+        row!("  workspace  virtual: no folder of its own; /workspace holds its repos side by side");
     } else {
-        println!(
+        row!(
             "  workspace  new folder, created now: the env starts empty, and `luoto pull` fills the folder"
         );
     }
@@ -439,7 +458,7 @@ fn print_proposal(p: &Proposal, specs: &[String], asks: bool) {
         .iter()
         .map(|(n, r)| {
             let what = match (&r.dir, &r.url) {
-                (Some(d), _) => format!("{d} (copied in)"),
+                (Some(d), _) => format!("{} (copied in)", crate::ssh::tilde(Path::new(d))),
                 (None, Some(u)) => format!("{} (cloned in the env)", crate::text::display(u)),
                 _ => String::new(),
             };
@@ -466,11 +485,11 @@ fn print_proposal(p: &Proposal, specs: &[String], asks: bool) {
         let width = repos.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
         for (i, (n, what)) in repos.iter().enumerate() {
             let label = if i == 0 { "repos" } else { "" };
-            println!("  {label:<10} {n:<width$}  {what}");
+            row!("  {label:<10} {n:<width$}  {what}");
         }
-        println!("{INDENT}each at /workspace/<name>");
+        row!("{INDENT}each at /workspace/<name>");
     }
-    println!(
+    row!(
         "  isolation  {}",
         isolation_text(p.apple, p.cfg.isolation, p.gvisor)
     );
@@ -483,7 +502,7 @@ fn print_proposal(p: &Proposal, specs: &[String], asks: bool) {
             None => n.clone(),
         })
         .collect();
-    println!("  presets    {}", presets.join(", "));
+    row!("  presets    {}", presets.join(", "));
     let mut tools: Vec<String> = p
         .found
         .tools
@@ -509,7 +528,7 @@ fn print_proposal(p: &Proposal, specs: &[String], asks: bool) {
         }
     }
     if ws.url.is_some() {
-        println!(
+        row!(
             "  toolchains and luoto.toml: read from the clone, shown before anything applies{}",
             if tools.is_empty() {
                 String::new()
@@ -518,41 +537,41 @@ fn print_proposal(p: &Proposal, specs: &[String], asks: bool) {
             }
         );
     } else if tools.is_empty() {
-        println!(
+        row!(
             "  toolchains none pinned; in the env, `mise use <tool>@<version>` adds one to the project"
         );
     } else {
-        println!(
+        row!(
             "  toolchains {}\n{INDENT}installed by mise in the env; the project's files keep deciding versions",
             tools.join(", ")
         );
     }
     if !p.cfg.agents.is_empty() {
         let names: Vec<&str> = p.cfg.agents.names().map(String::as_str).collect();
-        println!("  agents     {}", names.join(", "));
+        row!("  agents     {}", names.join(", "));
     }
     for row in credential_rows(p, specs, asks) {
-        println!("  credential {row}");
+        row!("  credential {row}");
     }
     if !p.cfg.ports.is_empty() {
         let ports: Vec<String> = p.cfg.ports.iter().map(u16::to_string).collect();
-        println!("  ports      {}", ports.join(", "));
+        row!("  ports      {}", ports.join(", "));
     }
     if let Some(i) = &p.cfg.image {
-        println!("  image      {i}");
+        row!("  image      {i}");
     }
     if let Some(w) = &p.open {
-        println!(
+        row!(
             "  egress     open for {w} to any HTTP(S) host no rule allows\n{INDENT}`luoto egress keep -e {}` keeps what it reaches",
             p.name
         );
     }
     if let Some((_, pc)) = &p.project {
-        println!("  luoto.toml settings written in the repository, so review them:");
+        row!("  luoto.toml settings written in the repository, so review them:");
         project::print_entries(&project::summary(pc), "               ");
     }
     if let Some(e) = &p.project_error {
-        println!("  luoto.toml not used: {}", crate::text::display(e));
+        row!("  luoto.toml not used: {}", crate::text::display(e));
     }
 }
 
@@ -667,7 +686,7 @@ pub fn create(ctx: &Ctx, p: &mut Proposal, accept_project: bool, quiet: bool) ->
     let name = &p.name;
     let f = EnvFile::create(&ctx.paths, name, &p.cfg)?;
     if !quiet {
-        println!("created env `{name}` ({})", f.path.display());
+        head!("created env `{name}` ({})", crate::ssh::tilde(&f.path));
     }
     if let Some((text, _)) = &p.project {
         if accept_project {
@@ -675,9 +694,7 @@ pub fn create(ctx: &Ctx, p: &mut Proposal, accept_project: bool, quiet: bool) ->
         } else {
             project::forget(ctx, name, Some(text))?;
             if !quiet {
-                println!(
-                    "luoto.toml not applied (`luoto project apply -e {name}` applies it later)"
-                );
+                out!("luoto.toml not applied (`luoto project apply -e {name}` applies it later)");
             }
         }
     }
@@ -785,10 +802,10 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
         if let Some(hint) =
             repos::credential_hint(&name, &repos::remotes(&cfg.workspace), &cfg.credentials)
         {
-            println!("\n{hint}");
+            out_text!("\n{hint}");
         }
         if cfg.workspace.url.is_some() {
-            println!("\n`luoto up -e {name}` clones it");
+            out!("\n`luoto up -e {name}` clones it");
         }
     } else {
         start(&ctx, &name, false, o.yes)?;
@@ -799,7 +816,7 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
         let missing = crate::needs::snippets(&pc.needs, &cfg, &crate::repos::declined(&ctx, &name));
         if crate::prompt::interactive() {
             if !missing.is_empty() {
-                println!(
+                out!(
                     "\nThe project still needs credentials only you add: `luoto project needs -e \
                      {name}` asks for them."
                 );
@@ -808,10 +825,14 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
             print_needs(&name, &missing);
         }
     }
-    println!(
-        "\nYour settings for every env (shell rc files, .gitconfig, .claude/settings.json, …) go in \
+    let settings = format!(
+        "Your settings for every env (shell rc files, .gitconfig, .claude/settings.json, …) go in \
          {}: copied in on each `up`, and readable by code in the env, so keep secrets out.",
         crate::ssh::tilde(&ctx.paths.home_files())
+    );
+    out_text!(
+        "\n{}",
+        crate::text::wrap(&settings, "", crate::text::columns())
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -823,7 +844,7 @@ fn redetect(ctx: &Ctx, name: &str, dir: Option<&Path>, o: &InitOpts) -> Result<E
     if let Some(w) = &o.open {
         let until = crate::egress::until(crate::egress::parse_window(w).context("--open")?);
         crate::egress::open(ctx, name, until)?;
-        println!(
+        out!(
             "egress of `{name}` is open {}",
             crate::egress::until_text(Some(until))
         );
@@ -838,13 +859,13 @@ fn redetect(ctx: &Ctx, name: &str, dir: Option<&Path>, o: &InitOpts) -> Result<E
         _ => {
             if !inside {
                 if o.no_up {
-                    println!(
+                    out!(
                         "env `{name}` exists for that remote, and its files are only in the env: \
                          `luoto up -e {name}` starts it, then `luoto init` again reads them"
                     );
                     return Ok(ExitCode::SUCCESS);
                 }
-                println!("env `{name}` exists for that remote; starting it to read its files");
+                out!("env `{name}` exists for that remote; starting it to read its files");
                 env::up(ctx, name, &up)?;
                 inside = true;
             }
@@ -856,7 +877,7 @@ fn redetect(ctx: &Ctx, name: &str, dir: Option<&Path>, o: &InitOpts) -> Result<E
     };
     let heading = format!("env `{name}` exists; {source} now suggests:");
     if !offer(ctx, name, &found, &heading, o.yes, inside)? {
-        println!("env `{name}` already has what {source} suggests");
+        out!("env `{name}` already has what {source} suggests");
         return Ok(ExitCode::SUCCESS);
     }
     if !o.no_up {
@@ -892,7 +913,7 @@ pub fn offer(
         return Ok(false);
     }
     // Paths can come from the env's workspace: printed cleaned.
-    println!("{heading}");
+    out_text!("{heading}");
     for (p, f) in &presets {
         println!("  preset    + {p} ({})", crate::text::display(f));
     }
@@ -906,9 +927,9 @@ pub fn offer(
     }
     if !yes && !crate::prompt::interactive() {
         match (&file.cfg.workspace.url, &file.cfg.workspace.dir) {
-            (Some(u), _) => println!("  `luoto init {} --yes` adds them", display(u)),
-            (None, Some(_)) => println!("  `luoto init --yes` in the env's folder adds them"),
-            (None, None) => println!("  `luoto init --yes` in a repo's folder adds them"),
+            (Some(u), _) => out!("  `luoto init {} --yes` adds them", display(u)),
+            (None, Some(_)) => out!("  `luoto init --yes` in the env's folder adds them"),
+            (None, None) => out!("  `luoto init --yes` in a repo's folder adds them"),
         }
         return Ok(false);
     }
@@ -930,7 +951,7 @@ pub fn offer(
     for t in &tools {
         file.set_in_table("tools", &t.tool, &t.version)?;
     }
-    println!("updated {}", file.path.display());
+    head!("updated {}", crate::ssh::tilde(&file.path));
     Ok(true)
 }
 
@@ -938,7 +959,7 @@ pub fn offer(
 /// per credential, already worded).
 pub fn print_needs(name: &str, needs: &[String]) {
     if !needs.is_empty() {
-        println!(
+        out!(
             "\nThe project needs credentials only you can add (`luoto project needs -e {name}` \
              asks for them):\n\n{}\n",
             needs.join("\n\n")

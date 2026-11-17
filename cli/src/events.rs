@@ -463,8 +463,8 @@ pub fn denials(events: &[Event]) -> Vec<Denied> {
 }
 
 /// The summary of `denied` for stderr, one line per host (the sandbox's strings escaped);
-/// empty when there is none.
-pub fn fmt_denials(env: &str, denied: &[Denied]) -> String {
+/// empty when there is none. `during` names what they were denied in: a `run`, a `session`.
+pub fn fmt_denials(env: &str, during: &str, denied: &[Denied]) -> String {
     use crate::text::display;
     const TARGETS: usize = 3;
     if denied.is_empty() {
@@ -474,7 +474,7 @@ pub fn fmt_denials(env: &str, denied: &[Denied]) -> String {
     let hosts: Vec<String> = denied.iter().map(|d| display(&d.host)).collect();
     let width = hosts.iter().map(|h| h.chars().count()).max().unwrap_or(0);
     let mut out = format!(
-        "the gate denied {total} attempt{} to reach {} host{} during the run:\n",
+        "the gate denied {total} attempt{} to reach {} host{} during the {during}:\n",
         if total == 1 { "" } else { "s" },
         denied.len(),
         if denied.len() == 1 { "" } else { "s" },
@@ -583,9 +583,22 @@ pub fn fmt_opened(env: &str, opened: &[Opened]) -> String {
     )
 }
 
+/// An event as a line, its time in UTC (a report, read elsewhere).
 pub fn fmt_event(e: &Event) -> String {
+    fmt_event_in(e, &Utc)
+}
+
+/// [`fmt_event`] for the terminal: its time as this machine's clock shows it.
+pub fn fmt_event_local(e: &Event) -> String {
+    fmt_event_in(e, &chrono::Local)
+}
+
+fn fmt_event_in<Tz: chrono::TimeZone>(e: &Event, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
     let ts =
-        e.ts.map(|t| t.format("%H:%M:%S").to_string())
+        e.ts.map(|t| t.with_timezone(tz).format("%H:%M:%S").to_string())
             .unwrap_or_default();
     let verdict = match e.verdict {
         Some(Verdict::Allow) => "allow",
@@ -780,13 +793,13 @@ mod tests {
             ]
         );
         assert_eq!(
-            fmt_denials("web", &d),
+            fmt_denials("web", "run", &d),
             "the gate denied 4 attempts to reach 2 hosts during the run:\n\
              \x20 docs.rs          3  GET /serde (2), GET /tokio: no rule allows docs.rs\n\
              \x20 evil.example     1  port 22: no rule allows evil.example\n\
              `luoto egress -e web --denied` says how to allow each.\n"
         );
-        assert_eq!(fmt_denials("web", &[]), "");
+        assert_eq!(fmt_denials("web", "run", &[]), "");
     }
 
     #[test]
@@ -797,7 +810,7 @@ mod tests {
             targets: (1..=5).map(|i| (format!("GET /{i}"), 1)).collect(),
             message: Some("no\u{202e}pe".into()),
         };
-        let line = fmt_denials("web", &[d]);
+        let line = fmt_denials("web", "session", &[d]);
         assert!(line.contains("x\\u{1b}[2J.example"), "{line}");
         assert!(
             line.contains("GET /1, GET /2, GET /3, 2 more: no\\u{202e}pe"),

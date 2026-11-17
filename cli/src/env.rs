@@ -478,7 +478,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     let a = names::addrs(state.octet);
     let (env_ca, made) = ca::ensure(&ctx.paths.env_state(env), env)?;
     if let ca::Made::Renewed(old) = made {
-        eprintln!("{}", ca::renewal_note(old, &env_ca));
+        err_text!("{}", ca::renewal_note(old, &env_ca));
     }
     let ca_sha = env_ca.pem_sha256();
     // A renewal counts on its own: `dev_ca` is unset until a start records it.
@@ -565,10 +565,10 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             (Some(dir), _) => {
                 let dir = workspace::canonical(dir)?;
                 let n = crate::progress::step(
-                    &format!("copying {} into the env", dir.display()),
+                    &format!("copying {} into the env", crate::ssh::tilde(&dir)),
                     || workspace::push(ctx, env, &dir, None),
                 )?;
-                println!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
+                out!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
             }
             (None, Some(url)) => {
                 let locked = repos::creds_locked(ctx, env);
@@ -641,7 +641,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         }
     }
     if let Some(cmd) = crate::shares::needs(ctx, env, &p.cfg) {
-        crate::progress::say(|| println!("the env can't read its shares yet: `{cmd}`"));
+        crate::progress::say(|| out!("the env can't read its shares yet: `{cmd}`"));
     }
     // New clones bring files of their own: the presets and toolchains they suggest, offered
     // as `luoto init` offers a folder's.
@@ -670,7 +670,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
                 // What the clone pins is unknown: nothing installs without a look at it.
                 if installs_pending {
                     install = false;
-                    println!("nothing installed yet: `luoto up -e {env}` asks again");
+                    out!("nothing installed yet: `luoto up -e {env}` asks again");
                 }
             }
         }
@@ -706,7 +706,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         && (opts.quiet || opts.brief)
     {
         let width = crate::text::columns().saturating_sub(10);
-        eprintln!(
+        err!(
             "egress of `{env}` is {}",
             crate::egress::state_line(env, until, width)
         );
@@ -714,7 +714,8 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     if opts.quiet || opts.brief {
         seeded.warn();
     } else {
-        println!(
+        let style = crate::style::out();
+        head!(
             "env `{env}` is up{}{}",
             if dev == Launch::Created {
                 " (new dev container)"
@@ -743,7 +744,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
                 .iter()
                 .map(|p| format!("http://127.0.0.1:{p}"))
                 .collect();
-            println!("  ports:  {}", ports.join("  "));
+            println!("{}{}", style.dim("  ports:   "), ports.join("  "));
         }
         let (in_env, editors): (Vec<_>, Vec<_>) = luoto_shared::profiles::editor_names()
             .filter_map(luoto_shared::profiles::editor)
@@ -754,21 +755,34 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
                 .collect::<Vec<_>>()
                 .join("|")
         };
-        println!("  shell:   luoto shell -e {env}");
-        println!("  agents:  luoto open -e {env} --with {}", names(&in_env));
-        println!(
-            "  editor:  luoto open -e {env}   (or --with {})",
-            names(&editors)
+        // A command for each thing to do next, its alternative after it.
+        let next = |key: &str, command: String, also: String| {
+            println!(
+                "{}{}{also}",
+                style.dim(&format!("  {key:<9}")),
+                style.head(&command)
+            );
+        };
+        next("shell:", format!("luoto shell -e {env}"), String::new());
+        next(
+            "agents:",
+            format!("luoto open -e {env} --with {}", names(&in_env)),
+            String::new(),
         );
-        println!("  egress:  luoto egress -e {env}");
+        next(
+            "editor:",
+            format!("luoto open -e {env}"),
+            format!("   (or --with {})", names(&editors)),
+        );
+        next("egress:", format!("luoto egress -e {env}"), String::new());
         if let Some(until) = open {
             let width = crate::text::columns().saturating_sub(11);
-            println!(
+            out_text!(
                 "           {}",
                 crate::egress::state_line(env, until, width)
             );
         }
-        println!("  web UI:  luoto ui");
+        next("web UI:", "luoto ui".into(), String::new());
         // Now that the gate and vault run on the new images, the old ones are unused.
         if ids.pulled {
             crate::disk::note_superseded(ctx);
@@ -837,14 +851,14 @@ fn ask_installs(
         return true;
     }
     if !crate::prompt::interactive() {
-        println!(
+        out!(
             "nothing installed: installing waits for a yes, which `luoto up -e {env}` asks for \
              on a terminal"
         );
         return false;
     }
     if crate::prompt::ask("Install them now? [Y/n]", 'y') == 'n' {
-        println!("nothing installed yet: `luoto up -e {env}` asks again");
+        out!("nothing installed yet: `luoto up -e {env}` asks again");
         return false;
     }
     true
@@ -1030,6 +1044,9 @@ fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
         // Its VM leaves through macOS's NAT, which translates only out of the primary
         // interface, never onto a VPN: private addresses are dialed from the Mac (`hostdial.rs`).
         set_env(&mut spec.env, "LUOTO_HOST_DIAL", APPLE_GATE_DIAL);
+        // Nothing names this machine in Apple's VMs: the gate dials its gateway for it, never
+        // DNS, which on a LAN may answer with another machine.
+        set_env(&mut spec.env, "LUOTO_HOST_GATEWAY", "route");
         spec.published_sockets = vec![
             (socks.gate.display().to_string(), APPLE_GATE_SOCKET.into()),
             (socks.uplink.display().to_string(), APPLE_GATE_UPLINK.into()),

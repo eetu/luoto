@@ -8,7 +8,7 @@ headless = ["{args}", "-p", "--dangerously-skip-permissions", "--output-format",
 providers = ["anthropic"]
 install = ["curl -fsSL https://claude.ai/install.sh | bash"]
 install_hosts = ["claude.ai", "downloads.claude.ai", "storage.googleapis.com"]
-env = { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", DISABLE_AUTOUPDATER = "1" }
+env = { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", DISABLE_AUTOUPDATER = "1", CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL = "1" }
 briefing = []
 mcp = "claude"
 
@@ -30,6 +30,13 @@ value = true
 [[first_run]]
 file = "~/.claude.json"
 path = ["hasSeenAutoDefaultNotice"]
+value = true
+
+# The notice that its bypass mode (`--yolo`) belongs in a sandbox with restricted internet
+# access: this is one.
+[[first_run]]
+file = "~/.claude/settings.json"
+path = ["skipDangerousModePermissionPrompt"]
 value = true
 
 # Its state for its terminal (OSC 7501, which terminals that show agents' status read and

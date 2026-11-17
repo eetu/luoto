@@ -485,7 +485,7 @@ fn apple_ready(o: &SetupOpts, info: Option<&RuntimeInfo>) -> Result<bool> {
         println!("\nluoto needs Apple's container {min} or later");
         println!("install command: {}", cmd.join(" "));
         if !o.install {
-            println!("re-run with `luoto setup --install --runtime container` to run it");
+            out!("re-run with `luoto setup --install --runtime container` to run it");
             return Ok(false);
         }
         if !o.yes && !confirm("Run it now?") {
@@ -599,7 +599,7 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
         Some(_) => match choose(&o, configured(&global))? {
             Some(c) => Some(c),
             None => {
-                println!("nothing set up; `luoto setup` asks again");
+                out!("nothing set up; `luoto setup` asks again");
                 return Ok(ExitCode::SUCCESS);
             }
         },
@@ -660,7 +660,7 @@ fn podman_ready(
     if let Some(cmd) = &rec.install {
         println!("\ninstall command: {}", cmd.join(" "));
         if !o.install {
-            println!("re-run with `luoto setup --install` to run it");
+            out!("re-run with `luoto setup --install` to run it");
             return Ok(false);
         }
         if !o.yes && !confirm("Run it now?") {
@@ -701,7 +701,7 @@ fn podman_ready(
         }
         global.connection = Some(machine::NAME.into());
         global.gvisor = Some(machine::runsc_path());
-        println!(
+        out!(
             "\nluoto's VM `{}`: no host folders, an ID range per env, gVisor {}",
             machine::NAME,
             machine::GVISOR_RELEASE
@@ -722,7 +722,7 @@ fn podman_ready(
             None => None,
         };
         if global.gvisor.is_none() {
-            println!(
+            out!(
                 "\n! gVisor (runsc) is not installed: dev containers share the host kernel. \
                  Install it from https://gvisor.dev and run `luoto setup` again."
             );
@@ -757,7 +757,7 @@ fn finish(
         if missing.is_empty() {
             new_images = false;
             if source_root().is_some() {
-                println!("\nimages present; `luoto setup --build` rebuilds them from source");
+                out!("\nimages present; `luoto setup --build` rebuilds them from source");
             } else {
                 println!("\nimages present");
             }
@@ -781,7 +781,7 @@ fn finish(
     }
     let home = ctx.paths.home_files();
     if crate::personal::seed_home(&home)? {
-        println!(
+        out!(
             "\nyour own config for every env goes in {} (copied in on each `up`)",
             crate::ssh::tilde(&home)
         );
@@ -798,7 +798,7 @@ fn finish(
         "next",
         "luoto init [--agent claude], in a project folder".into(),
     ));
-    println!("\n{}", crate::prompt::summary("ready", &rows));
+    block!("\n{}", crate::prompt::summary("ready", &rows));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -808,7 +808,7 @@ struct Checks(Vec<String>);
 
 impl Checks {
     fn say(&mut self, line: String) {
-        println!("{line}");
+        println!("{}", crate::style::out().check(&line));
         self.0.push(line);
     }
 }

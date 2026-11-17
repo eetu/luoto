@@ -55,7 +55,7 @@ pub fn uninstall(yes: bool) -> Result<ExitCode> {
         println!("\n{} is uninstalled; the binary stays: {binary}", plan.inst);
         Ok(ExitCode::SUCCESS)
     } else {
-        println!(
+        out!(
             "\n{failed} step(s) failed, listed above; `luoto uninstall` again tries what is \
              left. The binary stays: {binary}"
         );

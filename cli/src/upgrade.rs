@@ -98,7 +98,7 @@ pub fn upgrade() -> Result<ExitCode> {
     if !child.wait()?.success() {
         bail!("the upgrade failed; luoto {current} is unchanged");
     }
-    println!(
+    out!(
         "next: `luoto setup` gets this version's images, then `luoto up --recreate` moves each \
          env onto them (its volumes are kept)"
     );

@@ -648,7 +648,7 @@ pub fn seed(ctx: &Ctx, env: &str, cfg: &EnvConfig, done: &BTreeSet<String>) -> S
             continue;
         }
         if found.contains(name) {
-            println!(
+            out!(
                 "repo {name}: /workspace/{name} is there already (from the env's folder or an \
                  earlier repo of that name) and is left as it is; to start it over, delete it \
                  in the env and `luoto up`"
@@ -959,7 +959,7 @@ fn copy_in(ctx: &Ctx, env: &str, ws: &Workspace, name: &str, dir: &str) -> Resul
     let dir = workspace::canonical(dir)?;
     check_folder(ws.dir.as_deref(), &dir)?;
     let n = crate::progress::step(
-        &format!("copying {} into /workspace/{name}", dir.display()),
+        &format!("copying {} into /workspace/{name}", crate::ssh::tilde(&dir)),
         || workspace::push(ctx, env, &dir, Some(name)),
     )?;
     println!("copied {n} file(s)");
@@ -1347,7 +1347,7 @@ pub fn waits(env: &str, url: &str) -> bool {
         &format!("luoto repo auth -e {env} {repo}"),
         text::columns(),
     );
-    println!("{line}");
+    out_text!("{line}");
     true
 }
 
@@ -1848,7 +1848,7 @@ fn ask_repo_step(
         if let Ok(mut s) = LATER.lock() {
             s.insert(forge.key(repo));
         }
-        println!("{}", access_summary(env, forge, repo, None, None));
+        block!("{}", access_summary(env, forge, repo, None, None));
         Ok(Step::Got(false))
     };
     // Back from where its token is kept, the menu opens on what was picked.
@@ -1894,7 +1894,7 @@ fn ask_repo_step(
                 display(repo),
                 crate::wizard::shown_ref(t)
             );
-            println!("{}", text::wrap(&line, "  ", text::columns()));
+            out_text!("{}", text::wrap(&line, "  ", text::columns()));
             None
         } else {
             let read = access == Access::Read;
@@ -1937,7 +1937,7 @@ fn ask_repo_step(
             .as_ref()
             .is_some_and(|(a, t)| *a == access && (token.is_none() || *t == token))
         {
-            println!("{}", access_summary(env, forge, repo, now.as_ref(), None));
+            block!("{}", access_summary(env, forge, repo, now.as_ref(), None));
             return Ok(Step::Got(false));
         }
         let public = access == Access::Public && !matches!(forge, Forge::Git(_));
@@ -1949,7 +1949,7 @@ fn ask_repo_step(
         }
         let after = access_of(&f.cfg.credentials, &declined(ctx, env), forge, repo);
         let was = replaced(now.as_ref(), after.as_ref());
-        println!("{}", access_summary(env, forge, repo, after.as_ref(), was));
+        block!("{}", access_summary(env, forge, repo, after.as_ref(), was));
         return Ok(Step::Got(true));
     }
 }
@@ -1972,7 +1972,7 @@ pub fn ask_missing(ctx: &Ctx, env: &str, cfg: &EnvConfig) -> Result<bool> {
     }
     if !crate::prompt::interactive() {
         if let Some(h) = hint(env, &needs, &cfg.credentials, all.iter().any(|u| is_ssh(u))) {
-            println!("\n{h}");
+            out_text!("\n{h}");
         }
         return Ok(false);
     }
@@ -2075,9 +2075,9 @@ pub fn add(
     ws.repos.insert(name.clone(), repo.clone());
     check(&ws)?;
     f.set_repo(&name, &repo)?;
-    println!("added repo `{name}` to env `{env_name}`, at /workspace/{name}");
+    out!("added repo `{name}` to env `{env_name}`, at /workspace/{name}");
     if project::accepted(&ctx, env_name).is_some_and(|(_, p)| p.repos.contains_key(&name)) {
-        println!("  it replaces luoto.toml's repo `{name}` in this env");
+        out!("  it replaces luoto.toml's repo `{name}` in this env");
     }
     let running = ctx.rt.is_running(&names::dev(env_name));
     // Its credential before its clone, which needs it.
@@ -2093,7 +2093,7 @@ pub fn add(
         now.warn();
         EnvState::update(&ctx.paths, env_name, |s| s.repos = now.done)?;
     } else {
-        println!(
+        out!(
             "`luoto up -e {env_name}` {} it",
             if repo.dir.is_some() {
                 "copies in"
@@ -2138,12 +2138,12 @@ pub fn rm(env_name: &str, name: &str) -> Result<ExitCode> {
     f.remove_repo(name)?;
     let mut was_there = false;
     EnvState::update(&ctx.paths, env_name, |s| was_there = s.repos.remove(name))?;
-    println!("removed repo `{name}` from env `{env_name}`");
+    out!("removed repo `{name}` from env `{env_name}`");
     if was_there {
         println!("its copy stays at /workspace/{name} in the env until you delete it there");
     }
     if in_project {
-        println!("luoto.toml lists `{name}` too, and applies again");
+        out!("luoto.toml lists `{name}` too, and applies again");
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -2215,7 +2215,7 @@ pub fn auth(env_name: &str, which: &str) -> Result<ExitCode> {
     // The env's own remote is cloned by `up` alone, which this one waits for.
     let own = cfg.workspace.url.as_deref().map(clone_url) == Some(url);
     if own && !state.as_ref().is_some_and(|s| s.seeded) {
-        println!("`luoto up -e {env_name}` clones it");
+        out!("`luoto up -e {env_name}` clones it");
     }
     if !ctx.rt.is_running(&names::dev(env_name)) {
         return Ok(ExitCode::SUCCESS);
@@ -2236,7 +2236,7 @@ pub fn list(env_name: &str) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let repos = listed(&ctx, env_name)?;
     if repos.is_empty() {
-        println!(
+        out!(
             "env `{env_name}` has no repos besides its folder (`luoto repo add <folder|owner/repo|url>`)"
         );
         return Ok(ExitCode::SUCCESS);

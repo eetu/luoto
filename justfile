@@ -84,6 +84,41 @@ it:
 test-ui:
     cd frontend && {{yarn}} test:ui
 
+# Terminal recordings in docs/casts, one GIF per tape (needs vhs, the runtime and `luoto-dev`
+# set up with its ssh_config included, which `luoto open` attaches through; leaves nothing
+# behind). Their envs are `tz`, `pulse` and `platform`, run by the debug build; it refuses to run if
+# luoto-dev has one of them already. Agents answer from docs/casts/canned.py.
+casts:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # LUOTO_CAST_BIN=luoto records with an installed release (its images, `luoto-<env>` names).
+    if [ -z "${LUOTO_CAST_BIN:-}" ]; then
+        cargo build -p luoto
+        export LUOTO_CAST_BIN="$PWD/target/debug/luoto"
+    fi
+    # A full path: in the recording, docs/casts/bin/luoto (which runs this) is first on PATH.
+    LUOTO_CAST_BIN=$(command -v "$LUOTO_CAST_BIN") || { echo "no $LUOTO_CAST_BIN" >&2; exit 1; }
+    export LUOTO_CAST_BIN
+    envs="tz pulse platform"
+    for e in $envs; do
+        if "$LUOTO_CAST_BIN" status -e "$e" >/dev/null 2>&1; then
+            echo "$LUOTO_CAST_BIN has an env \`$e\`; remove it first" >&2
+            exit 1
+        fi
+    done
+    demo="$HOME/demo"
+    if [ -e "$demo" ] && [ ! -e "$demo/.luoto-cast" ]; then
+        echo "$demo exists; a cast makes its repos there, so move it first" >&2
+        exit 1
+    fi
+    cleanup() {
+        kill "$(cat "$demo/.luoto-cast" 2>/dev/null)" 2>/dev/null || true
+        for e in $envs; do "$LUOTO_CAST_BIN" rm -e "$e" --yes >/dev/null 2>&1 || true; done
+        if [ -e "$demo/.luoto-cast" ]; then rm -rf "$demo"; fi
+    }
+    trap cleanup EXIT
+    for tape in docs/casts/*.tape; do vhs "$tape"; done
+
 # README screenshots from a real env and `luoto ui` (needs the runtime; leaves nothing behind).
 # The env is `demo` in a throwaway LUOTO_HOME, run by the debug build (the `luoto-dev` instance);
 # it refuses to run if a `luoto-dev-demo` exists, so its cleanup can't touch an env of yours. The

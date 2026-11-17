@@ -271,7 +271,7 @@ pub fn watch() -> Result<ExitCode> {
             for name in &running {
                 links.entry(name.clone()).or_insert_with(|| {
                     let s = env::link_sockets(&ctx, name);
-                    println!("{} linking `{name}` to its gate", Utc::now());
+                    out!("{} linking `{name}` to its gate", Utc::now());
                     crate::tunlink::Link::start(s.dev, s.gate)
                 });
             }
@@ -394,11 +394,11 @@ pub fn watch() -> Result<ExitCode> {
                 }
                 match ports::Forward::start(&ctx.rt, &dev, port, port) {
                     Ok(f) => {
-                        println!("{} localhost:{port} → `{name}`", Utc::now());
+                        out!("{} localhost:{port} → `{name}`", Utc::now());
                         forwards.insert(key, f);
                     }
                     Err(e) => {
-                        println!("{} not forwarding `{name}`:{port}: {e:#}", Utc::now());
+                        out!("{} not forwarding `{name}`:{port}: {e:#}", Utc::now());
                         refused.insert(key);
                     }
                 }
@@ -418,7 +418,7 @@ pub fn watch() -> Result<ExitCode> {
                 && closed.get(name) != Some(&until)
                 && crate::sync::reapply(&ctx, name).is_ok()
             {
-                println!("{} closed open egress of `{name}`", Utc::now());
+                out!("{} closed open egress of `{name}`", Utc::now());
                 closed.insert(name.clone(), until);
             }
         }
@@ -448,8 +448,8 @@ pub fn watch() -> Result<ExitCode> {
             }
             idle_since.remove(name);
             match env::down(&ctx, name) {
-                Ok(_) => println!("{} stopped `{name}`: idle for {limit:?}", Utc::now()),
-                Err(e) => println!("{} could not stop `{name}`: {e:#}", Utc::now()),
+                Ok(_) => out!("{} stopped `{name}`: idle for {limit:?}", Utc::now()),
+                Err(e) => out!("{} could not stop `{name}`: {e:#}", Utc::now()),
             }
         }
     }
@@ -487,8 +487,8 @@ fn restart_gates(
         }
         *last = Some(Instant::now());
         match ctx.rt.run(["start", &gate]) {
-            Ok(_) => println!("{} started the stopped gate of `{name}`", Utc::now()),
-            Err(e) => println!("{} could not start the gate of `{name}`: {e:#}", Utc::now()),
+            Ok(_) => out!("{} started the stopped gate of `{name}`", Utc::now()),
+            Err(e) => out!("{} could not start the gate of `{name}`: {e:#}", Utc::now()),
         }
     }
 }
@@ -639,7 +639,7 @@ fn reread_refused(
             if secrets::unattended(&ctx.global, r) {
                 due.insert(r.to_string());
             } else {
-                println!(
+                out!(
                     "{} `{name}`: an upstream refused credential `{b}` ({r}); if it changed, \
                      `luoto vault reload` reads it again",
                     Utc::now()

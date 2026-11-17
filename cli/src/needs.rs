@@ -232,7 +232,7 @@ impl Need {
                      env can only fetch it if it is public.",
                     display(r)
                 );
-                println!("{}", text::wrap(&line, "", text::columns()));
+                out_text!("{}", text::wrap(&line, "", text::columns()));
                 crate::repos::ask_repo(ctx, env, &Forge::Github(owner(r)), r, mode)
             }
             Need::Provider(n) => ask_provider(ctx, mode, env, n, own),
@@ -323,7 +323,7 @@ static LATER: std::sync::Mutex<BTreeSet<(String, String)>> = std::sync::Mutex::n
 pub fn ask(ctx: &Ctx, env: &str, mode: Mode) -> Result<bool> {
     let Some((_, p)) = crate::project::accepted(ctx, env) else {
         if mode == Mode::Change {
-            println!("env `{env}` has no accepted luoto.toml, so nothing it needs");
+            out!("env `{env}` has no accepted luoto.toml, so nothing it needs");
         }
         return Ok(false);
     };
@@ -395,13 +395,13 @@ pub fn ask(ctx: &Ctx, env: &str, mode: Mode) -> Result<bool> {
 fn summary(env: &str, title: &str, rows: Vec<(&str, String)>) {
     let mut rows = rows;
     rows.push(("change it", format!("luoto project needs -e {env}")));
-    println!("{}", crate::prompt::summary(title, &rows));
+    block!("{}", crate::prompt::summary(title, &rows));
 }
 
 fn ask_provider(ctx: &Ctx, mode: Mode, env: &str, name: &str, own: &EnvConfig) -> Result<bool> {
     use crate::agents::Auth;
     let Some(p) = profiles::provider(name) else {
-        println!(
+        out!(
             "luoto.toml: needs.credentials: no provider `{}`",
             display(name)
         );

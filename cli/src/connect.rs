@@ -44,6 +44,26 @@ fn terminal_env() -> Vec<String> {
 /// Run `inner` with a login shell as the dev user.
 pub fn exec_login(ctx: &Ctx, name: &str, inner: &str) -> Result<ExitCode> {
     ensure_running(ctx, name)?;
+    login(ctx, name, inner)
+}
+
+/// A session in the env (a shell, an agent): `inner` as [`exec_login`] runs it, then what the
+/// gate denied meanwhile, on stderr; what ran in it may not have said.
+pub fn session(ctx: &Ctx, name: &str, inner: &str) -> Result<ExitCode> {
+    ensure_running(ctx, name)?;
+    let gate_at_start = crate::agents::GateMark::now(ctx, name);
+    let code = login(ctx, name, inner)?;
+    if let Ok(evs) = gate_at_start.since(ctx, name) {
+        crate::progress::summary(&crate::events::fmt_denials(
+            name,
+            "session",
+            &crate::events::denials(&evs),
+        ));
+    }
+    Ok(code)
+}
+
+fn login(ctx: &Ctx, name: &str, inner: &str) -> Result<ExitCode> {
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let mut e = exec(&names::dev(name)).stdin();
     if tty {
@@ -68,18 +88,20 @@ pub fn exec_login(ctx: &Ctx, name: &str, inner: &str) -> Result<ExitCode> {
 
 pub fn shell(name: &str, cmd: &[String]) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
-    let inner = if cmd.is_empty() {
+    if cmd.is_empty() {
         // The dev user's own login shell (fish in luoto-base).
-        format!(r#"s=$(awk -F: '$3=={UID}{{print $7}}' /etc/passwd); exec "${{s:-/bin/sh}}" -l"#)
-    } else {
-        format!(
-            "exec {}",
-            cmd.iter()
-                .map(|c| crate::text::sh_quote(c))
-                .collect::<Vec<_>>()
-                .join(" ")
-        )
-    };
+        let inner = format!(
+            r#"s=$(awk -F: '$3=={UID}{{print $7}}' /etc/passwd); exec "${{s:-/bin/sh}}" -l"#
+        );
+        return session(&ctx, name, &inner);
+    }
+    let inner = format!(
+        "exec {}",
+        cmd.iter()
+            .map(|c| crate::text::sh_quote(c))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     exec_login(&ctx, name, &inner)
 }
 
@@ -213,7 +235,7 @@ pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
         );
     }
     if editor.launch.is_empty() {
-        println!(
+        out!(
             "Connect to SSH host `{host}` as `{user}` and open /workspace \
              (the host entry is in {}).",
             config.display()
@@ -224,7 +246,7 @@ pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
         ensure_tool(&ctx, name, &user, tool)?;
     }
     if let Some(hint) = &editor.hint {
-        println!("{hint}");
+        out_text!("{hint}");
     }
     let mut argv: Vec<String> = editor.launch.iter().map(|a| fill(a)).collect();
     if cfg!(windows)
@@ -240,7 +262,7 @@ pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
         // It ran in the env and said why it stopped there.
         Ok(_) if editor.in_env() => Ok(ExitCode::FAILURE),
         _ => {
-            println!(
+            out!(
                 "could not start `{}`; install its command-line launcher, or run: {}",
                 argv[0],
                 argv.join(" ")
@@ -298,7 +320,7 @@ pub fn forward(name: &str, spec: &str, open_browser: bool) -> Result<ExitCode> {
             format!("pick another local port: `luoto forward -e {name} <local>:{env_port}`")
         })?;
     let url = format!("http://localhost:{local}");
-    println!("{url} → port {env_port} in `{name}` (Ctrl-C stops)");
+    out!("{url} → port {env_port} in `{name}` (Ctrl-C stops)");
     if open_browser {
         let _ = open::that(&url);
     }

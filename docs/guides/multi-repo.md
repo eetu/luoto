@@ -46,6 +46,11 @@ $ luoto init --virtual --name platform --repo ~/dev/api --repo acme/web
 $ luoto repo add ~/dev/lib -e platform      # more, one at a time
 ```
 
+Two folders become one env, and Claude Code changes the API in a terminal workspace there
+(`luoto open --with <name>`) while it runs:
+
+![A virtual workspace of two repos, opened in a terminal workspace where Claude Code adds a route](../casts/virtual-workspace.gif)
+
 ```toml
 [workspace.repos.api]
 dir = "/Users/me/dev/api"

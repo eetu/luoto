@@ -207,8 +207,16 @@ What the CLI asks and prints follows one grammar, whatever the feature:
   the user should see: its own line) or a `progress::wait` (quick when all is well: named on
   the spinner's line only while slow); a line printed during either goes through
   `progress::say`, and a question or `op` runs in `progress::pause` (`prompt::Ask::ask`
-  does). Color only through `progress::accent` / `prompt::theme` (the UI's accent), none
-  under `NO_COLOR`.
+  does). Style only through `style.rs` (`style::out()` / `err()`, the `out!`, `err!`, `head!`,
+  `heading!` and `block!` prints) and `prompt::theme`: what a step made or a block is about
+  bold; keys, column headings and asides dim; what a line names in backticks bold, the
+  backticks kept (`out!` / `err!` read only the backticks of their format string, never an
+  argument's; `out_text!` is for text luoto composed before the print); the answer Enter
+  picks bold in `[Y/n]`; markers (`●`, `?`, `→`) in the UI's
+  accent, luoto's only color of its own, never text; `luoto:` of an error in the terminal's
+  red and `warning:` in its yellow, the message in the terminal's color. Format plain, style
+  as it is printed (escapes take no columns), and style around sandbox text, never inside
+  it. Plain when the stream is no terminal and under `NO_COLOR`. Times are local.
 
 ## Working on this repo
 

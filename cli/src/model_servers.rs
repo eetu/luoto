@@ -19,9 +19,8 @@ pub const ANTHROPIC: &str = "anthropic";
 pub const OPENAI: &str = "openai";
 pub const APIS: [&str; 2] = [ANTHROPIC, OPENAI];
 
-/// This machine as the sandbox reaches it: podman's `/etc/hosts` has the name, Docker
-/// Desktop's DNS answers it.
-pub const HOST: &str = "host.docker.internal";
+/// This machine as the sandbox reaches it ([`luoto_shared::THIS_MACHINE`]).
+pub const HOST: &str = luoto_shared::THIS_MACHINE;
 
 /// The token the sandbox holds for a server; the gate puts the real one in its place.
 pub const PLACEHOLDER: &str = "luoto-model-server-placeholder";
@@ -738,7 +737,7 @@ pub fn ask(global: &GlobalConfig, a: &profiles::Agent, cfg: &EnvConfig) -> Resul
                 let ep = match check(&name, &s) {
                     Ok(ep) => ep,
                     Err(e) => {
-                        println!("{}", text::wrap(&format!("{e:#}"), "  ", text::columns()));
+                        out_text!("{}", text::wrap(&format!("{e:#}"), "  ", text::columns()));
                         continue;
                     }
                 };
@@ -791,7 +790,7 @@ pub fn ask(global: &GlobalConfig, a: &profiles::Agent, cfg: &EnvConfig) -> Resul
                         m.endpoint,
                         a.title()
                     );
-                    println!("{}", text::wrap(&why, "  ", text::columns()));
+                    out_text!("{}", text::wrap(&why, "  ", text::columns()));
                     continue;
                 }
             }
@@ -821,7 +820,7 @@ fn new_server(
                 " On Linux it must listen on this machine's address, not only 127.0.0.1.",
             );
         }
-        println!("{}", text::wrap(&note, "  ", text::columns()));
+        out_text!("{}", text::wrap(&note, "  ", text::columns()));
     }
     let name = suggest_name(ep, p.owner.as_deref(), cfg);
     let takes_token = if p.needs_token {

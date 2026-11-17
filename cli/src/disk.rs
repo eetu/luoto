@@ -527,7 +527,7 @@ pub fn note_superseded(ctx: &Ctx) {
         && !p.remove.is_empty()
     {
         crate::progress::say(|| {
-            println!(
+            out!(
                 "note: {} superseded luoto image(s) take up to {}: `luoto prune` removes them",
                 p.remove.len(),
                 human(p.bytes())
@@ -932,7 +932,7 @@ pub fn prune(yes: bool) -> Result<ExitCode> {
             p.kept
         );
     } else {
-        println!(
+        out!(
             "`{inst} prune` removes {} of its images that no container uses and it doesn't run, \
              up to {}:",
             p.remove.len(),
@@ -958,7 +958,7 @@ pub fn prune(yes: bool) -> Result<ExitCode> {
             },
         )?;
         let gone = p.remove.iter().filter(|i| !left.contains(&i.id)).count();
-        println!("removed {gone} image(s)");
+        head!("removed {gone} image(s)");
         if gone < p.remove.len() {
             failed = true;
             println!(

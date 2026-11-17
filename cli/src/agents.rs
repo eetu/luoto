@@ -14,7 +14,7 @@ use luoto_shared::policy::Rule;
 use luoto_shared::profiles;
 
 use crate::config::{EnvConfig, EnvFile, ModelServer, ProviderValue};
-use crate::connect::exec_login;
+use crate::connect::session;
 use crate::env::{self, Ctx, UID};
 use crate::logs::InstallLog;
 use crate::runtime::exec;
@@ -25,28 +25,34 @@ use crate::{events, model_servers, names, secrets, sync};
 use sha2::{Digest, Sha256};
 
 pub fn list() -> Result<ExitCode> {
-    println!("agents:");
+    let width = crate::text::columns();
+    // A name, then what it is, wrapped under itself.
+    let row = |name: &str, wide: usize, what: String| {
+        println!(
+            "{}",
+            crate::text::hang(&format!("  {name:<wide$}  "), &what, width)
+        );
+    };
+    let wide = |names: &mut dyn Iterator<Item = &str>| names.map(str::len).max().unwrap_or(0);
+    head!("agents:");
+    let w = wide(&mut profiles::agent_names());
     for n in profiles::agent_names() {
         let a = profiles::agent(n).context("agent profile")?;
-        println!(
-            "  {n:<10} {} (providers: {})",
-            a.description,
-            a.providers.join(", ")
+        row(
+            n,
+            w,
+            format!("{} (providers: {})", a.description, a.providers.join(", ")),
         );
     }
-    println!("\nproviders (configure under [credentials.<provider>]):");
+    head!("\nproviders (configure under [credentials.<provider>]):");
+    let w = wide(&mut profiles::provider_names());
     for n in profiles::provider_names() {
         let p = profiles::provider(n).context("provider profile")?;
-        let kinds: Vec<&String> = p.auth.keys().collect();
-        println!(
-            "  {n:<10} {} — {} via {}",
-            p.description,
-            p.host,
-            kinds
-                .iter()
-                .map(|k| k.as_str())
-                .collect::<Vec<_>>()
-                .join(" | ")
+        let kinds: Vec<&str> = p.auth.keys().map(String::as_str).collect();
+        row(
+            n,
+            w,
+            format!("{} — {} via {}", p.description, p.host, kinds.join(" | ")),
         );
     }
     Ok(ExitCode::SUCCESS)
@@ -225,7 +231,7 @@ fn mark_settled(env_name: &str, name: &str) {
 /// End a credential step for agent `name` with its summary: what the env has now (`have`,
 /// [`configured`]) and the command that changes it.
 pub fn settle(env_name: &str, name: &str, a: &profiles::Agent, cfg: &EnvConfig) {
-    println!("{}", summary(env_name, name, a, cfg));
+    block!("{}", summary(env_name, name, a, cfg));
     mark_settled(env_name, name);
 }
 
@@ -379,7 +385,7 @@ pub fn ensure(ctx: &Ctx, env_name: &str, agents: &[String], quiet: bool) -> Resu
             continue;
         }
         if !quiet {
-            println!("{}", installed_line(&cfg, env_name, name, a));
+            out_text!("{}", installed_line(&cfg, env_name, name, a));
         }
     }
     if !failed.is_empty() {
@@ -397,8 +403,8 @@ fn installed_line(cfg: &EnvConfig, env_name: &str, name: &str, a: &profiles::Age
             _ => "a model provider".into(),
         };
         return format!(
-            "{} installed. It can't reach {reach} until it has a credential:\n  luoto agent \
-             auth -e {env_name} {name}",
+            "{} installed. It can't reach {reach} until it has a credential:\n  `luoto agent \
+             auth -e {env_name} {name}`",
             a.title()
         );
     }
@@ -409,7 +415,7 @@ fn installed_line(cfg: &EnvConfig, env_name: &str, name: &str, a: &profiles::Age
         _ => "",
     };
     format!(
-        "{} is ready: luoto agent run -e {env_name} {name}{first}",
+        "{} is ready: `luoto agent run -e {env_name} {name}`{first}",
         a.title()
     )
 }
@@ -825,7 +831,7 @@ pub fn set_credentials(
             None => ProviderValue::Flag(true),
         };
         EnvFile::load(&ctx.paths, env_name)?.set_provider_kind(provider, kind, &value)?;
-        println!("[credentials.{provider}] {kind} written to env `{env_name}`");
+        out!("[credentials.{provider}] {kind} written to env `{env_name}`");
     }
     Ok(())
 }
@@ -864,7 +870,7 @@ pub fn add(env_name: &str, agent: &str, credential: Option<&str>) -> Result<Exit
     env::up(&ctx, env_name, &up)?;
     if there {
         let cfg = EnvFile::load(&ctx.paths, env_name)?.cfg;
-        println!("{}", installed_line(&cfg, env_name, agent, &a));
+        out_text!("{}", installed_line(&cfg, env_name, agent, &a));
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -888,7 +894,7 @@ pub fn auth(env_name: &str, agent: &str) -> Result<ExitCode> {
     let own = EnvFile::load(&ctx.paths, env_name)?.cfg;
     let have = configured(&own, &a);
     if login_only(&a) && !have.is_empty() {
-        println!("{}", summary(env_name, agent, &a, &own));
+        block!("{}", summary(env_name, agent, &a, &own));
         println!(
             "nothing else to choose: {} logs in inside the env",
             a.title()
@@ -981,6 +987,33 @@ pub fn up_args(env: &str) -> [&str; 4] {
     ["up", "-e", env, "--quiet"]
 }
 
+/// Where an env's gate log stands as an agent or a shell starts, so what is said of it
+/// afterwards leaves out what `up` did.
+pub struct GateMark {
+    since: String,
+    at: Result<events::Mark>,
+}
+
+impl GateMark {
+    pub fn now(ctx: &Ctx, env: &str) -> Self {
+        let since = (chrono::Utc::now() - CLOCK_SLACK).to_rfc3339();
+        let at = events::gate_events(&ctx.rt, env, Some(&since)).map(|evs| events::Mark::of(&evs));
+        GateMark { since, at }
+    }
+
+    /// The gate's events after the mark, without the denials a `[[mute]]` hides (as in `luoto
+    /// egress`).
+    pub fn since(self, ctx: &Ctx, env: &str) -> Result<Vec<luoto_shared::events::Event>> {
+        let mut evs = self
+            .at?
+            .after(events::gate_events(&ctx.rt, env, Some(&self.since))?);
+        if let Ok(mutes) = env::mutes(ctx, env) {
+            mutes.hide(&mut evs);
+        }
+        Ok(evs)
+    }
+}
+
 /// `luoto run`: one prompt, no terminal. Lists the agent if the env doesn't, brings the env up
 /// (as a child whose output goes to stderr, with nothing to answer on), then runs the agent's
 /// headless command line: its answer on stdout or in `output`, its exit code returned, or
@@ -1038,10 +1071,7 @@ pub fn headless(
     let script = format!("exec {}", argv.join(" "));
     let dev = names::dev(env_name);
     let mark = format!("{RUN_MARK}={}", hex::encode(rand::random::<[u8; 8]>()));
-    // The gate's log as the agent starts, so the summary leaves out what `up` did.
-    let since = (chrono::Utc::now() - CLOCK_SLACK).to_rfc3339();
-    let gate_at_start =
-        events::gate_events(&ctx.rt, env_name, Some(&since)).map(|evs| events::Mark::of(&evs));
+    let gate_at_start = GateMark::now(&ctx, env_name);
     let mut cmd = ctx.rt.command();
     cmd.args(exec(&dev).user(UID).cwd("/workspace").env(&mark).argv([
         "sh",
@@ -1141,16 +1171,14 @@ pub fn headless(
     if let Some(t) = errs {
         let _ = t.join();
     }
-    let run_events = gate_at_start
-        .and_then(|at| Ok(at.after(events::gate_events(&ctx.rt, env_name, Some(&since))?)));
-    match run_events {
-        Ok(mut evs) => {
-            // Muted denials stay out, as in `luoto egress`.
-            if let Ok(mutes) = env::mutes(&ctx, env_name) {
-                mutes.hide(&mut evs);
-            }
-            eprint!("{}", events::fmt_denials(env_name, &events::denials(&evs)));
-            eprint!("{}", events::fmt_opened(env_name, &events::opened(&evs)));
+    match gate_at_start.since(&ctx, env_name) {
+        Ok(evs) => {
+            crate::progress::summary(&events::fmt_denials(
+                env_name,
+                "run",
+                &events::denials(&evs),
+            ));
+            crate::progress::summary(&events::fmt_opened(env_name, &events::opened(&evs)));
         }
         Err(e) => crate::progress::warn(&format!("no summary of the gate's denials ({e:#})")),
     }
@@ -1158,7 +1186,7 @@ pub fn headless(
     crate::disk::hint_growth(&ctx, env_name);
     if down {
         match env::down(&ctx, env_name) {
-            Ok(_) => eprintln!("env `{env_name}` stopped"),
+            Ok(_) => err!("env `{env_name}` stopped"),
             Err(e) => crate::progress::warn(&format!("env `{env_name}` not stopped ({e:#})")),
         }
     }
@@ -1268,15 +1296,17 @@ pub fn rm(env_name: &str, agent: &str) -> Result<ExitCode> {
     }
     f.remove_agent(agent)?;
     sync::reapply(&ctx, env_name)?;
-    println!(
+    out!(
         "removed {} from env `{env_name}`; its files stay in the env's home (`{}` in \
          ~/.local/bin), and its [credentials] stay in the config",
-        a.description, a.command
+        a.description,
+        a.command
     );
     Ok(ExitCode::SUCCESS)
 }
 
 /// `luoto agent run`: as `agent add` when the env doesn't have the agent ready, then run it.
+/// What the gate denied meanwhile is listed on stderr when it ends.
 pub fn run(env_name: &str, agent: &str, yolo: bool, args: &[String]) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let a = profile(agent)?;
@@ -1298,7 +1328,7 @@ pub fn run(env_name: &str, agent: &str, yolo: bool, args: &[String]) -> Result<E
     }
     // `up` asked, or without a terminal said how to set one.
     if !has_credential(&EnvFile::load(&ctx.paths, env_name)?.cfg, &a) {
-        eprintln!("Then run `luoto agent run -e {env_name} {agent}` again.");
+        err!("Then run `luoto agent run -e {env_name} {agent}` again.");
         return Ok(ExitCode::FAILURE);
     }
     let mut argv = vec![sh_quote(&a.command)];
@@ -1311,7 +1341,7 @@ pub fn run(env_name: &str, agent: &str, yolo: bool, args: &[String]) -> Result<E
         .map(|o| o.args.clone())
         .unwrap_or_default();
     argv.extend(own.iter().chain(args).map(|s| sh_quote(s)));
-    exec_login(&ctx, env_name, &format!("exec {}", argv.join(" ")))
+    session(&ctx, env_name, &format!("exec {}", argv.join(" ")))
 }
 
 /// Agent `a`'s command line for one prompt (`luoto run`), quoted: its headless arguments, the
@@ -1507,29 +1537,29 @@ model_server = "box"
         assert_eq!(
             installed_line(&EnvConfig::default(), "web", "claude", &claude),
             "Claude Code installed. It can't reach Anthropic API until it has a credential:\n  \
-             luoto agent auth -e web claude"
+             `luoto agent auth -e web claude`"
         );
         assert_eq!(
             installed_line(&EnvConfig::default(), "web", "opencode", &agent("opencode")),
             "OpenCode installed. It can't reach a model provider until it has a credential:\n  \
-             luoto agent auth -e web opencode"
+             `luoto agent auth -e web opencode`"
         );
         let kind = cfg("[credentials.anthropic]\noauth_token = \"env:T\"\nserver_tools = true");
         assert_eq!(
             installed_line(&kind, "web", "claude", &claude),
-            "Claude Code is ready: luoto agent run -e web claude"
+            "Claude Code is ready: `luoto agent run -e web claude`"
         );
         let inside = cfg("[credentials.anthropic]\nlogin_inside = true");
         assert_eq!(
             installed_line(&inside, "unsaid", "claude", &claude),
-            "Claude Code is ready: luoto agent run -e unsaid claude (it asks you to sign in on \
+            "Claude Code is ready: `luoto agent run -e unsaid claude` (it asks you to sign in on \
              its first run)"
         );
         // Once its step's summary said how it signs in, the line doesn't again.
         mark_settled("said", "claude");
         assert_eq!(
             installed_line(&inside, "said", "claude", &claude),
-            "Claude Code is ready: luoto agent run -e said claude"
+            "Claude Code is ready: `luoto agent run -e said claude`"
         );
     }
 

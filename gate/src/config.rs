@@ -44,6 +44,10 @@ pub struct Config {
     /// Apple: private addresses a rule allows are dialed by the host, over connections it opens
     /// to this socket (`hostdial.rs`).
     pub host_dial: Option<PathBuf>,
+    /// Where [`luoto_shared::THIS_MACHINE`] is, without asking DNS: `route` (the gate's default
+    /// gateway, which is this machine on Apple's VM network) or an address. None: resolved as
+    /// any name, which podman's and Docker's hosts files answer.
+    pub host_gateway: Option<String>,
     /// Events go to this file (`eventlog.rs`) instead of stdout, kept under `events_mb`.
     pub events_file: Option<PathBuf>,
     pub events_mb: u64,
@@ -116,6 +120,7 @@ impl Config {
             ),
             vault_uplink: var("LUOTO_VAULT_UPLINK").map(PathBuf::from),
             host_dial: var("LUOTO_HOST_DIAL").map(PathBuf::from),
+            host_gateway: var("LUOTO_HOST_GATEWAY"),
             events_file: var("LUOTO_EVENTS_FILE").map(PathBuf::from),
             events_mb: var("LUOTO_EVENTS_MB")
                 .map(|v| v.parse())

@@ -100,6 +100,11 @@ pub fn accent() -> Option<Accent> {
     }
 }
 
+/// Whether the dot and `…` render here: a UTF-8 locale.
+pub fn unicode() -> bool {
+    Look::detect().unicode
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Colors {
     True,
@@ -223,14 +228,24 @@ pub fn note(msg: &str) {
 }
 
 fn labelled(label: &str, msg: &str) {
-    let s = text::hang(label, msg, text::columns());
+    let style = crate::style::err();
+    let s = style.commands(&text::hang(label, msg, text::columns()));
+    // The label is the line's start, so styling it moves nothing.
+    let s = match (label, s.strip_prefix(label)) {
+        ("warning: ", Some(rest)) => format!("{}{rest}", style.warning(label)),
+        (_, Some(rest)) => format!("{}{rest}", style.dim(label)),
+        _ => s,
+    };
     say(|| eprintln!("{s}"));
 }
 
-/// Run `f` as a step: `label…` on a line of its own, then on a terminal the spinner, until it
-/// ends. A step inside another shows its own time.
+/// Run `f` as a step: `label…` on a line of its own (wrapped to the terminal, the lines after
+/// its first indented), then on a terminal the spinner, until it ends. A step inside another
+/// shows its own time.
 pub fn step<T>(label: &str, f: impl FnOnce() -> T) -> T {
-    say(|| println!("{label}…"));
+    let line = text::wrap(&format!("{label}…"), "  ", text::columns());
+    let line = crate::style::out().commands(line.strip_prefix("  ").unwrap_or(&line));
+    say(|| println!("{line}"));
     if !spins() {
         return f();
     }
@@ -458,6 +473,22 @@ fn rest(
         out.extend_from_slice(format!("  {HINT}").as_bytes());
     }
     out
+}
+
+/// What a session ends with (what the gate denied meanwhile, …) on stderr, apart from what the
+/// session printed last: after a blank line, its first line bold behind the dot in the accent
+/// on a terminal with colors. Nothing for an empty `text`.
+pub fn summary(text: &str) {
+    let Some((head, rest)) = text.split_once('\n') else {
+        return;
+    };
+    let style = crate::style::err();
+    eprint!(
+        "\n{}{}\n{}",
+        style.dot(),
+        style.head(head),
+        style.commands(rest)
+    );
 }
 
 fn paint(e: &mut impl Write, color: Option<Color>, s: &str) -> std::io::Result<()> {

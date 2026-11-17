@@ -115,7 +115,7 @@ pub fn set(paths: &Paths, env: &str, name: &str, value: &Value) -> Result<()> {
 /// Ask where the secret `name` is kept and write its ref; whether it wrote one.
 pub fn ask(ctx: &Ctx, mode: Mode, env: &str, name: &str, own: &EnvConfig) -> Result<bool> {
     check_free(ctx, env, name)?;
-    println!(
+    out_text!(
         "{}",
         text::wrap(
             &format!(
@@ -176,7 +176,7 @@ fn summary(env: &str, name: &str, value: &Value, replaced: Option<String>) {
         rows.push(("replaces", r));
     }
     rows.push(("change it", change));
-    println!("{}", crate::prompt::summary(&title, &rows));
+    block!("{}", crate::prompt::summary(&title, &rows));
 }
 
 /// Apply the env's variables to it if it runs (new shells there see them, without what was
@@ -298,7 +298,7 @@ pub fn list(env: &str) -> Result<ExitCode> {
     let cfg = EnvFile::load(&Paths::get()?, env)?.cfg;
     let vars = of(&cfg);
     if vars.is_empty() {
-        println!(
+        out!(
             "env `{env}` has no variables (`luoto var set NAME=value`, or `luoto var set NAME` \
              for a secret)"
         );
@@ -357,7 +357,7 @@ pub fn rm_cmd(env: &str, name: &str) -> Result<ExitCode> {
             display(name)
         );
     }
-    println!("removed `{name}` from env `{env}`");
+    out!("removed `{name}` from env `{env}`");
     finish(&ctx, env, name, true);
     Ok(ExitCode::SUCCESS)
 }

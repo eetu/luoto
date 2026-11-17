@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.5.3 (2026-11-17)
+
+- **Security, Apple's `container`:** a model server on this machine was reached through a DNS
+  lookup of `host.docker.internal`, which Apple's VMs don't define, so a resolver on your
+  network could answer with another machine, and the server's token and the agent's prompts
+  went there over plain HTTP. The gate now dials its own gateway (this machine) for it and
+  never asks DNS; the next `luoto up` recreates each gate. podman and Docker were not
+  affected.
+- `luoto agent run` and `luoto shell` list what the gate denied during the session when it
+  ends, as `luoto run` does: each host, how often, the requests it refused and why. The
+  summary stands apart from the session's last output.
+- `luoto egress`, `luoto list`, `luoto agent list` and the rules of `luoto status` fit 80
+  columns: columns are as wide as what they hold, a host's hint is under it (its command on
+  a line of its own when long), an env's presets are under it, and rules stand under the
+  preset or source that made them, their paths under each. So do the `luoto init` proposal
+  and a step's line (`installing …`).
+- Claude Code runs with `CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1`: its first
+  start in an env no longer asks for its plugin marketplace, which the gate denied
+  (`downloads.claude.ai`, SSH to `github.com`).
+- `luoto agent run claude --yolo` starts without Claude Code's bypass mode notice, which
+  asks you to confirm that it runs in a sandbox with restricted internet access.
+- `luoto init`, `up` and `pull` show folders and files in your home as `~/…`, and the note
+  that ends `init` fits 80 columns.
+- Output is easier to scan on a terminal: what a step made or changed is bold, keys and
+  column headings are dim, the commands a line names are bold, the answer Enter picks stands
+  out in `[Y/n]`, and `luoto:` before an error is red, `warning:` yellow. Piped output and
+  `NO_COLOR` stay plain.
+- `luoto allow` ends with a summary that fits 80 columns: access, expiry, rule and the
+  command that revokes it. A rule's expiry is in local time in `allow`, `approve`, `status`
+  and the review of a `luoto.toml`, as open egress shows its own; `luoto logs` shows local
+  time too, and `sandbox status` in an env shows the env's zone when it has one.
+
 ## 0.5.2 (2026-11-17)
 
 - **Virtual workspaces:** `luoto init --virtual --name <env>` makes an env with no folder of

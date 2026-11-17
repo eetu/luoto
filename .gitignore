@@ -5,3 +5,4 @@
 # Playwright
 frontend/test-results/
 frontend/playwright-report/
+__pycache__/

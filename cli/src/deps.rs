@@ -537,7 +537,7 @@ pub fn ensure(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str) -> Result<()> {
             return Err(err);
         }
         let note = format!("the install was denied: {}", denied.join(", "));
-        println!("{note}");
+        out_text!("{note}");
         e.log.note(&note);
         if asked
             || !confirm(&format!(

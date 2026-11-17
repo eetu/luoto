@@ -35,7 +35,7 @@ pub fn apply(ctx: &Ctx, env: &str, cfg: &EnvConfig, home: &str, quiet: bool) -> 
                 crate::progress::say(|| {
                     println!(
                         "copied {n} file(s) from {} into the env's home",
-                        ctx.paths.home_files().display()
+                        crate::ssh::tilde(&ctx.paths.home_files())
                     )
                 });
             }
