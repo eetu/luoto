@@ -585,9 +585,8 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
                 }
                 cloned_workspace = true;
             }
-            (None, None) => {
-                bail!("env `{env}` has no folder or remote (`[workspace] dir` or `url`)")
-            }
+            // A virtual workspace: /workspace holds its repos, if any, and nothing of its own.
+            (None, None) => {}
         }
         // The install question outlives this `up`: one cut short, or unable to ask, leaves it
         // for the next.

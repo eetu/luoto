@@ -795,6 +795,11 @@ enum Source {
 }
 
 fn source(running: bool, ws: &crate::config::Workspace) -> Source {
+    // A workspace of repos has no luoto.toml of its own: one at /workspace is only what the
+    // sandbox wrote there.
+    if ws.dir.is_none() && ws.url.is_none() {
+        return Source::Nothing;
+    }
     if running {
         return Source::Env;
     }
@@ -1305,6 +1310,12 @@ credentials = ["anthropic"]
             ..Default::default()
         };
         assert_eq!(source(false, &gone), Source::Nothing);
+        // A workspace of repos has none, running or not: /workspace is the sandbox's.
+        let repos = crate::config::Workspace {
+            repos: [("api".to_string(), Default::default())].into(),
+            ..Default::default()
+        };
+        assert_eq!(source(true, &repos), Source::Nothing);
     }
 
     const FULL_ENV: &str = r#"

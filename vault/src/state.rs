@@ -138,7 +138,13 @@ impl Vault {
         for _ in 0..MINT_ATTEMPTS {
             let (spec, secret, generation) = {
                 let inner = self.lock();
-                let entry = inner.envs.get(env).ok_or(CredentialError::NotBound)?;
+                // A vault that holds no secrets has restarted or been locked: it lost the env's
+                // bindings with them, and `up` or `vault unlock` brings both back.
+                let entry = inner.envs.get(env).ok_or(if inner.secrets.is_empty() {
+                    CredentialError::Locked
+                } else {
+                    CredentialError::NotBound
+                })?;
                 let spec = entry
                     .bindings
                     .get(binding)
@@ -533,6 +539,22 @@ mod tests {
         update.insert(sec1.to_string(), "val1_updated".to_string());
         assert_eq!(v.load(update, true), 1);
         assert_eq!(v.lock().secrets[sec1].as_str(), "val1_updated");
+    }
+
+    #[tokio::test]
+    async fn a_restarted_vault_says_locked_not_unbound() {
+        let v = Vault::new(client_tls());
+        // Fresh (or locked): it knows no env and holds nothing.
+        assert_eq!(
+            v.issue("env1", "anthropic").await.unwrap_err(),
+            CredentialError::Locked
+        );
+        // Unlocked, an env or binding it lacks is unbound.
+        v.load(BTreeMap::from([("k".into(), "v".into())]), false);
+        assert_eq!(
+            v.issue("env1", "anthropic").await.unwrap_err(),
+            CredentialError::NotBound
+        );
     }
 
     #[tokio::test]

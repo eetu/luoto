@@ -26,6 +26,14 @@ pub struct InitOpts {
     /// Env name (default: the folder's or repository's name).
     #[arg(long)]
     pub name: Option<String>,
+    /// No folder of its own: a virtual workspace, whose /workspace holds only the env's repos
+    /// side by side (`--repo` now, or `luoto repo add` later). Needs --name.
+    #[arg(long = "virtual", requires = "name", conflicts_with_all = ["dir", "branch"])]
+    pub virtual_ws: bool,
+    /// With --repo for a folder that is a git repository: put the repos inside it anyway
+    /// (kept out of its `git status`) rather than make a virtual workspace.
+    #[arg(long, requires = "repos", conflicts_with = "virtual_ws")]
+    pub inside: bool,
     /// The branch a remote's clone checks out (default: the remote's).
     #[arg(long)]
     pub branch: Option<String>,
@@ -183,25 +191,53 @@ pub struct Proposal {
 /// nothing on disk. A remote is read nowhere: its clone, inside the env, says what it needs
 /// on the first `up`.
 pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
-    let (name, mut workspace) = match source(o.dir.as_deref(), &std::env::current_dir()?)? {
-        Source::Folder(dir) => {
-            if o.branch.is_some() {
-                bail!("--branch is for a remote; a folder is copied as it is");
+    let virtual_ws = o.virtual_ws;
+    let (name, mut workspace) = if virtual_ws {
+        let name = o.name.clone().unwrap_or_default();
+        config::validate_name(&name)?;
+        (name, Workspace::default())
+    } else {
+        match source(o.dir.as_deref(), &std::env::current_dir()?)? {
+            Source::Folder(dir) => {
+                if o.branch.is_some() {
+                    bail!("--branch is for a remote; a folder is copied as it is");
+                }
+                new_workspace(paths, dir.as_deref(), o.name.as_deref())?
             }
-            new_workspace(paths, dir.as_deref(), o.name.as_deref())?
-        }
-        Source::Remote(url) => {
-            if o.no_project {
-                bail!(
-                    "--no-project is for a folder: a remote's luoto.toml is shown on the first \
+            Source::Remote(url) => {
+                if o.no_project {
+                    bail!(
+                        "--no-project is for a folder: a remote's luoto.toml is shown on the first \
                      `up`, and applies only if you say yes"
-                );
+                    );
+                }
+                remote_workspace(&url, o.branch.as_deref(), o.name.as_deref())?
             }
-            remote_workspace(&url, o.branch.as_deref(), o.name.as_deref())?
         }
     };
     let remote = workspace.url.is_some();
     let dir = std::path::PathBuf::from(workspace.dir.as_deref().unwrap_or_default());
+    // Repos in a folder that is a repository itself would nest; a remote is a launchpad or
+    // not only once its luoto.toml is read, in the env.
+    if !o.repos.is_empty()
+        && !o.inside
+        && !remote
+        && repos::nested_in_repo(&workspace, false, &name, "").is_some()
+    {
+        let folder = workspace.dir.as_deref().unwrap_or_default();
+        let repos: Vec<String> = o
+            .repos
+            .iter()
+            .map(|r| format!(" --repo {}", crate::text::sh_quote(r)))
+            .collect();
+        bail!(
+            "{} is a git repository, so its repos would sit inside it. For repos side by side: \
+             `luoto init --virtual --name {name} --repo {}{}`. `--inside` nests them anyway",
+            display(folder),
+            crate::text::sh_quote(folder),
+            repos.concat()
+        );
+    }
     for spec in &o.repos {
         let src = repos::parse_source(spec)?;
         let repo_name = repos::default_name(&src)?;
@@ -226,8 +262,10 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
         }
     }
     repos::check(&workspace)?;
-    let new_folder = !remote && std::fs::read_dir(&dir).map_or(true, |mut d| d.next().is_none());
-    let (project, project_error) = if o.no_project || new_folder || remote {
+    // A virtual workspace has no folder to make or read: only its repos are detected.
+    let new_folder =
+        !remote && !virtual_ws && std::fs::read_dir(&dir).map_or(true, |mut d| d.next().is_none());
+    let (project, project_error) = if o.no_project || new_folder || remote || virtual_ws {
         (None, None)
     } else {
         match project::read_host(&dir)
@@ -239,7 +277,7 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
     };
     // The folder and the host folders of its repos, each repo's files under its name.
     let mut roots: Vec<(String, std::path::PathBuf)> = Vec::new();
-    if !new_folder && !remote {
+    if !new_folder && !remote && !virtual_ws {
         roots.push((String::new(), dir.clone()));
     }
     roots.extend(
@@ -387,6 +425,10 @@ fn print_proposal(p: &Proposal, specs: &[String], asks: bool) {
         println!(
             "  workspace  copy: the env works on its own copy; changes leave by git push or `luoto pull`"
         );
+    } else if ws.dir.is_none() {
+        println!(
+            "  workspace  virtual: no folder of its own; /workspace holds its repos side by side"
+        );
     } else {
         println!(
             "  workspace  new folder, created now: the env starts empty, and `luoto pull` fills the folder"
@@ -533,16 +575,19 @@ pub fn isolation_text(
 }
 
 /// The env whose folder is `dir` itself.
+/// The env whose folder `dir` is, or one of whose repos it is: `init` there detects anew for
+/// that env rather than make a second one for the same folder.
 fn env_at(paths: &Paths, dir: &Path) -> Result<Option<String>> {
     for name in config::list_envs(paths)? {
         let Ok(f) = EnvFile::load(paths, &name) else {
             continue;
         };
-        if f.cfg
-            .workspace
+        let ws = &f.cfg.workspace;
+        let mut folders = ws
             .dir
-            .is_some_and(|d| workspace::canonical(&d).is_ok_and(|d| d == dir))
-        {
+            .iter()
+            .chain(ws.repos.values().filter_map(|r| r.dir.as_ref()));
+        if folders.any(|d| workspace::canonical(d).is_ok_and(|d| d == dir)) {
             return Ok(Some(name));
         }
     }
@@ -611,7 +656,8 @@ pub fn make_folder(p: &mut Proposal) -> Result<()> {
 /// Create the proposed env: its folder, its config, and the answer to the folder's
 /// luoto.toml (`accept_project`).
 pub fn create(ctx: &Ctx, p: &mut Proposal, accept_project: bool, quiet: bool) -> Result<()> {
-    if p.cfg.workspace.url.is_none() {
+    // A virtual workspace (neither a folder nor a remote) has no folder to make.
+    if p.cfg.workspace.url.is_none() && p.cfg.workspace.dir.is_some() {
         make_folder(p)?;
     }
     // The window starts now, not when it was proposed.
@@ -859,9 +905,10 @@ pub fn offer(
         );
     }
     if !yes && !crate::prompt::interactive() {
-        match &file.cfg.workspace.url {
-            Some(u) => println!("  `luoto init {} --yes` adds them", display(u)),
-            None => println!("  `luoto init --yes` in the env's folder adds them"),
+        match (&file.cfg.workspace.url, &file.cfg.workspace.dir) {
+            (Some(u), _) => println!("  `luoto init {} --yes` adds them", display(u)),
+            (None, Some(_)) => println!("  `luoto init --yes` in the env's folder adds them"),
+            (None, None) => println!("  `luoto init --yes` in a repo's folder adds them"),
         }
         return Ok(false);
     }
@@ -935,6 +982,32 @@ mod tests {
         .unwrap();
         let url = origin_url(dir.path()).unwrap();
         assert_eq!(repos::github_repo(&url).as_deref(), Some("Eetu/luoto"));
+    }
+
+    #[test]
+    fn a_virtual_workspace_has_no_folder_only_its_repos() {
+        let paths = Paths {
+            config: tempfile::tempdir().unwrap().keep(),
+            data: tempfile::tempdir().unwrap().keep(),
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let api = tmp.path().join("api");
+        std::fs::create_dir(&api).unwrap();
+        std::fs::write(api.join("package.json"), "{}").unwrap();
+        let o = InitOpts {
+            name: Some("platform".into()),
+            virtual_ws: true,
+            repos: vec![api.display().to_string()],
+            ..Default::default()
+        };
+        let p = propose(&paths, &o).unwrap();
+        assert_eq!(p.name, "platform");
+        assert_eq!(p.cfg.workspace.dir, None);
+        assert_eq!(p.cfg.workspace.url, None);
+        assert_eq!(p.cfg.workspace.repos.len(), 1);
+        assert!(!p.new_folder && p.project.is_none());
+        // Its repos' files are detected as a folder's are.
+        assert!(p.cfg.presets.contains(&"npm".to_string()));
     }
 
     #[test]

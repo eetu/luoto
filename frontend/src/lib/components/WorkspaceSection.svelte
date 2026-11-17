@@ -58,6 +58,12 @@
       folder:
     </p>
     <CopyCommand cmd={`luoto pull -e ${app.env} --to <new folder>`} />
+  {:else if !dir}
+    <p class="label">workspace</p>
+    <p class="small">virtual: no folder of its own</p>
+    <p class="small muted">
+      /workspace holds its repos side by side, each pulled to its own folder
+    </p>
   {:else}
     <p class="label">folder</p>
     <p class="small path">{dir ?? "none"}</p>

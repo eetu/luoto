@@ -94,6 +94,8 @@ pub fn name_from(s: &str) -> String {
 /// the same depth an env's own folder over another's repo.
 pub fn env_for_dir(paths: &Paths, cwd: &Path) -> Result<Option<String>> {
     let mut best: Option<((usize, bool), String)> = None;
+    // Other envs with the same folder, equally close: which one is meant, only `-e` says.
+    let mut tied: Vec<String> = Vec::new();
     for name in config::list_envs(paths)? {
         let Ok(f) = EnvFile::load(paths, &name) else {
             continue;
@@ -109,11 +111,28 @@ pub fn env_for_dir(paths: &Paths, cwd: &Path) -> Result<Option<String>> {
             let Ok(dir) = canonical(dir) else { continue };
             if cwd.starts_with(&dir) {
                 let rank = (dir.components().count(), own);
-                if best.as_ref().is_none_or(|(r, _)| rank > *r) {
-                    best = Some((rank, name.clone()));
+                match &best {
+                    Some((r, n)) if rank == *r && *n != name => tied.push(name.clone()),
+                    Some((r, _)) if rank <= *r => {}
+                    _ => {
+                        best = Some((rank, name.clone()));
+                        tied.clear();
+                    }
                 }
             }
         }
+    }
+    if let Some((_, first)) = &best
+        && !tied.is_empty()
+    {
+        bail!(
+            "envs {} all have this folder; pick one with `-e <env>`",
+            std::iter::once(first)
+                .chain(&tied)
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     Ok(best.map(|(_, n)| n))
 }
@@ -705,19 +724,23 @@ pub fn pull_targets(
             skip: Vec::new(),
         }]);
     }
-    let mut out = vec![PullTarget {
-        repo: None,
-        dest: match &to {
-            Some(t) => t.clone(),
-            None => root()?,
-        },
-        skip: ws
-            .repos
-            .keys()
-            .filter(|n| present.contains(*n))
-            .cloned()
-            .collect(),
-    }];
+    // A workspace of repos has nothing of its own to bring back: /workspace only holds them.
+    let mut out = Vec::new();
+    if ws.dir.is_some() || ws.url.is_some() {
+        out.push(PullTarget {
+            repo: None,
+            dest: match &to {
+                Some(t) => t.clone(),
+                None => root()?,
+            },
+            skip: ws
+                .repos
+                .keys()
+                .filter(|n| present.contains(*n))
+                .cloned()
+                .collect(),
+        });
+    }
     let own = ws
         .repos
         .iter()
@@ -1298,6 +1321,27 @@ mod tests {
     }
 
     #[test]
+    fn a_virtual_workspace_pulls_only_its_repos() {
+        let api = tempfile::tempdir().unwrap();
+        let ws = Workspace {
+            repos: BTreeMap::from([(
+                "api".to_string(),
+                config::Repo {
+                    dir: Some(api.path().display().to_string()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let present = BTreeSet::from(["api".to_string()]);
+        let all = pull_targets(&ws, None, None, &present).unwrap();
+        // /workspace itself is never a destination, whatever it holds.
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].repo.as_deref(), Some("api"));
+        assert_eq!(all[0].dest, api.path().canonicalize().unwrap());
+    }
+
+    #[test]
     fn pull_targets_send_each_folder_repo_home() {
         let root = tempfile::tempdir().unwrap();
         let api = tempfile::tempdir().unwrap();
@@ -1493,9 +1537,24 @@ mod tests {
         );
         // The repo's own env wins over the env it is a repo of.
         let mut own = config::EnvConfig::default();
-        own.workspace.dir = Some(api_s);
+        own.workspace.dir = Some(api_s.clone());
         EnvFile::create(&paths, "api", &own).unwrap();
         assert_eq!(env_for_dir(&paths, &sub).unwrap().as_deref(), Some("api"));
+        // Two virtual workspaces with the same repo: neither is guessed.
+        let mut virtual_ws = config::EnvConfig::default();
+        virtual_ws.workspace.repos.insert(
+            "api".into(),
+            config::Repo {
+                dir: Some(api_s),
+                ..Default::default()
+            },
+        );
+        EnvFile::create(&paths, "one", &virtual_ws).unwrap();
+        EnvFile::create(&paths, "two", &virtual_ws).unwrap();
+        std::fs::remove_file(paths.env_config("api")).unwrap();
+        std::fs::remove_file(paths.env_config("platform")).unwrap();
+        let e = env_for_dir(&paths, &sub).unwrap_err().to_string();
+        assert!(e.contains("`one`, `two` all have this folder"), "{e}");
     }
 
     #[test]

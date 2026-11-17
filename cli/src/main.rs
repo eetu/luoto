@@ -525,6 +525,10 @@ enum RepoCmd {
         /// The branch a clone checks out (default: the remote's).
         #[arg(long)]
         branch: Option<String>,
+        /// Add it even though the env's workspace is a git repository itself, so the repo sits
+        /// inside it (kept out of its `git status`).
+        #[arg(long)]
+        inside: bool,
     },
     /// Remove a repo from the env's config; its copy in the env stays.
     Rm {
@@ -804,7 +808,8 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
                 source,
                 name,
                 branch,
-            } => repos::add(&env()?, &source, name.as_deref(), branch.as_deref()),
+                inside,
+            } => repos::add(&env()?, &source, name.as_deref(), branch.as_deref(), inside),
             RepoCmd::Rm { name } => repos::rm(&env()?, &name),
             RepoCmd::Auth { repo } => repos::auth(&env()?, &repo),
         },

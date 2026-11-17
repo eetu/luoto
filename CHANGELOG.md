@@ -1,6 +1,20 @@
 # Changelog
 
-## 0.5.1 (2026-11-16)
+## 0.5.2 (2026-11-17)
+
+- **Virtual workspaces:** `luoto init --virtual --name <env>` makes an env with no folder of
+  its own, whose `/workspace` holds only its repos side by side (`--repo` now or `luoto repo
+  add` later), or nothing at all: a sandbox with nothing from your machine. `/workspace`
+  itself is never pulled, and has no `luoto.toml`.
+- **No repo inside a repo:** when the env's folder is a git repository, its first `luoto repo
+  add` (and `luoto init --repo` there) gives the `--virtual` command instead; `--inside` nests
+  it anyway. Launchpads and envs that nest repos already are unchanged.
+- **Repos:** a repo's folder can't be the env's or another repo's, or inside one; one copied
+  from a folder isn't set up over a `/workspace/<name>` the env already has; `luoto init` in a
+  repo's folder updates its env rather than make a second; two envs with the same folder ask
+  for `-e`.
+- **A restarted vault** reads as locked, with `luoto vault unlock`, rather than as a credential
+  not registered with it.
 
 - **Sign-ins with a callback to `localhost`:** every port a server in the env listens on is
   forwarded, also above 32767, where a login's callback lands (MCP servers', cloud CLIs'), so

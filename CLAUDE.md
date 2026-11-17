@@ -45,9 +45,13 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
 - Events are serde-serialized JSON lines with `seq` + `run`; never hand-format event output.
   A `[[mute]]` only hides: every view of denials (egress, UI, notifications, run summary)
   filters through `events::Mutes`.
-- Every env has a folder (`[workspace] dir`), copied into its workspace volume on the first
+- An env has a folder (`[workspace] dir`), copied into its workspace volume on the first
   `up` (`luoto init` creates a missing one), or a remote (`[workspace] url`), cloned into
-  `/workspace` inside the env on the first `up` (`repos::clone_workspace`), never both. Of a
+  `/workspace` inside the env on the first `up` (`repos::clone_workspace`), never both; or
+  neither, a virtual workspace (`luoto init --virtual`), whose `/workspace` holds only its
+  repos (maybe none), is never pulled and has no luoto.toml (`project::source`). A first repo
+  for a workspace that is itself a git repository (not a launchpad) is refused with the
+  `--virtual` way (`repos::nested_in_repo`), unless `--inside`. Of a
   clone, nothing reaches the host but `read_files` text and luoto.toml, and nothing it wrote
   runs, installs or is granted before the user's yes to its luoto.toml (`project::review`)
   and to its installs (`env::ask_installs`). `workspace.rs` owns env-from-cwd resolution and

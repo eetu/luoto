@@ -125,6 +125,12 @@ pub fn project_suggest(name: &str, write: bool, force: bool) -> Result<ExitCode>
         print!("{}", crate::text::lines(&s.text));
         return Ok(ExitCode::SUCCESS);
     }
+    if cfg.workspace.dir.is_none() && cfg.workspace.url.is_none() {
+        bail!(
+            "a virtual workspace has no luoto.toml to write; `luoto project suggest -e {name}` \
+             prints one for a repository of the team's"
+        );
+    }
     let (dir, path) = match &cfg.workspace.dir {
         Some(d) => {
             let dir = workspace::canonical(d)?;
@@ -434,6 +440,18 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
             crate::text::display(url)
         );
     }
+    let ws = EnvFile::load(&ctx.paths, name)
+        .ok()
+        .map(|f| f.cfg.workspace);
+    if ws
+        .as_ref()
+        .is_some_and(|w| w.dir.is_none() && w.url.is_none())
+    {
+        println!(
+            "`{name}` is a virtual workspace: what is only in its /workspace, and its clones' \
+             work unless pushed, goes with it"
+        );
+    }
     // A state that won't load must not keep an env from being removed.
     let repos = EnvState::load(&ctx.paths, name)
         .ok()
@@ -589,7 +607,10 @@ fn from(ws: &config::Workspace) -> String {
     match (&ws.dir, &ws.url) {
         (Some(d), _) => crate::ssh::tilde(std::path::Path::new(d)),
         (None, Some(u)) => crate::text::display(u),
-        (None, None) => "-".into(),
+        (None, None) => match ws.repos.len() {
+            1 => "1 repo".into(),
+            n => format!("{n} repos"),
+        },
     }
 }
 
@@ -652,12 +673,26 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
                     .unwrap_or_default()
             ),
         ),
-        (dir, _) => (
+        (None, None) => (
+            "workspace",
+            if ws.repos.values().any(|r| r.dir.is_some()) {
+                format!(
+                    "virtual: no folder of its own; /workspace holds its repos (`luoto pull -e \
+                     {name}` brings each copied from a folder back to it)"
+                )
+            } else if ws.repos.is_empty() {
+                "virtual: no folder of its own, nothing from this machine; `luoto repo add` adds \
+                 repos"
+                    .to_string()
+            } else {
+                "virtual: no folder of its own; /workspace holds its clones, whose work leaves by \
+                 git push"
+                    .to_string()
+            },
+        ),
+        (Some(dir), _) => (
             "folder",
-            format!(
-                "{} (copied in; `luoto pull -e {name}` brings changes back)",
-                dir.as_deref().unwrap_or("none")
-            ),
+            format!("{dir} (copied in; `luoto pull -e {name}` brings changes back)"),
         ),
     });
     let ca_dir = ctx.paths.env_state(name);
