@@ -35,7 +35,9 @@ env's name and its current rules.
   feature branches to one GitHub repository). Protected branches, tags, workflow files and
   GitHub Actions are off-limits.
 - **Files.** Only this container exists; the project is in `/workspace`, and related
-  repositories the user added are folders in it, each with its own git remote. Folders
+  repositories the user added are folders in it, each with its own git remote (when
+  `/workspace` is not a repository itself, it only holds them, and anything written directly
+  in it never leaves this container). Folders
   the user shared from their machine are under `/shares`, read-only. `/workspace` and
   your home directory persist; the rest of the container's filesystem is reset when luoto
   recreates it. `/workspace` may exist only here (an env cloned from a remote has no copy on

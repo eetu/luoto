@@ -736,7 +736,10 @@ fn summary(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) -> Vec<String>
             ),
         ),
         (None, Some(u)) => line("remote", display(u)),
-        _ => {}
+        (None, None) => line(
+            "workspace",
+            "virtual: no folder of its own, only its repos".into(),
+        ),
     }
     for (n, r) in &ws.repos {
         match (&r.dir, &r.url) {

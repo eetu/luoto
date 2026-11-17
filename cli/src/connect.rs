@@ -113,9 +113,10 @@ fn pick_editor(ctx: &Ctx, with: Option<&str>) -> Result<Editor> {
         .or_else(|| ctx.global.editor.clone())
     {
         Some(n) => n,
+        // An editor on this machine; a terminal workspace in the env only when asked for.
         None => profiles::editor_names()
             .filter_map(profiles::editor)
-            .find(|e| e.launch.first().is_some_and(|p| on_path(p)))
+            .find(|e| !e.in_env() && e.launch.first().is_some_and(|p| on_path(p)))
             .map_or_else(|| "ssh".to_string(), |e| e.name),
     };
     profiles::editor(&name).with_context(|| {
@@ -128,6 +129,49 @@ fn pick_editor(ctx: &Ctx, with: Option<&str>) -> Result<Editor> {
 
 /// Open the env in an editor over SSH: the editor's window runs on the host; its language
 /// servers, extensions, tasks and terminals run in the sandbox.
+/// How long an install in the env has the access it needs.
+const TOOL_INSTALL_FOR: chrono::TimeDelta = chrono::TimeDelta::minutes(15);
+
+/// Install `tool` in the env with mise unless it has it: the presets that serve it open for the
+/// install only (as for toolchains), and it runs as the env's user, on its login PATH.
+fn ensure_tool(
+    ctx: &Ctx,
+    env: &str,
+    user: &str,
+    tool: &luoto_shared::profiles::EditorTool,
+) -> Result<()> {
+    let dev = names::dev(env);
+    let program = crate::text::sh_quote(&tool.program);
+    if ctx
+        .rt
+        .exec_sh(&dev, user, &format!("command -v {program} >/dev/null"))
+    {
+        return Ok(());
+    }
+    let cfg = crate::config::EnvFile::load(&ctx.paths, env)?.cfg;
+    let presets = crate::deps::install_presets([tool.mise.as_str()], &cfg.presets);
+    let rules: Vec<luoto_shared::policy::Rule> = presets
+        .iter()
+        .filter_map(|p| luoto_shared::presets::get(p))
+        .flat_map(|p| p.rules)
+        .collect();
+    let install = format!("mise use -g --yes {}", crate::text::sh_quote(&tool.mise));
+    let args = crate::runtime::exec(&dev).user(user).login_sh(&install);
+    let note = format!("installing {} in `{env}`", tool.program);
+    let status = crate::progress::step(&note, || {
+        crate::sync::with_grants(ctx, env, &rules, TOOL_INSTALL_FOR, &note, || {
+            crate::progress::tool(&ctx.rt, &args, &|_| {})
+        })
+    })??;
+    if !status.success() {
+        bail!(
+            "{} didn't install in `{env}`; `luoto egress -e {env}` shows what the gate refused",
+            tool.program
+        );
+    }
+    Ok(())
+}
+
 pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     ensure_running(&ctx, name)?;
@@ -176,6 +220,9 @@ pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
         );
         return Ok(ExitCode::SUCCESS);
     }
+    if let Some(tool) = &editor.tool {
+        ensure_tool(&ctx, name, &user, tool)?;
+    }
     if let Some(hint) = &editor.hint {
         println!("{hint}");
     }
@@ -190,6 +237,8 @@ pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
         .status()
     {
         Ok(s) if s.success() => Ok(ExitCode::SUCCESS),
+        // It ran in the env and said why it stopped there.
+        Ok(_) if editor.in_env() => Ok(ExitCode::FAILURE),
         _ => {
             println!(
                 "could not start `{}`; install its command-line launcher, or run: {}",

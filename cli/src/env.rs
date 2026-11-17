@@ -585,9 +585,8 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
                 }
                 cloned_workspace = true;
             }
-            (None, None) => {
-                bail!("env `{env}` has no folder or remote (`[workspace] dir` or `url`)")
-            }
+            // A virtual workspace: /workspace holds its repos, if any, and nothing of its own.
+            (None, None) => {}
         }
         // The install question outlives this `up`: one cut short, or unable to ask, leaves it
         // for the next.
@@ -746,11 +745,20 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
                 .collect();
             println!("  ports:  {}", ports.join("  "));
         }
-        let editors: Vec<&str> = luoto_shared::profiles::editor_names().collect();
+        let (in_env, editors): (Vec<_>, Vec<_>) = luoto_shared::profiles::editor_names()
+            .filter_map(luoto_shared::profiles::editor)
+            .partition(|e| e.in_env());
+        let names = |es: &[luoto_shared::profiles::Editor]| {
+            es.iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>()
+                .join("|")
+        };
         println!("  shell:   luoto shell -e {env}");
+        println!("  agents:  luoto open -e {env} --with {}", names(&in_env));
         println!(
             "  editor:  luoto open -e {env}   (or --with {})",
-            editors.join("|")
+            names(&editors)
         );
         println!("  egress:  luoto egress -e {env}");
         if let Some(until) = open {

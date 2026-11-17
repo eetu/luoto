@@ -247,6 +247,52 @@ pub fn github_repo(url: &str) -> Option<String> {
     shorthand(path).map(|(o, r)| format!("{o}/{r}"))
 }
 
+/// Why a first repo for this workspace isn't added: the workspace is itself a git repository
+/// (a folder with `.git`, or a remote's clone) and not a launchpad (whose `luoto.toml` lists
+/// repos: holding them is what it is for), so the repo would sit inside another, which confuses
+/// git and the tools on it. A workspace that has repos already keeps getting them. `launchpad`:
+/// the env's accepted luoto.toml lists repos. Never read from the env: the sandbox writes there.
+pub fn nested_in_repo(ws: &Workspace, launchpad: bool, env: &str, spec: &str) -> Option<String> {
+    if launchpad || !ws.repos.is_empty() {
+        return None;
+    }
+    let lists_repos = |d: &Path| {
+        project::read_host(d)
+            .ok()
+            .flatten()
+            .and_then(|t| project::parse(&t).ok())
+            .is_some_and(|p| !p.repos.is_empty())
+    };
+    let (what, from) = match (&ws.dir, &ws.url) {
+        (Some(d), _) => {
+            let dir = workspace::canonical(d).ok()?;
+            if !dir.join(".git").exists() || lists_repos(&dir) {
+                return None;
+            }
+            (format!("{} is a git repository", display(d)), display(d))
+        }
+        (None, Some(u)) => (
+            format!("the env's clone of {} is a git repository", display(u)),
+            display(u),
+        ),
+        (None, None) => return None,
+    };
+    let (out, rm) = if ws.dir.is_some() {
+        (
+            format!("git push, or `luoto pull -e {env}`"),
+            format!("`luoto rm {env}`"),
+        )
+    } else {
+        ("git push".to_string(), format!("`luoto rm {env}`"))
+    };
+    Some(format!(
+        "{what}, so this repo would sit inside it. For repos side by side, make a virtual \
+         workspace: bring the env's work out ({out}), then {rm} and `luoto init --virtual --name \
+         {env} --repo {from} --repo {}`. `--inside` nests it anyway",
+        sh_quote(spec)
+    ))
+}
+
 /// The env config's workspace is well-formed: a host folder (`dir`) or a remote (`url`, maybe
 /// with a `branch`), not both; and its repos have valid names that stay distinct on a
 /// case-insensitive host, each a folder or a remote in the same way.
@@ -258,12 +304,26 @@ pub fn check(ws: &Workspace) -> Result<()> {
             .chain(ws.repos.iter().filter_map(|(n, r)| {
                 Some((format!("[workspace.repos.{}]", display(n)), r.dir.as_ref()?))
             }));
-    for (at, d) in folders {
+    let folders: Vec<(String, &String)> = folders.collect();
+    for (at, d) in &folders {
         if workspace::network_path(d) {
             bail!(
                 "{at}: `{}` is on another machine; `dir` is a folder on this one",
                 display(d)
             );
+        }
+    }
+    // No folder is another's or inside it: each is pulled back on its own, and two pulls into
+    // one tree would overwrite each other.
+    let named: Vec<(&String, Vec<String>)> = folders
+        .iter()
+        .filter_map(|(at, d)| Some((at, text_names(d).ok()?)))
+        .collect();
+    for (i, (a, an)) in named.iter().enumerate() {
+        for (b, bn) in &named[i + 1..] {
+            if an.starts_with(bn) || bn.starts_with(an) {
+                bail!("{a} and {b}: one folder is the other or inside it");
+            }
         }
     }
     match (&ws.dir, &ws.url) {
@@ -573,6 +633,17 @@ pub fn seed(ctx: &Ctx, env: &str, cfg: &EnvConfig, done: &BTreeSet<String>) -> S
                 "{name}: left out, as the env's {} has its own `{name}`; give the repo another \
                  name",
                 if ws.dir.is_some() { "folder" } else { "clone" }
+            ));
+            continue;
+        }
+        // Taken for a folder's copy, whatever is there (an earlier repo's, or what code in the
+        // env made) would be pulled into that folder.
+        if found.contains(name) && r.dir.is_some() {
+            failed.push(format!(
+                "{name}: not copied in, as /workspace/{name} was there before this repo, and \
+                 `luoto pull` would bring it to {}; delete it in the env and `luoto up -e {env}`, \
+                 or add the repo under another --name",
+                display(r.dir.as_deref().unwrap_or_default())
             ));
             continue;
         }
@@ -1958,9 +2029,14 @@ pub fn add(
     spec: &str,
     name: Option<&str>,
     branch: Option<&str>,
+    inside: bool,
 ) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let mut f = EnvFile::load(&ctx.paths, env_name)?;
+    let launchpad = project::accepted(&ctx, env_name).is_some_and(|(_, p)| !p.repos.is_empty());
+    if !inside && let Some(why) = nested_in_repo(&f.cfg.workspace, launchpad, env_name, spec) {
+        bail!("{why}");
+    }
     let src = parse_source(spec)?;
     let name = match name {
         Some(n) => n.to_string(),
@@ -2026,7 +2102,12 @@ pub fn add(
             }
         );
     }
-    if let Some(u) = &repo.url {
+    let ws = &f.cfg.workspace;
+    if let Some(u) = repo
+        .url
+        .as_ref()
+        .filter(|_| ws.dir.is_some() || ws.url.is_some())
+    {
         println!(
             "\nTo give the team the same repo, add it to the folder's luoto.toml:\n\n[repos.{name}]\nurl = \"{u}\"{}",
             repo.branch
@@ -2440,6 +2521,20 @@ repos = ["other/app"]
             ..Default::default()
         };
         assert!(check(&ws(&[("api", url("acme/api"))])).is_ok());
+        // No repo's folder is the env's, another repo's, or inside one: their pulls would overlap.
+        // Absolute on this platform: `/x` has no drive on Windows.
+        let dir = |d: &str| Repo {
+            dir: Some(if cfg!(windows) {
+                format!("C:{}", d.replace('/', "\\"))
+            } else {
+                d.into()
+            }),
+            ..Default::default()
+        };
+        assert!(check(&ws(&[("a", dir("/x")), ("b", dir("/y"))])).is_ok());
+        assert!(check(&ws(&[("a", dir("/x")), ("b", dir("/x/sub"))])).is_err());
+        assert!(check(&ws(&[("a", dir("/x")), ("b", dir("/x"))])).is_err());
+        assert!(check(&ws(&[("a", dir("/p/inner"))])).is_err());
         let both = Repo {
             dir: Some("/x".into()),
             url: Some("acme/api".into()),

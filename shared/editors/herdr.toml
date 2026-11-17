@@ -1,0 +1,7 @@
+description = "herdr, a terminal workspace for coding agents, run in the env"
+launch = ["ssh", "-t", "{host}", "exec sh -lc 'cd {path} && exec herdr'"]
+hint = "herdr and every agent it starts run in the sandbox; detach and its agents keep working, `luoto open --with herdr` again comes back."
+
+[tool]
+mise = "herdr"
+program = "herdr"

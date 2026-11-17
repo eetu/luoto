@@ -591,7 +591,8 @@ impl DenyReason {
                 format!("{host} resolves to a private/host address, which is never dialed")
             }
             DenyReason::Locked => format!(
-                "credentials for {host} are locked; the user must run `luoto vault unlock` on the host"
+                "the vault is locked (it was locked, or restarted and holds nothing yet), so no \
+                 credential for {host} can be added; the user runs `luoto vault unlock` on the host"
             ),
             DenyReason::Guard { reason } => reason.clone(),
         }

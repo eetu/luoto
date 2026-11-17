@@ -306,6 +306,27 @@ pub struct Editor {
     /// A one-time setting the editor needs, shown until its settings file has it.
     #[serde(default)]
     pub setting: Option<EditorSetting>,
+    /// A program that runs in the env (a terminal workspace attached to over SSH), installed
+    /// there with mise on first use, through the gate.
+    #[serde(default)]
+    pub tool: Option<EditorTool>,
+}
+
+impl Editor {
+    /// Whether it runs in the env (a terminal workspace over `ssh -t`) rather than on this
+    /// machine.
+    pub fn in_env(&self) -> bool {
+        self.launch.first().is_some_and(|p| p == "ssh")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditorTool {
+    /// What `mise use -g` installs (a registry name).
+    pub mise: String,
+    /// The command it provides, found on the env's login PATH once installed.
+    pub program: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -323,7 +344,8 @@ pub struct EditorSetting {
 
 const PROVIDERS: &[(&str, &str)] = embed!("providers"; "anthropic", "openai", "openrouter", "gemini", "mistral", "groq", "copilot", "antigravity", "hetzner", "upcloud", "digitalocean", "cloudflare");
 const AGENTS: &[(&str, &str)] = embed!("agents"; "claude", "opencode", "codex", "copilot", "agy");
-const EDITORS: &[(&str, &str)] = embed!("editors"; "zed", "code", "cursor", "ssh");
+const EDITORS: &[(&str, &str)] =
+    embed!("editors"; "zed", "code", "cursor", "ssh", "herdr", "zellij", "tmux", "claude-squad");
 
 /// Editors in the order `luoto open` tries them when none is configured.
 pub fn editor_names() -> impl Iterator<Item = &'static str> {
@@ -366,8 +388,15 @@ mod tests {
                     .replace("{path}", "");
                 assert!(!rest.contains('{'), "{name}: unknown placeholder in {a}");
             }
+            // A program installed in the env is what its launch runs there.
+            if let Some(t) = &e.tool {
+                assert!(!t.mise.is_empty(), "{name}");
+                let runs = e.launch.last().is_some_and(|c| c.contains(&t.program));
+                assert!(runs, "{name}: launch doesn't run {}", t.program);
+            }
         }
         assert!(editor("ssh").unwrap().launch.is_empty());
+        assert!(editor("tmux").unwrap().tool.is_none(), "in the image");
     }
 
     /// The placeholders pass the checks the clients make before sending a token.

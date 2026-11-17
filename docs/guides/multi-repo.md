@@ -36,6 +36,36 @@ url = "acme/web"                # a remote
 branch = "develop"              # default: the remote's
 ```
 
+## A virtual workspace
+
+An env needn't have a folder of its own. `--virtual` makes one whose `/workspace` holds only
+its repos, side by side, with nothing created on your machine:
+
+```console
+$ luoto init --virtual --name platform --repo ~/dev/api --repo acme/web
+$ luoto repo add ~/dev/lib -e platform      # more, one at a time
+```
+
+```toml
+[workspace.repos.api]
+dir = "/Users/me/dev/api"
+
+[workspace.repos.web]
+url = "acme/web"
+```
+
+`/workspace` itself is never pulled, whatever is written there; `luoto pull` brings each repo
+copied from a folder back to that folder. Commands in a repo's folder find the env, and the
+env's own file is its only config: there is no `luoto.toml` of the workspace. Without
+`--repo` it starts empty, a sandbox with nothing from your machine (an agent's scratch space).
+
+When the env's folder is a git repository itself, its first `luoto repo add` (and `luoto init`
+with `--repo` there) stops and gives the `--virtual` command instead, since the repo would
+otherwise sit inside it. `--inside` nests it anyway; a launchpad, whose `luoto.toml` lists
+repos, takes them as before. An env made that way can't be turned virtual in place: bring its
+work out (`git push`, `luoto pull`), `luoto rm` it, and `luoto init --virtual` under the same
+name.
+
 ## From a launchpad
 
 A launchpad is a repository that holds a `luoto.toml` listing the remotes, and usually a

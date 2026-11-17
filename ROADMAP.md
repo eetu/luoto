@@ -22,6 +22,10 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
 
 ## Workflow
 
+- **Turn an env virtual in place,** its folder moved beside its repos inside the volume: a
+  marker every command finishes or refuses on, refused while stopped once seeded, dotfiles
+  and a planted symlink at the target handled, the accepted luoto.toml dropped, sessions
+  told to restart. Until then: recreate it with `luoto init --virtual`.
 - **Agent status for OpenCode,** as Claude Code and Codex report it (OSC 7501).
 - **An env as a machine for agent managers** that reach machines over SSH: through luoto's SSH,
   helpers they start run inside the env, behind its gate.
