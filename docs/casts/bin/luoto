@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# The `luoto` a cast types: the binary under test ($LUOTO_CAST_BIN, default luoto-dev), with what
+# a cast needs done out of sight, so the screen shows only commands a viewer would run:
+# - before an env with Claude first comes up (`init --agent`, `up -e <env>`, `agent run`), its
+#   Claude answers from canned.py, where a first run asks for Claude's credential instead;
+# - after `up -e <env>`, herdr starts as one that has seen its settings.
+set -u
+bin=${LUOTO_CAST_BIN:-luoto-dev}
+
+env=() prev="" agent="" no_up=""
+for a in "$@"; do
+  [ "$prev" = "-e" ] && env=(-e "$a")
+  [ "$a" = "--agent" ] && agent=1
+  [ "$a" = "--no-up" ] && no_up=1
+  prev=$a
+done
+case "${1:-} ${2:-}" in
+  "init "*)
+    [ -n "$agent" ] && [ -z "$no_up" ] || exec "$bin" "$@"
+    # The env's file has to exist before it can name the canned server: init, then up.
+    "$bin" "$@" --no-up || exit
+    ;;
+  "up "*) [ ${#env[@]} -gt 0 ] || exec "$bin" "$@" ;;
+  "agent run") ;;
+  *) exec "$bin" "$@" ;;
+esac
+
+# In the env, out of sight.
+inside() {
+  "$bin" shell ${env[@]+"${env[@]}"} -- "$@" </dev/null >/dev/null 2>&1
+}
+
+file=$("$bin" status ${env[@]+"${env[@]}"} | awk '$1 == "config" {print $2}')
+if ! grep -q '^\[model_servers\.cast\]' "$file"; then
+  python3 -I - "$file" <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+text = re.sub(r'(?m)^agents = \["claude"\]\n', "", text)
+text = re.sub(r'(?m)^\[credentials\.anthropic\]\nlogin_inside = true\n\n?', "", text)
+text += """
+[model_servers.cast]
+url = "http://localhost:18000"
+api = ["anthropic"]
+model = "claude-sonnet-4-5"
+context = 200000
+
+[agents.claude]
+model_server = "cast"
+"""
+open(path, "w").write(text)
+PY
+fi
+
+case "$1" in
+  init) exec "$bin" up ;;
+  agent) exec "$bin" "$@" ;;
+esac
+"$bin" "$@" || exit
+inside sh -c \
+  'mkdir -p ~/.config/herdr && printf "onboarding = false\n" >~/.config/herdr/config.toml'

@@ -42,6 +42,11 @@ clones the new repo, asking for its access the same way. More in
 Each writes the env's own file and ends with a summary: what it set, and the command that
 changes it again.
 
+A rule applies at once, to a running env: a fetch the gate denied works the next time it is
+tried. `--ttl` makes the rule expire by itself.
+
+![A fetch the gate denies, luoto allow with --ttl 1h, and the same fetch answered](../casts/allow.gif)
+
 ## Toolchains and packages
 
 Toolchains come from the project's own version files (`mise.toml`, `.tool-versions`,

@@ -87,7 +87,7 @@ impl Dialers {
             if self.envs.contains_key(env) {
                 continue;
             }
-            println!(
+            out!(
                 "{} dialing private addresses for `{env}`",
                 chrono::Utc::now()
             );

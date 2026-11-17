@@ -154,7 +154,7 @@ fn files(paths: &[PathBuf], follow: bool, lines: Option<usize>, missing: &str) -
         f.read_to_end(&mut kept)?;
     }
     if kept.is_empty() && !follow {
-        eprintln!("{missing}");
+        err!("{missing}");
         return Ok(ExitCode::SUCCESS);
     }
     let out = Output::new();

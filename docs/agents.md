@@ -94,8 +94,10 @@ use prompts to improve its products, until its Google Cloud project has billing.
 ## Claude Code
 
 - Installs with Anthropic's installer (`claude.ai`, `downloads.claude.ai`,
-  `storage.googleapis.com`). Runs with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and
-  `DISABLE_AUTOUPDATER=1`.
+  `storage.googleapis.com`). Runs with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`,
+  `DISABLE_AUTOUPDATER=1` and `CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1` (its
+  first start otherwise fetches its plugin marketplace from `downloads.claude.ai` and over SSH
+  from `github.com`, both denied).
 - Also reaches `platform.claude.com` `/v1/oauth/hello`, which first-run onboarding checks
   whatever the credential.
 - `oauth_token` from `claude setup-token` uses your Claude subscription; `api_key` is billed
@@ -114,7 +116,9 @@ use prompts to improve its products, until its Google Cloud project has billing.
 - The briefing goes in as managed instructions (`/etc/claude-code/CLAUDE.md`).
 - Its first start skips onboarding (text style, security notes), the auto mode notice and the
   question whether to trust `/workspace` and the folders in it: luoto answers them in
-  `~/.claude.json`, as the sandbox is the boundary. Commits and pull requests without its AI
+  `~/.claude.json`, as the sandbox is the boundary. For the same reason `--yolo` starts
+  without its bypass mode notice (`skipDangerousModePermissionPrompt` in
+  `~/.claude/settings.json`). Commits and pull requests without its AI
   attribution: [guides/agent-settings.md](guides/agent-settings.md#commits-without-ai-attribution).
 
 ## OpenCode

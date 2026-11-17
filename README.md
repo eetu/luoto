@@ -5,6 +5,19 @@
   </picture>
 </p>
 
+Run coding agents with their permission prompts off, in a sandbox that reaches only the hosts
+you allowed and never holds your secrets.
+
+<p align="center">
+  <img alt="luoto init in a folder, Claude Code at work in a shell of the env, the request the gate denied, and the change pulled back" src="docs/casts/hello.gif" width="900">
+</p>
+
+`luoto init` in a Rust project, one confirm, and its env has the toolchain it pins and Claude
+Code. Claude gives the CLI's splash screen a unicorn and a laser, on a copy of the folder. The
+tests it runs build a dev-dependency whose build script posts the environment to a host of its
+own, as a compromised crate would: the gate blocked it, and luoto says so when the shell ends.
+`luoto pull` brings the change back, reviewed first.
+
 ## Why
 
 A malicious package runs with everything you have. Its install script can read `~/.ssh`,
@@ -153,8 +166,9 @@ bell in `luoto ui` gives browser notifications for requests.
 `luoto agent run <agent>` installs the agent on first run (`up` installs those listed in the
 env's `agents` or its `luoto.toml`), applies the env's current config and starts the agent in
 `/workspace`; `--yolo` turns off its own permission prompts (OpenCode has no flag for it),
-since the sandbox is the boundary. After that first run the command (`claude`, `codex`, …)
-also works in any env terminal, including an editor's. Each agent needs a credential for one
+since the sandbox is the boundary. When the session ends, as when a `luoto shell` does,
+luoto lists what the gate denied meanwhile. After that first run the command (`claude`, `codex`, …) also works in any env
+terminal, including an editor's. Each agent needs a credential for one
 of its providers under `[credentials.<provider>]`, or a model server of yours; the gate adds it
 to every request and the sandbox sees only a placeholder. `luoto agent auth <agent>` changes
 it, its questions opening on what the env has. [docs/agents.md](docs/agents.md#credentials)

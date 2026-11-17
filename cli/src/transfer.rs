@@ -375,7 +375,7 @@ pub fn export(env: &str, file: Option<&str>, no_home: bool, yes: bool) -> Result
     parts.extend([Part::State, Part::Work]);
     parts.extend(home.then_some(Part::Home));
 
-    println!("`{env}` goes into {}:", dest.display());
+    out!("`{env}` goes into {}:", dest.display());
     println!(
         "  config     {}{}, its repos and your answers about them",
         crate::ssh::tilde(&cfg_path),
@@ -401,13 +401,13 @@ pub fn export(env: &str, file: Option<&str>, no_home: bool, yes: bool) -> Result
             }
         );
     }
-    println!(
+    out!(
         "Not in it: secret values (the config's refs are read where it is imported), its CA \
          and vault token (import makes new ones), and what `up` rebuilds."
     );
     let states = ctx.rt.states()?;
     if states.running(&names::dev(env)) || states.running(&names::gate(env)) {
-        println!(
+        out!(
             "\n`{env}` is running, and its files would change under the copy: it stops for the \
              export (`luoto up -e {env}` starts it again)."
         );
@@ -415,7 +415,7 @@ pub fn export(env: &str, file: Option<&str>, no_home: bool, yes: bool) -> Result
             bail!("nothing exported (`luoto down -e {env}` first, or `--yes` stops it)");
         }
         env::down(&ctx, env)?;
-        println!("env `{env}` stopped");
+        out!("env `{env}` stopped");
     }
     env::ensure_image(&ctx, &ctx.image("tools"))?;
 
@@ -452,7 +452,7 @@ pub fn export(env: &str, file: Option<&str>, no_home: bool, yes: bool) -> Result
         }
     };
     std::fs::rename(&tmp, &dest).with_context(|| format!("write {}", dest.display()))?;
-    println!(
+    out!(
         "\nwrote {} ({}): `luoto import {}` makes the env in another luoto, here or on \
          another machine.\nIt holds the env's workspace and home, agents' logins included: keep \
          it as you would a secret.",
@@ -1012,9 +1012,7 @@ pub fn import(file: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
     // Its folders are text until the yes: nothing here looks one up.
     repos::check(&cfg.cfg.workspace).context("its config")?;
     repos::check_folders_text(&cfg.cfg.workspace).context("its config")?;
-    for line in summary(&path, &head, &name, &cfg.cfg) {
-        println!("{line}");
-    }
+    block!("{}", summary(&path, &head, &name, &cfg.cfg).join("\n"));
     if !yes && !confirm(&format!("Import it as `{name}`?")) {
         bail!("nothing imported (`--yes` imports without asking)");
     }
@@ -1070,14 +1068,14 @@ pub fn import(file: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
         });
     }
     std::fs::remove_file(dir.join(PARTIAL))?;
-    println!(
+    out!(
         "env `{name}` imported (subnet {})",
         names::addrs(octet).subnet
     );
     for n in notes(&ctx, &name, &head, &cfg.cfg) {
         println!("note: {n}");
     }
-    println!("`luoto up -e {name}` starts it, and asks for what it needs here");
+    out!("`luoto up -e {name}` starts it, and asks for what it needs here");
     Ok(ExitCode::SUCCESS)
 }
 

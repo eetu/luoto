@@ -8,6 +8,25 @@
   went there over plain HTTP. The gate now dials its own gateway (this machine) for it and
   never asks DNS; the next `luoto up` recreates each gate. podman and Docker were not
   affected.
+- `luoto agent run` and `luoto shell` list what the gate denied during the session when it
+  ends, as `luoto run` does: each host, how often, the requests it refused and why. The
+  summary stands apart from the session's last output.
+- `luoto egress` fits 80 columns: its columns are as wide as what they hold, and each host's
+  hint (the command that allows it) is on a line of its own.
+- Claude Code runs with `CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1`: its first
+  start in an env no longer asks for its plugin marketplace, which the gate denied
+  (`downloads.claude.ai`, SSH to `github.com`).
+- `luoto agent run claude --yolo` starts without Claude Code's bypass mode notice, which
+  asks you to confirm that it runs in a sandbox with restricted internet access.
+- `luoto init`, `up` and `pull` show folders and files in your home as `~/…`, and the note
+  that ends `init` fits 80 columns.
+- Output is easier to scan on a terminal: what a step made or changed is bold, keys and
+  column headings are dim, the commands a line names are bold, the answer Enter picks stands
+  out in `[Y/n]`, and `luoto:` before an error is red, `warning:` yellow. Piped output and
+  `NO_COLOR` stay plain. The `luoto init` proposal fits 80 columns.
+- `luoto allow` ends with a summary that fits 80 columns: access, expiry, rule and the
+  command that revokes it. A rule's expiry is in local time in `allow`, `approve` and
+  `status`, as open egress shows its own; `luoto logs` shows local time too.
 
 ## 0.5.2 (2026-11-17)
 

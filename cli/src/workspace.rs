@@ -1041,7 +1041,7 @@ pub fn describe(plan: &PullPlan, w: &mut impl Write) -> std::io::Result<()> {
         "{} new or changed file(s), {} unchanged → {}",
         plan.entries.len(),
         plan.unchanged,
-        plan.dir
+        crate::ssh::tilde(Path::new(&plan.dir))
     )?;
     for e in plan.entries.iter().filter(|e| e.risky.is_none()).take(30) {
         writeln!(w, "  {:<7} {}", e.change, crate::text::display(&e.path))?;

@@ -1,6 +1,9 @@
 //! luoto — supply-chain-safe dev sandboxes. Every dev tool runs in a container whose only
 //! way out is a policy gate you control; secrets stay in a vault outside the sandbox.
 
+// First: its `out!` and `err!` are in scope for the modules after it.
+#[macro_use]
+mod style;
 mod agents;
 mod archive;
 mod azure;
@@ -662,7 +665,10 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(e) => {
             let msg = text::lines(&format!("{e:#}"));
-            eprintln!("{}", text::hang("luoto: ", &msg, text::columns()));
+            let style = style::err();
+            let shown = style.commands(&text::hang("luoto: ", &msg, text::columns()));
+            let shown = shown.strip_prefix("luoto: ").unwrap_or(&shown);
+            eprintln!("{}{shown}", style.error("luoto: "));
             ExitCode::FAILURE
         }
     }

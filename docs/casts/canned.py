@@ -1,0 +1,252 @@
+"""A stand-in model server for recording casts: Anthropic's Messages API with canned replies.
+
+Agents in a cast's env reach it as a model server (`[model_servers.cast]`), so a recording
+needs no account, costs nothing and plays the same every time. Standard library only.
+
+    python3 canned.py [port]   # default 18000
+"""
+
+import json
+import os
+import sys
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+MODEL = "claude-sonnet-4-5"
+
+
+# The splash screen setup.sh gives the CLI, which splash.rs replaces.
+BEFORE = """use std::io::{self, Write};
+
+/// The splash screen; `tty` says whether `out` is a terminal.
+pub fn show(out: &mut impl Write, _tty: bool) -> io::Result<()> {
+    writeln!(out, "pulse")?;
+    writeln!(out, "response times at a glance")
+}
+"""
+
+# A flow is a real change, made through the agent's own tools: each step answers the tool
+# result of the one before it. A prompt gets the first flow whose words it has all of.
+FLOWS = [
+    # A CLI in an env of one folder: its plain splash screen (setup.sh) becomes splash.rs, then
+    # its tests.
+    (
+        ("sparkle",),
+        [
+            (
+                "I'll look at the splash screen.",
+                ("Read", {"file_path": "/workspace/src/splash.rs"}),
+            ),
+            (
+                "A unicorn that draws the wordmark with a rainbow laser. Piped output stays plain.",
+                (
+                    "Edit",
+                    {
+                        "file_path": "/workspace/src/splash.rs",
+                        "old_string": BEFORE,
+                        "new_string": (Path(__file__).parent / "splash.rs").read_text(),
+                    },
+                ),
+            ),
+            ("Now the tests.", ("Bash", {"command": "cargo test", "description": "Run the tests"})),
+            (
+                "The splash now opens with a unicorn firing a rainbow laser that draws the "
+                "wordmark, sparkles trailing, and settles after two seconds. Both tests pass.",
+                None,
+            ),
+        ],
+    ),
+    # A virtual workspace: a route for the api repo, beside the app.
+    (
+        ("health",),
+        [
+            ("I'll look at the API's routes.", ("Read", {"file_path": "/workspace/api/app.py"})),
+            (
+                "Adding a `/health` route.",
+                (
+                    "Edit",
+                    {
+                        "file_path": "/workspace/api/app.py",
+                        "old_string": "def route(path):\n",
+                        "new_string": (
+                            "def route(path):\n"
+                            '    if path == "/health":\n'
+                            '        return 200, "ok\\n"\n'
+                        ),
+                    },
+                ),
+            ),
+            (
+                "Added a `/health` route to `api/app.py` that answers `ok`. The API reads its "
+                "routes on every request, so it answers at once, no restart.",
+                None,
+            ),
+        ],
+    ),
+]
+
+# The reply to a prompt that mentions the key, else the default. Kept short: a cast shows
+# the flow, not the model.
+REPLIES = {
+    "app": (
+        "The app calls the API at `/workspace/api`. Both repos sit side by side in this "
+        "workspace, so I can change them together and commit each from its own folder."
+    ),
+}
+DEFAULT = "Done. Everything I ran stayed in the sandbox, behind luoto's gate."
+
+
+def last_user(body):
+    """The last user message's content blocks."""
+    for m in reversed(body.get("messages", [])):
+        if m.get("role") == "user":
+            content = m.get("content")
+            if isinstance(content, str):
+                return [{"type": "text", "text": content}]
+            return [c for c in content or [] if isinstance(c, dict)]
+    return []
+
+
+def prompt(body):
+    """The text of the conversation's first user message: what the agent was asked."""
+    for m in body.get("messages", []):
+        if m.get("role") == "user":
+            content = m.get("content")
+            if isinstance(content, str):
+                return content
+            return " ".join(c.get("text", "") for c in content or [] if isinstance(c, dict))
+    return ""
+
+
+def reply_for(body):
+    """(text, tool call or None) for a Messages API request."""
+    tools = {t.get("name") for t in body.get("tools") or []}
+    asked = prompt(body).lower()
+    for words, steps in FLOWS:
+        if all(w in asked for w in words) and {call[0] for _, call in steps if call} <= tools:
+            answered = {
+                c.get("tool_use_id") for c in last_user(body) if c.get("type") == "tool_result"
+            }
+            step = next((i + 1 for i in range(len(steps)) if f"toolu_cast{i}" in answered), 0)
+            text, call = steps[step]
+            return text, call and (f"toolu_cast{step}", *call)
+    lower = " ".join(c.get("text", "") for c in last_user(body)).lower()
+    for key, reply in REPLIES.items():
+        if key in lower:
+            return reply, None
+    return DEFAULT, None
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        # CANNED_LOG=1: each request on stderr, to see what an agent asks.
+        if os.environ.get("CANNED_LOG"):
+            sys.stderr.write(fmt % args + "\n")
+
+    def body(self):
+        n = int(self.headers.get("content-length") or 0)
+        try:
+            return json.loads(self.rfile.read(n) or b"{}")
+        except ValueError:
+            return {}
+
+    def json(self, obj, status=200):
+        data = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path.split("?")[0].rstrip("/").endswith("/models"):
+            self.json(
+                {
+                    "data": [{"id": MODEL, "type": "model", "display_name": "Cast"}],
+                    "has_more": False,
+                }
+            )
+        else:
+            self.json({"error": {"type": "not_found"}}, 404)
+
+    def do_POST(self):
+        path = self.path.split("?")[0]
+        body = self.body()
+        if os.environ.get("CANNED_LOG"):
+            sys.stderr.write(
+                f"{path} model={body.get('model')} stream={body.get('stream')} "
+                f"tools={len(body.get('tools') or [])} max_tokens={body.get('max_tokens')}\n"
+            )
+        if path.endswith("/count_tokens"):
+            self.json({"input_tokens": 100})
+        elif path.endswith("/messages"):
+            text, call = reply_for(body)
+            if body.get("stream"):
+                self.stream(text, call)
+            else:
+                self.json(message(text, call))
+        else:
+            self.json({"error": {"type": "not_found"}}, 404)
+
+    def stream(self, text, call):
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("cache-control", "no-cache")
+        self.end_headers()
+
+        def event(kind, data):
+            data["type"] = kind
+            self.wfile.write(f"event: {kind}\ndata: {json.dumps(data)}\n\n".encode())
+            self.wfile.flush()
+
+        start = message("", None)
+        start["content"] = []
+        start["stop_reason"] = None
+        event("message_start", {"message": start})
+        block = {"type": "text", "text": ""}
+        event("content_block_start", {"index": 0, "content_block": block})
+        # Word by word, so the recording shows it arrive.
+        words = text.split(" ")
+        for i, w in enumerate(words):
+            chunk = w if i == len(words) - 1 else w + " "
+            delta = {"type": "text_delta", "text": chunk}
+            event("content_block_delta", {"index": 0, "delta": delta})
+            time.sleep(0.04)
+        event("content_block_stop", {"index": 0})
+        if call:
+            tid, name, args = call
+            block = {"type": "tool_use", "id": tid, "name": name, "input": {}}
+            event("content_block_start", {"index": 1, "content_block": block})
+            delta = {"type": "input_json_delta", "partial_json": json.dumps(args)}
+            event("content_block_delta", {"index": 1, "delta": delta})
+            event("content_block_stop", {"index": 1})
+        stop = {"stop_reason": "tool_use" if call else "end_turn", "stop_sequence": None}
+        event("message_delta", {"delta": stop, "usage": {"output_tokens": len(words)}})
+        event("message_stop", {})
+
+
+def message(text, call):
+    content = [{"type": "text", "text": text}]
+    if call:
+        tid, name, args = call
+        content.append({"type": "tool_use", "id": tid, "name": name, "input": args})
+    return {
+        # Its own id: an agent joins the blocks of replies that share one.
+        "id": f"msg_{uuid.uuid4().hex}",
+        "type": "message",
+        "role": "assistant",
+        "model": MODEL,
+        "content": content,
+        "stop_reason": "tool_use" if call else "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 100, "output_tokens": len(text.split())},
+    }
+
+
+if __name__ == "__main__":
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 18000
+    # Every interface: an env's gate reaches this machine at its VM network's gateway, not at
+    # loopback. It serves canned text only.
+    ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()

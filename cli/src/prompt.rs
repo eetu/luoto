@@ -43,14 +43,15 @@ pub fn confirm(question: &str) -> bool {
     if !interactive() {
         return false;
     }
-    let line = read_answer(&format!("{question} [y/N] "));
+    let line = read_answer(&format!("{question} [y/N]"));
     matches!(line.trim(), "y" | "Y" | "yes")
 }
 
-/// `question`, then the line typed after it, with the spinner paused.
+/// `question` (its answers in brackets at its end), then the line typed after it, with the
+/// spinner paused.
 fn read_answer(question: &str) -> String {
     crate::progress::pause(|| {
-        print!("{question}");
+        print!("{}", crate::style::out().question(question));
         let _ = std::io::stdout().flush();
         let mut line = String::new();
         let _ = std::io::stdin().read_line(&mut line);
@@ -158,7 +159,7 @@ pub fn with_command(what: &str, command: &str, width: usize) -> String {
 
 /// One-letter answer to `question`; Enter picks `default`.
 pub fn ask(question: &str, default: char) -> char {
-    read_answer(&format!("{question} "))
+    read_answer(question)
         .trim()
         .chars()
         .next()

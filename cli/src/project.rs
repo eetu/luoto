@@ -729,7 +729,8 @@ fn credentials_reached(policy: &Policy, old: &ProjectConfig, new: &ProjectConfig
 pub fn print_entries(entries: &[(String, String)], indent: &str) {
     for (label, value) in entries {
         let mut lines = value.lines();
-        println!("{indent}{label:<8} {}", lines.next().unwrap_or_default());
+        let label = crate::style::out().dim(&format!("{label:<8}"));
+        println!("{indent}{label} {}", lines.next().unwrap_or_default());
         for l in lines {
             println!("{indent}{:<8} {l}", "");
         }
@@ -938,7 +939,7 @@ pub fn take_from_folder(ctx: &Ctx, env: &str, ask: bool) -> Result<bool> {
                 write_env(ctx, env, &text)?;
                 println!("took luoto.toml from your folder into the env");
             } else if !crate::prompt::interactive() {
-                println!(
+                out!(
                     "note: luoto.toml in your folder changed since the env took its copy: \
                      `luoto project apply -e {env}` takes it in"
                 );
@@ -946,7 +947,7 @@ pub fn take_from_folder(ctx: &Ctx, env: &str, ask: bool) -> Result<bool> {
             Ok(take)
         }
         FolderCopy::Both => {
-            println!(
+            out!(
                 "note: luoto.toml changed in your folder and in the env; luoto reads the env's \
                  copy (`luoto pull -e {env}` brings it out to compare)"
             );
@@ -966,7 +967,7 @@ pub fn review(ctx: &Ctx, env: &str) -> Result<bool> {
             "the project's luoto.toml is not applied: {}",
             st.error.as_deref().unwrap_or_default()
         )),
-        State::Removed => println!(
+        State::Removed => out!(
             "note: the project no longer has luoto.toml; its accepted settings still apply \
              (`luoto project ignore -e {env}` drops them)"
         ),
@@ -984,14 +985,14 @@ pub fn review(ctx: &Ctx, env: &str) -> Result<bool> {
             print_entries(&st.current, "  ");
             if crate::prompt::confirm("Apply these settings to this env?") {
                 accept(ctx, env, text)?;
-                println!("applied");
+                head!("applied");
                 return Ok(true);
             }
             if crate::prompt::interactive() {
                 set_declined(ctx, env, Some(sha(text)))?;
-                println!("not applied (`luoto project apply -e {env}` applies it later)");
+                out!("not applied (`luoto project apply -e {env}` applies it later)");
             } else {
-                println!("not applied: run `luoto project apply -e {env}` to review and apply");
+                out!("not applied: run `luoto project apply -e {env}` to review and apply");
             }
         }
         State::Changed => {
@@ -1004,16 +1005,16 @@ pub fn review(ctx: &Ctx, env: &str) -> Result<bool> {
             }
             if crate::prompt::confirm("Apply these settings to this env?") {
                 accept(ctx, env, text)?;
-                println!("applied");
+                head!("applied");
                 return Ok(true);
             }
             if crate::prompt::interactive() {
                 set_declined(ctx, env, Some(sha(text)))?;
-                println!(
+                out!(
                     "kept the previous settings (`luoto project apply -e {env}` applies it later)"
                 );
             } else {
-                println!("not applied: run `luoto project apply -e {env}` to review and apply");
+                out!("not applied: run `luoto project apply -e {env}` to review and apply");
             }
         }
         State::Accepted | State::None | State::Declined | State::Unread => {}

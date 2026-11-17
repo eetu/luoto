@@ -20,13 +20,13 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
     let ctx = Ctx::load()?;
     if forget {
         project::ignore(&ctx, name)?;
-        println!("`{name}` no longer applies the project's luoto.toml");
+        out!("`{name}` no longer applies the project's luoto.toml");
         return Ok(ExitCode::SUCCESS);
     }
     if accept {
         project::take_from_folder(&ctx, name, false)?;
     } else if let project::FolderCopy::Newer(_) = project::folder_copy(&ctx, name)? {
-        println!(
+        out!(
             "luoto.toml in your folder changed since the env took its copy: `luoto project \
              apply -e {name}` takes it in"
         );
@@ -44,11 +44,11 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
             show(&st.accepted);
         }
         project::State::Accepted => {
-            println!("luoto.toml is accepted and applies to `{name}`:");
+            out!("luoto.toml is accepted and applies to `{name}`:");
             show(&st.current);
         }
         project::State::Declined => {
-            println!("luoto.toml is ignored for `{name}` (this version):");
+            out!("luoto.toml is ignored for `{name}` (this version):");
             show(&st.current);
         }
         project::State::Changed => {
@@ -62,7 +62,7 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
             show(&st.current);
         }
         project::State::Unread => {
-            println!(
+            out!(
                 "`{name}` is stopped and its luoto.toml is only in the env: `luoto up -e {name}` \
                  reads it"
             );
@@ -95,9 +95,9 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
     }
     let running = project::apply(&ctx, name, &text)?;
     if running {
-        println!("applied to `{name}`");
+        out!("applied to `{name}`");
     } else {
-        println!("accepted; applies on `luoto up -e {name}`");
+        out!("accepted; applies on `luoto up -e {name}`");
     }
     // Without a terminal, what they need was printed above.
     if crate::prompt::interactive()
@@ -252,7 +252,7 @@ pub fn pull(
         .filter(|n| !own.contains(n))
         .collect();
     if !left.is_empty() {
-        println!(
+        out!(
             "left out: {} (`luoto pull --repo <name>` brings one)",
             left.join(", ")
         );
@@ -282,10 +282,10 @@ pub fn pull(
         println!("only risky files changed; re-run with --include-risky after reviewing them");
         return Ok(ExitCode::SUCCESS);
     }
-    let dirs: Vec<&str> = plans
+    let dirs: Vec<String> = plans
         .iter()
         .filter(|p| changed(p) > 0)
-        .map(|p| p.dir.as_str())
+        .map(|p| crate::ssh::tilde(std::path::Path::new(&p.dir)))
         .collect();
     if !yes
         && !confirm(&format!(
@@ -301,7 +301,7 @@ pub fn pull(
         written += w;
         skipped += s;
     }
-    println!(
+    head!(
         "wrote {written} file(s){}",
         if skipped > 0 {
             format!("; skipped {skipped} risky (review, then --include-risky)")
@@ -338,7 +338,7 @@ fn each_env(envs: &[String], mut f: impl FnMut(&str) -> Result<()>) -> Vec<Strin
     let mut failed = Vec::new();
     for name in envs {
         if let Err(e) = f(name) {
-            eprintln!("luoto: `{name}`: {}", crate::text::lines(&format!("{e:#}")));
+            err!("luoto: `{name}`: {}", crate::text::lines(&format!("{e:#}")));
             failed.push(name.clone());
         }
     }
@@ -364,7 +364,7 @@ pub fn up_all(selftest: bool, recreate: bool, quiet: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let envs = config::list_envs(&ctx.paths)?;
     if envs.is_empty() {
-        println!("no envs yet: `luoto init` in a project folder, or `luoto init <new-folder>`");
+        out!("no envs yet: `luoto init` in a project folder, or `luoto init <new-folder>`");
         return Ok(ExitCode::SUCCESS);
     }
     crate::prompt::never_ask();
@@ -395,7 +395,7 @@ pub fn down_all() -> Result<ExitCode> {
     }
     let failed = each_env(&running, |name| {
         env::down(&ctx, name)?;
-        println!("env `{name}` stopped");
+        out!("env `{name}` stopped");
         Ok(())
     });
     crate::watch::spawn(&ctx);
@@ -405,15 +405,15 @@ pub fn down_all() -> Result<ExitCode> {
 pub fn down(name: &str) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     if machine::stopped(&ctx.rt) {
-        println!("env `{name}` is not running (luoto's VM is stopped)");
+        out!("env `{name}` is not running (luoto's VM is stopped)");
         return Ok(ExitCode::SUCCESS);
     }
     // While its dev container still runs, to name its build folders.
     disk::hint_growth(&ctx, name);
     if env::down(&ctx, name)? {
-        println!("env `{name}` stopped");
+        out!("env `{name}` stopped");
     } else {
-        println!("env `{name}` was not running");
+        out!("env `{name}` was not running");
     }
     // The VM stays up for a quick `up`; the watcher stops it after `idle_stop` without envs.
     crate::watch::spawn(&ctx);
@@ -435,7 +435,7 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
             .filter(|_| f.cfg.workspace.dir.is_none())
     });
     if let Some(url) = &url {
-        println!(
+        out!(
             "`{name}` is cloned from {}: its work exists only in the env, unless pushed",
             crate::text::display(url)
         );
@@ -447,7 +447,7 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
         .as_ref()
         .is_some_and(|w| w.dir.is_none() && w.url.is_none())
     {
-        println!(
+        out!(
             "`{name}` is a virtual workspace: what is only in its /workspace, and its clones' \
              work unless pushed, goes with it"
         );
@@ -462,7 +462,7 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
         match crate::repos::unpushed(&ctx, name, &repos) {
             Ok(found) if found.is_empty() => {}
             Ok(found) => {
-                println!("Work in `{name}` that no remote has:");
+                out!("Work in `{name}` that no remote has:");
                 for w in found {
                     println!("  {w}");
                 }
@@ -473,7 +473,7 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
             ),
         }
     } else if url.is_some() || !repos.is_empty() {
-        println!(
+        out!(
             "`{name}` is stopped: after `luoto up -e {name}`, `luoto rm` names the repos with work \
              no remote has"
         );
@@ -496,7 +496,7 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
     crate::ssh::forget_host_key(&ctx, name)?;
     std::fs::remove_file(&cfg)?;
     crate::ssh::write_config(&ctx)?;
-    println!("env `{name}` removed");
+    out!("env `{name}` removed");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -516,15 +516,15 @@ pub fn reset_home(name: &str, yes: bool) -> Result<ExitCode> {
     }
     let running = ctx.rt.is_running(&names::dev(name));
     if !env::reset_home(&ctx, name)? {
-        println!("`{name}` has no home yet: nothing to discard");
+        out!("`{name}` has no home yet: nothing to discard");
         return Ok(ExitCode::SUCCESS);
     }
-    println!("discarded the home of `{name}`");
+    out!("discarded the home of `{name}`");
     if running {
         // Back as it was, with its agents and toolchains installed anew.
         env::up(&ctx, name, &UpOptions::default())?;
     } else {
-        println!("`luoto up -e {name}` starts it with a fresh home");
+        out!("`luoto up -e {name}` starts it with a fresh home");
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -533,12 +533,12 @@ pub fn list(size: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let envs = config::list_envs(&ctx.paths)?;
     if envs.is_empty() {
-        println!("no envs yet: `luoto init` in a project folder, or `luoto init <new-folder>`");
+        out!("no envs yet: `luoto init` in a project folder, or `luoto init <new-folder>`");
         return Ok(ExitCode::SUCCESS);
     }
     let states = ctx.rt.states().unwrap_or_default();
     if states.vm_stopped {
-        println!("luoto's VM is stopped; `luoto up` starts it with the env\n");
+        out!("luoto's VM is stopped; `luoto up` starts it with the env\n");
     }
     let sizes = if size && !states.vm_stopped {
         crate::progress::wait("measuring every volume", || disk::sizes(&ctx.rt))
@@ -584,7 +584,7 @@ pub fn list(size: bool) -> Result<ExitCode> {
             String::new()
         }
     };
-    println!(
+    heading!(
         "{:<20} {:<10} {:<10} {}{:<width$} {:<28} PRESETS",
         "ENV",
         "DEV",
@@ -756,7 +756,7 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
         };
         rows.push(("disk", disk));
     }
-    println!(
+    block!(
         "{}",
         crate::prompt::rows(&format!("env {name}"), &rows, crate::text::columns())
     );
@@ -796,7 +796,7 @@ fn ports_text(name: &str, p: &ports::EnvPorts) -> String {
 }
 
 fn print_rules(p: &env::Plan) {
-    println!("\n{:<22} {:<38} {:<28} ORIGIN", "RULE", "HOST", "ACCESS");
+    heading!("\n{:<22} {:<38} {:<28} ORIGIN", "RULE", "HOST", "ACCESS");
     for r in &p.compiled.policy.rules {
         let mut access = r.rule.access.describe();
         if r.rule.mode == Mode::Tunnel {
@@ -807,7 +807,7 @@ fn print_rules(p: &env::Plan) {
             r.rule.idle.as_ref().map(|i| format!("idle {i}")),
             r.rule
                 .expires
-                .map(|e| format!("until {}", e.format("%m-%d %H:%M"))),
+                .map(|e| format!("until {}", egress::at_text(e))),
         ]
         .into_iter()
         .flatten()
@@ -823,19 +823,19 @@ fn print_rules(p: &env::Plan) {
         );
     }
     if !p.compiled.policy.injections.is_empty() {
-        println!("\ncredentials injected by the gate:");
+        head!("\ncredentials injected by the gate:");
         for i in &p.compiled.policy.injections {
             println!("  {:<38} binding {}", i.host, i.binding);
         }
     }
     if !p.cfg.deny.is_empty() {
-        println!("\ndenied whatever allows them:");
+        head!("\ndenied whatever allows them:");
         for d in &p.cfg.deny {
             println!("  {}", project::deny_line(d));
         }
     }
     if !p.cfg.mute.is_empty() {
-        println!("\nmuted (still denied; `luoto egress --all` shows them):");
+        head!("\nmuted (still denied; `luoto egress --all` shows them):");
         for m in &p.cfg.mute {
             let paths = if m.paths.is_empty() {
                 String::new()
@@ -876,29 +876,27 @@ pub fn allow(name: &str, o: AllowOpts) -> Result<ExitCode> {
     {
         rule.allow_private = true;
     }
-    let summary = format!(
-        "{} {}{}{}",
-        rule.host,
-        rule.access.describe(),
-        if rule.paths.is_empty() {
-            String::new()
-        } else {
-            format!(" paths {}", rule.paths.join(","))
-        },
-        rule.expires
-            .map(|e| format!(" until {}", e.format("%Y-%m-%d %H:%M UTC")))
-            .unwrap_or_default()
-    );
     let id = rule.id.clone().unwrap_or_default();
+    let mut rows = vec![("access", rule.access.describe())];
+    if !rule.paths.is_empty() {
+        rows.push(("paths", rule.paths.join(",")));
+    }
+    if let Some(e) = rule.expires {
+        rows.push(("expires", egress::at_text(e)));
+    }
+    rows.push(("rule", id.clone()));
+    rows.push(("revoke it", format!("luoto revoke -e {name} {id}")));
+    let title = format!("allowed {}", rule.host);
     rules::accepting_risks(o.force, |force| {
         rules::add_rule_checked(&ctx, name, rule.clone(), force)
     })?;
-    println!("allowed {summary} (rule {id}); revoke with `luoto revoke -e {name} {id}`");
+    block!("{}", crate::prompt::summary(&title, &rows));
     if !private.is_empty() && !rule.allow_private {
-        println!(
+        out!(
             "{} resolves to {private}, which the rule doesn't reach: `luoto allow -e {name} {} \
              --private` makes one that does",
-            rule.host, rule.host
+            rule.host,
+            rule.host
         );
     }
     Ok(ExitCode::SUCCESS)
@@ -906,7 +904,7 @@ pub fn allow(name: &str, o: AllowOpts) -> Result<ExitCode> {
 
 pub fn revoke(name: &str, rule: &str) -> Result<ExitCode> {
     let n = rules::remove(&Ctx::load()?, name, rule)?;
-    println!("removed {n} rule(s)");
+    head!("removed {n} rule(s)");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -967,12 +965,15 @@ fn pending(ctx: &Ctx, name: Option<&str>) -> Result<Vec<(String, AccessRequest)>
 }
 
 fn print_request(e: &str, r: &AccessRequest) {
+    let style = crate::style::out();
     println!(
-        "{e} #{}  {}\n   approve: luoto approve -e {e} {}   reject: luoto reject -e {e} {}",
-        r.id,
+        "{}  {}\n   {} {}   {} {}",
+        style.head(&format!("{e} #{}", r.id)),
         fmt_request(r),
-        r.id,
-        r.id
+        style.dim("approve:"),
+        style.head(&format!("luoto approve -e {e} {}", r.id)),
+        style.dim("reject:"),
+        style.head(&format!("luoto reject -e {e} {}", r.id))
     );
 }
 
@@ -1040,15 +1041,21 @@ pub fn approve(
     match rules::accepting_risks(force, |force| {
         rules::approve(&ctx, name, &req, ttl, narrow, force)
     })? {
-        rules::Approved::Installed { installed } => println!("{installed}"),
-        rules::Approved::Rule(rule) => println!("approved: {}", rules::describe(&rule)),
+        rules::Approved::Installed { installed } => out!("{installed}"),
+        rules::Approved::Rule(rule) => head!(
+            "approved: {}{}",
+            rules::describe(&rule),
+            rule.expires
+                .map(|e| format!(", until {}", egress::at_text(e)))
+                .unwrap_or_default()
+        ),
     }
     Ok(ExitCode::SUCCESS)
 }
 
 pub fn reject(name: &str, id: u64, note: Option<String>) -> Result<ExitCode> {
     rules::reject(&Ctx::load()?, name, id, note)?;
-    println!("rejected request #{id}");
+    head!("rejected request #{id}");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1094,7 +1101,7 @@ pub fn egress(
             );
             return Ok(ExitCode::SUCCESS);
         }
-        println!("{:<40} {:>6}  {:<14} VIA", "HOST", "OPEN", "METHODS");
+        heading!("{:<40} {:>6}  {:<14} VIA", "HOST", "OPEN", "METHODS");
         for s in &summary {
             let methods: Vec<&str> = s.methods.iter().map(String::as_str).collect();
             let via: Vec<&str> = s.intakes.iter().map(String::as_str).collect();
@@ -1106,12 +1113,12 @@ pub fn egress(
                 via.join(",")
             );
         }
-        println!("`luoto egress keep -e {name}` keeps them");
+        out!("`luoto egress keep -e {name}` keeps them");
         return Ok(ExitCode::SUCCESS);
     }
     let footer = || {
         if hidden > 0 {
-            println!(
+            out!(
                 "{hidden} muted denial{} left out (`luoto egress --all` shows them)",
                 if hidden == 1 { "" } else { "s" }
             );
@@ -1127,10 +1134,7 @@ pub fn egress(
         footer();
         return Ok(ExitCode::SUCCESS);
     }
-    println!(
-        "{:<40} {:>6} {:>6}  {:<14} {:<10} LAST / HINT",
-        "HOST", "ALLOW", "DENY", "METHODS", "VIA"
-    );
+    let mut rows = Vec::new();
     for s in summary {
         let methods: Vec<&str> = s.methods.iter().map(String::as_str).collect();
         let via: Vec<&str> = s.intakes.iter().map(String::as_str).collect();
@@ -1190,15 +1194,45 @@ pub fn egress(
                 .map(|r| format!("rule {r}"))
                 .unwrap_or_default()
         };
-        println!(
-            "{:<40} {:>6} {:>6}  {:<14} {:<10} {}",
+        rows.push((
             crate::text::display(&s.host),
             s.allowed,
             s.denied,
             crate::text::display(&methods.join(",")),
             via.join(","),
-            crate::text::display(&hint)
-        );
+            crate::text::display(&hint),
+        ));
+    }
+    // Columns as wide as what they hold, and each hint on a line of its own under its host:
+    // a fix command fits 80 columns there.
+    let host_w = rows
+        .iter()
+        .map(|r| r.0.chars().count())
+        .fold("HOST".len(), usize::max);
+    let methods_w = rows
+        .iter()
+        .map(|r| r.3.chars().count())
+        .fold("METHODS".len(), usize::max);
+    let style = crate::style::out();
+    heading!(
+        "{:<host_w$} {:>6} {:>6}  {:<methods_w$}  VIA",
+        "HOST",
+        "ALLOW",
+        "DENY",
+        "METHODS"
+    );
+    for (host, allowed, denied, methods, via, hint) in &rows {
+        // What was denied stands out: its count, and the command under it.
+        let count = format!("{denied:>6}");
+        let count = if *denied > 0 {
+            style.head(&count)
+        } else {
+            count
+        };
+        println!("{host:<host_w$} {allowed:>6} {count}  {methods:<methods_w$}  {via}");
+        if !hint.is_empty() {
+            println!("{}", style.aside(&format!("  {hint}")));
+        }
     }
     footer();
     Ok(ExitCode::SUCCESS)
@@ -1225,7 +1259,7 @@ pub fn egress_open(name: &str, window: Option<&str>) -> Result<ExitCode> {
         "egress of `{name}` is open {}",
         egress::until_text(Some(until))
     );
-    println!("{}", crate::prompt::summary(&title, &rows));
+    block!("{}", crate::prompt::summary(&title, &rows));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1233,7 +1267,7 @@ pub fn egress_open(name: &str, window: Option<&str>) -> Result<ExitCode> {
 pub fn egress_close(name: &str) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     if !egress::close(&ctx, name)? {
-        println!("egress of `{name}` was not open");
+        out!("egress of `{name}` was not open");
         return Ok(ExitCode::SUCCESS);
     }
     let rows = [
@@ -1241,7 +1275,7 @@ pub fn egress_close(name: &str) -> Result<ExitCode> {
         ("open again", format!("luoto egress open -e {name}")),
     ];
     let title = format!("egress of `{name}` is closed: only its rules allow");
-    println!("{}", crate::prompt::summary(&title, &rows));
+    block!("{}", crate::prompt::summary(&title, &rows));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1251,7 +1285,7 @@ pub fn egress_keep(name: &str, since: Option<&str>, yes: bool) -> Result<ExitCod
     let ctx = Ctx::load()?;
     let opened = events::opened(&events::gate_events(&ctx.rt, name, since)?);
     if opened.is_empty() {
-        println!(
+        out!(
             "open egress let nothing out of `{name}`{}",
             since
                 .map(|s| format!(" in the last {s}"))
@@ -1262,7 +1296,7 @@ pub fn egress_keep(name: &str, since: Option<&str>, yes: bool) -> Result<ExitCod
     let plan = env::plan(&ctx, name)?;
     let p = egress::propose(&plan.compiled.policy, &plan.cfg.presets, &opened);
     if p.is_empty() {
-        println!("the rules of `{name}` already allow what open egress let out");
+        out!("the rules of `{name}` already allow what open egress let out");
         return Ok(ExitCode::SUCCESS);
     }
     let methods = |host: &str| {
@@ -1296,12 +1330,12 @@ pub fn egress_keep(name: &str, since: Option<&str>, yes: bool) -> Result<ExitCod
     let picked: Vec<usize> = if yes {
         (0..rows.len()).filter(|i| rows[*i].2).collect()
     } else if !crate::prompt::interactive() {
-        println!("open egress let out of `{name}`:");
+        out!("open egress let out of `{name}`:");
         let wide = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0);
         for (label, what, _) in &rows {
             println!("  {label:<wide$}  {what}");
         }
-        println!("`luoto egress keep -e {name} --yes` keeps the presets");
+        out!("`luoto egress keep -e {name} --yes` keeps the presets");
         if !p.rules.is_empty() {
             println!("a host only as you allow it:");
             for r in &p.rules {
@@ -1378,7 +1412,7 @@ pub fn egress_keep(name: &str, since: Option<&str>, yes: bool) -> Result<ExitCod
             ),
         ));
     }
-    println!(
+    block!(
         "{}",
         crate::prompt::summary(&format!("kept in `{name}`"), &summary)
     );
@@ -1405,14 +1439,14 @@ pub fn logs(
     if follow {
         events::follow(&ctx.rt, &names::gate(name), since, |e| {
             if show(&e) {
-                println!("{}", events::fmt_event(&e));
+                println!("{}", events::fmt_event_local(&e));
             }
             true
         })?;
     } else {
         for e in events::gate_events(&ctx.rt, name, since)? {
             if show(&e) {
-                println!("{}", events::fmt_event(&e));
+                println!("{}", events::fmt_event_local(&e));
             }
         }
     }
@@ -1458,9 +1492,9 @@ pub fn edit(name: &str) -> Result<ExitCode> {
     open_editor(&path)?;
     let p = match sync::reapply(&ctx, name)? {
         Some(p) => {
-            println!("applied ({} rules)", p.compiled.policy.rules.len());
+            head!("applied ({} rules)", p.compiled.policy.rules.len());
             if before.is_none_or(|b| needs_recreate(&b, &p)) {
-                println!(
+                out!(
                     "the dev container keeps its image, ports, isolation and resources until \
                      `luoto up -e {name} --recreate`"
                 );
@@ -1546,7 +1580,7 @@ pub fn reload(env: Option<&str>) -> Result<ExitCode> {
         ),
     };
     if refs.is_empty() {
-        println!("the vault holds no secrets to read again (`luoto vault unlock` loads them)");
+        out!("the vault holds no secrets to read again (`luoto vault unlock` loads them)");
         return Ok(ExitCode::SUCCESS);
     }
     let r = crate::progress::step(
@@ -1576,7 +1610,7 @@ pub fn lock() -> Result<ExitCode> {
         eprintln!("lock incomplete:\n  {}", failed.join("\n  "));
         return Ok(ExitCode::FAILURE);
     }
-    println!(
+    out!(
         "vault locked: credentials wiped from the vault and every gate; credentialed hosts \
          return 403 until `luoto vault unlock` (sandbox secrets already in running envs stay until \
          `luoto down`)"

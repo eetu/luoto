@@ -624,7 +624,7 @@ pub fn add(env: &str, folder: &str, name: Option<&str>, yes: bool) -> Result<Exi
     for s in sync(&ctx, env, &f.cfg, Some(&name)) {
         println!("{}", s.said());
     }
-    println!(
+    block!(
         "{}",
         crate::prompt::summary(
             &format!("share {name}"),
@@ -636,11 +636,11 @@ pub fn add(env: &str, folder: &str, name: Option<&str>, yes: bool) -> Result<Exi
         )
     );
     if let Some(cmd) = needs(&ctx, env, &f.cfg) {
-        println!("the running env sees its shares after `{cmd}` (its volumes are kept)");
+        out!("the running env sees its shares after `{cmd}` (its volumes are kept)");
     } else if !ctx.rt.is_running(&names::dev(env)) {
-        println!("in the env from its next `luoto up`");
+        out!("in the env from its next `luoto up`");
     }
-    println!(
+    out!(
         "Any code in the env can read it. A change in the folder reaches the env\n\
          at its next `luoto up` or `luoto share sync`."
     );
@@ -669,7 +669,7 @@ pub fn sync_cmd(env: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
         println!("{}", s.said());
     }
     if let Some(cmd) = needs(&ctx, env, &cfg) {
-        println!("the running env sees its shares after `{cmd}` (its volumes are kept)");
+        out!("the running env sees its shares after `{cmd}` (its volumes are kept)");
     }
     Ok(if done.iter().any(Synced::failed) {
         ExitCode::FAILURE
@@ -691,7 +691,7 @@ pub fn rm(env: &str, name: &str) -> Result<ExitCode> {
         );
     }
     let _ = std::fs::remove_dir_all(env_dir(env)?.join(name));
-    println!("removed share `{name}` from env `{env}`; it is gone from {IN_ENV} at once");
+    out!("removed share `{name}` from env `{env}`; it is gone from {IN_ENV} at once");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -700,9 +700,7 @@ pub fn list(env: &str) -> Result<ExitCode> {
     let paths = Paths::get()?;
     let cfg = EnvFile::load(&paths, env)?.cfg;
     if cfg.shares.is_empty() {
-        println!(
-            "env `{env}` shares no folder of this machine (`luoto share add -e {env} <folder>`)"
-        );
+        out!("env `{env}` shares no folder of this machine (`luoto share add -e {env} <folder>`)");
         return Ok(ExitCode::SUCCESS);
     }
     for s in status(&paths, env, &cfg) {

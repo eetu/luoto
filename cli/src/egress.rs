@@ -64,11 +64,28 @@ where
     let Some(t) = until else {
         return "until you close it".into();
     };
+    format!("until {}", at_in(t, now, tz))
+}
+
+/// A moment for people, in local time, as every expiry is shown: `14:05` today, `Nov 12
+/// 14:05` on another day of this year, `Nov 12 2027 14:05` in another.
+pub fn at_text(t: DateTime<Utc>) -> String {
+    at_in(t, Utc::now(), &Local)
+}
+
+fn at_in<Tz: TimeZone>(t: DateTime<Utc>, now: DateTime<Utc>, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::Datelike;
     let t = t.with_timezone(tz);
-    if t.date_naive() == now.with_timezone(tz).date_naive() {
-        format!("until {}", t.format("%H:%M"))
+    let now = now.with_timezone(tz);
+    if t.date_naive() == now.date_naive() {
+        t.format("%H:%M").to_string()
+    } else if t.year() == now.year() {
+        t.format("%b %-d %H:%M").to_string()
     } else {
-        format!("until {}", t.format("%b %-d %H:%M"))
+        t.format("%b %-d %Y %H:%M").to_string()
     }
 }
 
@@ -254,6 +271,12 @@ mod tests {
         assert_eq!(at("2026-11-11T14:05:00Z"), "until 14:05");
         assert_eq!(at("2026-11-12T09:30:00Z"), "until Nov 12 09:30");
         assert_eq!(until_in(None, now, &Utc), "until you close it");
+        let next_year = "2027-01-02T09:30:00Z".parse().unwrap();
+        assert_eq!(at_in(next_year, now, &Utc), "Jan 2 2027 09:30");
+        // As the clock here shows it: the day turns earlier east of UTC.
+        let east = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        let late = "2026-11-11T22:30:00Z".parse().unwrap();
+        assert_eq!(at_in(late, now, &east), "Nov 12 00:30");
     }
 
     #[test]
