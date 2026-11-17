@@ -2522,8 +2522,13 @@ repos = ["other/app"]
         };
         assert!(check(&ws(&[("api", url("acme/api"))])).is_ok());
         // No repo's folder is the env's, another repo's, or inside one: their pulls would overlap.
+        // Absolute on this platform: `/x` has no drive on Windows.
         let dir = |d: &str| Repo {
-            dir: Some(d.into()),
+            dir: Some(if cfg!(windows) {
+                format!("C:{}", d.replace('/', "\\"))
+            } else {
+                d.into()
+            }),
             ..Default::default()
         };
         assert!(check(&ws(&[("a", dir("/x")), ("b", dir("/y"))])).is_ok());
