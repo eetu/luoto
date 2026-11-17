@@ -88,6 +88,11 @@ pub async fn dial_tcp_to(
     } else {
         let addrs: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
             vec![SocketAddr::new(ip, port)]
+        } else if let Some(at) = state.cfg.host_gateway.as_deref()
+            && host.eq_ignore_ascii_case(luoto_shared::THIS_MACHINE)
+        {
+            // Never DNS: on a LAN, a resolver may name another machine this.
+            vec![SocketAddr::new(this_machine(at)?, port)]
         } else {
             tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, port)))
                 .await
@@ -172,6 +177,36 @@ pub async fn dial_tcp_to(
     )))
 }
 
+/// [`luoto_shared::THIS_MACHINE`]'s address from `LUOTO_HOST_GATEWAY`: an address, or `route`,
+/// the gate's default gateway.
+fn this_machine(at: &str) -> Result<IpAddr, DialError> {
+    if let Ok(ip) = at.parse() {
+        return Ok(ip);
+    }
+    let unknown = |why: &str| DialError::Failed(format!("this machine's address: {why}"));
+    if at != "route" {
+        return Err(unknown(
+            "LUOTO_HOST_GATEWAY is neither an address nor `route`",
+        ));
+    }
+    let table = std::fs::read_to_string("/proc/net/route").map_err(|e| unknown(&e.to_string()))?;
+    default_gateway(&table).ok_or_else(|| unknown("the gate has no default route"))
+}
+
+/// The gateway of the default route in a `/proc/net/route` table (addresses in hex, in the
+/// host's byte order: little-endian on the machines a gate runs on).
+fn default_gateway(table: &str) -> Option<IpAddr> {
+    table.lines().skip(1).find_map(|line| {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let (dest, gw) = (f.get(1)?, f.get(2)?);
+        if *dest != "00000000" {
+            return None;
+        }
+        let n = u32::from_str_radix(gw, 16).ok().filter(|n| *n != 0)?;
+        Some(IpAddr::V4(std::net::Ipv4Addr::from(n.swap_bytes())))
+    })
+}
+
 /// Why `host:port` can't be reached: each address's failure, and for a private address that
 /// timed out, what usually causes that.
 fn cannot_connect(host: &str, port: u16, failed: &[String], private_timed_out: bool) -> String {
@@ -219,6 +254,29 @@ pub async fn http1_sender(io: Box<dyn Io>) -> Result<SendRequest<Body>, DialErro
         let _ = conn.with_upgrades().await;
     });
     Ok(sender)
+}
+
+#[cfg(test)]
+mod this_machine_tests {
+    use super::{default_gateway, this_machine};
+
+    #[test]
+    fn this_machine_is_the_default_gateway_or_the_address_given() {
+        // Apple's VM network: default via 192.168.71.1.
+        let table = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n\
+                     eth0\t0047A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\n\
+                     eth0\t00000000\t0147A8C0\t0003\t0\t0\t0\t00000000\n";
+        assert_eq!(
+            default_gateway(table),
+            Some("192.168.71.1".parse().unwrap())
+        );
+        assert_eq!(default_gateway("Iface\tDestination\tGateway\n"), None);
+        assert_eq!(
+            this_machine("10.0.0.1").unwrap(),
+            "10.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        );
+        assert!(this_machine("dns").is_err());
+    }
 }
 
 #[cfg(test)]

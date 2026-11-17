@@ -19,9 +19,8 @@ pub const ANTHROPIC: &str = "anthropic";
 pub const OPENAI: &str = "openai";
 pub const APIS: [&str; 2] = [ANTHROPIC, OPENAI];
 
-/// This machine as the sandbox reaches it: podman's `/etc/hosts` has the name, Docker
-/// Desktop's DNS answers it.
-pub const HOST: &str = "host.docker.internal";
+/// This machine as the sandbox reaches it ([`luoto_shared::THIS_MACHINE`]).
+pub const HOST: &str = luoto_shared::THIS_MACHINE;
 
 /// The token the sandbox holds for a server; the gate puts the real one in its place.
 pub const PLACEHOLDER: &str = "luoto-model-server-placeholder";

@@ -28,6 +28,11 @@ pub const TRANSPARENT_PORT: u16 = 15001;
 pub const VAULT_SOCKET: &str = "/run/luoto/vault/vault.sock";
 /// Hostname the sandbox uses for the gate.
 pub const GATE_HOST: &str = "gate";
+/// This machine as the sandbox names it (a model server here). podman's hosts file and
+/// Docker's `host-gateway` give its address; on Apple's `container` nothing does, so the gate
+/// dials its own gateway for it (`LUOTO_HOST_GATEWAY`) and never asks DNS, which on a LAN may
+/// answer with another machine.
+pub const THIS_MACHINE: &str = "host.docker.internal";
 
 /// The variables every dev container gets pointing at the gate's proxy.
 pub const PROXY_VARS: [&str; 4] = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"];

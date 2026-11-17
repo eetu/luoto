@@ -587,6 +587,44 @@ async fn a_private_address_a_rule_allows_is_dialed_from_the_host() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "spawns binaries; run with `just it`"]
+async fn this_machine_is_its_gateway_never_a_dns_answer() {
+    // This machine's own private address (loopback is never dialed), where a responder on
+    // every interface answers: the gate reaches it for the name without asking DNS.
+    let Some(own) = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| s.connect("192.0.2.1:9").and_then(|()| s.local_addr()))
+        .ok()
+        .map(|a| a.ip())
+        .filter(|ip| luoto_shared::host::is_private(*ip))
+    else {
+        return;
+    };
+    let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut s in listener.incoming().flatten() {
+            let _ = read_head(&mut s);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nhere");
+        }
+    });
+    let at = own.to_string();
+    let env = Env::start_with(&[], &[("LUOTO_HOST_GATEWAY", at.as_str())]);
+    let mut here = read("model-server", luoto_shared::THIS_MACHINE);
+    here.rule.allow_private = true;
+    here.rule.port = Some(port);
+    env.apply(Policy {
+        rules: vec![here],
+        ..Default::default()
+    });
+    let r = env.get(&format!(
+        "http://{}:{port}/v1/models",
+        luoto_shared::THIS_MACHINE
+    ));
+    assert_eq!(r.status, 200, "{}", r.head);
+    assert_eq!(r.body, "here");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
 async fn without_the_host_a_private_dial_names_the_watcher() {
     let env = Env::start_host_dial(&[("kb.test", "10.99.0.1:8080".parse().unwrap())]);
     let mut kb = read("kb", "kb.test");

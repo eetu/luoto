@@ -236,8 +236,11 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Model servers on this machine** (`[model_servers]`). The gate lets the sandbox reach only
   the server's port and model endpoints, but the server runs with your privileges outside the
   VM, so its request parsing is in reach of code in the env; its token may go there over
-  plain HTTP, which never leaves the machine. A server that forwards to a cloud service sends
-  the prompts there.
+  plain HTTP, which never leaves the machine. The sandbox names this machine
+  `host.docker.internal`; the gate never asks DNS for it (podman's and Docker's hosts files
+  give it, and on Apple's `container` the gate dials its own gateway, this machine), since a
+  resolver on your network could answer with another machine. A server that forwards to a
+  cloud service sends the prompts there.
 - **Azure write access.** With `access = "write"`, code in the sandbox can do on the listed
   subscriptions whatever the identity's roles allow: create resources that reach the internet,
   read keys that `listKeys` returns. The gate refuses, at every scope, the writes that give

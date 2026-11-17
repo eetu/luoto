@@ -1030,6 +1030,9 @@ fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
         // Its VM leaves through macOS's NAT, which translates only out of the primary
         // interface, never onto a VPN: private addresses are dialed from the Mac (`hostdial.rs`).
         set_env(&mut spec.env, "LUOTO_HOST_DIAL", APPLE_GATE_DIAL);
+        // Nothing names this machine in Apple's VMs: the gate dials its gateway for it, never
+        // DNS, which on a LAN may answer with another machine.
+        set_env(&mut spec.env, "LUOTO_HOST_GATEWAY", "route");
         spec.published_sockets = vec![
             (socks.gate.display().to_string(), APPLE_GATE_SOCKET.into()),
             (socks.uplink.display().to_string(), APPLE_GATE_UPLINK.into()),

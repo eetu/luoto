@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.3 (2026-11-17)
+
+- **Security, Apple's `container`:** a model server on this machine was reached through a DNS
+  lookup of `host.docker.internal`, which Apple's VMs don't define, so a resolver on your
+  network could answer with another machine, and the server's token and the agent's prompts
+  went there over plain HTTP. The gate now dials its own gateway (this machine) for it and
+  never asks DNS; the next `luoto up` recreates each gate. podman and Docker were not
+  affected.
+
 ## 0.5.2 (2026-11-17)
 
 - **Virtual workspaces:** `luoto init --virtual --name <env>` makes an env with no folder of
