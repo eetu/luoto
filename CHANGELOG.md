@@ -9,8 +9,10 @@
   version of each and its install page, and stops. `--yes` takes the current runtime, or the
   first in the list, without asking. The UI's setup page shows the same and runs no install.
 - `luoto setup` opens with luoto's island, drawn once on a terminal with colors while setup
-  looks at this machine (still without colors, none where its output is piped). A first
-  setup ends with the next step: `luoto init` inside a project folder.
+  looks at this machine: what it finds is printed under the island as it comes, and any key
+  ends the drawing. The island is still without colors and on a terminal under 80 columns
+  or 21 rows, and absent where setup's output is piped. A first setup ends with the next
+  step: `luoto init` inside a project folder.
 - `luoto init` no longer takes toolchains from samples (`examples/`, `fixtures/`, `testdata/`):
   a launchpad example's `mise.toml` made `up` install terraform for a project without it.
 

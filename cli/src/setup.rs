@@ -498,29 +498,11 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
     let first = first_setup(&global);
     // `apple` is None where Apple's `container` can't run, Some(None) where it isn't installed.
     // Setup opens with the splash, which plays while this looks.
-    let (d, apple) = crate::splash::during("looking at this machine's container runtimes", || {
-        (detect(), probe_apple())
-    });
-    println!(
-        "host: {} {}{}",
-        d.os,
-        d.arch,
-        d.distro
-            .as_deref()
-            .map(|s| format!(" ({s})"))
-            .unwrap_or_default()
+    let (d, apple) = crate::splash::during(
+        "looking at this machine's container runtimes",
+        || (detect(), probe_apple()),
+        |(d, apple)| host_lines(d, apple.as_ref().and_then(Option::as_ref)),
     );
-    // In the order setup lists them.
-    for r in apple.iter().flatten().chain(&d.runtimes) {
-        println!(
-            "  {:<9} {} {}",
-            r.name,
-            r.version
-                .map(|(a, b, c)| format!("{a}.{b}.{c}"))
-                .unwrap_or_else(|| "?".into()),
-            r.detail
-        );
-    }
     let before = configured(&global);
     let options = runtime_options(&d, apple.as_ref().map(Option::as_ref), before);
     let ask = !o.yes && crate::prompt::interactive();
@@ -569,6 +551,26 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
         .find(|x| x.ready && x.runtime != choice)
         .map(|x| x.setup.clone());
     finish(o, paths, global, other, first)
+}
+
+/// The host and the runtimes found on it, Apple's first as setup lists them.
+fn host_lines(d: &Detection, apple: Option<&RuntimeInfo>) -> Vec<String> {
+    let distro = d.distro.as_deref();
+    let mut lines = vec![format!(
+        "host: {} {}{}",
+        d.os,
+        d.arch,
+        distro.map(|s| format!(" ({s})")).unwrap_or_default()
+    )];
+    lines.extend(apple.into_iter().chain(&d.runtimes).map(|r| {
+        format!(
+            "  {:<9} {} {}",
+            r.name,
+            r.version.map_or_else(|| "?".into(), dotted),
+            r.detail
+        )
+    }));
+    lines
 }
 
 /// Whether no setup has completed here: the config names no runtime yet.

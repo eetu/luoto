@@ -4,10 +4,13 @@
 //! the sun rises and its reflection sinks. Without colors it is the still picture, without a
 //! UTF-8 locale an ASCII one, and where stdout is no terminal there is none.
 //!
-//! The animation hides no cursor and every frame is one write that ends with all styles
-//! reset, so Ctrl-C at any moment leaves the terminal as it was.
+//! The animation holds nothing up: what setup finds meanwhile is printed under the picture,
+//! which keeps redrawing its own rows, and any key ends it at its last frame. It hides no
+//! cursor, and every frame is one write that puts the cursor back and ends with all styles
+//! reset. Keys are read in raw mode, where Ctrl-C is a key: it ends luoto as it would.
 
 use std::io::{IsTerminal, Write};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::style::Style;
@@ -19,6 +22,14 @@ const TICK: Duration = Duration::from_millis(48);
 const INDENT: usize = 4;
 /// The widest line: a narrower terminal would wrap it.
 const WIDTH: usize = 40;
+/// What luoto's lines are written to fit. The animation needs as many columns: a line under
+/// it that wrapped would be more rows than the redraw counts.
+const LINE: usize = 80;
+/// Lines the animation lets be printed under it.
+const UNDER: usize = 4;
+/// The rows the animation needs to stay on screen: a blank line, the picture, another, the
+/// lines under it and two to spare.
+const TALL: usize = 1 + H / 2 + 2 + 1 + UNDER + 2;
 
 /// Pixels, two to a row of text.
 const W: usize = 36;
@@ -290,12 +301,13 @@ enum Show {
     Moving,
 }
 
-/// What stdout gets: nothing unless it is a terminal wide enough, and movement only where
-/// both colors and half blocks show.
-fn plan(terminal: bool, styled: bool, unicode: bool, columns: usize) -> Show {
+/// What stdout gets: nothing unless it is a terminal wide enough for the picture; movement
+/// only where colors and half blocks show and the terminal has the columns for the lines
+/// printed under the picture and the rows to keep it on screen meanwhile.
+fn plan(terminal: bool, styled: bool, unicode: bool, columns: usize, rows: usize) -> Show {
     if !terminal || columns <= WIDTH {
         Show::Nothing
-    } else if styled && unicode {
+    } else if styled && unicode && columns >= LINE && rows >= TALL {
         Show::Moving
     } else {
         Show::Still
@@ -311,35 +323,212 @@ fn still(style: Style) -> Vec<String> {
     }
 }
 
-/// Runs `work`, which prints and asks nothing, and where stdout is a terminal prints the
-/// picture first, between blank lines. An animation plays while `work` runs, so it costs no
-/// time; whatever is left of `work` after the picture is a [`crate::progress::wait`] named
-/// `label`, as all of it is where nothing moves.
-pub fn during<T: Send>(label: &str, work: impl FnOnce() -> T + Send) -> T {
+/// Runs `work`, which prints and asks nothing, then prints `lines` of what it returned. Where
+/// stdout is a terminal the picture comes first, between blank lines. An animation plays
+/// while `work` runs and the lines are printed under it as soon as they are known; it has
+/// ended, or a key has ended it, when this returns. Whatever is left of `work` after the
+/// picture is a [`crate::progress::wait`] named `label`, as all of it is where nothing
+/// moves.
+pub fn during<T: Send>(
+    label: &str,
+    work: impl FnOnce() -> T + Send,
+    lines: impl FnOnce(&T) -> Vec<String> + Send,
+) -> T {
     let style = crate::style::out();
-    let columns = crossterm::terminal::size().map_or(80, |(w, _)| usize::from(w));
+    let (columns, rows) =
+        crossterm::terminal::size().map_or((80, 24), |(w, h)| (usize::from(w), usize::from(h)));
     let terminal = std::io::stdout().is_terminal();
-    match plan(terminal, style.styled(), style.unicode(), columns) {
-        Show::Nothing => crate::progress::wait(label, work),
-        Show::Still => {
-            draw(&[still(style)]);
-            crate::progress::wait(label, work)
+    let show = plan(terminal, style.styled(), style.unicode(), columns, rows);
+    if show != Show::Moving {
+        if show == Show::Still {
+            let mut stage = Stage::new(std::io::stdout(), columns, still(style));
+            stage.open(&stage.last.clone());
         }
-        Show::Moving => {
-            let frames: Vec<_> = (0..=FRAMES)
-                .map(|f| render(&blocks(f, true), style))
-                .collect();
-            beside(
-                || draw(&frames),
-                work,
-                |done| crate::progress::wait(label, done),
-            )
+        let found = crate::progress::wait(label, work);
+        for line in lines(&found) {
+            println!("{line}");
+        }
+        return found;
+    }
+    let frames: Vec<_> = (0..=FRAMES)
+        .map(|f| render(&blocks(f, true), style))
+        .collect();
+    let stage = Mutex::new(Stage::new(
+        std::io::stdout(),
+        columns,
+        frames[FRAMES].clone(),
+    ));
+    let (found, unsaid) = beside(
+        || {
+            let keys = Keys::read();
+            animate(&stage, &frames, |tick| keys.pressed(tick));
+        },
+        || {
+            let found = work();
+            let lines = lines(&found);
+            let said = lock(&stage).say(&lines);
+            (found, (!said).then_some(lines))
+        },
+        |done| crate::progress::wait(label, done),
+    );
+    // The work outlasted the picture.
+    for line in unsaid.into_iter().flatten() {
+        println!("{line}");
+    }
+    found
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The terminal while the picture is on it: the one way both its frames and the lines under
+/// it are written, each in one write. Lines end in a carriage return too, for raw mode.
+struct Stage<W> {
+    out: W,
+    columns: usize,
+    /// The animation's last frame.
+    last: Vec<String>,
+    /// Lines printed under the picture.
+    below: usize,
+    /// The picture still moves.
+    live: bool,
+}
+
+impl<W: Write> Stage<W> {
+    fn new(out: W, columns: usize, last: Vec<String>) -> Self {
+        Stage {
+            out,
+            columns,
+            last,
+            below: 0,
+            live: true,
+        }
+    }
+
+    /// A terminal that went away mid-picture is no error of setup's.
+    fn write(&mut self, text: &str) {
+        let _ = self
+            .out
+            .write_all(text.as_bytes())
+            .and_then(|()| self.out.flush());
+    }
+
+    /// The first frame, between blank lines.
+    fn open(&mut self, frame: &[String]) {
+        let mut text = String::from("\r\n");
+        for line in frame {
+            text.push_str(line);
+            text.push_str("\r\n");
+        }
+        text.push_str("\r\n");
+        self.write(&text);
+    }
+
+    /// `frame` over the one before it: the cursor is saved, moved up to the picture's rows
+    /// and put back, so what stands under the picture stays.
+    fn redraw(&mut self, frame: &[String]) {
+        let mut text = format!("\x1b7\x1b[{}A", frame.len() + 1 + self.below);
+        for line in frame {
+            text.push_str("\r\x1b[2K");
+            text.push_str(line);
+            text.push_str("\r\n");
+        }
+        text.push_str("\x1b8");
+        self.write(&text);
+    }
+
+    /// The last frame; nothing redraws after it.
+    fn end(&mut self) {
+        if self.live {
+            self.live = false;
+            self.redraw(&self.last.clone());
+        }
+    }
+
+    /// `lines` under the picture while it moves; false once it has ended, when printing is
+    /// the caller's. Lines the redraw couldn't count on (one that would wrap, more than
+    /// [`UNDER`]) end the animation first.
+    fn say(&mut self, lines: &[String]) -> bool {
+        if !self.live {
+            return false;
+        }
+        let fits = lines.iter().all(|l| l.chars().count() < self.columns);
+        if !fits || self.below + lines.len() > UNDER {
+            self.end();
+        }
+        let mut text = String::new();
+        for line in lines {
+            text.push_str(line);
+            text.push_str("\r\n");
+        }
+        self.write(&text);
+        self.below += lines.len();
+        true
+    }
+}
+
+/// `frames` on `stage`, a tick apart, until the last or until `skip` (which waits the tick)
+/// says a key was pressed. The stage is free between frames.
+fn animate<W: Write>(
+    stage: &Mutex<Stage<W>>,
+    frames: &[Vec<String>],
+    mut skip: impl FnMut(Duration) -> bool,
+) {
+    lock(stage).open(&frames[0]);
+    for frame in &frames[1..frames.len() - 1] {
+        if skip(TICK) || !lock(stage).live {
+            break;
+        }
+        lock(stage).redraw(frame);
+    }
+    lock(stage).end();
+}
+
+/// Keys read without echo while the animation plays; the terminal's mode comes back when
+/// this drops. `None` inside where raw mode can't be had: the animation then can't be
+/// skipped.
+struct Keys(bool);
+
+impl Keys {
+    fn read() -> Self {
+        Keys(std::io::stdin().is_terminal() && crossterm::terminal::enable_raw_mode().is_ok())
+    }
+
+    /// Waits `tick`; true when a key was pressed in it. Ctrl-C, a key in raw mode, ends
+    /// luoto as the signal would.
+    fn pressed(&self, tick: Duration) -> bool {
+        use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, poll, read};
+        if !self.0 {
+            std::thread::sleep(tick);
+            return false;
+        }
+        if !poll(tick).unwrap_or(false) {
+            return false;
+        }
+        match read() {
+            Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => {
+                if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                    let _ = crossterm::terminal::disable_raw_mode();
+                    std::process::exit(130);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Drop for Keys {
+    fn drop(&mut self) {
+        if self.0 {
+            let _ = crossterm::terminal::disable_raw_mode();
         }
     }
 }
 
 /// `work` on a thread of its own while `draw` runs on this one. `rest` gets what waits for
-/// `work` only once `draw` has ended, so nothing else writes to the terminal during it.
+/// `work` only once `draw` has ended, so no spinner draws during it.
 fn beside<T: Send>(
     draw: impl FnOnce(),
     work: impl FnOnce() -> T + Send,
@@ -354,29 +543,6 @@ fn beside<T: Send>(
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
         }))
     })
-}
-
-/// `frames` one over the other, a tick apart, between blank lines.
-fn draw(frames: &[Vec<String>]) {
-    let mut out = std::io::stdout().lock();
-    // A terminal that went away mid-picture is no error of setup's.
-    let _ = writeln!(out);
-    for (i, lines) in frames.iter().enumerate() {
-        let mut text = String::new();
-        if i > 0 {
-            std::thread::sleep(TICK);
-            text.push_str(&format!("\x1b[{}A", lines.len()));
-        }
-        for line in lines {
-            if i > 0 {
-                text.push_str("\r\x1b[2K");
-            }
-            text.push_str(line);
-            text.push('\n');
-        }
-        let _ = out.write_all(text.as_bytes()).and_then(|()| out.flush());
-    }
-    let _ = writeln!(out);
 }
 
 #[cfg(test)]
@@ -458,11 +624,149 @@ mod tests {
     }
 
     #[test]
-    fn only_a_terminal_gets_a_picture_and_only_colors_move() {
-        assert_eq!(plan(false, false, true, 80), Show::Nothing);
-        assert_eq!(plan(true, true, true, 80), Show::Moving);
-        assert_eq!(plan(true, false, true, 80), Show::Still);
-        assert_eq!(plan(true, true, false, 80), Show::Still);
-        assert_eq!(plan(true, true, true, WIDTH), Show::Nothing);
+    fn only_a_terminal_gets_a_picture_and_only_one_with_room_and_colors_moves() {
+        assert_eq!(plan(false, false, true, 80, 24), Show::Nothing);
+        assert_eq!(plan(true, true, true, 80, 24), Show::Moving);
+        assert_eq!(plan(true, false, true, 80, 24), Show::Still);
+        assert_eq!(plan(true, true, false, 80, 24), Show::Still);
+        // Too narrow for the lines under it, or too short to stay on screen: still.
+        assert_eq!(plan(true, true, true, LINE - 1, 24), Show::Still);
+        assert_eq!(plan(true, true, true, WIDTH + 1, 50), Show::Still);
+        assert_eq!(plan(true, true, true, 120, TALL - 1), Show::Still);
+        assert_eq!(plan(true, true, true, 120, TALL), Show::Moving);
+        // Too narrow for the picture: none.
+        assert_eq!(plan(true, true, true, WIDTH, 50), Show::Nothing);
+    }
+
+    /// What a terminal of `columns` shows after `bytes`: the few sequences a frame uses.
+    fn screen(bytes: &[u8]) -> Vec<String> {
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        let mut rows: Vec<Vec<char>> = vec![Vec::new()];
+        let (mut y, mut x, mut saved) = (0usize, 0usize, (0usize, 0usize));
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\r' => x = 0,
+                '\n' => {
+                    y += 1;
+                    if y == rows.len() {
+                        rows.push(Vec::new());
+                    }
+                }
+                '\x1b' => match chars.next().unwrap() {
+                    '7' => saved = (y, x),
+                    '8' => (y, x) = saved,
+                    '[' => {
+                        let mut n = String::new();
+                        while chars.peek().unwrap().is_ascii_digit() {
+                            n.push(chars.next().unwrap());
+                        }
+                        match chars.next().unwrap() {
+                            'A' => y -= n.parse::<usize>().unwrap(),
+                            'K' => rows[y].clear(),
+                            other => panic!("CSI {n}{other}"),
+                        }
+                    }
+                    other => panic!("ESC {other}"),
+                },
+                c => {
+                    let wide = rows[y].len().max(x + 1);
+                    rows[y].resize(wide, ' ');
+                    rows[y][x] = c;
+                    x += 1;
+                }
+            }
+        }
+        rows.into_iter().map(|r| r.into_iter().collect()).collect()
+    }
+
+    fn plain_frames() -> Vec<Vec<String>> {
+        (0..=FRAMES)
+            .map(|f| render(&blocks(f, true), Style::PLAIN))
+            .collect()
+    }
+
+    fn lines(text: &[&str]) -> Vec<String> {
+        text.iter().map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn lines_said_during_the_animation_stand_under_the_finished_picture() {
+        let frames = plain_frames();
+        let stage = Mutex::new(Stage::new(Vec::new(), 80, frames[FRAMES].clone()));
+        let said = lines(&["host: macos aarch64", "  podman    6.2.0 podman"]);
+        let mut tick = 0;
+        animate(&stage, &frames, |_| {
+            tick += 1;
+            // Found a few frames in; one more line later.
+            if tick == 5 {
+                assert!(lock(&stage).say(&said[..1]));
+            }
+            if tick == 20 {
+                assert!(lock(&stage).say(&said[1..]));
+            }
+            false
+        });
+        let stage = stage.into_inner().unwrap();
+        assert!(!stage.live && stage.below == 2);
+        let mut want = vec![String::new()];
+        want.extend(frames[FRAMES].iter().cloned());
+        want.push(String::new());
+        want.extend(said);
+        // The cursor rests on the line after them.
+        want.push(String::new());
+        assert_eq!(screen(&stage.out), want);
+    }
+
+    #[test]
+    fn a_key_ends_the_animation_at_its_last_frame() {
+        let frames = plain_frames();
+        let stage = Mutex::new(Stage::new(Vec::new(), 80, frames[FRAMES].clone()));
+        let mut ticks = 0;
+        animate(&stage, &frames, |_| {
+            ticks += 1;
+            ticks == 3
+        });
+        assert_eq!(ticks, 3);
+        let mut stage = stage.into_inner().unwrap();
+        // Once ended, lines are the caller's to print.
+        assert!(!stage.say(&lines(&["host"])));
+        let shown = screen(&stage.out);
+        assert_eq!(shown[1..=frames[FRAMES].len()], frames[FRAMES][..]);
+    }
+
+    #[test]
+    fn a_line_that_would_wrap_or_one_too_many_ends_the_animation_before_it_prints() {
+        let frames = plain_frames();
+        for said in [lines(&[&"x".repeat(80)]), lines(&["1", "2", "3", "4", "5"])] {
+            let mut stage = Stage::new(Vec::new(), 80, frames[FRAMES].clone());
+            stage.open(&frames[0]);
+            assert!(stage.say(&said));
+            assert!(!stage.live);
+            let shown = screen(&stage.out);
+            assert_eq!(shown[1..=frames[FRAMES].len()], frames[FRAMES][..]);
+            assert_eq!(shown[frames[FRAMES].len() + 2], said[0]);
+        }
+    }
+
+    /// The animation on the terminal the test runs in, with lines found half a second in
+    /// and a line after it where setup's question would come:
+    /// `cargo test -p luoto splash::tests::on_this_terminal -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "draws on the terminal, to be looked at"]
+    fn on_this_terminal() {
+        during(
+            "looking at this machine's container runtimes",
+            || std::thread::sleep(Duration::from_millis(500)),
+            |()| {
+                lines(&[
+                    "host: macos aarch64",
+                    "  container 1.7.1 Apple's container, service running",
+                    "  podman    6.2.0 podman (luoto runs envs in its own VM)",
+                    "  docker    29.10.0 docker CLI installed but the engine is not running",
+                ])
+            },
+        );
+        println!("? Run envs on: (setup's question comes here, after the picture)");
     }
 }
