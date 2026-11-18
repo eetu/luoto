@@ -728,7 +728,7 @@ test("a nearly full VM disk is flagged beside the envs, with what frees it", asy
   await expect(page.getByText("luoto prune", { exact: true })).toBeVisible();
 });
 
-test("first setup on a Mac offers Apple's container first and installs the chosen runtime", async ({
+test("first setup lists every runtime, offers the ready ones and runs no install", async ({
   page,
 }) => {
   await mockApi(page);
@@ -736,33 +736,63 @@ test("first setup on a Mac offers Apple's container first and installs the chose
     (url) => url.pathname === "/api/overview",
     (route) => route.fulfill({ json: { ...fixture("overview"), envs: [] } }),
   );
-  const installs: unknown[] = [];
+  await open(page);
+
+  // Listed in setup's order; one that isn't installed is no choice and links to its own page.
+  const radios = page.getByRole("radio");
+  await expect(radios).toHaveCount(3);
+  const apple = page.getByRole("radio", { name: /Apple's container/ });
+  const podman = page.getByRole("radio", { name: /podman/ });
+  const docker = page.getByRole("radio", { name: /Docker/ });
+  await expect(apple).toBeDisabled();
+  await expect(docker).toBeDisabled();
+  await expect(podman).toBeChecked();
+  await expect(page.getByText("every container is a VM of its own")).toBeVisible();
+  await expect(page.getByText("luoto runs on 1.7.1 or later:")).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "https://github.com/apple/container/releases" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "https://docs.docker.com/engine/install/" }),
+  ).toBeVisible();
+  await expect(page.getByText("luoto setup --runtime podman")).toBeVisible();
+
+  await expect(page.getByText("recommended")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Install/ })).toHaveCount(0);
+  await expect(page.getByText(/brew|winget|sudo/)).toHaveCount(0);
+});
+
+test("setup with several runtimes ready starts at the first and follows the pick", async ({
+  page,
+}) => {
+  await mockApi(page);
   await page.route(
-    (url) => url.pathname === "/api/setup/install",
-    (route, req) => {
-      installs.push(req.postDataJSON());
-      return route.fulfill({ json: { ok: true, command: "brew install container", output: "" } });
-    },
+    (url) => url.pathname === "/api/overview",
+    (route) => route.fulfill({ json: { ...fixture("overview"), envs: [] } }),
+  );
+  const base = fixture("setup");
+  await page.route(
+    (url) => url.pathname === "/api/setup",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...base,
+          runtimes: base.runtimes.map((o, i) => ({
+            ...o,
+            status: o.ready ? o.status : "29.1.0",
+            ready: true,
+            selected: i === 0,
+          })),
+        },
+      }),
   );
   await open(page);
 
-  const apple = page.getByRole("radio", { name: /Apple's container/ });
-  const podman = page.getByRole("radio", { name: /podman/ });
-  await expect(apple).toBeChecked();
-  await expect(page.getByText("every container is a VM of its own")).toBeVisible();
-  await expect(page.getByText("luoto needs Apple's container 1.7.1 or later")).toBeVisible();
-  await expect(page.getByText("brew install container")).toBeVisible();
+  await expect(page.getByRole("radio", { name: /Apple's container/ })).toBeChecked();
   await expect(page.getByText("luoto setup --runtime container")).toBeVisible();
-
-  await podman.check();
-  await expect(page.getByText(/^use the installed podman/)).toBeVisible();
-  await expect(page.getByText("luoto setup --runtime podman")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Install…" })).toHaveCount(0);
-
-  await apple.check();
-  await page.getByRole("button", { name: "Install…" }).click();
-  await page.getByRole("button", { name: "Run it" }).click();
-  await expect.poll(() => installs).toEqual([{ runtime: "container" }]);
+  await page.getByRole("radio", { name: /Docker/ }).check();
+  await expect(page.getByText("luoto setup --runtime docker")).toBeVisible();
+  await expect(page.getByRole("link")).toHaveCount(0);
 });
 
 test("on Apple's container the status bar and the env say each container is its own VM", async ({

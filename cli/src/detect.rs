@@ -79,8 +79,9 @@ pub struct Detected {
 /// How deep below the project folder detection and installs look.
 pub const DEPTH: usize = 3;
 
-/// Folders never looked into (dependencies, build output, virtualenvs), as hidden ones aren't.
-/// In a git work tree, `.gitignore` excludes more.
+/// Folders never looked into (dependencies, build output, virtualenvs, and samples, which pin
+/// toolchains of their own the project doesn't use), as hidden ones aren't. In a git work
+/// tree, `.gitignore` excludes more.
 pub const SKIP_DIRS: &[&str] = &[
     "node_modules",
     "target",
@@ -91,6 +92,10 @@ pub const SKIP_DIRS: &[&str] = &[
     "coverage",
     "venv",
     "__pycache__",
+    "examples",
+    "example",
+    "fixtures",
+    "testdata",
 ];
 
 /// Files besides `VERSION_FILES` and `MISE_CONFIGS` that can pin a toolchain for the folder
@@ -818,6 +823,10 @@ mod tests {
             r#"{"packageManager":"yarn@4.18.0"}"#,
         );
         w("frontend/node_modules/x/.node-version", "10\n");
+        w(
+            "docs/examples/launchpad/mise.toml",
+            "[tools]\nterraform = \"1\"\n",
+        );
         w(".hidden/.python-version", "3.9\n");
         w("generated/.python-version", "3.8\n");
         w(".gitignore", "generated/\n");

@@ -84,10 +84,30 @@ it:
 test-ui:
     cd frontend && {{yarn}} test:ui
 
+# Release downloads per version and platform, as GitHub counts them (Homebrew, Scoop and
+# install.sh all download the release's archive; upgrades count too).
+downloads:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    printf '%-14s %6s %6s %6s %6s %6s %6s\n' release total mac-arm mac-x86 lin-arm lin-x86 win
+    gh api repos/eetu/luoto/releases --paginate --jq '.[] | [.tag_name,
+      ([.assets[] | select(.name | test("\\.(tar\\.gz|zip)$")) | .download_count] | add // 0),
+      ([.assets[] | select(.name | test("aarch64-apple")) | .download_count] | add // 0),
+      ([.assets[] | select(.name | test("x86_64-apple")) | .download_count] | add // 0),
+      ([.assets[] | select(.name | test("aarch64-unknown-linux")) | .download_count] | add // 0),
+      ([.assets[] | select(.name | test("x86_64-unknown-linux")) | .download_count] | add // 0),
+      ([.assets[] | select(.name | test("windows")) | .download_count] | add // 0)] | @tsv' |
+      while IFS=$'\t' read -r tag t a b c d w; do
+        printf '%-14s %6s %6s %6s %6s %6s %6s\n' "$tag" "$t" "$a" "$b" "$c" "$d" "$w"
+      done
+
 # Terminal recordings in docs/casts, one GIF per tape (needs vhs, the runtime and `luoto-dev`
 # set up with its ssh_config included, which `luoto open` attaches through; leaves nothing
-# behind). Their envs are `tz`, `pulse` and `platform`, run by the debug build; it refuses to run if
-# luoto-dev has one of them already. Agents answer from docs/casts/canned.py.
+# behind but the builds of $LUOTO_CAST_TARGET, by default a folder of the system's temporary
+# ones). Their envs are `tz`, `luoto` and `platform`, run by the debug build; it refuses to
+# run if luoto-dev has one of them already. Agents answer from docs/casts/canned.py. The
+# hello cast gives a clone of this checkout, as committed and without its splash, the
+# splash the checkout has.
 casts:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -99,7 +119,9 @@ casts:
     # A full path: in the recording, docs/casts/bin/luoto (which runs this) is first on PATH.
     LUOTO_CAST_BIN=$(command -v "$LUOTO_CAST_BIN") || { echo "no $LUOTO_CAST_BIN" >&2; exit 1; }
     export LUOTO_CAST_BIN
-    envs="tz pulse platform"
+    envs="tz luoto platform"
+    export LUOTO_CAST_SRC="$PWD"
+    export LUOTO_CAST_TARGET="${LUOTO_CAST_TARGET:-${TMPDIR:-/tmp}/luoto-cast-target}"
     for e in $envs; do
         if "$LUOTO_CAST_BIN" status -e "$e" >/dev/null 2>&1; then
             echo "$LUOTO_CAST_BIN has an env \`$e\`; remove it first" >&2
@@ -117,6 +139,8 @@ casts:
         if [ -e "$demo/.luoto-cast" ]; then rm -rf "$demo"; fi
     }
     trap cleanup EXIT
+    # Stopped, it still cleans up.
+    trap 'exit 130' INT TERM
     for tape in docs/casts/*.tape; do vhs "$tape"; done
 
 # README screenshots from a real env and `luoto ui` (needs the runtime; leaves nothing behind).

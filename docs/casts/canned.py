@@ -17,44 +17,51 @@ from pathlib import Path
 MODEL = "claude-sonnet-4-5"
 
 
-# The splash screen setup.sh gives the CLI, which splash.rs replaces.
-BEFORE = """use std::io::{self, Write};
+# The checkout whose change the hello cast makes: the agent writes these files as they are there.
+SOURCE = Path(os.environ.get("LUOTO_CAST_SRC") or Path(__file__).resolve().parents[2])
+SPLASH = "cli/src/splash.rs"
+SETUP = "cli/src/setup.rs"
 
-/// The splash screen; `tty` says whether `out` is a terminal.
-pub fn show(out: &mut impl Write, _tty: bool) -> io::Result<()> {
-    writeln!(out, "pulse")?;
-    writeln!(out, "response times at a glance")
-}
-"""
 
-# A flow is a real change, made through the agent's own tools: each step answers the tool
-# result of the one before it. A prompt gets the first flow whose words it has all of.
+def read(path):
+    return ("Read", {"file_path": f"/workspace/{path}"})
+
+
+def write(path):
+    """Write `path` as the checkout has it, read when the step is sent."""
+    return (
+        "Write",
+        lambda: {"file_path": f"/workspace/{path}", "content": (SOURCE / path).read_text()},
+    )
+
+
+# A flow is a real change, made through the agent's own tools: each step is what the agent
+# says and the tools it calls then, and answers the results of the step before it. A prompt
+# gets the first flow whose words it has all of.
 FLOWS = [
-    # A CLI in an env of one folder: its plain splash screen (setup.sh) becomes splash.rs, then
-    # its tests.
+    # luoto in an env of its own clone, whose splash draws nothing (setup.sh): the splash of
+    # `luoto setup`, then its tests.
     (
-        ("sparkle",),
+        ("splash", "luoto setup"),
         [
             (
-                "I'll look at the splash screen.",
-                ("Read", {"file_path": "/workspace/src/splash.rs"}),
+                "I'll read where setup calls the splash, and what is there now.",
+                [read(SETUP), read(SPLASH)],
             ),
             (
-                "A unicorn that draws the wordmark with a rainbow laser. Piped output stays plain.",
-                (
-                    "Edit",
-                    {
-                        "file_path": "/workspace/src/splash.rs",
-                        "old_string": BEFORE,
-                        "new_string": (Path(__file__).parent / "splash.rs").read_text(),
-                    },
-                ),
+                "The island as pixels, two to a row of text: the palm grows, the sea spreads, "
+                "the sun rises, and setup's lines come up under it.",
+                [write(SPLASH)],
             ),
-            ("Now the tests.", ("Bash", {"command": "cargo test", "description": "Run the tests"})),
             (
-                "The splash now opens with a unicorn firing a rainbow laser that draws the "
-                "wordmark, sparkles trailing, and settles after two seconds. Both tests pass.",
-                None,
+                "Its tests.",
+                [("Bash", {"command": "cargo test -p luoto splash", "description": "Run the tests"})],
+            ),
+            (
+                "`luoto setup` now opens with the island, drawn once while it looks at the "
+                "machine. Still under NO_COLOR, ASCII without UTF-8, nothing when piped. Its "
+                "tests pass.",
+                [],
             ),
         ],
     ),
@@ -62,26 +69,28 @@ FLOWS = [
     (
         ("health",),
         [
-            ("I'll look at the API's routes.", ("Read", {"file_path": "/workspace/api/app.py"})),
+            ("I'll look at the API's routes.", [read("api/app.py")]),
             (
                 "Adding a `/health` route.",
-                (
-                    "Edit",
-                    {
-                        "file_path": "/workspace/api/app.py",
-                        "old_string": "def route(path):\n",
-                        "new_string": (
-                            "def route(path):\n"
-                            '    if path == "/health":\n'
-                            '        return 200, "ok\\n"\n'
-                        ),
-                    },
-                ),
+                [
+                    (
+                        "Edit",
+                        {
+                            "file_path": "/workspace/api/app.py",
+                            "old_string": "def route(path):\n",
+                            "new_string": (
+                                "def route(path):\n"
+                                '    if path == "/health":\n'
+                                '        return 200, "ok\\n"\n'
+                            ),
+                        },
+                    )
+                ],
             ),
             (
                 "Added a `/health` route to `api/app.py` that answers `ok`. The API reads its "
                 "routes on every request, so it answers at once, no restart.",
-                None,
+                [],
             ),
         ],
     ),
@@ -121,22 +130,32 @@ def prompt(body):
 
 
 def reply_for(body):
-    """(text, tool call or None) for a Messages API request."""
+    """(text, tool calls) for a Messages API request; a call is (id, name, input)."""
     tools = {t.get("name") for t in body.get("tools") or []}
     asked = prompt(body).lower()
     for words, steps in FLOWS:
-        if all(w in asked for w in words) and {call[0] for _, call in steps if call} <= tools:
-            answered = {
-                c.get("tool_use_id") for c in last_user(body) if c.get("type") == "tool_result"
-            }
-            step = next((i + 1 for i in range(len(steps)) if f"toolu_cast{i}" in answered), 0)
-            text, call = steps[step]
-            return text, call and (f"toolu_cast{step}", *call)
+        if all(w in asked for w in words) and {c[0] for _, calls in steps for c in calls} <= tools:
+            answered = [
+                c.get("tool_use_id", "") for c in last_user(body) if c.get("type") == "tool_result"
+            ]
+            step = next(
+                (
+                    i + 1
+                    for i in range(len(steps))
+                    if any(a.startswith(f"toolu_cast{i}_") for a in answered)
+                ),
+                0,
+            )
+            text, calls = steps[step]
+            return text, [
+                (f"toolu_cast{step}_{n}", name, args() if callable(args) else args)
+                for n, (name, args) in enumerate(calls)
+            ]
     lower = " ".join(c.get("text", "") for c in last_user(body)).lower()
     for key, reply in REPLIES.items():
         if key in lower:
-            return reply, None
-    return DEFAULT, None
+            return reply, []
+    return DEFAULT, []
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -182,15 +201,15 @@ class Handler(BaseHTTPRequestHandler):
         if path.endswith("/count_tokens"):
             self.json({"input_tokens": 100})
         elif path.endswith("/messages"):
-            text, call = reply_for(body)
+            text, calls = reply_for(body)
             if body.get("stream"):
-                self.stream(text, call)
+                self.stream(text, calls)
             else:
-                self.json(message(text, call))
+                self.json(message(text, calls))
         else:
             self.json({"error": {"type": "not_found"}}, 404)
 
-    def stream(self, text, call):
+    def stream(self, text, calls):
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
         self.send_header("cache-control", "no-cache")
@@ -201,7 +220,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"event: {kind}\ndata: {json.dumps(data)}\n\n".encode())
             self.wfile.flush()
 
-        start = message("", None)
+        start = message("", [])
         start["content"] = []
         start["stop_reason"] = None
         event("message_start", {"message": start})
@@ -215,22 +234,20 @@ class Handler(BaseHTTPRequestHandler):
             event("content_block_delta", {"index": 0, "delta": delta})
             time.sleep(0.04)
         event("content_block_stop", {"index": 0})
-        if call:
-            tid, name, args = call
+        for index, (tid, name, args) in enumerate(calls, 1):
             block = {"type": "tool_use", "id": tid, "name": name, "input": {}}
-            event("content_block_start", {"index": 1, "content_block": block})
+            event("content_block_start", {"index": index, "content_block": block})
             delta = {"type": "input_json_delta", "partial_json": json.dumps(args)}
-            event("content_block_delta", {"index": 1, "delta": delta})
-            event("content_block_stop", {"index": 1})
-        stop = {"stop_reason": "tool_use" if call else "end_turn", "stop_sequence": None}
+            event("content_block_delta", {"index": index, "delta": delta})
+            event("content_block_stop", {"index": index})
+        stop = {"stop_reason": "tool_use" if calls else "end_turn", "stop_sequence": None}
         event("message_delta", {"delta": stop, "usage": {"output_tokens": len(words)}})
         event("message_stop", {})
 
 
-def message(text, call):
+def message(text, calls):
     content = [{"type": "text", "text": text}]
-    if call:
-        tid, name, args = call
+    for tid, name, args in calls:
         content.append({"type": "tool_use", "id": tid, "name": name, "input": args})
     return {
         # Its own id: an agent joins the blocks of replies that share one.
@@ -239,7 +256,7 @@ def message(text, call):
         "role": "assistant",
         "model": MODEL,
         "content": content,
-        "stop_reason": "tool_use" if call else "end_turn",
+        "stop_reason": "tool_use" if calls else "end_turn",
         "stop_sequence": None,
         "usage": {"input_tokens": 100, "output_tokens": len(text.split())},
     }

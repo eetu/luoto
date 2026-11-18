@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.6.0 (unreleased)
+
+- **`luoto setup` installs no runtime, and `--install` is gone.** Setup uses a runtime you
+  installed: Apple's `container`, podman or Docker, each shown with how it isolates an env.
+  With several it asks, in that order, starting at the current one; Docker is a choice like
+  the others (`--runtime docker`). With none ready it lists what luoto runs on, the oldest
+  version of each and its install page, and stops. `--yes` takes the current runtime, or the
+  first in the list, without asking. The UI's setup page shows the same and runs no install.
+- `luoto setup` opens with luoto's island, drawn once on a terminal with colors while setup
+  looks at this machine: what it finds is printed under the island as it comes, and any key
+  ends the drawing. The island is still without colors and on a terminal under 80 columns
+  or 21 rows, and absent where setup's output is piped. A first setup ends with the next
+  step: `luoto init` inside a project folder.
+- `luoto doctor` checks that containers reach the internet on Apple's `container` and in
+  luoto's VM: after a Mac changes networks Apple's VMs can lose their way out until
+  `container system stop` and `container system start`, which doctor then names. An image
+  build that fails there points at `luoto doctor`.
+- `luoto init` no longer takes toolchains from samples (`examples/`, `fixtures/`, `testdata/`):
+  a launchpad example's `mise.toml` made `up` install terraform for a project without it.
+- luoto has a page, https://eetu.github.io/luoto/, with the hello cast and install steps.
+
 ## 0.5.3 (2026-11-17)
 
 - **Security, Apple's `container`:** a model server on this machine was reached through a DNS

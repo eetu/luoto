@@ -212,7 +212,7 @@ impl Runtime {
             None if which("podman") => "podman".into(),
             None if which("docker") => "docker".into(),
             None => {
-                bail!("no container runtime found; run `luoto setup` to install podman or docker")
+                bail!("no container runtime found; `luoto setup` lists what luoto runs on")
             }
         };
         let flavor = Self::flavor_of(&bin);

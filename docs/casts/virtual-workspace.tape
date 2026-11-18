@@ -14,7 +14,7 @@ Set TypingSpeed 35ms
 
 Hide
 Type "source docs/casts/setup.fish" Enter
-Sleep 2s
+Wait+Screen@600s /demo ❯/
 Show
 
 Type "luoto init --virtual --name platform --repo ./api --repo ./app --agent claude --no-up"

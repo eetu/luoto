@@ -1,6 +1,7 @@
 import type { SetupInfo } from "../../src/lib/types";
 
-// A first setup on macOS 26 on Apple silicon: podman installed, Apple's container not.
+// A first setup on macOS 26 on Apple silicon: podman installed, Apple's container and Docker
+// not.
 export default {
   detection: {
     os: "macos",
@@ -16,44 +17,45 @@ export default {
         detail: "podman (luoto runs envs in its own VM)",
       },
     ],
-    package_manager: "brew",
     wsl: null,
   },
-  recommendation: {
-    summary: "use the installed podman (podman (luoto runs envs in its own VM))",
-    reasons: ["a supported runtime is already installed and running"],
-    install: null,
-    notes: [],
-  },
-  runtimes: {
-    options: [
-      {
-        runtime: "container",
-        label: "Apple's container",
-        description: "every container is a VM of its own",
-        recommended: true,
-        current: false,
-        selected: true,
-        setup: "luoto setup --runtime container",
-      },
-      {
-        runtime: "podman",
-        label: "podman",
-        description: "every env in luoto's one VM, under gVisor",
-        recommended: false,
-        current: false,
-        selected: false,
-        setup: "luoto setup --runtime podman",
-      },
-    ],
-    apple: null,
-    apple_need: { min: "1.7.1", install: ["brew", "install", "container"] },
-    podman: {
-      summary: "use the installed podman (podman (luoto runs envs in its own VM))",
-      reasons: ["a supported runtime is already installed and running"],
-      install: null,
-      notes: [],
+  runtimes: [
+    {
+      runtime: "container",
+      label: "Apple's container",
+      description: "every container is a VM of its own",
+      min: "1.7.1",
+      url: "https://github.com/apple/container/releases",
+      status: "not installed",
+      ready: false,
+      current: false,
+      selected: false,
+      setup: "luoto setup --runtime container",
     },
-  },
+    {
+      runtime: "podman",
+      label: "podman",
+      description: "every env in luoto's one VM, under gVisor",
+      min: "5.2.0",
+      url: "https://podman.io/docs/installation",
+      status: "6.1.4",
+      ready: true,
+      current: false,
+      selected: true,
+      setup: "luoto setup --runtime podman",
+    },
+    {
+      runtime: "docker",
+      label: "Docker",
+      description: "containers in the Docker engine's VM; gVisor only where registered with it",
+      min: "28.0.0",
+      url: "https://docs.docker.com/engine/install/",
+      status: "not installed",
+      ready: false,
+      current: false,
+      selected: false,
+      setup: "luoto setup --runtime docker",
+    },
+  ],
   images_ok: false,
 } satisfies SetupInfo;

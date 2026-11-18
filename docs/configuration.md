@@ -225,7 +225,7 @@ Google Cloud ones aren't handled yet ([ROADMAP.md](../ROADMAP.md)).
 - `luoto init` reads the folder first and shows what it found (toolchains with the file that
   pins each, presets for the registries it uses) before creating anything. It looks three
   levels into subfolders (a monorepo's `frontend/` and `backend/`), skipping ignored,
-  dependency, build and hidden folders. A runtime the project needs but pins nowhere gets a
+  dependency, build and hidden folders, and samples (`examples/`, `fixtures/`, `testdata/`). A runtime the project needs but pins nowhere gets a
   default: Rust stable, node LTS or Python 3.14, and Java 17 for a Python dependency that
   runs on it (pyspark). `c` goes through the settings one at a time
   (isolation, presets, toolchains, agents and their credentials, ports); `--preset` and

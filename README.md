@@ -9,14 +9,13 @@ Run coding agents with their permission prompts off, in a sandbox that reaches o
 you allowed and never holds your secrets.
 
 <p align="center">
-  <img alt="luoto init in a folder, Claude Code at work in a shell of the env, the request the gate denied, and the change pulled back" src="docs/casts/hello.gif" width="900">
+  <img alt="luoto setup, luoto init in luoto's own folder, Claude Code adding a splash in a shell of the env, the change pulled back, and luoto setup opening with it" src="docs/casts/hello.gif" width="900">
 </p>
 
-`luoto init` in a Rust project, one confirm, and its env has the toolchain it pins and Claude
-Code. Claude gives the CLI's splash screen a unicorn and a laser, on a copy of the folder. The
-tests it runs build a dev-dependency whose build script posts the environment to a host of its
-own, as a compromised crate would: the gate blocked it, and luoto says so when the shell ends.
-`luoto pull` brings the change back, reviewed first.
+Here the project is luoto itself, and the cast opens with its `luoto setup` as it was.
+`luoto init --agent claude` in its folder, one confirm, and Claude Code works in the env, on
+a copy: it adds the island `luoto setup` opens with. `luoto pull` brings the change back,
+reviewed first, and the setup that then runs is the pulled code.
 
 ## Why
 
@@ -65,10 +64,11 @@ Then, once:
 luoto setup
 ```
 
-It checks your container runtime (podman ≥ 5.2 or Docker ≥ 28; on macOS 26 on Apple silicon
-it offers Apple's `container` first; `--install` installs the one picked after showing the
-command), creates luoto's own VM where podman needs one, and gets the images. Updates, tab
-completion and checking a download: [Install details](docs/install.md).
+It looks for a container runtime you have installed (Apple's `container` on macOS 26 on
+Apple silicon, podman ≥ 5.2, Docker ≥ 28), asks which to use when there are several, creates
+luoto's own VM where podman needs one, and gets the images. Without one it lists them with
+their install pages. Updates, tab completion and checking a download:
+[Install details](docs/install.md).
 
 ## Getting started
 
@@ -202,7 +202,7 @@ agent's answer, for a cron job or a CI step:
 - The gate holds up to 1024 connections per env. It closes a request whose response hasn't
   started 10 minutes after it was sent, a response that sends nothing for 5 minutes, and a
   tunnel or websocket after an hour without traffic. A rule's `idle` (`luoto allow
-  k8s.example.com --idle 2h`, at most 24h) gives its host that long instead, for long polls
+k8s.example.com --idle 2h`, at most 24h) gives its host that long instead, for long polls
   such as `kubectl logs -f`.
 - With podman on macOS and Windows, luoto's VM keeps its disk in a file on yours (up to
   100 GB, podman's default) that grows as images, toolchains and workspaces fill it and doesn't
