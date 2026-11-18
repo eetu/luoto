@@ -51,14 +51,14 @@ INKS = {
     # A terminal's faint: halfway to the background.
     "a": "#834f0c",
 }
-MARGIN = 84
-# One pixel of the splash, and where its grid starts: its last column is empty, so the sea
-# ends at the right margin.
-CELL = 14
-ART = (WIDTH - MARGIN - CELL * (len(PIXELS[0]) - 1), 44)
+# A chat thumbnail is the square cut from the middle (x 286 to 913), so the island and the
+# name stand inside it; a wide card shows the same picture with room either side.
+# One pixel of the splash, and where its grid starts.
+CELL = 15
+ART = ((WIDTH - CELL * len(PIXELS[0])) // 2, 62)
+NAME = [("luoto", "600", INKS["F"]), (".", "600", ACCENT)]
 TRACKING = -0.04
-# What a card shows of luoto without a word beside it: the README's first sentence, short.
-PITCH = ("A sandbox for dependencies and agents", "that feels like working locally.")
+FONTS = json.loads((HERE / "glyphs.json").read_text())
 
 
 def art() -> str:
@@ -79,52 +79,46 @@ def art() -> str:
     return "\n".join(rects)
 
 
-def text(runs: list[tuple[str, str, str]], size: float, x: float, baseline: float) -> str:
-    """`runs` of (text, weight, fill) as outlines, from `x` on `baseline`."""
-    fonts = json.loads((HERE / "glyphs.json").read_text())
+Runs = list[tuple[str, str, str]]
+
+
+def advance(char: str, weight: str, size: float) -> float:
+    font = FONTS[weight]
+    return font["glyphs"][char][0] * size / font["em"] + TRACKING * size
+
+
+def width(runs: Runs, size: float) -> float:
+    return sum(advance(c, weight, size) for string, weight, _ in runs for c in string)
+
+
+def text(runs: Runs, size: float, center: float, baseline: float) -> str:
+    """`runs` of (text, weight, fill) as outlines on `baseline`, centered on `center`."""
+    x = center - (width(runs, size) - TRACKING * size) / 2
     paths = []
     for string, weight, fill in runs:
-        font = fonts[weight]
-        scale = size / font["em"]
+        scale = size / FONTS[weight]["em"]
         for char in string:
-            advance, outline = font["glyphs"][char]
+            outline = FONTS[weight]["glyphs"][char][1]
             if outline:
                 paths.append(
                     f'<path transform="translate({x:.2f} {baseline}) scale({scale:.5f} '
                     f'{-scale:.5f})" fill="{fill}" d="{outline}"/>'
                 )
-            x += advance * scale + TRACKING * size
+            x += advance(char, weight, size)
     return "\n".join(paths)
 
 
 def svg() -> str:
-    # The name's left side bearing is taken off, so its stem stands over the lines under it.
-    name = text([("luoto", "600", INKS["F"]), (".", "600", ACCENT)], 168, MARGIN - 11, 226)
-    tagline = text(
-        [
-            ("no tool is an island, except on ", "400", INKS["D"]),
-            ("luoto", "600", INKS["F"]),
-            (".", "600", ACCENT),
-        ],
-        30,
-        MARGIN,
-        292,
-    )
-    pitch = "\n".join(
-        text([(line, "500", INKS["F"])], 54, MARGIN, 476 + 68 * i) for i, line in enumerate(PITCH)
-    )
     return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {HEIGHT}" \
 width="{WIDTH}" height="{HEIGHT}" role="img" \
-aria-label="luoto: no tool is an island, except on luoto.">
+aria-label="luoto">
 <!-- Written by make.py. The island mirrors the still frame of cli/src/splash.rs; the text is
 Inter (Copyright 2016 The Inter Project Authors, SIL Open Font License 1.1) as outlines. -->
 <rect width="{WIDTH}" height="{HEIGHT}" fill="{BACKGROUND}"/>
 <g shape-rendering="crispEdges">
 {art()}
 </g>
-{name}
-{tagline}
-{pitch}
+{text(NAME, 150, WIDTH / 2, 556)}
 </svg>
 """
 
