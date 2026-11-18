@@ -89,13 +89,20 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   configuration time. Configure branch rulesets on GitHub as well; the gate is a guard-rail.
   GraphQL names no repository in its path, so with a token (not an App) it reaches what the
   token does, `read_repos` and unlisted repositories included; only an App's minted token is
-  limited to the env's repositories.
+  limited to the env's repositories. A pushed branch or an opened pull request runs the
+  repository's CI as any branch does, with code the sandbox wrote, and CI runs outside the
+  sandbox: keep CI secrets in environments and protected branches, and give a token no
+  `workflow` scope, which would let a push change the workflows (luoto can check that only
+  for an App).
 - **Azure DevOps writes.** The PAT goes only on the granted repositories' git paths and their
   pull requests' REST paths, and pushes pass the same guard as on GitHub. A pull request's
   body is an allowlist of fields (title, description, branches, draft, reviewers, work items,
   labels), so completing one (a merge) or setting auto-complete is refused, as are votes. A PAT
   reaches its whole organization, so the gate's paths are the only repository boundary; the
   rest of its REST API is not reachable. Configure branch policies in Azure DevOps as well.
+  A pushed branch or an opened pull request runs the pipelines that trigger on it, with code
+  the sandbox wrote, outside the sandbox: keep their secrets behind approvals and branch
+  checks.
 - **Other forges** (`[[credentials.git]]`). The token goes only on the granted repositories'
   smart-HTTP and LFS paths, pushes pass the same guard, and push options (which can open merge
   requests or skip CI) are refused. The forge's API is not reachable with it; the token's
@@ -138,8 +145,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   ignores in a repository, and never writes to the host; work leaves through git pushes or a
   reviewed `pull`. `pull` reviews changes, holds back risky files in any folder within the pull
   (compared case-insensitively, as macOS and Windows name them), refuses `.git` under any
-  spelling, names that collide by case, and paths and symlinks that leave the folder. A
-  pulled `.gitignore` decides what later copies leave out, so review its changes. `pull`
+  spelling, names that collide by case, and paths and symlinks that leave the folder. What
+  it holds back is what tools run by themselves; the rest is still code the sandbox wrote,
+  and building or running it on your machine runs it outside the sandbox: read the diff
+  first. A pulled `.gitignore` decides what later copies leave out, so review its changes. `pull`
   never writes into your home folder or a folder that holds it. With podman on macOS and
   Windows, envs run only in luoto's own VM, which mounts none of your folders but luoto's
   shares folder, read-only (`luoto doctor` checks), so an escape reaches what you shared, not
@@ -164,8 +173,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   do, where mise reads its version files and `mise.toml` (which can run commands in the env).
   Both questions stay open until answered: an `up` cut short or without a terminal (the UI,
   `up --all`) installs nothing. Until then the env has its default presets and the access you
-  gave the remote. A shell or editor you open in it starts mise there. git's output on the
-  way, the remote's messages included, is shown escaped.
+  gave the remote. A shell or editor you open in it starts mise there, and an agent you start
+  there reads the clone's files and can run the hooks and MCP servers the clone configures
+  for it. git's output on the way, the remote's messages included, is shown escaped.
 - **Moving an env** (`luoto export`, `luoto import`). An archive holds no secret value, CA
   key or vault token: the config's refs stay refs, read where the env is imported, and import
   makes a new CA, vault token and subnet. The archive is untrusted input (the sandbox wrote
@@ -189,15 +199,18 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   ID range, and none maps to the VM user that owns podman (and so the vault and the other
   envs). `isolation = "container"` opts an env out of gVisor, leaving the VM's kernel as the
   boundary. With Docker, dev containers are plain containers, in Docker's VM on macOS and
-  Windows (which shares your folders) and on the host on Linux. On Apple's `container` every
-  container is a VM of its own: the dev VM has no network card, only a tun link to its gate
-  that the background watcher carries on your Mac, so it reaches neither your Mac nor your
-  network but through the gate. A gate is on its env's NAT network only, and the vault on its
-  own; a gate's connections to private addresses are opened by the watcher (above).
+  Windows (which shares your folders) and on the host on Linux, unless you register gVisor
+  with Docker and set `oci_runtime = "runsc"` under the env's `[resources]`; root in the
+  sandbox is root in a container of Docker's, with no ID range of its own. On Apple's
+  `container` every container is a VM of its own: the dev VM has no network card, only a
+  tun link to its gate that the background watcher carries on your Mac, so it reaches
+  neither your Mac nor your network but through the gate. A gate is on its env's NAT
+  network only, and the vault on its own; a gate's connections to private addresses are
+  opened by the watcher (above).
 - **Control plane.** Policy, CA and credentials reach the gate and vault through the
   runtime's `exec` into a unix socket — there is no admin port. The local UI binds
-  127.0.0.1, requires a per-run token, checks Host (DNS rebinding) and Origin, and sets a
-  strict CSP.
+  127.0.0.1, requires a per-run token, checks Host (DNS rebinding) and, on writes, Origin,
+  and sets a CSP that takes scripts only from the UI itself (inline ones by hash).
 - **Project settings.** A repository's `luoto.toml` is untrusted input: it applies only in the
   exact version the user accepted, never carries credentials or secret refs, and its rules
   pass the sandbox's own request checks. Its denies only tighten; it can't mute denials,
@@ -207,14 +220,16 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   are published on your machine's 127.0.0.1, `[deps] run` commands run in the env, and its
   repositories are cloned.
 - **Self-test.** `luoto up` verifies from inside, whenever a container restarts (skip with
-  `--no-selftest`), that raw-IP TCP, UDP and DNS cannot leave before any secret, dotfile or SSH
-  key enters the env; an env that fails is stopped.
-  `luoto doctor` also checks that host services are unreachable. The test runs inside the
+  `--no-selftest`), that raw-IP TCP, UDP and DNS cannot leave before any secret, dotfile or
+  the editor's public SSH key enters the env; an env that fails is stopped. On podman and
+  Docker, `luoto doctor` also checks that host services are unreachable (Apple's dev VM has
+  no network card). The test runs inside the
   container it checks, so it confirms the configuration rather than proving isolation.
 - **Sandbox output.** Values read back from the sandbox are checked against a strict format
   before the host uses them (the login name in the generated ssh config), and text from it
-  — file names, request paths, event messages, what installers and git print — is shown with
-  control and bidi characters escaped.
+  that luoto prints — file names, request paths, event messages, what installers and git
+  print — is shown with control and bidi characters escaped. A terminal session is not
+  luoto's print (Terminal sessions, below).
 
 ## Residual risks
 
@@ -236,10 +251,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Model servers on this machine** (`[model_servers]`). The gate lets the sandbox reach only
   the server's port and model endpoints, but the server runs with your privileges outside the
   VM, so its request parsing is in reach of code in the env; its token may go there over
-  plain HTTP, which never leaves the machine. The sandbox names this machine
-  `host.docker.internal`; the gate never asks DNS for it (podman's and Docker's hosts files
-  give it, and on Apple's `container` the gate dials its own gateway, this machine), since a
-  resolver on your network could answer with another machine. A server that forwards to a
+  plain HTTP. That never leaves the machine because the gate never asks DNS for the name the
+  sandbox gives this machine, `host.docker.internal`, which a resolver on your network could
+  answer with another machine: podman's and Docker's hosts files give it, and on Apple's
+  `container` the gate dials its own gateway, this machine. A server that forwards to a
   cloud service sends the prompts there.
 - **Azure write access.** With `access = "write"`, code in the sandbox can do on the listed
   subscriptions whatever the identity's roles allow: create resources that reach the internet,
@@ -275,9 +290,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   envs and the vault, which share the VM, and through podman's network helper also the
   services on your machine's loopback, and the helper's API, which can publish a port on your
   machine. On Linux there is no VM: gVisor is the boundary to
-  the host, so install `runsc`. With Docker, an escape lands in Docker's VM, which shares your
-  folders (on Linux, on the host). On Apple's `container`, an escape from the dev VM's kernel
-  has to break out through Apple's virtualization, onto your Mac.
+  the host, so install `runsc`. With Docker there is no gVisor unless you set it up
+  (Isolation, above): one kernel exploit lands, as root, in Docker's VM, which on Docker
+  Desktop shares your folders, or on Linux on the host. On Apple's `container`, an escape
+  from the dev VM's kernel has to break out through Apple's virtualization, onto your Mac.
 - **Forwarded ports.** A server in the sandbox on a port from 1024 up is reachable at
   localhost on your machine while it listens (at most 64 at once above 32767). Code in the
   sandbox can hold a port a host tool expects first (a local OAuth callback with a fixed
@@ -285,7 +301,15 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   any free port is never given a forwarded one. Ports already taken on the host are never
   taken over: a port anything on this machine answers on at localhost is skipped. luoto's UI
   ports (47878, 47879) are never forwarded, so no env can serve a page on a UI's origin.
-  `auto_forward = false` turns this off.
+  Any page in your browser and any local user can reach a forwarded port, as with any dev
+  server on localhost. `auto_forward = false` turns this off.
+- **Terminal sessions.** In `luoto shell` and `luoto agent run` the sandbox writes to your
+  terminal directly, escape sequences included: it can set the title or the clipboard where
+  your terminal allows it. Only what luoto itself prints is escaped.
+- **Agents.** luoto accepts an agent's first-run and workspace-trust prompts for it, and
+  `--yolo` turns its permission prompts off. An agent does what the text it reads tells it
+  (a file, a web page, an issue), with everything the env is granted: pushes, pull requests
+  and comments under your credential, the model key. The env's grants are the limit.
 - **Notifications.** A desktop notification shows the host and reason of a request, and a
   denied host, as the sandbox wrote them: control and format characters become spaces, the
   text is capped, and it reaches the notifier as an argument, never as script. Denials notify
@@ -303,12 +327,16 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Social engineering.** Access requests are written by code in the sandbox. Read the host
   and access, not the reason; grant less than asked where that will do (`luoto approve --read`,
   `--path`). A request can't name an address range or a private address, and one for a port
-  is an uninspected tunnel to that host and port, never 80 or 443. An install request names a
+  is an uninspected tunnel to that host and port, never 80 or 443. A preset request names one
+  of luoto's presets; approving it opens all of that preset's hosts and keeps it in the env's
+  config (`luoto status` lists them). An install request names a
   package or toolchain the gate has checked to be a plain name; approving it runs that
   package's install scripts as root inside the env (still the sandbox), and its downloads take
-  the env's usual presets and install windows. A variable request names a variable and may
-  suggest a plain value, which you confirm or change; it can't ask for a secret, or name one
-  luoto sets in the env (a credential's placeholder, an agent's settings) or the shell's own.
+  the env's usual presets and install windows. A toolchain may name a backend that installs
+  anyone's code (`npm:`, `cargo:`, `ubi:`), which the request says. A variable request names
+  a variable and may suggest a plain value, which you confirm or change; it can't ask for a
+  secret, or name one luoto sets in the env (a credential's placeholder, an agent's
+  settings) or the shell's own.
   Secrets you add yourself (`luoto var set`), so the sandbox never chooses which of yours it
   gets, nor when.
 - **Env archives.** A `luoto export` file holds the env's whole workspace and home: work not

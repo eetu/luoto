@@ -5,8 +5,10 @@
   </picture>
 </p>
 
-Run coding agents with their permission prompts off, in a sandbox that reaches only the hosts
-you allowed and never holds your secrets.
+A sandbox for a project's dependencies and for coding agents that feels like working on your
+own machine: your editor attaches over SSH, dev servers answer at localhost and toolchains
+install from the project's own files. The sandbox reaches only the hosts you allowed and keeps
+your tokens outside.
 
 <p align="center">
   <img alt="luoto setup, luoto init in luoto's own folder, Claude Code adding a splash in a shell of the env, the change pulled back, and luoto setup opening with it" src="docs/casts/hello.gif" width="900">
@@ -26,14 +28,16 @@ faster, often with their permission prompts off.
 
 luoto gives each project a sandbox where that doesn't work:
 
-- **It can't see your files.** The project is copied in; your home folder, SSH keys and other
-  repositories stay on your machine.
+- **It sees only the project.** The project is copied in, with any folder you share; your
+  home folder, SSH keys and other repositories stay on your machine.
 - **It reaches only what you allowed.** Every request leaves through a gate with per-host
-  rules, read-only unless you say otherwise. Anything else is blocked and shown to you, with a
-  one-click allow.
-- **Your secrets never enter it.** Agent, GitHub, Azure DevOps and Azure tokens stay in a
+  rules, read-only by default beyond what installs and the agent's model need. Anything else
+  is blocked and shown to you, with a one-click allow.
+- **Your tokens stay outside it.** Agent, GitHub, Azure DevOps and Azure tokens stay in a
   vault outside the sandbox; the gate adds them to the requests you allowed, and code inside sees
-  placeholders. Git tokens work only for the repositories you named.
+  placeholders. A git token over HTTPS clones and pushes only the repositories you named. A
+  secret is inside only where you put it there: a variable the code reads, an agent you log in
+  inside, what a cloud identity reads.
 
 You keep working as usual: your editor attaches over SSH, agents run with their prompts off
 because the sandbox is the boundary, and work leaves as a pull request.
