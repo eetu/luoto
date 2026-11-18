@@ -13,6 +13,10 @@
   ends the drawing. The island is still without colors and on a terminal under 80 columns
   or 21 rows, and absent where setup's output is piped. A first setup ends with the next
   step: `luoto init` inside a project folder.
+- `luoto doctor` checks that containers reach the internet on Apple's `container` and in
+  luoto's VM: after a Mac changes networks Apple's VMs can lose their way out until
+  `container system stop` and `container system start`, which doctor then names. An image
+  build that fails there points at `luoto doctor`.
 - `luoto init` no longer takes toolchains from samples (`examples/`, `fixtures/`, `testdata/`):
   a launchpad example's `mise.toml` made `up` install terraform for a project without it.
 

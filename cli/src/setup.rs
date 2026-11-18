@@ -483,6 +483,10 @@ pub fn build_images(rt: &Runtime, tag: &str) -> Result<()> {
             )
         })?;
         if !status.success() {
+            // A build's downloads fail when Apple's VMs have lost their way out.
+            if rt.flavor == Flavor::Apple {
+                bail!("building {image} failed; `luoto doctor` checks the network a build needs");
+            }
             bail!("building {image} failed");
         }
     }
@@ -717,6 +721,118 @@ fn close(first: bool, mut rows: Vec<(&str, String)>) {
     }
 }
 
+/// A public address and a name the network check tries from a container.
+const NET_ADDRESS: &str = "1.1.1.1";
+const NET_NAME: &str = "example.com";
+
+/// What a container on the runtime's own network reaches.
+#[derive(Debug, PartialEq)]
+enum Network {
+    Works,
+    /// No TCP connection to a public address.
+    NoRoute,
+    /// The address answers; the network's resolver doesn't.
+    NoDns,
+    /// The container didn't say: why.
+    Unknown(String),
+    /// No luoto image to start a container from.
+    NoImage,
+}
+
+/// What the check's container printed (`route=ok dns=fail`), read.
+fn network_found(output: &str) -> Network {
+    let says = |word: &str| output.split_whitespace().any(|w| w == word);
+    if says("route=fail") {
+        Network::NoRoute
+    } else if says("route=ok") && says("dns=fail") {
+        Network::NoDns
+    } else if says("route=ok") && says("dns=ok") {
+        Network::Works
+    } else {
+        Network::Unknown("its container printed no result".into())
+    }
+}
+
+/// Doctor's line for `found` on `flavor`, and whether it passes. A network that is down
+/// names what restarts it: the VMs of Apple's `container` lose their way out when the Mac
+/// changes networks, and only a restart of its service brings it back.
+fn network_line(flavor: Flavor, found: &Network) -> (bool, String) {
+    let (whose, fix) = match flavor {
+        Flavor::Apple => (
+            "Apple's container network",
+            "`container system stop`, then `container system start` (stops every running \
+             container)"
+                .to_string(),
+        ),
+        _ => (
+            "luoto's VM",
+            format!(
+                "`podman machine stop {}`, then `luoto up` (stops every env)",
+                machine::NAME
+            ),
+        ),
+    };
+    match found {
+        Network::Works => (
+            true,
+            "network: containers reach the internet and resolve names".into(),
+        ),
+        Network::NoRoute => (
+            false,
+            format!("network: NO ROUTE OUT of {whose} ({NET_ADDRESS}:443 unreachable); {fix}"),
+        ),
+        Network::NoDns => (
+            false,
+            format!("network: THE DNS of {whose} DOESN'T ANSWER ({NET_NAME} not resolved); {fix}"),
+        ),
+        Network::Unknown(why) => (true, format!("network: could not be checked: {why}")),
+        Network::NoImage => (
+            true,
+            "network: not checked (no luoto image here to start a container from)".into(),
+        ),
+    }
+}
+
+/// Whether a container reaches the internet, where containers run in VMs luoto doesn't
+/// see into (Apple's, luoto's own): a throwaway one from an image that is here, on the
+/// runtime's own network, tries a public address and a name. `None` on other runtimes.
+fn network_check(ctx: &Ctx) -> Option<(bool, String)> {
+    let vm = match ctx.rt.flavor {
+        Flavor::Apple => true,
+        Flavor::Podman => machine::is_luoto(ctx.rt.connection.as_deref()),
+        Flavor::Docker => false,
+    };
+    if !vm {
+        return None;
+    }
+    // Both have `nc`, `nslookup` and `timeout`: busybox's in tools, Debian's in base.
+    let image = ["tools", "base"]
+        .iter()
+        .map(|c| ctx.image(c))
+        .find(|i| ctx.rt.image_exists(i));
+    let found = match image {
+        None => Network::NoImage,
+        Some(image) => {
+            let script = format!(
+                "nc -z -w 3 {NET_ADDRESS} 443 && echo route=ok || echo route=fail; \
+                 timeout 4 nslookup {NET_NAME} >/dev/null 2>&1 && echo dns=ok || echo dns=fail"
+            );
+            let ran = crate::progress::wait("checking the network containers get", || {
+                ctx.rt.run_limited(
+                    ["run", "--rm", &image, "sh", "-c", &script],
+                    std::time::Duration::from_secs(30),
+                    4096,
+                )
+            });
+            match ran {
+                Ok(output) => network_found(&output),
+                Err(e) => Network::Unknown(format!("{e:#}")),
+            }
+        }
+    };
+    Some(network_line(ctx.rt.flavor, &found))
+}
+
 /// What `doctor` found, each line printed as it comes; `--report` keeps them.
 #[derive(Default)]
 struct Checks(Vec<String>);
@@ -841,6 +957,10 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
             "image {img}: {}",
             if present { "ok" } else { "missing" }
         ));
+    }
+    if let Some((passed, line)) = network_check(ctx) {
+        ok &= passed;
+        out.say(line);
     }
     for line in crate::progress::wait("measuring disk use", || crate::disk::doctor_lines(ctx)) {
         out.say(line);
@@ -1027,6 +1147,51 @@ mod tests {
         );
         let apple = info("container", machine::APPLE_MIN, false);
         runtime_options(&d, Some(Some(&apple)), current)
+    }
+
+    #[test]
+    fn the_network_check_reads_what_its_container_printed() {
+        assert_eq!(network_found("route=ok\ndns=ok\n"), Network::Works);
+        assert_eq!(network_found("route=ok\ndns=fail\n"), Network::NoDns);
+        // Without a route the lookup's result says nothing more.
+        assert_eq!(network_found("route=fail\ndns=fail\n"), Network::NoRoute);
+        assert_eq!(network_found("route=fail\ndns=ok\n"), Network::NoRoute);
+        assert!(matches!(network_found(""), Network::Unknown(_)));
+        assert!(matches!(network_found("route=ok\n"), Network::Unknown(_)));
+    }
+
+    #[test]
+    fn a_network_that_is_down_fails_doctor_with_what_restarts_it() {
+        let apple = "`container system stop`, then `container system start` (stops every \
+                     running container)";
+        assert_eq!(
+            network_line(Flavor::Apple, &Network::NoRoute),
+            (
+                false,
+                format!(
+                    "network: NO ROUTE OUT of Apple's container network (1.1.1.1:443 \
+                     unreachable); {apple}"
+                )
+            )
+        );
+        let (passed, line) = network_line(Flavor::Apple, &Network::NoDns);
+        assert!(!passed && line.ends_with(apple));
+        assert!(line.starts_with("network: THE DNS of Apple's container network DOESN'T ANSWER"));
+
+        let (passed, line) = network_line(Flavor::Podman, &Network::NoRoute);
+        assert!(!passed && line.contains("NO ROUTE OUT of luoto's VM"));
+        assert!(line.ends_with("`podman machine stop luoto`, then `luoto up` (stops every env)"));
+
+        // What works, and what couldn't be looked at, fails nothing and names no fix.
+        for found in [
+            Network::Works,
+            Network::NoImage,
+            Network::Unknown("timed out".into()),
+        ] {
+            let (passed, line) = network_line(Flavor::Apple, &found);
+            assert!(passed && !line.contains("container system"), "{line}");
+            assert!(line.starts_with("network: "));
+        }
     }
 
     #[test]
