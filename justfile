@@ -145,19 +145,18 @@ casts:
 
 # README screenshots from a real env and `luoto ui` (needs the runtime; leaves nothing behind).
 # The env is `demo` in a throwaway LUOTO_HOME, run by the debug build (the `luoto-dev` instance);
-# it refuses to run if a `luoto-dev-demo` exists, so its cleanup can't touch an env of yours. The
+# it refuses to run if luoto-dev has an env `demo`, so its cleanup can't touch an env of yours. The
 # dev vault is shared with your other dev envs: the vault shot is skipped unless it holds only
 # the demo's dummy credential, which stays in its memory until `luoto-dev vault lock`.
 shots:
     #!/usr/bin/env bash
     set -euo pipefail
-    rt="{{runtime}}"
-    if $rt container inspect luoto-dev-demo >/dev/null 2>&1; then
-        echo "a luoto-dev-demo container exists; remove that env first" >&2
-        exit 1
-    fi
     cargo build -p luoto
     luoto="$PWD/target/debug/luoto"
+    if "$luoto" status -e demo >/dev/null 2>&1; then
+        echo "luoto-dev has an env \`demo\`; remove it first" >&2
+        exit 1
+    fi
     real_config="$HOME/.config/luoto-dev"
     [ -f "$real_config/config.toml" ] || real_config="$HOME/.config/luoto"
     [ -n "${LUOTO_HOME:-}" ] && real_config="$LUOTO_HOME/config"
@@ -168,7 +167,6 @@ shots:
     cleanup() {
         kill "${ui:-}" 2>/dev/null || true
         "$luoto" rm -e demo --yes >/dev/null 2>&1 || true
-        for v in $($rt volume ls -q | grep '^luoto-dev-demo-' || true); do $rt volume rm "$v" >/dev/null; done
         rm -rf "$LUOTO_HOME"
     }
     trap cleanup EXIT
