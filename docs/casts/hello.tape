@@ -1,4 +1,5 @@
-# From a folder to an agent at work in a sandbox, and its change back in the folder and run.
+# A setup, then from a folder to an agent at work in a sandbox, and its change back in the
+# folder and run: the setup again.
 # The folder is a clone of luoto without the splash of `luoto setup` (setup.sh), and
 # Claude, answering from canned.py, writes that change as this checkout has it.
 # `just casts` records it. The waits of builds are skipped, never what they print.
@@ -9,7 +10,7 @@ Set Shell "fish"
 Set Theme "Catppuccin Mocha"
 Set FontSize 16
 Set Width 1200
-Set Height 840
+Set Height 880
 Set Padding 20
 Set TypingSpeed 30ms
 
@@ -18,10 +19,18 @@ Type "source docs/casts/setup.fish" Enter
 Wait+Screen@600s /demo ❯/
 # The env builds luoto's tests once it is up, so Claude's run of them builds only its change.
 Type "set -x LUOTO_CAST_WARM 'mkdir -p frontend/dist && cargo test -q -p luoto --no-run'" Enter
+Type "set -x LUOTO_CAST_CLEAR 1" Enter
 Type "cd luoto && clear" Enter
 Sleep 500ms
 Show
 Sleep 1s
+
+# The clone as it is: its setup before the change (bin/luoto runs the clone's build).
+Type "luoto setup"
+Sleep 400ms
+Enter
+Wait+Screen@120s /in a project folder/
+Sleep 3s
 
 Type "luoto init --agent claude"
 Sleep 500ms
@@ -29,18 +38,11 @@ Enter
 Wait+Screen@60s /Create it\?/
 Sleep 2500ms
 Enter
-# Its first seconds show; the rest of the wait and the installs are skipped.
+# Its first seconds show; the rest of the wait and the installs are skipped. The next
+# scene starts on a clear screen (LUOTO_CAST_CLEAR: keys typed meanwhile would go to `up`).
 Sleep 2500ms
 Hide
-Wait+Screen@900s /luoto ui\s+~\/demo\/luoto ❯/
-Show
-Sleep 1500ms
-
-# Each scene on a clear screen.
-Hide
-Type "clear"
-Enter
-Sleep 500ms
+Wait+Screen@900s /^~\/demo\/luoto ❯\s*$/
 Show
 
 # Inside the env, where Claude runs without its permission prompts.
@@ -90,14 +92,13 @@ Enter
 Wait+Screen@60s /wrote 4 file/
 Sleep 1500ms
 
-# The pulled code is built, and the setup about to run gets a config folder that names no
-# runtime, which makes it a first one (first-setup.sh).
+# The pulled code is built, so the setup about to run starts at once.
 Hide
-Type "set -x LUOTO_HOME (bash $casts/first-setup.sh); and clear" Enter
+Type "cargo build -q -p luoto; and clear" Enter
 Wait+Screen@600s /^~\/demo\/luoto ❯\s*$/
 Show
 
-Type "cargo run -q -p luoto -- setup --runtime container --yes"
+Type "luoto setup"
 Sleep 500ms
 Enter
 Wait+Screen@120s /Next: run/

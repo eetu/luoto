@@ -4,8 +4,11 @@
 # - before an env with Claude first comes up (`init --agent`, `up -e <env>`, `agent run`), its
 #   Claude answers from canned.py, where a first run asks for Claude's credential instead;
 # - after `init --agent` brought the env up, $LUOTO_CAST_WARM runs in it: a first build,
-#   say, that the cast would otherwise wait for;
-# - after `up -e <env>`, herdr starts as one that has seen its settings.
+#   say, that the cast would otherwise wait for; and with $LUOTO_CAST_CLEAR the screen is
+#   cleared then, for a tape that cuts to its next scene there;
+# - after `up -e <env>`, herdr starts as one that has seen its settings;
+# - `setup` is the build of the clone of luoto the hello cast changes, as a first setup
+#   that asks nothing (first-setup.sh).
 set -u
 bin=${LUOTO_CAST_BIN:-luoto-dev}
 
@@ -23,6 +26,12 @@ case "${1:-} ${2:-}" in
     "$bin" "$@" --no-up || exit
     ;;
   "up "*) [ ${#env[@]} -gt 0 ] || exec "$bin" "$@" ;;
+  "setup "*)
+    home=$(bash "$(dirname "$0")/../first-setup.sh") || exit
+    rt=podman
+    [ "${LUOTO_RUNTIME:-}" != container ] || rt=container
+    LUOTO_HOME=$home exec "$CARGO_TARGET_DIR/debug/luoto" setup --runtime "$rt" --yes
+    ;;
   "agent run") ;;
   *) exec "$bin" "$@" ;;
 esac
@@ -58,6 +67,7 @@ case "$1" in
   init)
     "$bin" up || exit
     [ -z "${LUOTO_CAST_WARM:-}" ] || inside sh -c "$LUOTO_CAST_WARM"
+    [ -z "${LUOTO_CAST_CLEAR:-}" ] || clear
     exit 0
     ;;
   agent) exec "$bin" "$@" ;;

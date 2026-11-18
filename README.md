@@ -9,12 +9,13 @@ Run coding agents with their permission prompts off, in a sandbox that reaches o
 you allowed and never holds your secrets.
 
 <p align="center">
-  <img alt="luoto init in luoto's own folder, Claude Code adding a splash in a shell of the env, the change pulled back, and the first luoto setup opening with it" src="docs/casts/hello.gif" width="900">
+  <img alt="luoto setup, luoto init in luoto's own folder, Claude Code adding a splash in a shell of the env, the change pulled back, and luoto setup opening with it" src="docs/casts/hello.gif" width="900">
 </p>
 
-Here the project is luoto itself. `luoto init --agent claude` in its folder, one confirm, and
-Claude Code works in the env, on a copy: it adds the island `luoto setup` opens with. `luoto pull` brings the change back, reviewed first, and the setup that then runs is
-the pulled code.
+Here the project is luoto itself, and the cast opens with its `luoto setup` as it was.
+`luoto init --agent claude` in its folder, one confirm, and Claude Code works in the env, on
+a copy: it adds the island `luoto setup` opens with. `luoto pull` brings the change back,
+reviewed first, and the setup that then runs is the pulled code.
 
 ## Why
 
