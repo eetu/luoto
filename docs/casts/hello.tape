@@ -1,7 +1,8 @@
 # A setup, then from a folder to an agent at work in a sandbox, and its change back in the
 # folder and run: the setup again.
-# The folder is a clone of luoto without the splash of `luoto setup` (setup.sh), and
-# Claude, answering from canned.py, writes that change as this checkout has it.
+# The folder is a clone of this checkout whose splash of `luoto setup` draws nothing
+# (setup.sh), and Claude, answering from canned.py, writes cli/src/splash.rs as this
+# checkout has it.
 # `just casts` records it. The waits of builds are skipped, never what they print.
 
 Output docs/casts/hello.gif
@@ -29,7 +30,7 @@ Sleep 1s
 Type "luoto setup"
 Sleep 400ms
 Enter
-Wait+Screen@120s /in a project folder/
+Wait+Screen@120s /Next: run/
 Sleep 3s
 
 Type "luoto init --agent claude"
@@ -49,7 +50,7 @@ Show
 Type "luoto shell"
 Sleep 400ms
 Enter
-Wait+Screen@60s /workspace main %/
+Wait+Screen@60s /workspace \S+ %/
 Sleep 600ms
 Type "whoami"
 Sleep 300ms
@@ -89,7 +90,7 @@ Sleep 1500ms
 Type "y"
 Sleep 300ms
 Enter
-Wait+Screen@60s /wrote 4 file/
+Wait+Screen@60s /wrote 1 file/
 Sleep 1500ms
 
 # The pulled code is built, so the setup about to run starts at once.

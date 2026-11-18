@@ -1,0 +1,43 @@
+name: Pages
+
+# The landing page at https://eetu.github.io/luoto/: site/ and the files it shows from the
+# rest of the repo (site/build.sh names them).
+on:
+  push:
+    branches: [main]
+    paths:
+      - site/**
+      - docs/casts/hello.gif
+      - docs/screenshots/egress-blocked-*.png
+      - frontend/static/favicon.svg
+      - .github/workflows/pages.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time; one that has started is left to finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Assemble the site
+        run: sh site/build.sh _site
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+      - uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        id: deploy

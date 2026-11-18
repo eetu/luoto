@@ -247,8 +247,9 @@ fn blocks(frame: usize, reflect: bool) -> Vec<Line> {
         })
         .collect();
     lines.push(Line::new());
+    // Typed alongside the island, done as the sun settles.
     let t = frame * 1000 / FRAMES;
-    lines.push(tagline(of(part(t, 500, 950), tagline_len())));
+    lines.push(tagline(of(part(t, 0, 800), tagline_len())));
     lines
 }
 

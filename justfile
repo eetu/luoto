@@ -106,8 +106,8 @@ downloads:
 # behind but the builds of $LUOTO_CAST_TARGET, by default a folder of the system's temporary
 # ones). Their envs are `tz`, `luoto` and `platform`, run by the debug build; it refuses to
 # run if luoto-dev has one of them already. Agents answer from docs/casts/canned.py. The
-# hello cast changes a clone of this checkout's `main` ($LUOTO_CAST_BASE) into what the
-# checkout has, so it records while `main` lacks that change.
+# hello cast gives a clone of this checkout, as committed and without its splash, the
+# splash the checkout has.
 casts:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -139,6 +139,8 @@ casts:
         if [ -e "$demo/.luoto-cast" ]; then rm -rf "$demo"; fi
     }
     trap cleanup EXIT
+    # Stopped, it still cleans up.
+    trap 'exit 130' INT TERM
     for tape in docs/casts/*.tape; do vhs "$tape"; done
 
 # README screenshots from a real env and `luoto ui` (needs the runtime; leaves nothing behind).

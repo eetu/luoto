@@ -62,16 +62,19 @@ mkdir -p "$CAST/tz" && cd "$CAST/tz"
 printf '# tz\n' >README.md
 commit
 
-# luoto itself as it is before a change the hello cast makes: branch $LUOTO_CAST_BASE (main) of
-# the checkout these casts are in, at the checkout's version (a vault one version made is
-# recreated by another, and the cast ends on a `luoto setup` of this clone). Built here, into a
-# target folder of the casts' own, so the cast's last build is only what the change touched.
+# luoto itself without the change the hello cast makes: this checkout as committed, its splash
+# (cli/src/splash.rs) replaced by one that draws nothing (splash-stub.rs). The same version as
+# the checkout, so the `luoto setup` the cast runs from this clone leaves luoto-dev's vault as
+# it is. Built here, into a target folder of the casts' own, so the cast's last build is only
+# what the change touched.
 repo=$(cd "$here/../.." && pwd)
-git clone -q --branch "${LUOTO_CAST_BASE:-main}" "$repo" "$CAST/luoto"
+git clone -q "$repo" "$CAST/luoto"
 cd "$CAST/luoto"
 git remote remove origin
-cp "$repo/Cargo.toml" "$repo/Cargo.lock" .
-git -c user.name=cast -c user.email=cast@example.com commit -qam version || true
+# The env's prompt names the branch.
+git branch -qM main
+cp "$here/splash-stub.rs" cli/src/splash.rs
+git -c user.name=cast -c user.email=cast@example.com commit -qam "no splash"
 # The UI's bundle is built, not committed, and the binary embeds its folder.
 mkdir -p frontend/dist
 CARGO_TARGET_DIR="${LUOTO_CAST_TARGET:?where the casts build}" cargo build --quiet -p luoto

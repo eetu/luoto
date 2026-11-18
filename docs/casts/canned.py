@@ -20,7 +20,7 @@ MODEL = "claude-sonnet-4-5"
 # The checkout whose change the hello cast makes: the agent writes these files as they are there.
 SOURCE = Path(os.environ.get("LUOTO_CAST_SRC") or Path(__file__).resolve().parents[2])
 SPLASH = "cli/src/splash.rs"
-WIRED = ["cli/src/style.rs", "cli/src/setup.rs", "cli/src/main.rs"]
+SETUP = "cli/src/setup.rs"
 
 
 def read(path):
@@ -39,26 +39,28 @@ def write(path):
 # says and the tools it calls then, and answers the results of the step before it. A prompt
 # gets the first flow whose words it has all of.
 FLOWS = [
-    # luoto in an env of its own clone (setup.sh): the splash of `luoto setup`, then
-    # its tests.
+    # luoto in an env of its own clone, whose splash draws nothing (setup.sh): the splash of
+    # `luoto setup`, then its tests.
     (
         ("splash", "luoto setup"),
         [
-            ("I'll read how setup starts and how output is styled.", [read(f) for f in WIRED]),
+            (
+                "I'll read where setup calls the splash, and what is there now.",
+                [read(SETUP), read(SPLASH)],
+            ),
             (
                 "The island as pixels, two to a row of text: the palm grows, the sea spreads, "
-                "the sun rises.",
+                "the sun rises, and setup's lines come up under it.",
                 [write(SPLASH)],
             ),
-            ("Now setup plays it while it detects the host.", [write(f) for f in WIRED]),
             (
                 "Its tests.",
                 [("Bash", {"command": "cargo test -p luoto splash", "description": "Run the tests"})],
             ),
             (
                 "`luoto setup` now opens with the island, drawn once while it looks at the "
-                "machine, and a first setup ends with the next step. Still under NO_COLOR, ASCII without "
-                "UTF-8, nothing when piped. Its tests pass.",
+                "machine. Still under NO_COLOR, ASCII without UTF-8, nothing when piped. Its "
+                "tests pass.",
                 [],
             ),
         ],

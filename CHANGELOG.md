@@ -19,6 +19,7 @@
   build that fails there points at `luoto doctor`.
 - `luoto init` no longer takes toolchains from samples (`examples/`, `fixtures/`, `testdata/`):
   a launchpad example's `mise.toml` made `up` install terraform for a project without it.
+- luoto has a page, https://eetu.github.io/luoto/, with the hello cast and install steps.
 
 ## 0.5.3 (2026-11-17)
 

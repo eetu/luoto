@@ -1,0 +1,261 @@
+<!doctype html>
+<!-- Preview: bash -c 'sh site/build.sh && python3 -m http.server -d target/site' -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>luoto: run coding agents in a sandbox that never holds your secrets</title>
+    <meta
+      name="description"
+      content="Dev sandboxes that contain supply-chain attacks: each project runs in a container that reaches only the hosts you allowed, with your tokens in a vault outside it."
+    />
+    <link rel="canonical" href="https://eetu.github.io/luoto/" />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f0f0f0" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0f0f0f" media="(prefers-color-scheme: dark)" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="luoto" />
+    <meta property="og:url" content="https://eetu.github.io/luoto/" />
+    <meta
+      property="og:title"
+      content="luoto: run coding agents in a sandbox that never holds your secrets"
+    />
+    <meta
+      property="og:description"
+      content="Dev sandboxes that contain supply-chain attacks: each project runs in a container that reaches only the hosts you allowed, with your tokens in a vault outside it."
+    />
+    <meta property="og:image" content="https://eetu.github.io/luoto/og.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="627" />
+    <meta
+      property="og:image:alt"
+      content="luoto. no tool is an island, except on luoto. Run coding agents with their prompts off, in a sandbox that never holds your secrets. Beside it, an island with a palm, the sun and the sea in large pixels."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="luoto: run coding agents in a sandbox that never holds your secrets"
+    />
+    <meta
+      name="twitter:description"
+      content="Dev sandboxes that contain supply-chain attacks: each project runs in a container that reaches only the hosts you allowed, with your tokens in a vault outside it."
+    />
+    <meta name="twitter:image" content="https://eetu.github.io/luoto/og.png" />
+    <meta
+      name="twitter:image:alt"
+      content="luoto. no tool is an island, except on luoto. Run coding agents with their prompts off, in a sandbox that never holds your secrets. Beside it, an island with a palm, the sun and the sea in large pixels."
+    />
+
+    <link rel="preload" href="fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header>
+        <a class="halo-wordmark" href="https://eetu.github.io/luoto/" aria-label="luoto"
+          ><svg class="glyph" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            <g stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 41c3-9 10-14 18-14s15 5 18 14" stroke="#f78f08" stroke-width="4" />
+              <path
+                d="M8 49c4 0 6-3 10-3s6 3 10 3 6-3 10-3 6 3 10 3 6-3 10-3"
+                stroke="currentColor"
+                stroke-width="3"
+              />
+            </g></svg
+          ><span class="riff">no tool is an island, except on&nbsp;</span>luoto<span class="accent"
+            >.</span
+          ></a
+        >
+        <nav aria-label="luoto elsewhere">
+          <a href="https://github.com/eetu/luoto#readme">Docs</a>
+          <a href="https://github.com/eetu/luoto/releases">Releases</a>
+          <a href="https://github.com/eetu/luoto">Source</a>
+        </nav>
+      </header>
+
+      <main>
+        <h1>
+          Run coding agents with their permission prompts off, in a sandbox that reaches only the
+          hosts you allowed and never holds your secrets.
+        </h1>
+
+        <figure class="cast">
+          <img
+            src="hello.gif"
+            width="1200"
+            height="880"
+            alt="A terminal: luoto setup, luoto init in luoto's own folder, Claude Code adding a splash in a shell of the env, the change pulled back, and luoto setup opening with it"
+          />
+          <figcaption>
+            Here the project is luoto itself, and the cast opens with its
+            <code>luoto setup</code> as it was. <code>luoto init --agent claude</code> in its
+            folder, one confirm, and Claude Code works in the env, on a copy: it adds the island
+            <code>luoto setup</code> opens with. <code>luoto pull</code> brings the change back,
+            reviewed first, and the setup that then runs is the pulled code.
+          </figcaption>
+        </figure>
+
+        <h2 id="why">Why</h2>
+        <p>
+          A malicious package runs with everything you have. Its install script can read
+          <code>~/.ssh</code>, your cloud and registry tokens and your other repos, send them
+          anywhere, and use a token of yours to publish itself further. Coding agents run more
+          code, faster, often with their permission prompts off.
+        </p>
+        <p>luoto gives each project a sandbox where that doesn't work:</p>
+        <div class="three">
+          <section class="halo-card">
+            <h3>It can't see your files.</h3>
+            <p>
+              The project is copied in; your home folder, SSH keys and other repositories stay on
+              your machine.
+            </p>
+          </section>
+          <section class="halo-card">
+            <h3>It reaches only what you allowed.</h3>
+            <p>
+              Every request leaves through a gate with per-host rules, read-only unless you say
+              otherwise. Anything else is blocked and shown to you, with a one-click allow.
+            </p>
+          </section>
+          <section class="halo-card">
+            <h3>Your secrets never enter it.</h3>
+            <p>
+              Agent, git and cloud tokens stay in a vault outside the sandbox; the gate adds them
+              to the requests you allowed, and code inside sees placeholders. Git tokens work only
+              for the repositories you named.
+            </p>
+          </section>
+        </div>
+        <p>
+          You keep working as usual: your editor attaches over SSH, agents run with their prompts
+          off because the sandbox is the boundary, and work leaves as a pull request.
+        </p>
+
+        <h2 id="blocked">What a blocked request looks like</h2>
+        <figure>
+          <div class="halo-card shot">
+            <picture>
+              <source media="(prefers-color-scheme: dark)" srcset="egress-blocked-dark.png" />
+              <img
+                src="egress-blocked-light.png"
+                width="2360"
+                height="1440"
+                loading="lazy"
+                alt="luoto ui: example.com blocked, with the allow form open"
+              />
+            </picture>
+          </div>
+          <figcaption>
+            Something in an env tried to reach <code>example.com</code>. The gate blocked it, and
+            <code>luoto ui</code> shows the attempt with a scoped allow next to it.
+          </figcaption>
+        </figure>
+
+        <h2 id="install">Install</h2>
+        <div class="halo-card card-text">
+          <dl class="install">
+            <dt>macOS, Linux</dt>
+            <dd>
+              <pre><code>curl -fsSL https://raw.githubusercontent.com/eetu/luoto/main/install.sh | sh</code></pre>
+            </dd>
+            <dt>macOS, Linux <small>Homebrew</small></dt>
+            <dd>
+              <pre><code>brew install eetu/tap/luoto</code></pre>
+            </dd>
+            <dt>Linux, no script</dt>
+            <dd>
+              a <code>.tar.gz</code> from
+              <a href="https://github.com/eetu/luoto/releases">Releases</a>, checked against
+              <code>SHA256SUMS</code>
+            </dd>
+            <dt>Windows <small>Scoop; not yet verified end to end</small></dt>
+            <dd>
+              <pre><code>scoop bucket add luoto https://github.com/eetu/scoop-luoto
+scoop install luoto</code></pre>
+            </dd>
+            <dt>From source</dt>
+            <dd>
+              <a href="https://github.com/eetu/luoto/blob/main/docs/install.md">source builds</a>
+            </dd>
+          </dl>
+          <p>Then, once:</p>
+          <pre><code>luoto setup</code></pre>
+          <p>
+            It looks for a container runtime you have installed, asks which to use when there are
+            several, and gets the images. Without one it lists them with their install pages.
+            Updates, tab completion and checking a download:
+            <a href="https://github.com/eetu/luoto/blob/main/docs/install.md">Install details</a>.
+          </p>
+        </div>
+
+        <h2 id="start">Getting started</h2>
+        <div class="halo-card card-text">
+          <pre><code>cd ~/dev/my-app
+luoto init                      <span class="note"># an env for this folder, from the toolchains its files name</span>
+luoto agent add claude          <span class="note"># installs Claude Code; asks for its credential</span>
+luoto agent run claude --yolo   <span class="note"># it works inside; the sandbox is the boundary</span>
+luoto open                      <span class="note"># your editor over SSH (or `luoto shell`)</span>
+luoto ui                        <span class="note"># what the env reached and what the gate blocked</span>
+luoto pull                      <span class="note"># bring files back when you need them here</span>
+luoto down                      <span class="note"># stop it; `luoto up` brings it back</span></code></pre>
+          <p>
+            <a href="https://github.com/eetu/luoto/blob/main/docs/first-session.md"
+              >A first session</a
+            >
+            goes through it step by step: credentials that stay outside the env, ports, what it
+            reached, a pull request.
+          </p>
+        </div>
+
+        <h2 id="more">Read more</h2>
+        <ul class="links">
+          <li>
+            <a href="https://github.com/eetu/luoto#readme">README</a>
+            <span>the overview, day-to-day commands, agents</span>
+          </li>
+          <li>
+            <a href="https://github.com/eetu/luoto#guides">Guides</a>
+            <span>step by step, for a task</span>
+          </li>
+          <li>
+            <a href="https://github.com/eetu/luoto/blob/main/docs/how-it-works.md">How it works</a>
+            <span>the gate, the vault, the sandbox, platforms</span>
+          </li>
+          <li>
+            <a href="https://github.com/eetu/luoto/blob/main/SECURITY.md">Threat model</a>
+            <span>what holds and what doesn't</span>
+          </li>
+          <li>
+            <a href="https://github.com/eetu/luoto/blob/main/docs/configuration.md"
+              >Configuration</a
+            >
+            <span>credentials, rules, toolchains, shells and editors</span>
+          </li>
+          <li>
+            <a href="https://github.com/eetu/luoto/blob/main/docs/agents.md">Agents</a>
+            <span>hosts, credentials and what is verified, per agent</span>
+          </li>
+          <li>
+            <a href="https://github.com/eetu/luoto#limits">Limits</a>
+            <span>what luoto doesn't do</span>
+          </li>
+          <li>
+            <a href="https://github.com/eetu/luoto/blob/main/CHANGELOG.md">Changelog</a>
+            <span>what each release changed</span>
+          </li>
+        </ul>
+      </main>
+
+      <footer>
+        <p>luoto is a personal hobby project in beta, maintained on a best-effort basis.</p>
+        <p>
+          MIT licensed. <a href="https://github.com/eetu/luoto">github.com/eetu/luoto</a>
+        </p>
+      </footer>
+    </div>
+  </body>
+</html>
