@@ -592,7 +592,7 @@ enum VarCmd {
     ///
     /// `NAME=value` a plain value (it stays in your shell history), `NAME` a secret, asking
     /// where it is kept, or `NAME --ref <ref>`. A token an HTTP API takes is safer under
-    /// [credentials.custom.<name>]: the gate adds it and the env never sees it.
+    /// [credentials.custom.<name>]: the gate adds it, so it stays outside the env.
     Set {
         /// `NAME=value` for a plain value, `NAME` for a secret.
         #[arg(value_name = "NAME[=VALUE]")]

@@ -15,7 +15,8 @@ use crate::{
 };
 
 const INSTRUCTIONS: &str = "You are inside a luoto sandbox: network egress is filtered by a \
-policy only the user controls from the host, and real credentials never enter the sandbox. \
+policy only the user controls from the host, and the credentials its gate adds to requests \
+stay outside the sandbox. \
 Use sandbox_status to see what is allowed, sandbox_check before relying on a URL, and \
 sandbox_request_access when access is genuinely needed, sandbox_request_install for a \
 system package or toolchain the env should keep, and sandbox_request_var for an environment \

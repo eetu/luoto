@@ -790,7 +790,8 @@ impl<'de> Deserialize<'de> for Agents {
 pub enum Isolation {
     /// gVisor's user-space kernel: a kernel exploit in the env doesn't reach the VM.
     Gvisor,
-    /// A plain container on the VM's kernel: builds about 1.6× faster, weaker.
+    /// A plain container on the VM's kernel (this machine's on Linux): builds about 1.6×
+    /// faster, weaker.
     Container,
 }
 

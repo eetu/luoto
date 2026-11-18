@@ -1,6 +1,21 @@
 # Changelog
 
-## 0.6.0 (unreleased)
+## 0.6.1 (unreleased)
+
+- `luoto setup` on Docker says what that means: dev containers are plain containers on this
+  machine's kernel (the kernel of Docker's VM on macOS and Windows), unless gVisor is
+  registered with Docker and an env sets `oci_runtime = "runsc"`.
+- Approving a preset request shows the hosts the preset opens, each with its access, in
+  `luoto requests`, `luoto approve` and the UI's request panel.
+- What luoto and the sandbox's helper say about secrets and isolation matches what holds:
+  the credentials the gate adds stay outside the sandbox, while a secret you put inside
+  (`[sandbox_secrets]`, a login in the env) is there; gVisor is a kernel a kernel exploit has
+  to break first; without gVisor a container shares this machine's kernel on Linux, the VM's
+  elsewhere; and no text says setup installs gVisor.
+- The gate's reason for refusing GitHub's Actions API says only that: a push still starts
+  the workflows a repository has.
+
+## 0.6.0 (2026-11-18)
 
 - **`luoto setup` installs no runtime, and `--install` is gone.** Setup uses a runtime you
   installed: Apple's `container`, podman or Docker, each shown with how it isolates an env.

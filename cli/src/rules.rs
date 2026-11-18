@@ -276,6 +276,37 @@ pub fn remove(ctx: &Ctx, name: &str, id_or_host: &str) -> Result<usize> {
 }
 
 /// The access requests filed with the env's gate; none while the gate is down.
+/// What preset `name` opens, a line per rule (`registry.npmjs.org read-only`), for whoever
+/// approves a request for it; `None` for a name that is no preset.
+pub fn preset_hosts(name: &str) -> Option<Vec<String>> {
+    use luoto_shared::policy::{Access, AccessLevel, Mode};
+    let preset = luoto_shared::presets::get(name)?;
+    Some(
+        preset
+            .rules
+            .iter()
+            .map(|r| {
+                let host = match r.port {
+                    Some(port) => format!("{}:{port}", r.host),
+                    None => r.host.clone(),
+                };
+                let access = match (&r.mode, &r.access) {
+                    (Mode::Tunnel, _) => "tunnel, uninspected".to_string(),
+                    (_, Access::Level(AccessLevel::Read)) => "read-only".to_string(),
+                    (_, Access::Level(AccessLevel::Write)) => "any method".to_string(),
+                    (_, Access::Methods(ms)) => ms.join(", "),
+                };
+                // A preset's path lists run long; their count says they narrow it.
+                match r.paths.len() {
+                    0 => format!("{host} {access}"),
+                    1 => format!("{host} {access}, only 1 path pattern"),
+                    n => format!("{host} {access}, only {n} path patterns"),
+                }
+            })
+            .collect(),
+    )
+}
+
 pub fn requests(ctx: &Ctx, name: &str, states: &States) -> Result<Vec<AccessRequest>> {
     if !states.running(&names::gate(name)) {
         return Ok(Vec::new());
@@ -461,6 +492,29 @@ pub fn reject(ctx: &Ctx, name: &str, id: u64, note: Option<String>) -> Result<Ac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_presets_hosts_are_listed_with_their_access_and_no_name_makes_some_up() {
+        let npm = preset_hosts("npm").unwrap();
+        assert!(
+            npm.contains(&"registry.npmjs.org read-only".to_string()),
+            "{npm:?}"
+        );
+        assert_eq!(
+            npm.len(),
+            luoto_shared::presets::get("npm").unwrap().rules.len()
+        );
+        // Every preset's every line names a host and what it may do there.
+        for name in luoto_shared::presets::names() {
+            for line in preset_hosts(name).unwrap() {
+                assert!(
+                    line.split_once(' ')
+                        .is_some_and(|(h, a)| !h.is_empty() && !a.is_empty())
+                );
+            }
+        }
+        assert_eq!(preset_hosts("no-such-preset"), None);
+    }
 
     #[test]
     fn a_name_on_a_private_address_is_told_and_one_never_dialed_is_flagged() {

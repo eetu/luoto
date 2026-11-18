@@ -206,16 +206,25 @@ struct Choice {
     description: String,
 }
 
+/// A preset, with what it opens: a line per rule, as an approval shows them.
+#[derive(Serialize)]
+struct PresetChoice {
+    name: String,
+    description: String,
+    hosts: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct Meta {
-    presets: Vec<Choice>,
+    presets: Vec<PresetChoice>,
     agents: Vec<Choice>,
 }
 
 async fn meta() -> Json<Meta> {
     let presets = presets::all()
         .into_iter()
-        .map(|p| Choice {
+        .map(|p| PresetChoice {
+            hosts: rules::preset_hosts(&p.name).unwrap_or_default(),
             name: p.name,
             description: p.description,
         })

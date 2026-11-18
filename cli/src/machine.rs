@@ -28,6 +28,15 @@ pub fn supported() -> bool {
     cfg!(any(target_os = "macos", target_os = "windows"))
 }
 
+/// The kernel a plain container is on: the VM's where the runtime has a VM around it.
+pub fn kernel() -> &'static str {
+    if supported() {
+        "the VM's kernel"
+    } else {
+        "this machine's kernel"
+    }
+}
+
 /// Whether `connection` is luoto's machine (configured by [`prepare`]).
 pub fn is_luoto(connection: Option<&str>) -> bool {
     connection == Some(NAME)

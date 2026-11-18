@@ -828,7 +828,7 @@ fn compile_github(b: &mut Builder, creds: &[GithubCred]) -> Result<Option<Github
                 "/repos/*/*/actions/**",
                 "/repos/*/*/dispatches",
             ],
-            "GitHub Actions cannot be triggered or configured from the sandbox",
+            "the Actions API is off-limits from the sandbox",
         ),
         (
             vec!["/repos/*/*/environments/**", "/repos/*/*/deployments/**"],

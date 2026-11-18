@@ -17,10 +17,11 @@ env's name and its current rules.
   a response silent for 5 minutes, and a tunnel or websocket silent for an hour; a long poll
   such as `kubectl logs -f` needs the user to give its host longer, on the host:
   `luoto allow -e <env> <host> --idle 2h`.
-- **Credentials.** Real secrets never enter the sandbox. Tokens you see in the environment
-  (`GH_TOKEN`, `ANTHROPIC_*`, `OPENAI_API_KEY`, …) are placeholders; the gate swaps in the real
-  credential only for the hosts the user granted. This is expected. Do not look for "real"
-  tokens.
+- **Credentials.** The credentials the gate handles stay outside the sandbox. Their tokens in
+  the environment (`GH_TOKEN`, `ANTHROPIC_*`, `OPENAI_API_KEY`, …) are placeholders; the gate
+  swaps in the real credential only for the hosts the user granted. This is expected. Do not
+  look for "real" tokens. Only what the user chose to put inside is real here: a variable
+  they set as a secret, a login they made in the env.
 - **Azure.** Where the user granted Azure, the env is a managed identity: `az` is logged in
   through the gate, and terraform (`ARM_USE_MSI`) and the Azure SDKs find the identity on their
   own. Never run `az login` here, interactively or with a secret. Access tokens you see are
