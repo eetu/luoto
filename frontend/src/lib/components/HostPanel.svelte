@@ -262,6 +262,10 @@
     overflow-wrap: anywhere;
   }
 
+  .mine .small .muted {
+    margin-left: 0.5em;
+  }
+
   .link {
     align-self: flex-start;
     padding: 0;
