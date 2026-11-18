@@ -58,7 +58,7 @@ CELL = 14
 ART = (WIDTH - MARGIN - CELL * (len(PIXELS[0]) - 1), 44)
 TRACKING = -0.04
 # What a card shows of luoto without a word beside it: the README's first sentence, short.
-PITCH = ("Run coding agents with their prompts off,", "in a sandbox that never holds your secrets.")
+PITCH = ("A sandbox for dependencies and agents", "that feels like working locally.")
 
 
 def art() -> str:

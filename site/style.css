@@ -168,11 +168,19 @@ nav a {
 
 h1 {
   max-width: 24em;
-  margin: 2rem 0 2.5rem;
+  margin: 2rem 0 0.75rem;
   font-size: clamp(1.5rem, 1rem + 2.4vw, 2.3rem);
   font-weight: 600;
   line-height: 1.25;
   letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.lede {
+  max-width: 38rem;
+  margin: 0 0 2.5rem;
+  font-size: clamp(1.05rem, 0.95rem + 0.5vw, 1.2rem);
+  line-height: 1.5;
   text-wrap: balance;
 }
 

@@ -4,7 +4,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>luoto: run coding agents in a sandbox that never holds your secrets</title>
+    <title>luoto: a sandbox for dependencies and coding agents that feels local</title>
     <meta
       name="description"
       content="Dev sandboxes that contain supply-chain attacks: each project runs in a container that reaches only the hosts you allowed, with your tokens in a vault outside it."
@@ -20,7 +20,7 @@
     <meta property="og:url" content="https://eetu.github.io/luoto/" />
     <meta
       property="og:title"
-      content="luoto: run coding agents in a sandbox that never holds your secrets"
+      content="luoto: a sandbox for dependencies and coding agents that feels local"
     />
     <meta
       property="og:description"
@@ -32,12 +32,12 @@
     <meta property="og:image:height" content="627" />
     <meta
       property="og:image:alt"
-      content="luoto. no tool is an island, except on luoto. Run coding agents with their prompts off, in a sandbox that never holds your secrets. Beside it, an island with a palm, the sun and the sea in large pixels."
+      content="luoto. no tool is an island, except on luoto. A sandbox for dependencies and agents that feels like working locally. Beside it, an island with a palm, the sun and the sea in large pixels."
     />
     <meta name="twitter:card" content="summary_large_image" />
     <meta
       name="twitter:title"
-      content="luoto: run coding agents in a sandbox that never holds your secrets"
+      content="luoto: a sandbox for dependencies and coding agents that feels local"
     />
     <meta
       name="twitter:description"
@@ -46,7 +46,7 @@
     <meta name="twitter:image" content="https://eetu.github.io/luoto/og.png" />
     <meta
       name="twitter:image:alt"
-      content="luoto. no tool is an island, except on luoto. Run coding agents with their prompts off, in a sandbox that never holds your secrets. Beside it, an island with a palm, the sun and the sea in large pixels."
+      content="luoto. no tool is an island, except on luoto. A sandbox for dependencies and agents that feels like working locally. Beside it, an island with a palm, the sun and the sea in large pixels."
     />
 
     <link rel="preload" href="fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin />
@@ -77,21 +77,23 @@
       </header>
 
       <main>
-        <h1>A sandbox for coding environments and agents</h1>
+        <h1>A sandbox for dependencies and agents that feels like working locally</h1>
+        <p class="lede">
+          Packages, tools and agents reach only the hosts you allowed, with your tokens in a
+          vault outside. It feels like your machine: your editor over SSH, dev servers at
+          localhost, toolchains installed from the project's own files.
+        </p>
 
         <figure class="cast">
           <img
             src="hello.gif"
             width="1200"
             height="880"
-            alt="A terminal: luoto setup, luoto init in luoto's own folder, Claude Code adding a splash in a shell of the env, the change pulled back, and luoto setup opening with it"
+            alt="A terminal: luoto setup, then luoto init --agent claude in luoto's own folder. In a shell of the env, Claude Code adds an island to what luoto setup prints. luoto pull brings the change back, and luoto setup opens with the island."
           />
           <figcaption>
-            Here the project is luoto itself, and the cast opens with its
-            <code>luoto setup</code> as it was. <code>luoto init --agent claude</code> in its
-            folder, one confirm, and Claude Code works in the env, on a copy: it adds the island
-            <code>luoto setup</code> opens with. <code>luoto pull</code> brings the change back,
-            reviewed first, and the setup that then runs is the pulled code.
+            Claude Code adds a splash screen to <code>luoto setup</code>, in an env of luoto's own
+            folder.
           </figcaption>
         </figure>
 
@@ -105,34 +107,47 @@
         <p>luoto gives each project a sandbox where that doesn't work:</p>
         <div class="three">
           <section class="halo-card">
-            <h3>It can't see your files.</h3>
+            <h3>It sees only the project.</h3>
             <p>
-              The project is copied in; your home folder, SSH keys and other repositories stay on
-              your machine.
+              The project is copied in, with any folder you share; your home folder, SSH keys and
+              other repositories stay on your machine.
             </p>
           </section>
           <section class="halo-card">
             <h3>It reaches only what you allowed.</h3>
             <p>
-              Every request leaves through a gate with per-host rules, read-only unless you say
-              otherwise. Anything else is blocked and shown to you, with a one-click allow.
+              Every request leaves through a gate with per-host rules, read-only by default beyond
+              what installs and the agent's model need. Anything else is blocked and shown to
+              you, with a one-click allow.
             </p>
           </section>
           <section class="halo-card">
-            <h3>Your secrets never enter it.</h3>
+            <h3>Your tokens stay outside it.</h3>
             <p>
               Agent, git and cloud tokens stay in a vault outside the sandbox; the gate adds them
-              to the requests you allowed, and code inside sees placeholders. Git tokens work only
-              for the repositories you named.
+              to the requests you allowed, and code inside sees placeholders. A git token over
+              HTTPS clones and pushes only the repositories you named. A secret is inside only
+              where you put it there: a variable the code reads, an agent you log in inside, what
+              a cloud identity reads.
             </p>
           </section>
         </div>
         <p>
-          You keep working as usual: your editor attaches over SSH, agents run with their prompts
-          off because the sandbox is the boundary, and work leaves as a pull request.
+          You keep working as usual: your editor attaches over SSH, agents run with their
+          permission prompts off because the sandbox is the boundary, and work leaves by
+          <code>git push</code> or a reviewed <code>luoto pull</code>. Agents know they're in a
+          sandbox: through luoto's MCP server they ask for a host, an install or a variable, and
+          you approve.
+        </p>
+        <p>
+          Setting up takes no list of tools. <code>luoto init</code> reads the project's own
+          version files (<code>.node-version</code>, <code>rust-toolchain.toml</code>, a
+          <code>package.json</code>'s package manager, …) and proposes its toolchains and package
+          registries; <code>luoto up</code> installs them in the env, with the gate open to each
+          install's hosts only while it runs.
         </p>
 
-        <h2 id="blocked">What a blocked request looks like</h2>
+        <h2 id="blocked">A blocked request</h2>
         <figure>
           <div class="halo-card shot">
             <picture>
@@ -182,8 +197,9 @@ scoop install luoto</code></pre>
           <p>Then, once:</p>
           <pre><code>luoto setup</code></pre>
           <p>
-            It looks for a container runtime you have installed, asks which to use when there are
-            several, and gets the images. Without one it lists them with their install pages.
+            It finds the container runtime you have installed, asks which to use when there are
+            several, and gets the images. With none, it lists the ones it supports and their
+            install pages.
             Updates, tab completion and checking a download:
             <a href="https://github.com/eetu/luoto/blob/main/docs/install.md">Install details</a>.
           </p>
