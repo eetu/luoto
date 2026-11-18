@@ -27,14 +27,6 @@ export type AccessRequest = {
   install?: Install;
 };
 
-/** What Apple's `container` lacks before setup can use it. */
-export type AppleNeed = {
-  /** The oldest version luoto runs on. */
-  min: string;
-  /** The command that installs or upgrades it; `None` without Homebrew. */
-  install: string[] | null;
-};
-
 /** What approving a request did. */
 export type Approved =
   /** The rule an access request became. */
@@ -104,7 +96,6 @@ export type Detection = {
   distro: string | null;
   cpus: number;
   runtimes: RuntimeInfo[];
-  package_manager: string | null;
   wsl: string | null;
 };
 
@@ -267,18 +258,6 @@ export type Install =
   | { kind: "preset"; name: string }
   /** An environment variable with a plain value (`[env]`), which the user gives or accepts. */
   | { kind: "var"; name: string; value?: string };
-
-/** What running the install printed. */
-export type InstallOutput = {
-  ok: boolean;
-  command: string;
-  output: string;
-};
-
-export type InstallRuntime = {
-  /** The runtime chosen; the recommended one when missing. */
-  runtime?: RuntimeChoice | null;
-};
 
 export type Intake = "proxy" | "transparent" | "dns";
 
@@ -469,14 +448,6 @@ export type Pulled = {
   skipped: number;
 };
 
-export type Recommendation = {
-  summary: string;
-  reasons: string[];
-  /** Shell command to install (shown first; run only on confirmation). */
-  install: string[] | null;
-  notes: string[];
-};
-
 /** What [`reload`] did. */
 export type Reloaded = {
   read: number;
@@ -549,7 +520,7 @@ export type Rule = {
   idle?: string;
 };
 
-export type RuntimeChoice = "container" | "podman";
+export type RuntimeChoice = "container" | "podman" | "docker";
 
 export type RuntimeInfo = {
   name: string;
@@ -559,28 +530,26 @@ export type RuntimeInfo = {
   detail: string;
 };
 
-/** Setup's choice of runtime where Apple's `container` runs, and what each choice needs. */
-export type RuntimeOffer = {
-  options: RuntimeOption[];
-  /** Apple's container; `None` when it isn't installed. */
-  apple: RuntimeInfo | null;
-  apple_need: AppleNeed | null;
-  /** What `--runtime podman` recommends. */
-  podman: Recommendation;
-};
-
 /**
- * A runtime setup offers where Apple's `container` runs: its menu row in a terminal, its
- * choice in the UI.
+ * A runtime luoto runs on, as this machine has it: a row of setup's listing, of its menu
+ * where it is ready, and of the UI's choice.
  */
 export type RuntimeOption = {
   runtime: RuntimeChoice;
   label: string;
+  /** How it isolates an env. */
   description: string;
-  recommended: boolean;
+  /** The oldest version luoto runs on. */
+  min: string;
+  /** Its own install page. */
+  url: string;
+  /** What was found of it: its version, and what keeps luoto from using it. */
+  status: string;
+  /** Setup can use it: installed, new enough, and running unless setup starts it. */
+  ready: boolean;
   /** config.toml names it. */
   current: boolean;
-  /** Where the choice starts: the current runtime, else the recommended one. */
+  /** Where the choice starts: the current runtime when it is ready, else the first ready. */
   selected: boolean;
   /** The command that sets it up. */
   setup: string;
@@ -599,9 +568,8 @@ export type SelftestReport = {
 
 export type SetupInfo = {
   detection: Detection;
-  recommendation: Recommendation;
-  /** The choice between Apple's `container` and podman, where Apple's can run. */
-  runtimes: RuntimeOffer | null;
+  /** The runtimes luoto runs on here, as found, in the order setup prefers them. */
+  runtimes: RuntimeOption[];
   /** The gate, vault and tools images are there. */
   images_ok: boolean;
 };

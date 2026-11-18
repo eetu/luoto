@@ -5,6 +5,12 @@
 - `luoto setup` opens with luoto's island, drawn once on a terminal with colors while setup
   looks at this machine (still without colors, none where its output is piped). A first
   setup ends with the next step: `luoto init` inside a project folder.
+- **`luoto setup` installs no runtime, and `--install` is gone.** Setup uses a runtime you
+  installed: Apple's `container`, podman or Docker, each shown with how it isolates an env.
+  With several it asks, in that order, starting at the current one; Docker is a choice like
+  the others (`--runtime docker`). With none ready it lists what luoto runs on, the oldest
+  version of each and its install page, and stops. `--yes` takes the current runtime, or the
+  first in the list, without asking. The UI's setup page shows the same and runs no install.
 - `luoto init` no longer takes toolchains from samples (`examples/`, `fixtures/`, `testdata/`):
   a launchpad example's `mise.toml` made `up` install terraform for a project without it.
 

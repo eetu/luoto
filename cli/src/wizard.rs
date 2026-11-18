@@ -17,7 +17,6 @@ use crate::config::{EnvConfig, GlobalConfig, Isolation};
 use crate::detect;
 use crate::init::Proposal;
 use crate::prompt::{Ask, menu_help, menu_rows};
-use crate::runtime::Flavor;
 use crate::secrets::{self, OpAccount, OpItem, OpVault};
 use crate::text::{self, display};
 
@@ -92,31 +91,27 @@ pub fn customize(p: &mut Proposal) -> Result<()> {
     Ok(())
 }
 
-/// `luoto setup`'s runtime on a Mac that runs Apple's `container`, starting at `current`;
-/// `None` for Esc.
-pub fn pick_runtime(current: Option<Flavor>) -> Result<Option<Flavor>> {
-    let offered = crate::setup::runtime_options(current);
-    let start = offered.iter().position(|o| o.selected).unwrap_or(0);
-    let rows = offered
+/// `luoto setup`'s runtime, of those of `offered` that are ready, in their order; `None` for
+/// Esc.
+pub fn pick_runtime(
+    offered: &[crate::setup::RuntimeOption],
+) -> Result<Option<crate::setup::RuntimeChoice>> {
+    let ready: Vec<_> = offered.iter().filter(|o| o.ready).collect();
+    let start = ready.iter().position(|o| o.selected).unwrap_or(0);
+    let changing = offered.iter().any(|o| o.current);
+    let rows = ready
         .into_iter()
         .map(|o| {
-            // What the machine runs on now is the more useful mark when it is both.
             let label = if o.current {
                 format!("{} (current)", o.label)
-            } else if o.recommended {
-                format!("{} (recommended)", o.label)
             } else {
-                o.label
+                o.label.clone()
             };
-            (o.runtime.flavor(), label, o.description)
+            (o.runtime, label, o.description.clone())
         })
         .collect();
     let options = table(rows, text::columns());
-    let help = menu_help(if current.is_some() {
-        "unchanged"
-    } else {
-        "later"
-    });
+    let help = menu_help(if changing { "unchanged" } else { "later" });
     Ok(Select::new("Run envs on:", options)
         .with_starting_cursor(start)
         .with_formatter(&short)

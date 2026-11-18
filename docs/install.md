@@ -15,14 +15,22 @@ The images it replaced stay in luoto's VM until `luoto prune` removes them (`up`
 they take).
 What each release changed is in [CHANGELOG.md](../CHANGELOG.md).
 
-On macOS 26 or later on Apple silicon, `luoto setup` offers Apple's
-[`container`](https://github.com/apple/container) (1.7.1 or later) first, where every container
-is a VM of its own; podman stays the other choice. Without a terminal, setup keeps the runtime
-`config.toml` names, or picks `container` for a new one; `luoto setup --runtime podman` (or
-`container`) chooses. `--install` runs `brew install container`; setup then starts its service
-(`container system start --enable-kernel-install`, whose first start downloads its kernel) and
-pulls the release's images with `container image pull`. What differs there:
-[Platforms](how-it-works.md#platforms).
+`luoto setup` runs envs on a container runtime you installed, and installs none itself:
+
+| runtime                                                            | oldest | an env's boundary                                         |
+| ------------------------------------------------------------------ | ------ | --------------------------------------------------------- |
+| Apple's [`container`](https://github.com/apple/container/releases) | 1.7.1  | every container is a VM of its own                        |
+| [podman](https://podman.io/docs/installation)                      | 5.2    | luoto's own VM and gVisor (Linux: gVisor where installed) |
+| [Docker](https://docs.docker.com/engine/install/)                  | 28     | Docker's VM, or on Linux this machine's kernel            |
+
+Apple's runs on macOS 26 or later on Apple silicon. With one of them installed, setup uses
+it; with several it asks, listing them in this order and starting at the one `config.toml`
+names. `luoto setup --runtime container` (or `podman`, `docker`) chooses without asking, and
+so do `--yes` and a run without a terminal, which keep the current runtime or take the first
+in the list. With none, or one too old or not running, setup says what it found and stops.
+For Apple's it starts the service (`container system start --enable-kernel-install`, whose
+first start downloads its kernel) and pulls the release's images with `container image pull`.
+What differs between them: [Platforms](how-it-works.md#platforms).
 
 `luoto uninstall` lists what it removes and asks once: every env's containers and volumes,
 the vault, luoto's images and keychain entries, its config and data folders, and luoto's VM

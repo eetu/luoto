@@ -68,7 +68,6 @@ pub fn routes() -> Router<Ui> {
         .route("/overview", get(overview))
         .route("/meta", get(meta))
         .route("/setup", get(setup_info))
-        .route("/setup/install", post(setup_install))
         .route("/envs", post(create_env))
         .route("/detect", post(detect))
         .route("/disk", get(vm_disk))
@@ -234,9 +233,8 @@ async fn meta() -> Json<Meta> {
 #[derive(Serialize)]
 struct SetupInfo {
     detection: setup::Detection,
-    recommendation: setup::Recommendation,
-    /// The choice between Apple's `container` and podman, where Apple's can run.
-    runtimes: Option<setup::RuntimeOffer>,
+    /// The runtimes luoto runs on here, as found, in the order setup prefers them.
+    runtimes: Vec<setup::RuntimeOption>,
     /// The gate, vault and tools images are there.
     images_ok: bool,
 }
@@ -244,10 +242,10 @@ struct SetupInfo {
 async fn setup_info() -> ApiResult<SetupInfo> {
     blocking(|| {
         let d = setup::detect();
-        let r = setup::recommend(&d);
         let paths = crate::paths::Paths::get()?;
         let current = setup::configured(&config::load_global(&paths)?);
-        let runtimes = setup::offer(&d, setup::probe_apple(), current);
+        let apple = setup::probe_apple();
+        let runtimes = setup::runtime_options(&d, apple.as_ref().map(Option::as_ref), current);
         let images_ok = Ctx::load()
             .map(|ctx| {
                 ["gate", "vault", "tools"]
@@ -257,49 +255,8 @@ async fn setup_info() -> ApiResult<SetupInfo> {
             .unwrap_or(false);
         Ok(SetupInfo {
             detection: d,
-            recommendation: r,
             runtimes,
             images_ok,
-        })
-    })
-    .await
-    .map(Json)
-}
-
-#[derive(Deserialize)]
-struct InstallRuntime {
-    /// The runtime chosen; the recommended one when missing.
-    runtime: Option<setup::RuntimeChoice>,
-}
-
-/// What running the install printed.
-#[derive(Serialize)]
-struct InstallOutput {
-    ok: bool,
-    command: String,
-    output: String,
-}
-
-async fn setup_install(Json(i): Json<InstallRuntime>) -> ApiResult<InstallOutput> {
-    blocking(move || {
-        let cmd = setup::install_command(i.runtime)?;
-        if cmd[0] == "sudo" {
-            anyhow::bail!(
-                "this needs your password — run it in a terminal: {}",
-                cmd.join(" ")
-            );
-        }
-        let out = std::process::Command::new(&cmd[0])
-            .args(&cmd[1..])
-            .output()?;
-        Ok(InstallOutput {
-            ok: out.status.success(),
-            command: cmd.join(" "),
-            output: format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            ),
         })
     })
     .await

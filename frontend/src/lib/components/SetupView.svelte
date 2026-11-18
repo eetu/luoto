@@ -1,17 +1,15 @@
 <script lang="ts">
   import { api } from "$lib/api";
   import CopyCommand from "$lib/components/CopyCommand.svelte";
-  import { act, app, errorText, say } from "$lib/stores/app.svelte";
+  import { errorText, say } from "$lib/stores/app.svelte";
   import type { RuntimeChoice, SetupInfo } from "$lib/types";
 
-  // First run: what this machine has, what luoto recommends, and the one confirmed step to
-  // get there. Shown until there is an env. Where Apple's container runs, setup's choice of
-  // runtime comes first, as `luoto setup` asks it.
+  // First run: what this machine has and the command that sets luoto up on the runtime
+  // picked, as `luoto setup` asks it. Shown until there is an env. Installing a runtime is
+  // the user's: one that isn't ready says what it lacks and links to its own install page.
   let { onNew }: { onNew: () => void } = $props();
 
   let info = $state<SetupInfo | null>(null);
-  let output = $state("");
-  let confirming = $state(false);
   let picked = $state<RuntimeChoice | null>(null);
 
   $effect(() => {
@@ -21,37 +19,11 @@
     );
   });
 
-  const offer = $derived(info?.runtimes ?? null);
-  const choice = $derived(
-    offer ? (picked ?? offer.options.find((o) => o.selected)?.runtime ?? null) : null,
-  );
-  const option = $derived(offer?.options.find((o) => o.runtime === choice));
-  const apple = $derived(choice === "container" ? offer?.apple_need : undefined);
-  const rec = $derived(choice === "podman" && offer ? offer.podman : info?.recommendation);
-  const installs = $derived(apple === undefined ? rec?.install : apple?.install);
-  const found = $derived(
-    info ? [...info.detection.runtimes, ...(offer?.apple ? [offer.apple] : [])] : [],
-  );
-  const ready = $derived(!!info?.images_ok && found.some((r) => r.reachable && r.version_ok));
-
-  function pick(runtime: RuntimeChoice) {
-    picked = runtime;
-    confirming = false;
-    output = "";
-  }
-
-  async function install() {
-    confirming = false;
-    await act(
-      "installing…",
-      async () => {
-        const r = await api.setupInstall(choice);
-        output = r.output;
-        info = await api.setup();
-      },
-      "installed — re-checking",
-    );
-  }
+  const options = $derived(info?.runtimes ?? []);
+  const choice = $derived(picked ?? options.find((o) => o.selected)?.runtime ?? null);
+  const option = $derived(options.find((o) => o.runtime === choice));
+  const usable = $derived(options.some((o) => o.ready));
+  const ready = $derived(!!info?.images_ok && usable);
 </script>
 
 <section class="setup">
@@ -66,88 +38,47 @@
         {info.detection.arch}{info.detection.distro ? `, ${info.detection.distro}` : ""}, {info
           .detection.cpus} CPUs
       </p>
-      {#each found as r (r.name)}
-        <p class:ok={r.reachable && r.version_ok}>
-          <b>{r.name}</b>
-          {r.version ? r.version.join(".") : "?"}
-          <span class="muted">— {r.detail}</span>
-        </p>
-      {:else}
-        <p class="muted">no container runtime found</p>
-      {/each}
-      <p class="muted small">
-        images: {#if info.images_ok}present{:else if offer}missing{:else}missing — run
-          <code>luoto setup</code>{/if}
-      </p>
+      <p class="muted small">images: {info.images_ok ? "present" : "missing"}</p>
     </div>
 
     <div class="halo-card card">
-      {#if offer}
-        <fieldset class="choices">
-          <legend class="label">run envs on</legend>
-          {#each offer.options as o (o.runtime)}
-            <label class="choice" class:on={choice === o.runtime}>
-              <input
-                type="radio"
-                name="runtime"
-                value={o.runtime}
-                checked={choice === o.runtime}
-                onchange={() => pick(o.runtime)}
-              />
-              <span>
-                <b>{o.label}</b>
-                {#if o.recommended}<span class="tag">recommended</span>{/if}
-                {#if o.current}<span class="tag">current</span>{/if}
-                <span class="muted small desc">{o.description}</span>
-              </span>
-            </label>
-          {/each}
-        </fieldset>
-      {:else}
-        <p class="label">recommendation</p>
-      {/if}
+      <fieldset class="choices">
+        <legend class="label">run envs on</legend>
+        {#each options as o (o.runtime)}
+          <label class="choice" class:on={choice === o.runtime} class:off={!o.ready}>
+            <input
+              type="radio"
+              name="runtime"
+              value={o.runtime}
+              checked={choice === o.runtime}
+              disabled={!o.ready}
+              onchange={() => (picked = o.runtime)}
+            />
+            <span>
+              <b>{o.label}</b>
+              {#if o.current}<span class="tag">current</span>{/if}
+              <span class="muted small status">{o.status}</span>
+              <span class="muted small desc">{o.description}</span>
+              {#if !o.ready}
+                <span class="small desc">
+                  luoto runs on {o.min} or later:
+                  <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- the runtime's own site -->
+                  <a class="link" href={o.url} target="_blank" rel="noopener noreferrer">{o.url}</a>
+                </span>
+              {/if}
+            </span>
+          </label>
+        {/each}
+      </fieldset>
 
-      {#if apple !== undefined}
-        {#if apple}
-          <p><b>luoto needs Apple's container {apple.min} or later</b></p>
-          {#if !apple.install}
-            <p class="note">
-              install it from <code>https://github.com/apple/container/releases</code>
-            </p>
-          {/if}
+      {#if !usable}
+        <p class="small finish">install one, then, in a terminal:</p>
+        <CopyCommand cmd="luoto setup" />
+      {:else if option && (!ready || !option.current)}
+        {#if option.runtime === "container"}
+          <p class="note">setup starts its service, whose first start downloads its kernel</p>
         {/if}
-        <p class="note">
-          setup starts its service (<code>container system start --enable-kernel-install</code>),
-          whose first start downloads its kernel
-        </p>
-      {:else if rec}
-        <p><b>{rec.summary}</b></p>
-        <ul>
-          {#each rec.reasons as r (r)}<li>{r}</li>{/each}
-        </ul>
-        {#each rec.notes as n (n)}<p class="note">{n}</p>{/each}
-      {/if}
-
-      {#if installs}
-        <p class="small">
-          installs with: <code>{installs.join(" ")}</code>
-        </p>
-        {#if confirming}
-          <p class="small">This runs on your machine (not sandboxed), from the package manager.</p>
-          <div class="actions">
-            <button class="btn primary" onclick={install} disabled={!!app.busy}>Run it</button>
-            <button class="btn" onclick={() => (confirming = false)}>Cancel</button>
-          </div>
-        {:else}
-          <button class="btn primary" onclick={() => (confirming = true)} disabled={!!app.busy}
-            >Install…</button
-          >
-        {/if}
-      {/if}
-      {#if output}<pre>{output}</pre>{/if}
-
-      {#if option && (!ready || !option.current)}
-        <p class="small finish">then, in a terminal:</p>
+        <p class="small finish">in a terminal:</p>
         <CopyCommand cmd={option.setup} />
       {/if}
     </div>
@@ -176,10 +107,6 @@
 
   .card p {
     margin: 4px 0;
-  }
-
-  .ok b {
-    color: var(--halo-accent);
   }
 
   .small {
@@ -215,8 +142,16 @@
     background: var(--halo-accent-soft);
   }
 
+  .choice.off {
+    cursor: default;
+  }
+
   .choice input {
     accent-color: var(--halo-accent);
+  }
+
+  .status {
+    margin-left: 4px;
   }
 
   .desc {
@@ -234,11 +169,5 @@
 
   .finish {
     margin-top: 10px;
-  }
-
-  pre {
-    max-height: 200px;
-    overflow: auto;
-    font-size: 11px;
   }
 </style>

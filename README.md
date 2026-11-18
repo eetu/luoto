@@ -64,10 +64,11 @@ Then, once:
 luoto setup
 ```
 
-It checks your container runtime (podman ≥ 5.2 or Docker ≥ 28; on macOS 26 on Apple silicon
-it offers Apple's `container` first; `--install` installs the one picked after showing the
-command), creates luoto's own VM where podman needs one, and gets the images. Updates, tab
-completion and checking a download: [Install details](docs/install.md).
+It looks for a container runtime you have installed (Apple's `container` on macOS 26 on
+Apple silicon, podman ≥ 5.2, Docker ≥ 28), asks which to use when there are several, creates
+luoto's own VM where podman needs one, and gets the images. Without one it lists them with
+their install pages. Updates, tab completion and checking a download:
+[Install details](docs/install.md).
 
 ## Getting started
 
@@ -201,7 +202,7 @@ agent's answer, for a cron job or a CI step:
 - The gate holds up to 1024 connections per env. It closes a request whose response hasn't
   started 10 minutes after it was sent, a response that sends nothing for 5 minutes, and a
   tunnel or websocket after an hour without traffic. A rule's `idle` (`luoto allow
-  k8s.example.com --idle 2h`, at most 24h) gives its host that long instead, for long polls
+k8s.example.com --idle 2h`, at most 24h) gives its host that long instead, for long polls
   such as `kubectl logs -f`.
 - With podman on macOS and Windows, luoto's VM keeps its disk in a file on yours (up to
   100 GB, podman's default) that grows as images, toolchains and workspaces fill it and doesn't

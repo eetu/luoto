@@ -70,19 +70,6 @@ fn macos_major(version: &str) -> Option<u32> {
     version.split('.').next()?.trim().parse().ok()
 }
 
-/// The command that installs Apple's `container` (or upgrades an older one), where Homebrew
-/// is there.
-pub fn apple_install(upgrade: bool) -> Option<Vec<String>> {
-    let has_brew = Command::new("brew")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    let verb = if upgrade { "upgrade" } else { "install" };
-    has_brew.then(|| vec!["brew".into(), verb.into(), "container".into()])
-}
-
 /// Apple's `container` needs its system service, not a VM: started here when it isn't
 /// running.
 pub fn ensure_apple_service(rt: &Runtime) -> Result<()> {

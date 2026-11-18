@@ -1,18 +1,18 @@
-//! `luoto setup` / `luoto doctor`: detect the host and container runtimes, recommend (and on
-//! request install) one, prepare luoto's images, and verify isolation of every env.
+//! `luoto setup` / `luoto doctor`: detect the host and the container runtimes it has, set luoto
+//! up on the one chosen, prepare luoto's images, and verify isolation of every env. Installing
+//! a runtime is the user's: setup names what luoto runs on and runs no package manager.
 
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::config;
 use crate::env::{self, Ctx};
 use crate::machine;
 use crate::names;
 use crate::paths::Paths;
-use crate::prompt::confirm;
 use crate::release;
 use crate::runtime::{Flavor, Runtime};
 
@@ -32,18 +32,12 @@ pub struct Detection {
     pub distro: Option<String>,
     pub cpus: usize,
     pub runtimes: Vec<RuntimeInfo>,
-    pub package_manager: Option<String>,
     pub wsl: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Recommendation {
-    pub summary: String,
-    pub reasons: Vec<String>,
-    /// Shell command to install (shown first; run only on confirmation).
-    pub install: Option<Vec<String>>,
-    pub notes: Vec<String>,
-}
+/// The oldest podman and Docker luoto runs on; Apple's is [`machine::APPLE_MIN`].
+const PODMAN_MIN: (u32, u32, u32) = (5, 2, 0);
+const DOCKER_MIN: (u32, u32, u32) = (28, 0, 0);
 
 fn output(cmd: &str, args: &[&str]) -> Option<String> {
     let out = Command::new(cmd)
@@ -98,10 +92,7 @@ fn probe_runtime(flavor: Flavor, min: (u32, u32, u32)) -> Option<RuntimeInfo> {
         }
         Flavor::Podman => match rt.run(["info", "--format", "{{.Host.RemoteSocket.Exists}}"]) {
             Ok(_) => (true, "podman reachable".to_string()),
-            Err(_) => (
-                false,
-                "podman installed but no running machine/service (`podman machine start`)".into(),
-            ),
+            Err(_) => (false, "podman installed but `podman info` fails".into()),
         },
         Flavor::Docker => match rt.run(["info", "--format", "{{.ServerVersion}}"]) {
             Ok(v) => (true, format!("docker engine {}", v.trim())),
@@ -124,69 +115,25 @@ fn probe_runtime(flavor: Flavor, min: (u32, u32, u32)) -> Option<RuntimeInfo> {
     })
 }
 
-pub fn os_release(text: &str) -> (Option<String>, Option<String>) {
-    let mut id = None;
-    let mut like = None;
-    for line in text.lines() {
-        if let Some(v) = line.strip_prefix("ID=") {
-            id = Some(v.trim_matches('"').to_string());
-        }
-        if let Some(v) = line.strip_prefix("ID_LIKE=") {
-            like = Some(v.trim_matches('"').to_string());
-        }
-    }
-    (id, like)
-}
-
-pub fn package_manager_for(
-    os: &str,
-    distro: Option<&str>,
-    like: Option<&str>,
-    has: impl Fn(&str) -> bool,
-) -> Option<String> {
-    match os {
-        "macos" => has("brew").then(|| "brew".into()),
-        "windows" => has("winget").then(|| "winget".into()),
-        _ => {
-            let ids = format!("{} {}", distro.unwrap_or(""), like.unwrap_or(""));
-            if ids.contains("debian") || ids.contains("ubuntu") {
-                Some("apt".into())
-            } else if ids.contains("fedora") || ids.contains("rhel") || ids.contains("centos") {
-                Some("dnf".into())
-            } else if ids.contains("arch") {
-                Some("pacman".into())
-            } else if ids.contains("suse") {
-                Some("zypper".into())
-            } else if ids.contains("alpine") {
-                Some("apk".into())
-            } else {
-                None
-            }
-        }
-    }
+/// The distribution's `ID` in /etc/os-release.
+pub fn os_release(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|l| l.strip_prefix("ID="))
+        .map(|v| v.trim_matches('"').to_string())
 }
 
 pub fn detect() -> Detection {
     let os = std::env::consts::OS.to_string();
-    let (distro, like) = std::fs::read_to_string("/etc/os-release")
-        .map(|t| os_release(&t))
-        .unwrap_or((None, None));
-    let has = |c: &str| {
-        Command::new(c)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
-    };
-    let runtimes = [(Flavor::Podman, (5, 2, 0)), (Flavor::Docker, (28, 0, 0))]
+    let distro = std::fs::read_to_string("/etc/os-release")
+        .ok()
+        .and_then(|t| os_release(&t));
+    let runtimes = [(Flavor::Podman, PODMAN_MIN), (Flavor::Docker, DOCKER_MIN)]
         .into_iter()
         .filter_map(|(f, min)| probe_runtime(f, min))
         .collect();
     let wsl = (os == "windows")
         .then(|| output("wsl", &["--status"]).unwrap_or_else(|| "not installed".into()));
     Detection {
-        package_manager: package_manager_for(&os, distro.as_deref(), like.as_deref(), has),
         os,
         arch: std::env::consts::ARCH.into(),
         distro,
@@ -198,83 +145,14 @@ pub fn detect() -> Detection {
     }
 }
 
-fn cmd(words: &[&str]) -> Vec<String> {
-    words.iter().map(|w| w.to_string()).collect()
-}
-
-pub fn recommend(d: &Detection) -> Recommendation {
-    if let Some(r) = d.runtimes.iter().find(|r| r.reachable && r.version_ok) {
-        let mut notes = Vec::new();
-        if r.name == "docker" {
-            notes.push("Docker Desktop requires a paid subscription for companies above 250 employees or $10M revenue; podman is free.".into());
-            if d.os == "linux" {
-                notes.push("On Linux there is no VM boundary: prefer rootless podman, or register gVisor with Docker and set `oci_runtime = \"runsc\"` under `[resources]` in each env's config.".into());
-            }
-        }
-        return Recommendation {
-            summary: format!("use the installed {} ({})", r.name, r.detail),
-            reasons: vec!["a supported runtime is already installed and running".into()],
-            install: None,
-            notes,
-        };
-    }
-    let install = match (d.os.as_str(), d.package_manager.as_deref()) {
-        ("macos", Some("brew")) => Some(cmd(&["brew", "install", "podman"])),
-        ("windows", Some("winget")) => {
-            Some(cmd(&["winget", "install", "-e", "--id", "RedHat.Podman"]))
-        }
-        ("linux", Some("apt")) => Some(cmd(&["sudo", "apt-get", "install", "-y", "podman"])),
-        ("linux", Some("dnf")) => Some(cmd(&["sudo", "dnf", "install", "-y", "podman"])),
-        ("linux", Some("pacman")) => Some(cmd(&["sudo", "pacman", "-S", "--noconfirm", "podman"])),
-        ("linux", Some("zypper")) => Some(cmd(&["sudo", "zypper", "install", "-y", "podman"])),
-        ("linux", Some("apk")) => Some(cmd(&["sudo", "apk", "add", "podman"])),
-        _ => None,
-    };
-    let mut notes = Vec::new();
-    if install.is_none() {
-        notes.push(
-            "install podman from https://podman.io (no supported package manager found)".into(),
-        );
-    }
-    if d.os == "windows"
-        && d.wsl
-            .as_deref()
-            .is_some_and(|w| w.contains("not installed"))
-    {
-        notes.push("WSL2 is needed first: run `wsl --install` as administrator and reboot (or use podman's Hyper-V provider).".into());
-    }
-    if let Some(r) = d.runtimes.iter().find(|r| !r.version_ok) {
-        notes.push(format!(
-            "{} is too old ({:?}); luoto needs podman ≥ 5.2 or Docker Engine ≥ 28",
-            r.name, r.version
-        ));
-    }
-    if let Some(r) = d.runtimes.iter().find(|r| !r.reachable) {
-        notes.push(r.detail.clone());
-    }
-    Recommendation {
-        summary: "install podman".into(),
-        reasons: vec![
-            "free for companies (no Docker Desktop subscription)".into(),
-            "rootless by default".into(),
-            "luoto gets its own VM with none of your folders mounted".into(),
-        ],
-        install,
-        notes,
-    }
-}
-
 #[derive(clap::Args)]
 pub struct SetupOpts {
-    /// Install the recommended runtime with the platform package manager.
-    #[arg(long)]
-    pub install: bool,
     /// Build luoto's images from the checkout this binary was built from, instead of pulling
     /// them (source builds only).
     #[arg(long)]
     pub build: bool,
-    /// Run envs on this runtime: `container` (Apple's, on macOS 26 or later on Apple silicon)
-    /// or `podman`.
+    /// Run envs on this runtime, which has to be installed: `container` (Apple's, on macOS 26
+    /// or later on Apple silicon), `podman` or `docker`.
     #[arg(long, value_enum)]
     pub runtime: Option<RuntimeChoice>,
     /// Don't ask first.
@@ -282,22 +160,43 @@ pub struct SetupOpts {
     pub yes: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeChoice {
     Container,
     Podman,
+    Docker,
 }
 
 impl RuntimeChoice {
+    fn of(flavor: Flavor) -> Self {
+        match flavor {
+            Flavor::Apple => RuntimeChoice::Container,
+            Flavor::Podman => RuntimeChoice::Podman,
+            Flavor::Docker => RuntimeChoice::Docker,
+        }
+    }
+
     pub fn flavor(self) -> Flavor {
         match self {
             RuntimeChoice::Container => Flavor::Apple,
             RuntimeChoice::Podman => Flavor::Podman,
+            RuntimeChoice::Docker => Flavor::Docker,
+        }
+    }
+
+    /// As `--runtime` and config.toml's `runtime` take it.
+    pub fn name(self) -> &'static str {
+        match self {
+            RuntimeChoice::Container => "container",
+            RuntimeChoice::Podman => "podman",
+            RuntimeChoice::Docker => "docker",
         }
     }
 }
 
+/// Where Apple's `container` is installed from.
+const APPLE_URL: &str = "https://github.com/apple/container/releases";
 const APPLE_HOST_ONLY: &str = "Apple's container needs macOS 26 or later on Apple silicon";
 
 /// Apple's `container` as found: `None` where it can't run, `Some(None)` where it isn't
@@ -306,131 +205,202 @@ pub fn probe_apple() -> Option<Option<RuntimeInfo>> {
     machine::apple_host().then(|| probe_runtime(Flavor::Apple, machine::APPLE_MIN))
 }
 
-/// What `--runtime podman` looks at: podman alone.
-fn podman_only(mut d: Detection) -> Detection {
-    d.runtimes.retain(|r| r.name == "podman");
-    d
-}
-
-/// A runtime setup offers where Apple's `container` runs: its menu row in a terminal, its
-/// choice in the UI.
-#[derive(Debug, Serialize)]
+/// A runtime luoto runs on, as this machine has it: a row of setup's listing, of its menu
+/// where it is ready, and of the UI's choice.
+#[derive(Debug, Clone, Serialize)]
 pub struct RuntimeOption {
     pub runtime: RuntimeChoice,
     pub label: String,
+    /// How it isolates an env.
     pub description: String,
-    pub recommended: bool,
+    /// The oldest version luoto runs on.
+    pub min: String,
+    /// Its own install page.
+    pub url: String,
+    /// What was found of it: its version, and what keeps luoto from using it.
+    pub status: String,
+    /// Setup can use it: installed, new enough, and running unless setup starts it.
+    pub ready: bool,
     /// config.toml names it.
     pub current: bool,
-    /// Where the choice starts: the current runtime, else the recommended one.
+    /// Where the choice starts: the current runtime when it is ready, else the first ready.
     pub selected: bool,
     /// The command that sets it up.
     pub setup: String,
 }
 
-/// The runtimes setup offers where Apple's `container` runs, the recommended first.
-pub fn runtime_options(current: Option<Flavor>) -> Vec<RuntimeOption> {
-    let start = if current == Some(Flavor::Podman) {
-        RuntimeChoice::Podman
-    } else {
-        RuntimeChoice::Container
-    };
-    [
-        (
-            RuntimeChoice::Container,
+fn dotted((a, b, c): (u32, u32, u32)) -> String {
+    format!("{a}.{b}.{c}")
+}
+
+/// `runtime` as its probe `found` it, on `os`: podman and Docker have a VM around them on
+/// macOS and Windows only.
+fn option(runtime: RuntimeChoice, found: Option<&RuntimeInfo>, os: &str) -> RuntimeOption {
+    let vm = matches!(os, "macos" | "windows");
+    let (label, min, description, url) = match runtime {
+        RuntimeChoice::Container => (
             "Apple's container",
+            machine::APPLE_MIN,
             "every container is a VM of its own",
+            APPLE_URL,
         ),
-        (
-            RuntimeChoice::Podman,
+        RuntimeChoice::Podman => (
             "podman",
-            "every env in luoto's one VM, under gVisor",
+            PODMAN_MIN,
+            if vm {
+                "every env in luoto's one VM, under gVisor"
+            } else {
+                "containers on this machine's kernel, under gVisor where runsc is installed"
+            },
+            "https://podman.io/docs/installation",
         ),
-    ]
-    .into_iter()
-    .map(|(runtime, label, description)| RuntimeOption {
+        RuntimeChoice::Docker => (
+            "Docker",
+            DOCKER_MIN,
+            if vm {
+                "containers in the Docker engine's VM; gVisor only where registered with it"
+            } else {
+                "containers on this machine's kernel; gVisor only where registered with Docker"
+            },
+            "https://docs.docker.com/engine/install/",
+        ),
+    };
+    // Setup starts Apple's service itself; the others have to be running.
+    let reachable = |i: &RuntimeInfo| i.reachable || runtime == RuntimeChoice::Container;
+    let status = match found {
+        None => "not installed".to_string(),
+        Some(i) => {
+            let version = i.version.map_or_else(|| "unknown version".into(), dotted);
+            if !i.version_ok {
+                format!("{version} found")
+            } else if reachable(i) {
+                version
+            } else if runtime == RuntimeChoice::Docker {
+                format!("{version}, the engine is not running")
+            } else {
+                format!("{version}, `podman info` fails")
+            }
+        }
+    };
+    RuntimeOption {
         runtime,
         label: label.into(),
         description: description.into(),
-        recommended: runtime == RuntimeChoice::Container,
-        current: current == Some(runtime.flavor()),
-        selected: runtime == start,
-        setup: format!(
-            "luoto setup --runtime {}",
-            match runtime {
-                RuntimeChoice::Container => "container",
-                RuntimeChoice::Podman => "podman",
-            }
+        min: dotted(min),
+        url: url.into(),
+        status,
+        ready: found.is_some_and(|i| i.version_ok && reachable(i)),
+        current: false,
+        selected: false,
+        setup: format!("luoto setup --runtime {}", runtime.name()),
+    }
+}
+
+/// The runtimes luoto runs on here, in the order setup lists and prefers them: Apple's
+/// `container` where it can run (`apple` from [`probe_apple`]), podman, Docker.
+pub fn runtime_options(
+    d: &Detection,
+    apple: Option<Option<&RuntimeInfo>>,
+    current: Option<Flavor>,
+) -> Vec<RuntimeOption> {
+    let found = |name: &str| d.runtimes.iter().find(|r| r.name == name);
+    let mut options: Vec<RuntimeOption> = apple
+        .map(|a| option(RuntimeChoice::Container, a, &d.os))
+        .into_iter()
+        .chain([
+            option(RuntimeChoice::Podman, found("podman"), &d.os),
+            option(RuntimeChoice::Docker, found("docker"), &d.os),
+        ])
+        .collect();
+    let is_current = |o: &RuntimeOption| current == Some(o.runtime.flavor());
+    let start = options
+        .iter()
+        .position(|o| o.ready && is_current(o))
+        .or_else(|| options.iter().position(|o| o.ready));
+    for (i, o) in options.iter_mut().enumerate() {
+        o.current = is_current(o);
+        o.selected = Some(i) == start;
+    }
+    options
+}
+
+/// What setup says where no runtime is ready: each one luoto runs on with its oldest
+/// version, what was found of it, how it isolates an env and its own install page. `wsl` is
+/// what Windows said of WSL.
+pub fn listing(options: &[RuntimeOption], wsl: Option<&str>) -> String {
+    let mut out = String::from("no container runtime luoto runs on is ready here\n");
+    for o in options {
+        let product = match o.runtime {
+            RuntimeChoice::Docker => "Docker Engine",
+            _ => &o.label,
+        };
+        out.push_str(&format!(
+            "\n{product} {} or later: {}\n  {}\n  {}",
+            o.min, o.status, o.description, o.url
+        ));
+    }
+    if wsl.is_some_and(|w| w.contains("not installed")) {
+        out.push_str(
+            "\n\npodman and Docker run in WSL2 or Hyper-V on Windows; WSL is not installed",
+        );
+    }
+    out.push_str("\n\ninstall one, then run `luoto setup` again");
+    out
+}
+
+#[derive(Debug, PartialEq)]
+enum Decision {
+    Use(RuntimeChoice),
+    Ask,
+    /// No runtime is ready.
+    Nothing,
+}
+
+/// Which runtime setup takes: the one `asked` for (`--runtime`), which has to be ready; else
+/// the only ready one; else, of several, the user's pick, or where nothing can be asked
+/// (`ask` false: `--yes`, no terminal) the one the choice starts at. The current runtime is
+/// never left for another unasked.
+fn decide(asked: Option<RuntimeChoice>, ask: bool, options: &[RuntimeOption]) -> Result<Decision> {
+    if let Some(runtime) = asked {
+        let o = options
+            .iter()
+            .find(|o| o.runtime == runtime)
+            .context(APPLE_HOST_ONLY)?;
+        if !o.ready {
+            bail!(
+                "{} is not ready ({}); luoto runs on {} or later: {}",
+                o.label,
+                o.status,
+                o.min,
+                o.url
+            );
+        }
+        return Ok(Decision::Use(runtime));
+    }
+    let ready: Vec<&RuntimeOption> = options.iter().filter(|o| o.ready).collect();
+    if let (Some(o), false) = (
+        options.iter().find(|o| o.current && !o.ready),
+        ready.is_empty(),
+    ) {
+        bail!(
+            "{}, which runs this machine's envs, is not ready ({}); `{}` moves to another",
+            o.label,
+            o.status,
+            ready[0].setup
+        );
+    }
+    Ok(match ready.as_slice() {
+        [] => Decision::Nothing,
+        [one] => Decision::Use(one.runtime),
+        _ if ask => Decision::Ask,
+        several => Decision::Use(
+            several
+                .iter()
+                .find(|o| o.selected)
+                .unwrap_or(&several[0])
+                .runtime,
         ),
     })
-    .collect()
-}
-
-/// What Apple's `container` lacks before setup can use it.
-#[derive(Debug, Serialize)]
-pub struct AppleNeed {
-    /// The oldest version luoto runs on.
-    pub min: String,
-    /// The command that installs or upgrades it; `None` without Homebrew.
-    pub install: Option<Vec<String>>,
-}
-
-/// `None` when `info` (its probe) is installed and new enough.
-pub fn apple_need(info: Option<&RuntimeInfo>) -> Option<AppleNeed> {
-    if info.is_some_and(|i| i.version_ok) {
-        return None;
-    }
-    let (a, b, c) = machine::APPLE_MIN;
-    Some(AppleNeed {
-        min: format!("{a}.{b}.{c}"),
-        install: machine::apple_install(info.is_some()),
-    })
-}
-
-/// Setup's choice of runtime where Apple's `container` runs, and what each choice needs.
-#[derive(Debug, Serialize)]
-pub struct RuntimeOffer {
-    pub options: Vec<RuntimeOption>,
-    /// Apple's container; `None` when it isn't installed.
-    pub apple: Option<RuntimeInfo>,
-    pub apple_need: Option<AppleNeed>,
-    /// What `--runtime podman` recommends.
-    pub podman: Recommendation,
-}
-
-/// `None` where Apple's `container` can't run (`apple` from `probe_apple`), and for docker,
-/// which only config.toml sets.
-pub fn offer(
-    d: &Detection,
-    apple: Option<Option<RuntimeInfo>>,
-    current: Option<Flavor>,
-) -> Option<RuntimeOffer> {
-    let apple = apple?;
-    (current != Some(Flavor::Docker)).then(|| RuntimeOffer {
-        options: runtime_options(current),
-        apple_need: apple_need(apple.as_ref()),
-        apple,
-        podman: recommend(&podman_only(d.clone())),
-    })
-}
-
-/// The install `--install` runs for `runtime`, or for the recommended one.
-pub fn install_command(runtime: Option<RuntimeChoice>) -> Result<Vec<String>> {
-    let cmd = match runtime {
-        Some(RuntimeChoice::Container) => {
-            let apple = probe_apple().context(APPLE_HOST_ONLY)?;
-            let need = apple_need(apple.as_ref()).context("Apple's container is installed")?;
-            return need.install.with_context(|| {
-                format!(
-                    "install Apple's container {} from https://github.com/apple/container/releases",
-                    need.min
-                )
-            });
-        }
-        Some(RuntimeChoice::Podman) => recommend(&podman_only(detect())).install,
-        None => recommend(&detect()).install,
-    };
-    cmd.context("nothing to install")
 }
 
 /// The runtime in a line, as setup's summary and the UI say it.
@@ -456,49 +426,8 @@ pub fn configured(global: &config::GlobalConfig) -> Option<Flavor> {
     }
 }
 
-/// The runtime to set up on a Mac that runs Apple's `container`: the one asked for, else
-/// asked about, else (without a terminal) the configured one or Apple's. `None` for Esc on a
-/// first setup.
-fn choose(o: &SetupOpts, current: Option<Flavor>) -> Result<Option<Flavor>> {
-    Ok(match (o.runtime, current) {
-        (Some(RuntimeChoice::Container), _) => Some(Flavor::Apple),
-        (Some(RuntimeChoice::Podman), _) => Some(Flavor::Podman),
-        // Docker was set by hand; setup doesn't offer it.
-        (None, Some(Flavor::Docker)) => Some(Flavor::Docker),
-        (None, _) if crate::prompt::interactive() => {
-            crate::wizard::pick_runtime(current)?.or(current)
-        }
-        (None, _) => Some(current.unwrap_or(Flavor::Apple)),
-    })
-}
-
-/// Install or upgrade Apple's `container` (with `--install`) and start its service; false
-/// when the install is left to the user.
-fn apple_ready(o: &SetupOpts, info: Option<&RuntimeInfo>) -> Result<bool> {
-    if let Some(AppleNeed { min, install }) = apple_need(info) {
-        let Some(cmd) = install else {
-            bail!(
-                "luoto needs Apple's container {min} or later: install it from \
-                 https://github.com/apple/container/releases, then `luoto setup --runtime container`"
-            );
-        };
-        println!("\nluoto needs Apple's container {min} or later");
-        println!("install command: {}", cmd.join(" "));
-        if !o.install {
-            out!("re-run with `luoto setup --install --runtime container` to run it");
-            return Ok(false);
-        }
-        if !o.yes && !confirm("Run it now?") {
-            bail!("not installed");
-        }
-        let status = Command::new(&cmd[0])
-            .args(&cmd[1..])
-            .status()
-            .context("run installer")?;
-        if !status.success() {
-            bail!("installer failed");
-        }
-    }
+/// Starts the service of Apple's `container` where it isn't running.
+fn apple_start() -> Result<()> {
     let rt = Runtime {
         bin: "container".into(),
         flavor: Flavor::Apple,
@@ -508,7 +437,7 @@ fn apple_ready(o: &SetupOpts, info: Option<&RuntimeInfo>) -> Result<bool> {
     if !machine::apple_running(&rt) {
         machine::start_apple_service(&rt)?;
     }
-    Ok(true)
+    Ok(())
 }
 
 fn source_root() -> Option<PathBuf> {
@@ -569,10 +498,9 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
     let first = first_setup(&global);
     // `apple` is None where Apple's `container` can't run, Some(None) where it isn't installed.
     // Setup opens with the splash, which plays while this looks.
-    let (mut d, apple) =
-        crate::splash::during("looking at this machine's container runtimes", || {
-            (detect(), probe_apple())
-        });
+    let (d, apple) = crate::splash::during("looking at this machine's container runtimes", || {
+        (detect(), probe_apple())
+    });
     println!(
         "host: {} {}{}",
         d.os,
@@ -582,7 +510,8 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
             .map(|s| format!(" ({s})"))
             .unwrap_or_default()
     );
-    for r in d.runtimes.iter().chain(apple.iter().flatten()) {
+    // In the order setup lists them.
+    for r in apple.iter().flatten().chain(&d.runtimes) {
         println!(
             "  {:<9} {} {}",
             r.name,
@@ -592,55 +521,54 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
             r.detail
         );
     }
-    if d.runtimes.is_empty() && apple.as_ref().is_none_or(Option::is_none) {
-        println!("  no container runtime found");
-    }
-    let choice = match &apple {
-        None if o.runtime == Some(RuntimeChoice::Container) => bail!(APPLE_HOST_ONLY),
-        None => o.runtime.map(|_| Flavor::Podman),
-        Some(_) => match choose(&o, configured(&global))? {
-            Some(c) => Some(c),
-            None => {
-                out!("nothing set up; `luoto setup` asks again");
-                return Ok(ExitCode::SUCCESS);
-            }
+    let before = configured(&global);
+    let options = runtime_options(&d, apple.as_ref().map(Option::as_ref), before);
+    let ask = !o.yes && crate::prompt::interactive();
+    let choice = match decide(o.runtime, ask, &options)? {
+        Decision::Use(c) => c,
+        Decision::Nothing => {
+            out_text!("\n{}", listing(&options, d.wsl.as_deref()));
+            return Ok(ExitCode::FAILURE);
+        }
+        Decision::Ask => match crate::wizard::pick_runtime(&options)? {
+            Some(c) => c,
+            // Esc: unchanged where a runtime is set up, later on a first setup.
+            None => match options.iter().find(|o| o.current) {
+                Some(o) => o.runtime,
+                None => {
+                    out!("nothing set up; `luoto setup` asks again");
+                    return Ok(ExitCode::SUCCESS);
+                }
+            },
         },
     };
-    let before = configured(&global);
-    if before.is_some() && choice.is_some() && choice != before {
+    if let Some(before) = before.filter(|b| *b != choice.flavor()) {
         let envs = config::list_envs(&paths)?.len();
         if envs > 0 {
             println!(
                 "! {envs} env(s) keep their containers and volumes on {}: work not pulled to \
                  this machine stays there",
-                match before {
-                    Some(Flavor::Apple) => "container",
-                    Some(Flavor::Docker) => "docker",
-                    _ => "podman",
-                }
+                RuntimeChoice::of(before).name()
             );
         }
     }
-    if choice == Some(Flavor::Apple) {
-        if !apple_ready(&o, apple.clone().flatten().as_ref())? {
-            return Ok(ExitCode::SUCCESS);
-        }
-        // Podman's VM and gVisor aren't Apple's: each container is a VM of its own.
-        global.runtime = Some("container".into());
+    // Another runtime's VM connection and gVisor path aren't this one's.
+    if before != Some(choice.flavor()) {
+        global.runtime = Some(choice.name().into());
         global.connection = None;
         global.gvisor = None;
-    } else {
-        if choice == Some(Flavor::Podman) {
-            d = podman_only(d);
-            if configured(&global) != Some(Flavor::Podman) {
-                global.runtime = Some("podman".into());
-            }
-        }
-        if !podman_ready(&o, &d, &paths, &mut global)? {
-            return Ok(ExitCode::SUCCESS);
-        }
     }
-    finish(o, paths, global, apple.is_some(), first)
+    match choice {
+        RuntimeChoice::Container => apple_start()?,
+        RuntimeChoice::Podman => podman_ready(&o, &d, &paths, &mut global)?,
+        // Docker runs envs as it is: its engine's VM or this machine's kernel.
+        RuntimeChoice::Docker => {}
+    }
+    let other = options
+        .iter()
+        .find(|x| x.ready && x.runtime != choice)
+        .map(|x| x.setup.clone());
+    finish(o, paths, global, other, first)
 }
 
 /// Whether no setup has completed here: the config names no runtime yet.
@@ -648,40 +576,13 @@ fn first_setup(global: &config::GlobalConfig) -> bool {
     global.runtime.is_none() && global.connection.is_none()
 }
 
-/// The podman (or docker) half of `setup`: install it with `--install`, then luoto's VM;
-/// false when the install is left to the user.
+/// podman's half of `setup`: luoto's VM where podman needs one, gVisor where it is found.
 fn podman_ready(
     o: &SetupOpts,
     d: &Detection,
     paths: &Paths,
     global: &mut config::GlobalConfig,
-) -> Result<bool> {
-    let rec = recommend(d);
-    println!("\nrecommendation: {}", rec.summary);
-    for r in &rec.reasons {
-        println!("  - {r}");
-    }
-    for n in &rec.notes {
-        println!("  ! {n}");
-    }
-    if let Some(cmd) = &rec.install {
-        println!("\ninstall command: {}", cmd.join(" "));
-        if !o.install {
-            out!("re-run with `luoto setup --install` to run it");
-            return Ok(false);
-        }
-        if !o.yes && !confirm("Run it now?") {
-            bail!("not installed");
-        }
-        let status = Command::new(&cmd[0])
-            .args(&cmd[1..])
-            .status()
-            .context("run installer")?;
-        if !status.success() {
-            bail!("installer failed");
-        }
-    }
-
+) -> Result<()> {
     let rt = Runtime::from_config(global)?;
     if rt.flavor == Flavor::Podman && machine::supported() {
         // Envs run in luoto's own VM: none of your folders but the shares folder once you share
@@ -730,21 +631,21 @@ fn podman_ready(
         };
         if global.gvisor.is_none() {
             out!(
-                "\n! gVisor (runsc) is not installed: dev containers share the host kernel. \
-                 Install it from https://gvisor.dev and run `luoto setup` again."
+                "\n! gVisor (runsc) is not installed (https://gvisor.dev): dev containers share \
+                 this machine's kernel. With it installed, `luoto setup` puts them under it."
             );
         }
     }
-    Ok(true)
+    Ok(())
 }
 
-/// Images, the vault and the summary, once the runtime is ready; on a Mac that runs Apple's
-/// `container` the summary names the other runtime.
+/// Images, the vault and the summary, once the runtime is ready; the summary names the
+/// command that moves to `other`, another runtime that is ready here.
 fn finish(
     o: SetupOpts,
     paths: Paths,
     mut global: config::GlobalConfig,
-    apple_host: bool,
+    other: Option<String>,
     first: bool,
 ) -> Result<ExitCode> {
     let rt = Runtime::from_config(&global)?;
@@ -795,12 +696,8 @@ fn finish(
         );
     }
     let mut rows = vec![("runtime", runtime_line(&ctx.rt))];
-    if apple_host
-        && let Some(other) = runtime_options(Some(ctx.rt.flavor))
-            .into_iter()
-            .find(|o| !o.current)
-    {
-        rows.push(("change it", other.setup));
+    if let Some(other) = other {
+        rows.push(("change it", other));
     }
     close(first, rows);
     Ok(ExitCode::SUCCESS)
@@ -902,28 +799,18 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
     }
     if ctx.rt.flavor == Flavor::Apple {
         let (a, b, c) = machine::APPLE_MIN;
-        let fix = |upgrade| {
-            machine::apple_install(upgrade).map_or_else(
-                || "https://github.com/apple/container/releases".to_string(),
-                |cmd| format!("`{}`", cmd.join(" ")),
-            )
-        };
         match ctx.rt.version().ok().and_then(|v| parse_version(&v)) {
             None => {
                 out.say(format!(
-                    "runtime: Apple's container is not installed; {}",
-                    fix(false)
+                    "runtime: Apple's container is not installed; {APPLE_URL}"
                 ));
                 return Ok(false);
             }
             Some(v) if v < machine::APPLE_MIN => {
                 ok = false;
                 out.say(format!(
-                    "runtime: Apple's container {}.{}.{} is older than {a}.{b}.{c}; {}",
-                    v.0,
-                    v.1,
-                    v.2,
-                    fix(true)
+                    "runtime: Apple's container {}.{}.{} is older than {a}.{b}.{c}; {APPLE_URL}",
+                    v.0, v.1, v.2
                 ));
             }
             Some((x, y, z)) => out.say(format!("runtime: Apple's container {x}.{y}.{z}")),
@@ -1101,16 +988,43 @@ mod tests {
         assert!(v1.contains("THE VAULT CAN BE SWAPPED") && v1.contains("cgroup v1"));
     }
 
-    fn det(os: &str, runtimes: Vec<RuntimeInfo>, pm: Option<&str>) -> Detection {
+    fn det(os: &str, runtimes: Vec<RuntimeInfo>) -> Detection {
         Detection {
             os: os.into(),
             arch: "aarch64".into(),
             distro: None,
             cpus: 8,
             runtimes,
-            package_manager: pm.map(str::to_string),
             wsl: None,
         }
+    }
+
+    fn info(name: &str, version: (u32, u32, u32), reachable: bool) -> RuntimeInfo {
+        let min = match name {
+            "podman" => PODMAN_MIN,
+            "docker" => DOCKER_MIN,
+            _ => machine::APPLE_MIN,
+        };
+        RuntimeInfo {
+            name: name.into(),
+            version: Some(version),
+            version_ok: version >= min,
+            reachable,
+            detail: String::new(),
+        }
+    }
+
+    /// A Mac with all three ready.
+    fn all_three(current: Option<Flavor>) -> Vec<RuntimeOption> {
+        let d = det(
+            "macos",
+            vec![
+                info("podman", (6, 2, 0), true),
+                info("docker", (29, 1, 0), true),
+            ],
+        );
+        let apple = info("container", machine::APPLE_MIN, false);
+        runtime_options(&d, Some(Some(&apple)), current)
     }
 
     #[test]
@@ -1124,62 +1038,192 @@ mod tests {
     }
 
     #[test]
-    fn recommends_install_per_os() {
-        let r = recommend(&det("macos", vec![], Some("brew")));
-        assert_eq!(r.install.unwrap().join(" "), "brew install podman");
-        let r = recommend(&det("windows", vec![], Some("winget")));
-        assert!(r.install.unwrap().join(" ").contains("RedHat.Podman"));
-        let r = recommend(&det("linux", vec![], Some("dnf")));
-        assert_eq!(r.install.unwrap().join(" "), "sudo dnf install -y podman");
-        let running = RuntimeInfo {
-            name: "docker".into(),
-            version: Some((29, 0, 0)),
-            version_ok: true,
-            reachable: true,
-            detail: "docker engine 29".into(),
-        };
-        let r = recommend(&det("linux", vec![running], Some("apt")));
-        assert!(r.install.is_none() && r.notes.iter().any(|n| n.contains("no VM boundary")));
+    fn the_distribution_is_its_id() {
+        let id = os_release("NAME=\"Ubuntu\"\nID=ubuntu\nID_LIKE=debian\n");
+        assert_eq!(id.as_deref(), Some("ubuntu"));
+        assert_eq!(os_release("NAME=x\n"), None);
     }
 
     #[test]
-    fn offers_apple_first_and_starts_at_the_current_runtime() {
-        let info = |name: &str| RuntimeInfo {
-            name: name.into(),
-            version: Some((29, 0, 0)),
-            version_ok: true,
-            reachable: true,
-            detail: String::new(),
-        };
-        let d = det("macos", vec![info("docker")], Some("brew"));
-        let apple = || Some(Some(info("container")));
-        assert!(offer(&d, None, None).is_none());
-        assert!(offer(&d, apple(), Some(Flavor::Docker)).is_none());
-
-        let first = offer(&d, apple(), None).unwrap();
-        let picked: Vec<_> = first.options.iter().map(|o| o.selected).collect();
-        assert_eq!(picked, [true, false]);
-        assert!(first.options[0].recommended && first.apple_need.is_none());
-        // The podman choice ignores the running docker.
-        assert_eq!(first.podman.summary, "install podman");
-
-        let podman = offer(&d, apple(), Some(Flavor::Podman)).unwrap();
-        let o = &podman.options[1];
-        assert!(o.selected && o.current && !o.recommended);
-        assert_eq!(o.setup, "luoto setup --runtime podman");
-    }
-
-    #[test]
-    fn distro_package_managers() {
-        let (id, like) = os_release("NAME=\"Ubuntu\"\nID=ubuntu\nID_LIKE=debian\n");
+    fn without_a_runtime_setup_lists_what_luoto_runs_on_and_no_command_to_install_one() {
+        let d = det("linux", vec![]);
+        let options = runtime_options(&d, None, None);
+        assert!(options.iter().all(|o| !o.ready && !o.selected));
+        assert_eq!(decide(None, true, &options).unwrap(), Decision::Nothing);
         assert_eq!(
-            package_manager_for("linux", id.as_deref(), like.as_deref(), |_| false).as_deref(),
-            Some("apt")
+            listing(&options, None),
+            "no container runtime luoto runs on is ready here\n\n\
+             podman 5.2.0 or later: not installed\n  \
+             containers on this machine's kernel, under gVisor where runsc is installed\n  \
+             https://podman.io/docs/installation\n\
+             Docker Engine 28.0.0 or later: not installed\n  \
+             containers on this machine's kernel; gVisor only where registered with Docker\n  \
+             https://docs.docker.com/engine/install/\n\n\
+             install one, then run `luoto setup` again"
         );
-        let (id, like) = os_release("ID=fedora\n");
+
+        // Where Apple's container can run it is listed first; every line fits 80 columns.
+        let mac = runtime_options(&det("macos", vec![]), Some(None), None);
+        let text = listing(&mac, None);
+        let (a, b, c) = machine::APPLE_MIN;
+        assert!(text.contains(&format!(
+            "\n\nApple's container {a}.{b}.{c} or later: not installed\n"
+        )));
+        assert!(text.contains("https://github.com/apple/container/releases"));
+        assert!(text.lines().all(|l| l.chars().count() <= 80), "{text}");
+        for word in ["brew", "sudo", "winget", "apt", "recommend", "--install"] {
+            assert!(!text.contains(word), "{word} in {text}");
+        }
+
+        let windows = listing(
+            &runtime_options(&det("windows", vec![]), None, None),
+            Some("not installed"),
+        );
+        assert!(windows.contains("WSL is not installed") && !windows.contains("wsl --install"));
+    }
+
+    #[test]
+    fn a_runtime_too_old_or_not_running_says_so_and_is_no_choice() {
+        let d = det(
+            "linux",
+            vec![
+                info("podman", (4, 9, 3), true),
+                info("docker", (29, 1, 0), false),
+            ],
+        );
+        let options = runtime_options(&d, None, None);
+        assert_eq!(options[0].status, "4.9.3 found");
+        assert_eq!(options[1].status, "29.1.0, the engine is not running");
+        assert!(options.iter().all(|o| !o.ready));
+        let text = listing(&options, None);
+        assert!(text.contains("podman 5.2.0 or later: 4.9.3 found"));
+        assert!(text.contains("Docker Engine 28.0.0 or later: 29.1.0, the engine is not running"));
+        let err = decide(Some(RuntimeChoice::Docker), false, &options).unwrap_err();
         assert_eq!(
-            package_manager_for("linux", id.as_deref(), like.as_deref(), |_| false).as_deref(),
-            Some("dnf")
+            err.to_string(),
+            "Docker is not ready (29.1.0, the engine is not running); luoto runs on 28.0.0 or \
+             later: https://docs.docker.com/engine/install/"
+        );
+    }
+
+    #[test]
+    fn the_choice_lists_apple_podman_docker_and_starts_at_the_current_or_the_first_ready() {
+        let selected = |options: &[RuntimeOption]| {
+            let on: Vec<_> = options.iter().filter(|o| o.selected).collect();
+            assert_eq!(on.len(), 1);
+            on[0].runtime
+        };
+        let first = all_three(None);
+        let order: Vec<_> = first.iter().map(|o| o.runtime).collect();
+        assert_eq!(
+            order,
+            [
+                RuntimeChoice::Container,
+                RuntimeChoice::Podman,
+                RuntimeChoice::Docker
+            ]
+        );
+        // Apple's service is started by setup, so a stopped one is ready.
+        assert!(first.iter().all(|o| o.ready && !o.current));
+        assert_eq!(selected(&first), RuntimeChoice::Container);
+
+        let docker = all_three(Some(Flavor::Docker));
+        assert_eq!(selected(&docker), RuntimeChoice::Docker);
+        assert!(docker[2].current && !docker[0].current);
+
+        // Without Apple's container podman comes first; a current one that isn't ready
+        // doesn't hold the start.
+        let d = det(
+            "macos",
+            vec![
+                info("podman", (6, 2, 0), true),
+                info("docker", (29, 1, 0), false),
+            ],
+        );
+        let options = runtime_options(&d, Some(None), Some(Flavor::Docker));
+        assert_eq!(selected(&options), RuntimeChoice::Podman);
+        assert!(options[2].current && !options[2].ready);
+
+        // Only one installed: it is where the choice starts, and no question.
+        let d = det("linux", vec![info("docker", (29, 1, 0), true)]);
+        let options = runtime_options(&d, None, None);
+        assert_eq!(selected(&options), RuntimeChoice::Docker);
+        assert_eq!(
+            decide(None, true, &options).unwrap(),
+            Decision::Use(RuntimeChoice::Docker)
+        );
+    }
+
+    #[test]
+    fn several_ready_runtimes_are_asked_about_unless_one_is_named_or_nothing_can_be_asked() {
+        let first = all_three(None);
+        assert_eq!(decide(None, true, &first).unwrap(), Decision::Ask);
+        assert_eq!(
+            decide(None, false, &first).unwrap(),
+            Decision::Use(RuntimeChoice::Container)
+        );
+        assert_eq!(
+            decide(None, false, &all_three(Some(Flavor::Podman))).unwrap(),
+            Decision::Use(RuntimeChoice::Podman)
+        );
+        assert_eq!(
+            decide(Some(RuntimeChoice::Docker), true, &first).unwrap(),
+            Decision::Use(RuntimeChoice::Docker)
+        );
+
+        // Apple's container is no option where it can't run.
+        let linux = runtime_options(
+            &det("linux", vec![info("podman", (6, 2, 0), true)]),
+            None,
+            None,
+        );
+        let err = decide(Some(RuntimeChoice::Container), true, &linux).unwrap_err();
+        assert_eq!(err.to_string(), APPLE_HOST_ONLY);
+
+        // The runtime the envs are on isn't left for another unasked.
+        let d = det(
+            "linux",
+            vec![
+                info("podman", (6, 2, 0), true),
+                info("docker", (29, 1, 0), false),
+            ],
+        );
+        let options = runtime_options(&d, None, Some(Flavor::Docker));
+        let err = decide(None, true, &options).unwrap_err().to_string();
+        assert!(err.contains("Docker, which runs this machine's envs, is not ready"));
+        assert!(err.contains("`luoto setup --runtime podman` moves to another"));
+    }
+
+    #[test]
+    fn docker_is_an_option_with_what_it_isolates_per_host() {
+        let linux = runtime_options(
+            &det("linux", vec![info("docker", (29, 1, 0), true)]),
+            None,
+            None,
+        );
+        let o = &linux[1];
+        assert_eq!(
+            (o.runtime.flavor(), o.runtime.name()),
+            (Flavor::Docker, "docker")
+        );
+        assert_eq!(o.setup, "luoto setup --runtime docker");
+        assert!(o.ready && o.status == "29.1.0");
+        assert!(
+            o.description
+                .starts_with("containers on this machine's kernel")
+        );
+        assert!(linux[0].description.contains("where runsc is installed"));
+
+        let mac = all_three(None);
+        assert_eq!(mac[0].description, "every container is a VM of its own");
+        assert_eq!(
+            mac[1].description,
+            "every env in luoto's one VM, under gVisor"
+        );
+        assert!(
+            mac[2]
+                .description
+                .starts_with("containers in the Docker engine's VM")
         );
     }
 }
