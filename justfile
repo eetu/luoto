@@ -148,7 +148,7 @@ casts:
 # it refuses to run if luoto-dev has an env `demo`, so its cleanup can't touch an env of yours. The
 # dev vault is shared with your other dev envs: the vault shot is skipped unless it holds only
 # the demo's dummy credential, which stays in its memory until `luoto-dev vault lock`.
-shots:
+shots: ui-build
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build -p luoto
@@ -165,7 +165,7 @@ shots:
     mkdir -p "$LUOTO_HOME/config"
     cp "$real_config/config.toml" "$LUOTO_HOME/config/" 2>/dev/null || true
     cleanup() {
-        kill "${ui:-}" 2>/dev/null || true
+        kill "${ui:-}" 2>/dev/null && wait "${ui:-}" 2>/dev/null || true
         "$luoto" rm -e demo --yes >/dev/null 2>&1 || true
         rm -rf "$LUOTO_HOME"
     }
