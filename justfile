@@ -84,6 +84,23 @@ it:
 test-ui:
     cd frontend && {{yarn}} test:ui
 
+# Release downloads per version and platform, as GitHub counts them (Homebrew, Scoop and
+# install.sh all download the release's archive; upgrades count too).
+downloads:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    printf '%-14s %6s %6s %6s %6s %6s %6s\n' release total mac-arm mac-x86 lin-arm lin-x86 win
+    gh api repos/eetu/luoto/releases --paginate --jq '.[] | [.tag_name,
+      ([.assets[] | select(.name | test("\\.(tar\\.gz|zip)$")) | .download_count] | add // 0),
+      ([.assets[] | select(.name | test("aarch64-apple")) | .download_count] | add // 0),
+      ([.assets[] | select(.name | test("x86_64-apple")) | .download_count] | add // 0),
+      ([.assets[] | select(.name | test("aarch64-unknown-linux")) | .download_count] | add // 0),
+      ([.assets[] | select(.name | test("x86_64-unknown-linux")) | .download_count] | add // 0),
+      ([.assets[] | select(.name | test("windows")) | .download_count] | add // 0)] | @tsv' |
+      while IFS=$'\t' read -r tag t a b c d w; do
+        printf '%-14s %6s %6s %6s %6s %6s %6s\n' "$tag" "$t" "$a" "$b" "$c" "$d" "$w"
+      done
+
 # Terminal recordings in docs/casts, one GIF per tape (needs vhs, the runtime and `luoto-dev`
 # set up with its ssh_config included, which `luoto open` attaches through; leaves nothing
 # behind but the builds of $LUOTO_CAST_TARGET, by default a folder of the system's temporary
