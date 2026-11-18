@@ -62,8 +62,9 @@ pub struct InitOpts {
     /// copied in, or a remote (`owner/repo` on GitHub, an https or ssh URL), cloned in the env.
     #[arg(long = "repo", value_name = "FOLDER|REMOTE")]
     pub repos: Vec<String>,
-    /// `gvisor` (default once `luoto setup` installed it): the env gets its own user-space
-    /// kernel. `container`: it shares the VM's kernel, with builds about 1.6× faster.
+    /// `gvisor` (default once `luoto setup` found or set it up): the env gets its own
+    /// user-space kernel. `container`: it shares the VM's kernel (this machine's on Linux),
+    /// with builds about 1.6× faster.
     #[arg(long, value_enum)]
     pub isolation: Option<config::Isolation>,
     /// Let the env reach any HTTP(S) host for a while (`--open=2h`; default 1h) to see what
@@ -582,14 +583,20 @@ pub fn isolation_text(
     chosen: Option<config::Isolation>,
     gvisor: bool,
 ) -> &'static str {
+    // podman and Docker have a VM around them on macOS and Windows only.
+    let vm = crate::machine::supported();
     match chosen {
         _ if apple => "a VM of its own (Apple's container; `isolation` doesn't apply)",
-        Some(config::Isolation::Container) => {
+        Some(config::Isolation::Container) if vm => {
             "container: shares the VM's kernel (builds about 1.6× faster, weaker)"
+        }
+        Some(config::Isolation::Container) => {
+            "container: shares this machine's kernel (builds about 1.6× faster, weaker)"
         }
         _ if gvisor => "gVisor: its own user-space kernel (builds about 1.6× slower)",
         Some(config::Isolation::Gvisor) => "gVisor, not set up yet: run `luoto setup`",
-        None => "container: shares the VM's kernel (`luoto setup` installs gVisor)",
+        None if vm => "container: shares the VM's kernel (no gVisor set up)",
+        None => "container: shares this machine's kernel (no gVisor set up)",
     }
 }
 

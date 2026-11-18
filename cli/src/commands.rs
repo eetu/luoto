@@ -1035,10 +1035,20 @@ fn rule_lines(rows: &[RuleRow], width: usize) -> Vec<String> {
 /// What the sandbox asked for and why, escaped: the sandbox wrote all of it.
 fn fmt_request(r: &AccessRequest) -> String {
     let what = match &r.install {
-        Some(i @ luoto_shared::api::Install::Preset { .. }) => format!(
-            "{}, kept in the env's config",
-            crate::text::display(&i.describe())
-        ),
+        Some(i @ luoto_shared::api::Install::Preset { name }) => {
+            // The hosts are luoto's own data; the name is the sandbox's.
+            let opens = match crate::rules::preset_hosts(name) {
+                Some(hosts) => hosts
+                    .iter()
+                    .map(|h| format!("\n     {h}"))
+                    .collect::<String>(),
+                None => "\n     nothing: luoto has no such preset".into(),
+            };
+            format!(
+                "{}, kept in the env's config\n   opens:{opens}",
+                crate::text::display(&i.describe())
+            )
+        }
         Some(i @ luoto_shared::api::Install::Var { .. }) => format!(
             "{}, a plain value from you, readable by any code in the env",
             crate::text::display(&i.describe())
@@ -1770,6 +1780,37 @@ pub fn lock() -> Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_preset_request_shows_the_hosts_it_opens() {
+        let req = |name: &str| AccessRequest {
+            id: 1,
+            host: String::new(),
+            port: None,
+            access: luoto_shared::policy::AccessLevel::Read,
+            paths: vec![],
+            reason: "to install packages".into(),
+            status: RequestStatus::Pending,
+            created: chrono::Utc::now(),
+            resolved: None,
+            note: None,
+            install: Some(luoto_shared::api::Install::Preset { name: name.into() }),
+        };
+        let text = fmt_request(&req("npm"));
+        assert!(
+            text.contains("kept in the env's config\n   opens:\n     "),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n     registry.npmjs.org read-only\n"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("reason (written by the sandbox, untrusted): \"to install packages\"")
+        );
+        assert!(text.lines().all(|l| l.chars().count() <= 80), "{text}");
+        assert!(fmt_request(&req("nope")).contains("nothing: luoto has no such preset"));
+    }
 
     fn fits(lines: &[String]) {
         for l in lines {

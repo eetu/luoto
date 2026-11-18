@@ -33,6 +33,11 @@
     given = untrack(() => suggestion) ?? "";
   });
 
+  /** What a preset opens, from luoto's own data: the request carries only its name. */
+  function presetHosts(name: string): string[] {
+    return app.meta?.presets.find((p) => p.name === name)?.hosts ?? [];
+  }
+
   /** Show the next pending request, else the env. */
   function onward() {
     const next = app.pending.find((r) => r.id !== id);
@@ -164,6 +169,16 @@
             ? "preset: a registry's or service's hosts"
             : "toolchain installed by mise"}
       </dd>
+      {#if req.install.kind === "preset"}
+        <dt>opens</dt>
+        <dd>
+          {#each presetHosts(req.install.name) as h (h)}
+            <span class="opens mono">{h}</span>
+          {:else}
+            nothing: luoto has no such preset
+          {/each}
+        </dd>
+      {/if}
       <dt>filed</dt>
       <dd>{ago(req.created)}</dd>
       <dt>status</dt>
@@ -270,6 +285,11 @@
 </div>
 
 <style>
+  .opens {
+    display: block;
+    font-size: 12px;
+  }
+
   h2 {
     margin: 0;
     font-size: 15px;

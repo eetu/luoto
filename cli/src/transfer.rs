@@ -855,7 +855,10 @@ fn summary(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) -> Vec<String>
     match cfg.isolation {
         Some(config::Isolation::Container) => line(
             "isolation",
-            "CONTAINER: no gVisor, the VM's kernel is the boundary".into(),
+            format!(
+                "CONTAINER: no gVisor, {} is the boundary",
+                crate::machine::kernel()
+            ),
         ),
         Some(config::Isolation::Gvisor) => line("isolation", "gVisor".into()),
         None => {}

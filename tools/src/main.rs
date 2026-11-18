@@ -277,7 +277,7 @@ where
     }
     if !s.credentialed_hosts.is_empty() {
         out.push_str(&format!(
-            "\ncredentials injected by the gate (values never enter the sandbox): {}\n",
+            "\ncredentials injected by the gate (their values stay outside the sandbox): {}\n",
             s.credentialed_hosts.join(", ")
         ));
     }

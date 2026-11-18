@@ -288,7 +288,7 @@ export type LuotoEvent = {
 };
 
 export type Meta = {
-  presets: Choice[];
+  presets: PresetChoice[];
   agents: Choice[];
 };
 
@@ -349,6 +349,13 @@ export type PlanEntry = {
   size: number;
   executable: boolean;
   risky: string | null;
+};
+
+/** A preset, with what it opens: a line per rule, as an approval shows them. */
+export type PresetChoice = {
+  name: string;
+  description: string;
+  hosts: string[];
 };
 
 export type ProjectAction = {

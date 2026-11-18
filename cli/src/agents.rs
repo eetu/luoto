@@ -568,8 +568,8 @@ fn credential_help(env_name: &str, name: &str, a: &profiles::Agent) -> String {
         );
     }
     let mut out = format!(
-        "{} needs a credential for {}. The gate adds it to each request; the env never holds \
-         it. Set it with {how}.",
+        "{} needs a credential for {}. The gate adds it to each request, so it stays outside \
+         the env. Set it with {how}.",
         a.title(),
         a.providers.join(" or ")
     );

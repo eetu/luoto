@@ -130,12 +130,12 @@ fn isolation(p: &mut Proposal) -> Result<()> {
             (
                 Isolation::Gvisor,
                 "gVisor (recommended)".into(),
-                "its own kernel: exploits stay in the env, 1.6× slower".into(),
+                "its own kernel: a kernel exploit has to break gVisor first, 1.6× slower".into(),
             ),
             (
                 Isolation::Container,
                 "container".into(),
-                "shares the VM's kernel: 1.6× faster, weaker".into(),
+                format!("shares {}: 1.6× faster, weaker", crate::machine::kernel()),
             ),
         ],
         text::columns(),
@@ -1125,8 +1125,8 @@ fn op_paste(global: &GlobalConfig, ask: &SecretAsk) -> Result<Step<String>> {
             }
             let vault = &list[i];
             let note = format!(
-                "{}. luoto hands it to its gate, which adds it to requests; the sandbox never \
-                 sees it.",
+                "{}. luoto hands it to its gate, which adds it to requests, so it stays \
+                 outside the sandbox.",
                 ask.label
             );
             let r = secrets::op_save(

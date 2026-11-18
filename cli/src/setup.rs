@@ -426,6 +426,20 @@ pub fn configured(global: &config::GlobalConfig) -> Option<Flavor> {
     }
 }
 
+/// What setup says once envs run on Docker, where luoto adds no VM and no gVisor of its
+/// own: which kernel a dev container is on, and the one way to put gVisor under it.
+fn docker_note(os: &str) -> String {
+    let kernel = if matches!(os, "macos" | "windows") {
+        "the kernel of Docker's VM"
+    } else {
+        "this machine's kernel"
+    };
+    format!(
+        "Docker: dev containers are plain containers on {kernel}, unless gVisor is \
+         registered with Docker and an env sets `oci_runtime = \"runsc\"` under `[resources]`."
+    )
+}
+
 /// Starts the service of Apple's `container` where it isn't running.
 fn apple_start() -> Result<()> {
     let rt = Runtime {
@@ -547,8 +561,10 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
     match choice {
         RuntimeChoice::Container => apple_start()?,
         RuntimeChoice::Podman => podman_ready(&o, &d, &paths, &mut global)?,
-        // Docker runs envs as it is: its engine's VM or this machine's kernel.
-        RuntimeChoice::Docker => {}
+        RuntimeChoice::Docker => out_text!(
+            "\n{}",
+            crate::text::hang("! ", &docker_note(&d.os), crate::text::columns())
+        ),
     }
     let other = options
         .iter()
@@ -946,7 +962,10 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
         ));
         out.say(match &ctx.global.gvisor {
             Some(p) => format!("gVisor: {p} (dev containers run on it unless an env opts out)"),
-            None => "gVisor: not set up; dev containers share the VM's kernel".into(),
+            None => format!(
+                "gVisor: not set up; dev containers share {}",
+                machine::kernel()
+            ),
         });
     }
     for c in ["gate", "vault", "tools", "base"] {
@@ -1192,6 +1211,18 @@ mod tests {
             assert!(passed && !line.contains("container system"), "{line}");
             assert!(line.starts_with("network: "));
         }
+    }
+
+    #[test]
+    fn the_docker_note_names_the_kernel_and_the_way_to_gvisor() {
+        let linux = docker_note("linux");
+        assert!(
+            linux.starts_with(
+                "Docker: dev containers are plain containers on this machine's kernel,"
+            )
+        );
+        assert!(linux.ends_with("an env sets `oci_runtime = \"runsc\"` under `[resources]`."));
+        assert!(docker_note("macos").contains("on the kernel of Docker's VM,"));
     }
 
     #[test]

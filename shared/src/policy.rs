@@ -588,7 +588,11 @@ impl DenyReason {
             DenyReason::Explicit { reason } => reason.clone(),
             DenyReason::InvalidHost => "invalid or ambiguous destination".into(),
             DenyReason::PrivateAddress => {
-                format!("{host} resolves to a private/host address, which is never dialed")
+                format!(
+                    "{host} resolves to a private/host address, which is dialed only for a \
+                     host the user allowed as private, and loopback and metadata addresses \
+                     for none"
+                )
             }
             DenyReason::Locked => format!(
                 "the vault is locked (it was locked, or restarted and holds nothing yet), so no \
