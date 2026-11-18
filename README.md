@@ -13,8 +13,7 @@ you allowed and never holds your secrets.
 </p>
 
 Here the project is luoto itself. `luoto init --agent claude` in its folder, one confirm, and
-Claude Code works in the env, on a copy: it adds the island the first `luoto setup` opens
-with. `luoto pull` brings the change back, reviewed first, and the setup that then runs is
+Claude Code works in the env, on a copy: it adds the island `luoto setup` opens with. `luoto pull` brings the change back, reviewed first, and the setup that then runs is
 the pulled code.
 
 ## Why

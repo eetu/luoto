@@ -2,9 +2,9 @@
 
 ## 0.5.4 (unreleased)
 
-- The first `luoto setup` opens with luoto's island, drawn once on a terminal with colors
-  while setup looks at this machine (still without colors, none where its output is piped),
-  and ends with the next step: `luoto init` inside a project folder.
+- `luoto setup` opens with luoto's island, drawn once on a terminal with colors while setup
+  looks at this machine (still without colors, none where its output is piped). A first
+  setup ends with the next step: `luoto init` inside a project folder.
 
 ## 0.5.3 (2026-11-17)
 

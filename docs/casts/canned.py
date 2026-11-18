@@ -39,7 +39,7 @@ def write(path):
 # says and the tools it calls then, and answers the results of the step before it. A prompt
 # gets the first flow whose words it has all of.
 FLOWS = [
-    # luoto in an env of its own clone (setup.sh): the splash of the first `luoto setup`, then
+    # luoto in an env of its own clone (setup.sh): the splash of `luoto setup`, then
     # its tests.
     (
         ("splash", "luoto setup"),
@@ -50,14 +50,14 @@ FLOWS = [
                 "the sun rises.",
                 [write(SPLASH)],
             ),
-            ("Now the first setup plays it while it detects the host.", [write(f) for f in WIRED]),
+            ("Now setup plays it while it detects the host.", [write(f) for f in WIRED]),
             (
                 "Its tests.",
                 [("Bash", {"command": "cargo test -p luoto splash", "description": "Run the tests"})],
             ),
             (
-                "The first `luoto setup` now opens with the island, drawn once while it looks at "
-                "the machine, and ends with the next step. Still under NO_COLOR, ASCII without "
+                "`luoto setup` now opens with the island, drawn once while it looks at the "
+                "machine, and a first setup ends with the next step. Still under NO_COLOR, ASCII without "
                 "UTF-8, nothing when piped. Its tests pass.",
                 [],
             ),

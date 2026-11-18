@@ -1,4 +1,4 @@
-//! The picture that starts the first `luoto setup`: the logo in half blocks (the island and
+//! The picture that starts `luoto setup`: the logo in half blocks (the island and
 //! the sun in the accent, the palm and the sea in the terminal's own foreground) over the
 //! tagline. On a terminal with colors it draws itself once: the palm grows, the sea spreads,
 //! the sun rises and its reflection sinks. Without colors it is the still picture, without a

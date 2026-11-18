@@ -568,14 +568,11 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
     let mut global = config::load_global(&paths)?;
     let first = first_setup(&global);
     // `apple` is None where Apple's `container` can't run, Some(None) where it isn't installed.
-    // A first setup opens with the splash, which plays while this looks.
-    let look = || (detect(), probe_apple());
-    let looking = "looking at this machine's container runtimes";
-    let (mut d, apple) = if first {
-        crate::splash::during(looking, look)
-    } else {
-        crate::progress::wait(looking, look)
-    };
+    // Setup opens with the splash, which plays while this looks.
+    let (mut d, apple) =
+        crate::splash::during("looking at this machine's container runtimes", || {
+            (detect(), probe_apple())
+        });
     println!(
         "host: {} {}{}",
         d.os,
@@ -813,10 +810,7 @@ fn finish(
 /// own; a later one names the next step as a row.
 fn close(first: bool, mut rows: Vec<(&str, String)>) {
     if !first {
-        rows.push((
-            "next",
-            "luoto init [--agent claude], in a project folder".into(),
-        ));
+        rows.push(("next", "luoto init, inside a project folder".into()));
     }
     block!("\n{}", crate::prompt::summary("ready", &rows));
     if first {

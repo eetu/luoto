@@ -1,5 +1,5 @@
 # From a folder to an agent at work in a sandbox, and its change back in the folder and run.
-# The folder is a clone of luoto without the splash of its first `luoto setup` (setup.sh), and
+# The folder is a clone of luoto without the splash of `luoto setup` (setup.sh), and
 # Claude, answering from canned.py, writes that change as this checkout has it.
 # `just casts` records it. The waits of builds are skipped, never what they print.
 
@@ -58,7 +58,7 @@ Sleep 400ms
 Enter
 Wait+Screen@120s /bypass permissions on/
 Sleep 800ms
-Type@6ms "add a splash to the first `luoto setup`: the logo's island as half-block pixel art (palm, orange arc, waves), the sun rising right of the island while its dim reflection sinks in the sea. Animate it once (~1.6 s) while setup detects the host, then leave the still frame. Plain under NO_COLOR, ASCII without UTF-8, nothing when piped, 80 columns. End setup with: Next: run `luoto init` inside a project folder."
+Type@6ms "add a splash to `luoto setup`: the logo's island as half-block pixel art (palm, orange arc, waves), the sun rising right of the island while its dim reflection sinks in the sea. Animate it once (~1.6 s) while setup detects the host, then leave the still frame. Plain under NO_COLOR, ASCII without UTF-8, nothing when piped, 80 columns. End a first setup with: Next: run `luoto init` inside a project folder."
 Sleep 1s
 Enter
 # The wait of its test run is skipped.
