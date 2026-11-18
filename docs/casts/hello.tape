@@ -61,7 +61,7 @@ Sleep 400ms
 Enter
 Wait+Screen@120s /bypass permissions on/
 Sleep 800ms
-Type@6ms "add a splash to `luoto setup`: the logo's island as half-block pixel art (palm, orange arc, waves), the sun rising right of the island while its dim reflection sinks in the sea. Animate it once (~1.6 s) while setup detects the host, then leave the still frame. Plain under NO_COLOR, ASCII without UTF-8, nothing when piped, 80 columns. End a first setup with: Next: run `luoto init` inside a project folder."
+Type@6ms "add a splash to `luoto setup`: the logo's island as half-block pixel art (palm, orange arc, waves), the sun rising right of the island while its dim reflection sinks in the sea. Animate it once (~1.6 s) while setup detects the host, then leave the still frame. Plain under NO_COLOR, ASCII without UTF-8, nothing when piped, 80 columns."
 Sleep 1s
 Enter
 # The wait of its test run is skipped.
