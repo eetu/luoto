@@ -3,6 +3,8 @@
 # a cast needs done out of sight, so the screen shows only commands a viewer would run:
 # - before an env with Claude first comes up (`init --agent`, `up -e <env>`, `agent run`), its
 #   Claude answers from canned.py, where a first run asks for Claude's credential instead;
+# - after `init --agent` brought the env up, $LUOTO_CAST_WARM runs in it: a first build,
+#   say, that the cast would otherwise wait for;
 # - after `up -e <env>`, herdr starts as one that has seen its settings.
 set -u
 bin=${LUOTO_CAST_BIN:-luoto-dev}
@@ -53,7 +55,11 @@ PY
 fi
 
 case "$1" in
-  init) exec "$bin" up ;;
+  init)
+    "$bin" up || exit
+    [ -z "${LUOTO_CAST_WARM:-}" ] || inside sh -c "$LUOTO_CAST_WARM"
+    exit 0
+    ;;
   agent) exec "$bin" "$@" ;;
 esac
 "$bin" "$@" || exit

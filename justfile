@@ -86,8 +86,11 @@ test-ui:
 
 # Terminal recordings in docs/casts, one GIF per tape (needs vhs, the runtime and `luoto-dev`
 # set up with its ssh_config included, which `luoto open` attaches through; leaves nothing
-# behind). Their envs are `tz`, `pulse` and `platform`, run by the debug build; it refuses to run if
-# luoto-dev has one of them already. Agents answer from docs/casts/canned.py.
+# behind but the builds of $LUOTO_CAST_TARGET, by default a folder of the system's temporary
+# ones). Their envs are `tz`, `luoto` and `platform`, run by the debug build; it refuses to
+# run if luoto-dev has one of them already. Agents answer from docs/casts/canned.py. The
+# hello cast changes a clone of this checkout's `main` ($LUOTO_CAST_BASE) into what the
+# checkout has, so it records while `main` lacks that change.
 casts:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -99,7 +102,9 @@ casts:
     # A full path: in the recording, docs/casts/bin/luoto (which runs this) is first on PATH.
     LUOTO_CAST_BIN=$(command -v "$LUOTO_CAST_BIN") || { echo "no $LUOTO_CAST_BIN" >&2; exit 1; }
     export LUOTO_CAST_BIN
-    envs="tz pulse platform"
+    envs="tz luoto platform"
+    export LUOTO_CAST_SRC="$PWD"
+    export LUOTO_CAST_TARGET="${LUOTO_CAST_TARGET:-${TMPDIR:-/tmp}/luoto-cast-target}"
     for e in $envs; do
         if "$LUOTO_CAST_BIN" status -e "$e" >/dev/null 2>&1; then
             echo "$LUOTO_CAST_BIN has an env \`$e\`; remove it first" >&2

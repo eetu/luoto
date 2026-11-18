@@ -217,6 +217,9 @@ What the CLI asks and prints follows one grammar, whatever the feature:
   red and `warning:` in its yellow, the message in the terminal's color. Format plain, style
   as it is printed (escapes take no columns), and style around sandbox text, never inside
   it. Plain when the stream is no terminal and under `NO_COLOR`. Times are local.
+- **The splash** (`splash.rs`, the logo's island) opens only a first `luoto setup` (its config
+  names no runtime yet): animated while setup detects the host, still under `NO_COLOR`, ASCII
+  without UTF-8, absent without a terminal. Nothing else draws while it animates.
 
 ## Working on this repo
 

@@ -15,7 +15,7 @@ Set TypingSpeed 30ms
 # An env of a folder, up before the recording starts.
 Hide
 Type "source docs/casts/setup.fish" Enter
-Wait+Screen@300s /demo ❯/
+Wait+Screen@600s /demo ❯/
 Type "cd tz && luoto init --yes" Enter
 Wait+Screen@900s /is up/
 Type "clear" Enter

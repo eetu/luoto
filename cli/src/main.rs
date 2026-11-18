@@ -47,6 +47,7 @@ mod runtime;
 mod secrets;
 mod setup;
 mod shares;
+mod splash;
 mod ssh;
 mod state;
 mod sync;

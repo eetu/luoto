@@ -9,14 +9,13 @@ Run coding agents with their permission prompts off, in a sandbox that reaches o
 you allowed and never holds your secrets.
 
 <p align="center">
-  <img alt="luoto init in a folder, Claude Code at work in a shell of the env, the request the gate denied, and the change pulled back" src="docs/casts/hello.gif" width="900">
+  <img alt="luoto init in luoto's own folder, Claude Code adding a splash in a shell of the env, the change pulled back, and the first luoto setup opening with it" src="docs/casts/hello.gif" width="900">
 </p>
 
-`luoto init` in a Rust project, one confirm, and its env has the toolchain it pins and Claude
-Code. Claude gives the CLI's splash screen a unicorn and a laser, on a copy of the folder. The
-tests it runs build a dev-dependency whose build script posts the environment to a host of its
-own, as a compromised crate would: the gate blocked it, and luoto says so when the shell ends.
-`luoto pull` brings the change back, reviewed first.
+Here the project is luoto itself. `luoto init --agent claude` in its folder, one confirm, and
+Claude Code works in the env, on a copy: it adds the island the first `luoto setup` opens
+with. `luoto pull` brings the change back, reviewed first, and the setup that then runs is
+the pulled code.
 
 ## Why
 

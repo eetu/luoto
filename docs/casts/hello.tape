@@ -1,8 +1,7 @@
-# From a plain folder to an agent at work in a sandbox, what the sandbox stopped, and the
-# agent's change back in the folder.
-# `just casts` records it; Claude answers from canned.py, so it plays the same every time.
-# The folder's dev-dependency posts the environment to a host of its own as it builds, as a
-# compromised crate would (setup.sh).
+# From a folder to an agent at work in a sandbox, and its change back in the folder and run.
+# The folder is a clone of luoto without the splash of its first `luoto setup` (setup.sh), and
+# Claude, answering from canned.py, writes that change as this checkout has it.
+# `just casts` records it. The waits of builds are skipped, never what they print.
 
 Output docs/casts/hello.gif
 
@@ -10,23 +9,19 @@ Set Shell "fish"
 Set Theme "Catppuccin Mocha"
 Set FontSize 16
 Set Width 1200
-Set Height 720
+Set Height 840
 Set Padding 20
 Set TypingSpeed 30ms
 
 Hide
 Type "source docs/casts/setup.fish" Enter
-Wait+Screen@300s /demo ❯/
-Type "cd pulse && clear" Enter
+Wait+Screen@600s /demo ❯/
+# The env builds luoto's tests once it is up, so Claude's run of them builds only its change.
+Type "set -x LUOTO_CAST_WARM 'mkdir -p frontend/dist && cargo test -q -p luoto --no-run'" Enter
+Type "cd luoto && clear" Enter
 Sleep 500ms
 Show
 Sleep 1s
-
-# The CLI's splash screen as it is.
-Type "cargo run -q"
-Sleep 400ms
-Enter
-Sleep 1500ms
 
 Type "luoto init --agent claude"
 Sleep 500ms
@@ -34,12 +29,12 @@ Enter
 Wait+Screen@60s /Create it\?/
 Sleep 2500ms
 Enter
-# Its first seconds show; the rest of the wait, and the installs of Rust and Claude, are skipped.
+# Its first seconds show; the rest of the wait and the installs are skipped.
 Sleep 2500ms
 Hide
-Wait+Screen@1800s /is up/
+Wait+Screen@900s /luoto ui\s+~\/demo\/luoto ❯/
 Show
-Sleep 2s
+Sleep 1500ms
 
 # Each scene on a clear screen.
 Hide
@@ -63,12 +58,17 @@ Sleep 400ms
 Enter
 Wait+Screen@120s /bypass permissions on/
 Sleep 800ms
-Type "give the splash some sparkle: unicorns and lasers. run the tests"
-Sleep 500ms
+Type@6ms "add a splash to the first `luoto setup`: the logo's island as half-block pixel art (palm, orange arc, waves), the sun rising right of the island while its dim reflection sinks in the sea. Animate it once (~1.6 s) while setup detects the host, then leave the still frame. Plain under NO_COLOR, ASCII without UTF-8, nothing when piped, 80 columns. End setup with: Next: run `luoto init` inside a project folder."
+Sleep 1s
 Enter
+# The wait of its test run is skipped.
+Wait+Screen@120s /Its tests\./
+Sleep 1500ms
+Hide
 # Claude's summary line ("Worked for 1s · done") picks a verb at random.
-Wait+Screen@300s /for [0-9]+s · done/
-Sleep 2s
+Wait+Screen@600s /for [0-9ms ]+s · done/
+Show
+Sleep 2500ms
 Type "/exit"
 Sleep 500ms
 Enter
@@ -77,8 +77,7 @@ Sleep 800ms
 Type "exit"
 Sleep 300ms
 Enter
-Wait+Screen@60s /the gate denied/
-Sleep 3500ms
+Sleep 1500ms
 
 Type "luoto pull"
 Sleep 500ms
@@ -88,17 +87,18 @@ Sleep 1500ms
 Type "y"
 Sleep 300ms
 Enter
-Wait+Screen@60s /wrote 1 file/
+Wait+Screen@60s /wrote 4 file/
 Sleep 1500ms
 
+# The pulled code is built, and the setup about to run gets a config folder that names no
+# runtime, which makes it a first one (first-setup.sh).
 Hide
-Type "clear"
-Enter
-Sleep 500ms
+Type "set -x LUOTO_HOME (bash $casts/first-setup.sh); and clear" Enter
+Wait+Screen@600s /^~\/demo\/luoto ❯\s*$/
 Show
 
-# The change, on this machine.
-Type "cargo run -q"
-Sleep 400ms
+Type "cargo run -q -p luoto -- setup --runtime container --yes"
+Sleep 500ms
 Enter
-Sleep 5s
+Wait+Screen@120s /Next: run/
+Sleep 4500ms

@@ -1,7 +1,10 @@
 # Sourced, out of sight, at the start of a cast's tape (fish, for its highlighting): the cast's
-# folder and canned server (setup.sh), and the `luoto` in bin/ first on the PATH.
+# folder and canned server (setup.sh), the `luoto` in bin/ first on the PATH, and cargo
+# building where setup.sh built ($LUOTO_CAST_TARGET). $casts is this folder.
 set -l here (path dirname (status filename))
+set -g casts (path resolve $here)
 bash $here/setup.sh
+set -gx CARGO_TARGET_DIR $LUOTO_CAST_TARGET
 set -gx PATH (path resolve $here/bin) $PATH
 # VHS starts fish without config, so without colours: these are Catppuccin Mocha's, as the tape's
 # theme, in 24-bit.

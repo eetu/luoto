@@ -566,11 +566,16 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
     }
     let paths = Paths::get()?;
     let mut global = config::load_global(&paths)?;
+    let first = first_setup(&global);
     // `apple` is None where Apple's `container` can't run, Some(None) where it isn't installed.
-    let (mut d, apple) =
-        crate::progress::wait("looking at this machine's container runtimes", || {
-            (detect(), probe_apple())
-        });
+    // A first setup opens with the splash, which plays while this looks.
+    let look = || (detect(), probe_apple());
+    let looking = "looking at this machine's container runtimes";
+    let (mut d, apple) = if first {
+        crate::splash::during(looking, look)
+    } else {
+        crate::progress::wait(looking, look)
+    };
     println!(
         "host: {} {}{}",
         d.os,
@@ -638,7 +643,12 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
     }
-    finish(o, paths, global, apple.is_some())
+    finish(o, paths, global, apple.is_some(), first)
+}
+
+/// Whether no setup has completed here: the config names no runtime yet.
+fn first_setup(global: &config::GlobalConfig) -> bool {
+    global.runtime.is_none() && global.connection.is_none()
 }
 
 /// The podman (or docker) half of `setup`: install it with `--install`, then luoto's VM;
@@ -738,6 +748,7 @@ fn finish(
     paths: Paths,
     mut global: config::GlobalConfig,
     apple_host: bool,
+    first: bool,
 ) -> Result<ExitCode> {
     let rt = Runtime::from_config(&global)?;
     global.runtime.get_or_insert_with(|| rt.bin.clone());
@@ -794,12 +805,23 @@ fn finish(
     {
         rows.push(("change it", other.setup));
     }
-    rows.push((
-        "next",
-        "luoto init [--agent claude], in a project folder".into(),
-    ));
-    block!("\n{}", crate::prompt::summary("ready", &rows));
+    close(first, rows);
     Ok(ExitCode::SUCCESS)
+}
+
+/// The summary that ends `setup`. A first setup ends with the way on from it as a line of its
+/// own; a later one names the next step as a row.
+fn close(first: bool, mut rows: Vec<(&str, String)>) {
+    if !first {
+        rows.push((
+            "next",
+            "luoto init [--agent claude], in a project folder".into(),
+        ));
+    }
+    block!("\n{}", crate::prompt::summary("ready", &rows));
+    if first {
+        out!("\nNext: run `luoto init` inside a project folder.");
+    }
 }
 
 /// What `doctor` found, each line printed as it comes; `--report` keeps them.
@@ -1053,6 +1075,17 @@ fn which(bin: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_setup_is_the_first_until_the_config_names_a_runtime() {
+        let mut global = config::GlobalConfig::default();
+        assert!(first_setup(&global));
+        global.connection = Some("luoto".into());
+        assert!(!first_setup(&global));
+        global.connection = None;
+        global.runtime = Some("docker".into());
+        assert!(!first_setup(&global));
+    }
 
     #[test]
     fn swap_is_named_only_where_there_is_some() {

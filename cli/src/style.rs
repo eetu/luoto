@@ -100,7 +100,7 @@ macro_rules! block {
 
 impl Style {
     #[cfg(test)]
-    const PLAIN: Style = Style {
+    pub(crate) const PLAIN: Style = Style {
         on: false,
         accent: None,
         unicode: true,
@@ -117,6 +117,16 @@ impl Style {
             accent,
             unicode: crate::progress::unicode(),
         }
+    }
+
+    /// Whether anything is styled: a terminal with colors.
+    pub fn styled(self) -> bool {
+        self.on
+    }
+
+    /// Whether characters beyond ASCII render: a UTF-8 locale.
+    pub fn unicode(self) -> bool {
+        self.unicode
     }
 
     fn wrap(self, start: &str, s: &str, end: &str) -> String {
