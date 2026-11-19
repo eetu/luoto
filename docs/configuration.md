@@ -277,7 +277,9 @@ Your own config goes in `~/.config/luoto/home/`: `luoto up` copies it into every
 `.gitconfig`. Keep these files on the host: each `up` overwrites the copies in the env. It is
 a separate folder on purpose: rc files tend to export tokens, and everything there is readable by
 code in the sandbox. luoto also sets your git `user.name` and `user.email` in each env. Install
-plugins and prompts inside the env (through the gate) rather than copying binaries in.
+plugins and prompts inside the env (through the gate) rather than copying binaries in. Task by
+task, with what luoto writes into agents' settings itself:
+[Your settings in every env](guides/your-settings.md).
 
 ## Editors
 

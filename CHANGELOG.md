@@ -13,6 +13,9 @@
   `luoto agent run` and a terminal workspace: `luoto open --with tmux` from Ghostty failed
   with "missing or unsuitable terminal". luoto installs your machine's terminfo entry for it
   in the env, and falls back to `xterm-256color` where it can't.
+- New guide: [your settings in every env](docs/guides/your-settings.md), the shell, git,
+  terminal workspace themes and agents' own settings from `~/.config/luoto/home/`, and the
+  keys luoto writes into agents' settings itself.
 
 ## 0.6.1 (unreleased)
 

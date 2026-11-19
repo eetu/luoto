@@ -1,8 +1,9 @@
 # Agent settings
 
 How to set up the agents in your envs: their model and effort, the arguments they start with,
-their credentials without the prompt, your own settings in every env, and commits without AI
-attribution. A model server of yours instead of the cloud: [Model servers](model-servers.md).
+their credentials without the prompt, and commits without AI attribution. Your own settings
+(theme, status line, instructions): [Your settings in every env](your-settings.md). A model
+server of yours instead of the cloud: [Model servers](model-servers.md).
 What luoto knows about each agent (hosts, credentials, what is verified) is in
 [agents.md](../agents.md).
 
@@ -58,14 +59,10 @@ does the same through the questions, opening on what the env has.
 
 ## Your settings in every env
 
-`~/.config/luoto/home/` is copied into every env's home on `up`: a portable subset of your
-agent settings goes there (`.claude/settings.json`, `CLAUDE.md`, `rules/`, `skills/`), never
-`~/.claude.json` or your history, which code in the sandbox could read. Each `up` overwrites
-the copies, so edit them on the host.
-
-Claude Code's first start asks nothing in an env (luoto answers onboarding and trusting
-`/workspace`); its text style stays yours, `"theme": "auto"` (or `dark`, `light`) in that
-`settings.json`.
+`~/.config/luoto/home/` is copied into every env's home on `up`, an agent's own settings
+among your other files: `.claude/settings.json` with its `theme` and status line, `CLAUDE.md`,
+`rules/`, `skills/`. [Your settings in every env](your-settings.md) has what goes there for
+each agent and the keys luoto writes into the same files.
 
 ## Commits without AI attribution
 
