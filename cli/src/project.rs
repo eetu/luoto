@@ -270,6 +270,21 @@ pub fn snapshot_path(ctx: &Ctx, env: &str) -> PathBuf {
     ctx.paths.env_state(env).join("project.toml")
 }
 
+/// The text luoto last copied from the folder into the env: with the first `up`, or taken in
+/// since. The env's copy being this text means the env didn't change it, accepted or not.
+pub fn taken_path(ctx: &Ctx, env: &str) -> PathBuf {
+    ctx.paths.env_state(env).join("project.taken")
+}
+
+/// Remember `text` as what the env's copy was made from.
+pub fn set_taken(ctx: &Ctx, env: &str, text: &str) -> Result<()> {
+    write_private(&taken_path(ctx, env), text.as_bytes())
+}
+
+fn taken(ctx: &Ctx, env: &str) -> Option<String> {
+    std::fs::read_to_string(taken_path(ctx, env)).ok()
+}
+
 /// `sha` of a text the user declined, so it isn't offered again.
 pub fn declined_path(ctx: &Ctx, env: &str) -> PathBuf {
     ctx.paths.env_state(env).join("project.declined")
@@ -889,7 +904,8 @@ pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
 pub enum FolderCopy {
     /// The same, or nothing to compare.
     Same,
-    /// Changed in the folder since the env took its copy (which is still the accepted one).
+    /// Changed in the folder since the env took its copy, which the env left as it was: the
+    /// accepted text, or the one luoto copied in.
     Newer(String),
     /// Changed in the folder and in the env.
     Both,
@@ -910,14 +926,26 @@ pub fn folder_copy(ctx: &Ctx, env: &str) -> Result<FolderCopy> {
     Ok(compare_copies(
         &host,
         copy.as_deref(),
-        accepted(ctx, env).map(|(t, _)| t).as_deref(),
+        // As it is on disk: one that no longer parses is still what was accepted.
+        std::fs::read_to_string(snapshot_path(ctx, env))
+            .ok()
+            .as_deref(),
+        taken(ctx, env).as_deref(),
     ))
 }
 
-fn compare_copies(host: &str, copy: Option<&str>, accepted: Option<&str>) -> FolderCopy {
+/// `host` (the folder's text) against the env's `copy`. The env changed its copy only when
+/// it is neither the `accepted` text nor the one luoto last copied in (`taken`): a copy luoto
+/// wrote itself, which was never accepted because it didn't parse, is not the env's edit.
+fn compare_copies(
+    host: &str,
+    copy: Option<&str>,
+    accepted: Option<&str>,
+    taken: Option<&str>,
+) -> FolderCopy {
     if copy == Some(host) {
         FolderCopy::Same
-    } else if copy.is_none() || copy == accepted {
+    } else if copy.is_none() || copy == accepted || copy == taken {
         FolderCopy::Newer(host.to_string())
     } else {
         FolderCopy::Both
@@ -937,6 +965,7 @@ pub fn take_from_folder(ctx: &Ctx, env: &str, ask: bool) -> Result<bool> {
                 );
             if take {
                 write_env(ctx, env, &text)?;
+                set_taken(ctx, env, &text)?;
                 println!("took luoto.toml from your folder into the env");
             } else if !crate::prompt::interactive() {
                 out!(
@@ -964,8 +993,14 @@ pub fn review(ctx: &Ctx, env: &str) -> Result<bool> {
     let text = st.text.as_deref().unwrap_or_default();
     match st.state {
         State::Invalid => crate::progress::warn(&format!(
-            "the project's luoto.toml is not applied: {}",
-            st.error.as_deref().unwrap_or_default()
+            "the project's luoto.toml is not applied: {}{}",
+            st.error.as_deref().unwrap_or_default(),
+            // The env's copy is the folder's: that is where to fix it.
+            if st.text.is_some() && st.text == taken(ctx, env) {
+                format!("; fix it in your folder, and `luoto up -e {env}` offers to take it in")
+            } else {
+                String::new()
+            }
         )),
         State::Removed => out!(
             "note: the project no longer has luoto.toml; its accepted settings still apply \
@@ -1055,18 +1090,55 @@ mod tests {
     #[test]
     fn a_folder_copy_changed_only_on_this_machine_is_taken_in() {
         let (old, new) = ("presets = [\"npm\"]\n", "presets = [\"pypi\"]\n");
-        assert_eq!(compare_copies(old, Some(old), Some(old)), FolderCopy::Same);
         assert_eq!(
-            compare_copies(new, Some(old), Some(old)),
+            compare_copies(old, Some(old), Some(old), None),
+            FolderCopy::Same
+        );
+        assert_eq!(
+            compare_copies(new, Some(old), Some(old), None),
             FolderCopy::Newer(new.into())
         );
         assert_eq!(
-            compare_copies(new, None, None),
+            compare_copies(new, None, None, None),
             FolderCopy::Newer(new.into())
         );
         // Changed in the env too (a `git pull` there): neither wins.
         assert_eq!(
-            compare_copies(new, Some("ports = [3000]\n"), Some(old)),
+            compare_copies(new, Some("ports = [3000]\n"), Some(old), None),
+            FolderCopy::Both
+        );
+    }
+
+    #[test]
+    fn a_copy_luoto_took_from_the_folder_is_not_the_envs_change() {
+        let accepted = "presets = [\"npm\"]\n";
+        // Taken in with a typo, so never accepted; then fixed in the folder.
+        let broken = "presets = [\"npm\"]\nrepose = []\n";
+        let fixed = "presets = [\"npm\"]\n[repos.web]\nurl = \"acme/web\"\n";
+        assert!(parse(broken).is_err());
+        assert_eq!(
+            compare_copies(fixed, Some(broken), Some(accepted), Some(broken)),
+            FolderCopy::Newer(fixed.into())
+        );
+        // The same from the first `up`, with nothing accepted yet.
+        assert_eq!(
+            compare_copies(fixed, Some(broken), None, Some(broken)),
+            FolderCopy::Newer(fixed.into())
+        );
+        // Still the taken text in the folder: nothing to take.
+        assert_eq!(
+            compare_copies(broken, Some(broken), Some(accepted), Some(broken)),
+            FolderCopy::Same
+        );
+        // The env changed its copy after that: neither wins, as before.
+        let edited = "presets = [\"npm\", \"pypi\"]\n";
+        assert_eq!(
+            compare_copies(fixed, Some(edited), Some(accepted), Some(broken)),
+            FolderCopy::Both
+        );
+        // Without a record of what was taken, an unaccepted copy is the env's.
+        assert_eq!(
+            compare_copies(fixed, Some(broken), Some(accepted), None),
             FolderCopy::Both
         );
     }

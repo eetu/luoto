@@ -9,6 +9,9 @@
   launchpad, a virtual workspace, a plain folder) says so before it starts, with the terminal
   workspaces that open there; it used to fail inside the env. `luoto up` lists only the ones
   the env can open.
+- A luoto.toml taken from your folder with a mistake in it can be fixed in the folder: the
+  next `luoto up` offers the fixed one. luoto took its own copy for a change made in the env
+  and kept reading it ("changed in your folder and in the env").
 - A terminal the env's image doesn't know (Ghostty, kitty, WezTerm) works in `luoto shell`,
   `luoto agent run` and a terminal workspace: `luoto open --with tmux` from Ghostty failed
   with "missing or unsuitable terminal". luoto installs your machine's terminfo entry for it
