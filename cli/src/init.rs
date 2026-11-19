@@ -21,7 +21,7 @@ pub struct InitOpts {
     /// The project folder, copied into the env (default: `.`; created when missing), or a
     /// remote cloned inside the env, with nothing on this machine: `owner/repo` on GitHub, an
     /// https or ssh URL, or user@host:path. `./owner/repo` is a folder.
-    #[arg(value_name = "DIR|REMOTE")]
+    #[arg(value_name = "DIR|REMOTE", add = clap_complete::engine::ArgValueCompleter::new(clap_complete::engine::PathCompleter::dir()))]
     pub dir: Option<String>,
     /// Env name (default: the folder's or repository's name).
     #[arg(long)]
@@ -60,7 +60,7 @@ pub struct InitOpts {
     pub ports: Vec<u16>,
     /// A repository beside the folder, at `/workspace/<name>` (repeatable): a host folder,
     /// copied in, or a remote (`owner/repo` on GitHub, an https or ssh URL), cloned in the env.
-    #[arg(long = "repo", value_name = "FOLDER|REMOTE")]
+    #[arg(long = "repo", value_name = "FOLDER|REMOTE", add = clap_complete::engine::ArgValueCompleter::new(clap_complete::engine::PathCompleter::dir()))]
     pub repos: Vec<String>,
     /// `gvisor` (default once `luoto setup` found or set it up): the env gets its own
     /// user-space kernel. `container`: it shares the VM's kernel (this machine's on Linux),

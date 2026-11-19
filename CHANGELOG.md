@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.2 (unreleased)
+
+- Tab completes folders and files where a command takes one: `luoto init`, `--repo`,
+  `luoto repo add`, `luoto share add`, `luoto import`, `luoto export`, `luoto run`'s files and
+  `luoto doctor --report`.
+- `luoto open --with claude-squad` on an env whose `/workspace` is no git repository (a
+  launchpad, a virtual workspace, a plain folder) says so before it starts, with the terminal
+  workspaces that open there; it used to fail inside the env. `luoto up` lists only the ones
+  the env can open.
+- A luoto.toml taken from your folder with a mistake in it can be fixed in the folder: the
+  next `luoto up` offers the fixed one. luoto took its own copy for a change made in the env
+  and kept reading it ("changed in your folder and in the env").
+- Where luoto.toml did change in your folder and in the env, `luoto up` and `luoto project
+  apply` ask which to go on with: the env's (the default, said to be committed there or
+  not), yours, or their differences first. Without a terminal the env's stays and the note
+  names `luoto project apply --from-folder`, which takes yours.
+- A terminal the env's image doesn't know (Ghostty, kitty, WezTerm) works in `luoto shell`,
+  `luoto agent run` and a terminal workspace: `luoto open --with tmux` from Ghostty failed
+  with "missing or unsuitable terminal". luoto installs your machine's terminfo entry for it
+  in the env, and falls back to `xterm-256color` where it can't.
+- New guide: [your settings in every env](docs/guides/your-settings.md), the shell, git,
+  terminal workspace themes and agents' own settings from `~/.config/luoto/home/`, and the
+  keys luoto writes into agents' settings itself.
+
 ## 0.6.1 (unreleased)
 
 - `luoto setup` on Docker says what that means: dev containers are plain containers on this

@@ -569,6 +569,11 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
                     || workspace::push(ctx, env, &dir, None),
                 )?;
                 out!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
+                // The env's luoto.toml is the folder's, until the env changes it. One that
+                // can't be read here (a link, too large) is refused where it is reviewed.
+                if let Ok(Some(text)) = crate::project::read_host(&dir) {
+                    crate::project::set_taken(ctx, env, &text)?;
+                }
             }
             (None, Some(url)) => {
                 let locked = repos::creds_locked(ctx, env);
@@ -746,15 +751,6 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
                 .collect();
             println!("{}{}", style.dim("  ports:   "), ports.join("  "));
         }
-        let (in_env, editors): (Vec<_>, Vec<_>) = luoto_shared::profiles::editor_names()
-            .filter_map(luoto_shared::profiles::editor)
-            .partition(|e| e.in_env());
-        let names = |es: &[luoto_shared::profiles::Editor]| {
-            es.iter()
-                .map(|e| e.name.as_str())
-                .collect::<Vec<_>>()
-                .join("|")
-        };
         // A command for each thing to do next, its alternative after it.
         let next = |key: &str, command: String, also: String| {
             println!(
@@ -764,16 +760,13 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             );
         };
         next("shell:", format!("luoto shell -e {env}"), String::new());
-        next(
-            "agents:",
-            format!("luoto open -e {env} --with {}", names(&in_env)),
-            String::new(),
-        );
-        next(
-            "editor:",
-            format!("luoto open -e {env}"),
-            format!("   (or --with {})", names(&editors)),
-        );
+        // Only what this env can open: a launchpad's /workspace is no git repository.
+        let user = EnvState::load(&ctx.paths, env)?
+            .map_or_else(|| "dev".into(), |s| s.login().to_string());
+        let facts = crate::connect::Facts::of(ctx, env, &user);
+        for (key, command, also) in crate::connect::offers(env, facts) {
+            next(key, command, also);
+        }
         next("egress:", format!("luoto egress -e {env}"), String::new());
         if let Some(until) = open {
             let width = crate::text::columns().saturating_sub(11);

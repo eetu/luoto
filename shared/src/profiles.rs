@@ -285,6 +285,16 @@ pub struct JsonSet {
     pub if_absent: bool,
 }
 
+/// Something an editor needs of the env it opens (`requires`): where the env lacks it, luoto
+/// doesn't offer the editor and says why it can't open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Requirement {
+    /// `/workspace` is a git work tree: not a launchpad's or a virtual workspace's, whose
+    /// repos are folders in it.
+    GitRepo,
+}
+
 /// An editor `luoto open` connects to an env. Every editor reaches the env over SSH through
 /// luoto's `ProxyCommand`, so all of them get the same server-side restrictions.
 #[derive(Debug, Clone, Deserialize)]
@@ -310,6 +320,9 @@ pub struct Editor {
     /// there with mise on first use, through the gate.
     #[serde(default)]
     pub tool: Option<EditorTool>,
+    /// What it needs of the env.
+    #[serde(default)]
+    pub requires: Vec<Requirement>,
 }
 
 impl Editor {
@@ -397,6 +410,23 @@ mod tests {
         }
         assert!(editor("ssh").unwrap().launch.is_empty());
         assert!(editor("tmux").unwrap().tool.is_none(), "in the image");
+    }
+
+    #[test]
+    fn an_editor_names_what_it_requires_and_only_what_luoto_knows() {
+        assert_eq!(
+            editor("claude-squad").unwrap().requires,
+            [Requirement::GitRepo]
+        );
+        assert!(editor("herdr").unwrap().requires.is_empty());
+        let parse = |requires: &str| {
+            toml::from_str::<Editor>(&format!("description = \"x\"\nrequires = {requires}"))
+        };
+        assert_eq!(
+            parse("[\"git_repo\"]").unwrap().requires,
+            [Requirement::GitRepo]
+        );
+        assert!(parse("[\"a_fast_disk\"]").is_err());
     }
 
     /// The placeholders pass the checks the clients make before sending a token.

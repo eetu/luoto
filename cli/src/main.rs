@@ -51,6 +51,7 @@ mod splash;
 mod ssh;
 mod state;
 mod sync;
+mod terminfo;
 mod text;
 mod transfer;
 #[cfg(unix)]
@@ -69,7 +70,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::CompleteEnv;
-use clap_complete::engine::ArgValueCandidates;
+use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter, PathCompleter};
 
 #[derive(Parser)]
 #[command(
@@ -100,7 +101,7 @@ enum Cmd {
     Doctor {
         /// Also write what a bug report needs to FILE (default: luoto-report-<time>.txt here),
         /// with secrets and what identifies you taken out.
-        #[arg(long, value_name = "FILE", num_args = 0..=1)]
+        #[arg(long, value_name = "FILE", num_args = 0..=1, add = ArgValueCompleter::new(PathCompleter::any()))]
         report: Option<Option<String>>,
     },
     /// Update luoto to the latest release.
@@ -183,6 +184,7 @@ enum Cmd {
     /// machine; secrets stay refs. A running env is stopped first, after asking.
     Export {
         /// The archive (default: <env>.luoto.tar here; in a folder, that name there).
+        #[arg(add = ArgValueCompleter::new(PathCompleter::any()))]
         file: Option<String>,
         /// Leave the home out: the imported env starts with a new one.
         #[arg(long)]
@@ -196,6 +198,7 @@ enum Cmd {
     /// It gets its own subnet, CA and vault token; `luoto up` starts it.
     Import {
         /// The file `luoto export` wrote.
+        #[arg(add = ArgValueCompleter::new(PathCompleter::file()))]
         file: String,
         /// Its name here (default: the one it had).
         #[arg(long)]
@@ -271,10 +274,10 @@ enum Cmd {
         #[arg(long)]
         prompt: Option<String>,
         /// Read the prompt from this file.
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", add = ArgValueCompleter::new(PathCompleter::file()))]
         prompt_file: Option<String>,
         /// Write the agent's answer to this file here instead of stdout.
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", add = ArgValueCompleter::new(PathCompleter::any()))]
         output: Option<String>,
         /// Stop the agent after this long (30m, 2h) and exit with 124.
         #[arg(long, value_name = "DURATION")]
@@ -523,7 +526,7 @@ enum RepoCmd {
     Add {
         /// A folder (starts with `/`, `~` or `.`, or exists), else a remote: `owner/repo` on
         /// GitHub, an https or ssh URL, or user@host:path.
-        #[arg(value_name = "FOLDER|REMOTE")]
+        #[arg(value_name = "FOLDER|REMOTE", add = ArgValueCompleter::new(PathCompleter::dir()))]
         source: String,
         /// Its folder in the workspace (default: the last part of the path or URL).
         #[arg(long)]
@@ -560,6 +563,7 @@ enum ShareCmd {
     /// The env reads it as of its last sync.
     Add {
         /// A folder inside your home folder (not a secret one such as ~/.ssh), or on a disk.
+        #[arg(add = ArgValueCompleter::new(PathCompleter::dir()))]
         folder: String,
         /// Its name (default: the folder's own, made lowercase).
         #[arg(long)]
@@ -615,6 +619,10 @@ enum ProjectCmd {
         /// Don't ask.
         #[arg(long, short)]
         yes: bool,
+        /// Take your folder's luoto.toml into the env first, also over a copy the env
+        /// changed.
+        #[arg(long)]
+        from_folder: bool,
     },
     /// Stop applying it (this version is not offered again).
     Ignore,
@@ -765,9 +773,16 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Status { json, size } => c::status(&env()?, json, size),
         Cmd::Edit => c::edit(&env()?),
         Cmd::Project { action } => match action {
-            None => c::project(&env()?, false, false, false),
-            Some(ProjectCmd::Apply { yes }) => c::project(&env()?, true, false, yes),
-            Some(ProjectCmd::Ignore) => c::project(&env()?, false, true, false),
+            None => c::project(&env()?, None, false, false),
+            Some(ProjectCmd::Apply { yes, from_folder }) => {
+                let take = if from_folder {
+                    project::Take::Folder
+                } else {
+                    project::Take::Newer
+                };
+                c::project(&env()?, Some(take), false, yes)
+            }
+            Some(ProjectCmd::Ignore) => c::project(&env()?, None, true, false),
             Some(ProjectCmd::Needs) => c::project_needs(&env()?),
             Some(ProjectCmd::Suggest { write, force }) => c::project_suggest(&env()?, write, force),
         },

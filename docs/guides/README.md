@@ -18,8 +18,10 @@ Step by step, for a task; the reference is [configuration](../configuration.md),
   and terraform, read-only unless the env writes, with the tokens outside the env.
 - [Environment variables](env-vars.md): plain values, secrets the code reads and tokens it
   never sees, with `luoto var`.
-- [Agent settings](agent-settings.md): model and effort, credentials without the prompt, your
-  own settings in every env, commits without AI attribution.
+- [Agent settings](agent-settings.md): model and effort, credentials without the prompt,
+  commits without AI attribution.
+- [Your settings in every env](your-settings.md): shell, prompt, git, terminal workspace
+  themes, editors and agents' own settings from one folder, and the keys luoto writes itself.
 - [Model servers](model-servers.md): Ollama, LM Studio, MTPLX or any OpenAI- or
   Anthropic-compatible server, on this machine, your network or the internet, beside the
   cloud.

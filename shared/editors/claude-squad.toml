@@ -1,6 +1,8 @@
 description = "claude-squad, agents side by side in tmux sessions and worktrees, run in the env"
 launch = ["ssh", "-t", "{host}", "exec sh -lc 'cd {path} && exec claude-squad'"]
 hint = "claude-squad and its agents run in the sandbox, each in a tmux session of the env; quit and come back to them with `luoto open --with claude-squad`."
+# It makes a git worktree per agent.
+requires = ["git_repo"]
 
 [tool]
 mise = "claude-squad"

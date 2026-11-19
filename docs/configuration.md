@@ -277,7 +277,9 @@ Your own config goes in `~/.config/luoto/home/`: `luoto up` copies it into every
 `.gitconfig`. Keep these files on the host: each `up` overwrites the copies in the env. It is
 a separate folder on purpose: rc files tend to export tokens, and everything there is readable by
 code in the sandbox. luoto also sets your git `user.name` and `user.email` in each env. Install
-plugins and prompts inside the env (through the gate) rather than copying binaries in.
+plugins and prompts inside the env (through the gate) rather than copying binaries in. Task by
+task, with what luoto writes into agents' settings itself:
+[Your settings in every env](guides/your-settings.md).
 
 ## Editors
 
@@ -296,8 +298,15 @@ The first time, luoto prints a one-time editor setting so the editor installs it
 server from your machine instead of the sandbox downloading it (Zed's
 `upload_binary_over_ssh`, VS Code's and Cursor's `remote.SSH.localServerDownload`).
 `--with ssh` prints the connection for anything else (JetBrains Gateway, Neovim). Editors are
-data: one TOML file each in `shared/editors/`. Install extensions in the remote window, where
+data: one TOML file each in `shared/editors/`, whose `requires` lists what it needs of an env
+(`git_repo`: `/workspace` is one git repository); `up` offers and `open` opens it only where
+the env has that. Install extensions in the remote window, where
 they are sandboxed; keep host-side ones to themes and keymaps.
+
+luoto's own terminal sessions (`luoto shell`, `luoto agent run`, a terminal workspace) keep
+your terminal's `TERM`. Where the env has no terminfo entry for it (Ghostty, kitty, WezTerm),
+luoto installs your machine's in the env user's `~/.terminfo`, and where it can't, the session
+gets `xterm-256color`.
 
 A terminal workspace for agents runs in the env instead: `luoto open --with <name>` (`luoto
 open --help` lists them; `up` prints them as `agents:`) installs it there with mise on first

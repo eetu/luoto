@@ -16,15 +16,22 @@ use crate::state::EnvState;
 use crate::{ctl, disk, egress, events, machine, names, ports, project, sync, workspace};
 
 /// Show, accept or drop the project's luoto.toml settings for an env.
-pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<ExitCode> {
+pub fn project(
+    name: &str,
+    apply: Option<project::Take>,
+    forget: bool,
+    yes: bool,
+) -> Result<ExitCode> {
+    let accept = apply.is_some();
     let ctx = Ctx::load()?;
     if forget {
         project::ignore(&ctx, name)?;
         out!("`{name}` no longer applies the project's luoto.toml");
         return Ok(ExitCode::SUCCESS);
     }
-    if accept {
-        project::take_from_folder(&ctx, name, false)?;
+    let mut took = None;
+    if let Some(take) = apply {
+        took = project::take_from_folder(&ctx, name, take)?;
     } else if let project::FolderCopy::Newer(_) = project::folder_copy(&ctx, name)? {
         out!(
             "luoto.toml in your folder changed since the env took its copy: `luoto project \
@@ -32,6 +39,14 @@ pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<Exit
         );
     }
     let st = project::status(&ctx, name)?;
+    // What was taken is what is reviewed and applied, not what the env made of it since.
+    if !project::taken_intact(took.as_deref(), st.text.as_deref()) {
+        bail!(
+            "luoto.toml in `{name}` is no longer the text taken from your folder: something in \
+             the env changed it meanwhile. Nothing is applied; `luoto project apply -e {name}` \
+             reviews what is there"
+        );
+    }
     let show = |lines: &[(String, String)]| project::print_entries(lines, "  ");
     match st.state {
         project::State::None => println!("the project has no luoto.toml"),
