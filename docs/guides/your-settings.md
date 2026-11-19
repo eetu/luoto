@@ -21,6 +21,9 @@ build's is `~/.config/luoto-dev/home/`).
   .claude/CLAUDE.md
 ```
 
+- An edit here reaches an env at its next `luoto up`, not before. A running env takes it with
+  `luoto up -e <env>`, which copies it in and keeps the env running; each env gets it at its
+  own next `up`.
 - The copy overwrites the env's file of the same name, so edit on your machine: a change made
   in the env lasts until the next `up`. A file you remove from the folder stays in the envs
   that have it; delete it there too.
