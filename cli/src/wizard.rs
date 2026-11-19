@@ -121,6 +121,23 @@ pub fn pick_runtime(
         .map(|c| c.value))
 }
 
+/// Which luoto.toml to go on with where the folder's and the env's both changed (`rows`
+/// from `project::copy_rows`, the env's first); `None` for Esc.
+pub fn pick_copy(
+    rows: Vec<(crate::project::CopyChoice, String, String)>,
+) -> Result<Option<crate::project::CopyChoice>> {
+    let options = table(rows, text::columns());
+    let help = menu_help("later");
+    Ok(
+        Select::new("luoto.toml changed in your folder and in the env:", options)
+            .with_formatter(&short)
+            .with_help_message(&help)
+            .without_filtering()
+            .ask()?
+            .map(|c| c.value),
+    )
+}
+
 fn isolation(p: &mut Proposal) -> Result<()> {
     if !p.gvisor {
         return Ok(());

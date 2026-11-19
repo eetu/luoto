@@ -619,6 +619,10 @@ enum ProjectCmd {
         /// Don't ask.
         #[arg(long, short)]
         yes: bool,
+        /// Take your folder's luoto.toml into the env first, also over a copy the env
+        /// changed.
+        #[arg(long)]
+        from_folder: bool,
     },
     /// Stop applying it (this version is not offered again).
     Ignore,
@@ -769,9 +773,16 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Status { json, size } => c::status(&env()?, json, size),
         Cmd::Edit => c::edit(&env()?),
         Cmd::Project { action } => match action {
-            None => c::project(&env()?, false, false, false),
-            Some(ProjectCmd::Apply { yes }) => c::project(&env()?, true, false, yes),
-            Some(ProjectCmd::Ignore) => c::project(&env()?, false, true, false),
+            None => c::project(&env()?, None, false, false),
+            Some(ProjectCmd::Apply { yes, from_folder }) => {
+                let take = if from_folder {
+                    project::Take::Folder
+                } else {
+                    project::Take::Newer
+                };
+                c::project(&env()?, Some(take), false, yes)
+            }
+            Some(ProjectCmd::Ignore) => c::project(&env()?, None, true, false),
             Some(ProjectCmd::Needs) => c::project_needs(&env()?),
             Some(ProjectCmd::Suggest { write, force }) => c::project_suggest(&env()?, write, force),
         },

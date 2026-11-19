@@ -16,15 +16,21 @@ use crate::state::EnvState;
 use crate::{ctl, disk, egress, events, machine, names, ports, project, sync, workspace};
 
 /// Show, accept or drop the project's luoto.toml settings for an env.
-pub fn project(name: &str, accept: bool, forget: bool, yes: bool) -> Result<ExitCode> {
+pub fn project(
+    name: &str,
+    apply: Option<project::Take>,
+    forget: bool,
+    yes: bool,
+) -> Result<ExitCode> {
+    let accept = apply.is_some();
     let ctx = Ctx::load()?;
     if forget {
         project::ignore(&ctx, name)?;
         out!("`{name}` no longer applies the project's luoto.toml");
         return Ok(ExitCode::SUCCESS);
     }
-    if accept {
-        project::take_from_folder(&ctx, name, false)?;
+    if let Some(take) = apply {
+        project::take_from_folder(&ctx, name, take)?;
     } else if let project::FolderCopy::Newer(_) = project::folder_copy(&ctx, name)? {
         out!(
             "luoto.toml in your folder changed since the env took its copy: `luoto project \

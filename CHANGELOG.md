@@ -12,6 +12,10 @@
 - A luoto.toml taken from your folder with a mistake in it can be fixed in the folder: the
   next `luoto up` offers the fixed one. luoto took its own copy for a change made in the env
   and kept reading it ("changed in your folder and in the env").
+- Where luoto.toml did change in your folder and in the env, `luoto up` and `luoto project
+  apply` ask which to go on with: the env's (the default, said to be committed there or
+  not), yours, or their differences first. Without a terminal the env's stays and the note
+  names `luoto project apply --from-folder`, which takes yours.
 - A terminal the env's image doesn't know (Ghostty, kitty, WezTerm) works in `luoto shell`,
   `luoto agent run` and a terminal workspace: `luoto open --with tmux` from Ghostty failed
   with "missing or unsuitable terminal". luoto installs your machine's terminfo entry for it
