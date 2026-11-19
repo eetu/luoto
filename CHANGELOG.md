@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.2 (unreleased)
+
+- `luoto open --with claude-squad` on an env whose `/workspace` is no git repository (a
+  launchpad, a virtual workspace, a plain folder) says so before it starts, with the terminal
+  workspaces that open there; it used to fail inside the env. `luoto up` lists only the ones
+  the env can open.
+- A terminal the env's image doesn't know (Ghostty, kitty, WezTerm) works in `luoto shell`,
+  `luoto agent run` and a terminal workspace: `luoto open --with tmux` from Ghostty failed
+  with "missing or unsuitable terminal". luoto installs your machine's terminfo entry for it
+  in the env, and falls back to `xterm-256color` where it can't.
+
 ## 0.6.1 (unreleased)
 
 - `luoto setup` on Docker says what that means: dev containers are plain containers on this

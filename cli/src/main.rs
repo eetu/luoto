@@ -51,6 +51,7 @@ mod splash;
 mod ssh;
 mod state;
 mod sync;
+mod terminfo;
 mod text;
 mod transfer;
 #[cfg(unix)]
