@@ -22,7 +22,8 @@ commit it. Each developer's env reads its own copy of the file in `/workspace`:
 - a launchpad in git: `git pull` in `/workspace`, then `luoto up`;
 - a launchpad folder you edit on this machine: `luoto up` notices that your folder's file
   changed since the env took its copy and offers to take it in (`luoto project apply` does
-  it without asking).
+  it without asking). Where the env's copy changed too, it asks which to go on with: the
+  env's, yours, or their differences first. `luoto project apply --from-folder` takes yours.
 
 Either way `up` shows what changed in `luoto.toml` and applies it only after your yes, then
 clones the new repo, asking for its access the same way. More in

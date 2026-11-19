@@ -208,7 +208,13 @@ pub fn offers(env: &str, facts: Option<Facts>) -> Vec<(&'static str, String, Str
 }
 
 /// Why `editor` can't open `env`, which lacks `missing`, and what can instead.
-pub fn refusal(editor: &Editor, missing: Requirement, facts: Facts, env: &str) -> String {
+pub fn refusal(
+    editor: &Editor,
+    missing: Requirement,
+    facts: Facts,
+    env: &str,
+    configured: bool,
+) -> String {
     let name = &editor.name;
     let (needs, has) = match missing {
         Requirement::GitRepo => (
@@ -225,7 +231,12 @@ pub fn refusal(editor: &Editor, missing: Requirement, facts: Facts, env: &str) -
         .filter(|e| e.in_env() == editor.in_env())
         .map(|e| e.name)
         .collect();
-    let mut text = format!("{name} needs {needs}; {has}");
+    // Not asked for here: say where it came from.
+    let mut text = if configured {
+        format!("`editor` in config.toml names {name}, which needs {needs}; {has}")
+    } else {
+        format!("{name} needs {needs}; {has}")
+    };
     if let Some((first, rest)) = others.split_first() {
         text.push_str(&format!(": `luoto open -e {env} --with {first}`"));
         if !rest.is_empty() {
@@ -339,7 +350,8 @@ pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
         && let Some(found) = facts()
         && let Some(missing) = unmet(&editor, Some(found))
     {
-        bail!("{}", refusal(&editor, missing, found, name));
+        let configured = with.is_none() && ctx.global.editor.is_some();
+        bail!("{}", refusal(&editor, missing, found, name, configured));
     }
     let fill = |s: &str| {
         s.replace("{host}", &host)
@@ -370,6 +382,13 @@ pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
              (the host entry is in {}).",
             config.display()
         );
+        let here = std::env::var("TERM").ok();
+        if let Some(note) = term
+            .as_deref()
+            .and_then(|got| crate::terminfo::ssh_note(here.as_deref(), got))
+        {
+            out_text!("{note}");
+        }
         return Ok(ExitCode::SUCCESS);
     }
     if let Some(tool) = &editor.tool {
@@ -534,10 +553,20 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_editor_from_config_toml_is_said_to_come_from_there() {
+        let squad = profiles::editor("claude-squad").unwrap();
+        let text = refusal(&squad, Requirement::GitRepo, LAUNCHPAD, "web", true);
+        assert!(text.starts_with(
+            "`editor` in config.toml names claude-squad, which needs /workspace to be one git \
+             repository; this env's holds 3 repos: "
+        ));
+    }
+
+    #[test]
     fn an_editor_that_cant_open_says_what_it_needs_and_what_opens_instead() {
         let squad = profiles::editor("claude-squad").unwrap();
         assert_eq!(
-            refusal(&squad, Requirement::GitRepo, LAUNCHPAD, "web"),
+            refusal(&squad, Requirement::GitRepo, LAUNCHPAD, "web", false),
             "claude-squad needs /workspace to be one git repository; this env's holds 3 repos: \
              `luoto open -e web --with herdr` (or zellij, tmux) opens without one, or start \
              claude-squad in one repo from `luoto shell -e web`"
@@ -548,7 +577,7 @@ mod tests {
             repos: 0,
         };
         assert_eq!(
-            refusal(&squad, Requirement::GitRepo, plain, "web"),
+            refusal(&squad, Requirement::GitRepo, plain, "web", false),
             "claude-squad needs /workspace to be one git repository; this env's isn't one: \
              `luoto open -e web --with herdr` (or zellij, tmux) opens without one"
         );

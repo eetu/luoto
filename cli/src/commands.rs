@@ -29,8 +29,9 @@ pub fn project(
         out!("`{name}` no longer applies the project's luoto.toml");
         return Ok(ExitCode::SUCCESS);
     }
+    let mut took = None;
     if let Some(take) = apply {
-        project::take_from_folder(&ctx, name, take)?;
+        took = project::take_from_folder(&ctx, name, take)?;
     } else if let project::FolderCopy::Newer(_) = project::folder_copy(&ctx, name)? {
         out!(
             "luoto.toml in your folder changed since the env took its copy: `luoto project \
@@ -38,6 +39,14 @@ pub fn project(
         );
     }
     let st = project::status(&ctx, name)?;
+    // What was taken is what is reviewed and applied, not what the env made of it since.
+    if !project::taken_intact(took.as_deref(), st.text.as_deref()) {
+        bail!(
+            "luoto.toml in `{name}` is no longer the text taken from your folder: something in \
+             the env changed it meanwhile. Nothing is applied; `luoto project apply -e {name}` \
+             reviews what is there"
+        );
+    }
     let show = |lines: &[(String, String)]| project::print_entries(lines, "  ");
     match st.state {
         project::State::None => println!("the project has no luoto.toml"),

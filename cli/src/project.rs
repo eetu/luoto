@@ -864,9 +864,8 @@ pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
         }
         Source::Nothing => Ok(None),
     };
-    let new = text.and_then(|t| t.map(|t| parse(&t).map(|p| (t, p))).transpose());
-    let (text, new) = match new {
-        Ok(Some(found)) => found,
+    let text = match text {
+        Ok(Some(text)) => text,
         Ok(None) => {
             if let Some((_, p)) = &old {
                 s.state = State::Removed;
@@ -877,6 +876,16 @@ pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
         Err(e) => {
             s.state = State::Invalid;
             s.error = Some(crate::text::lines(&format!("{e:#}")));
+            return Ok(s);
+        }
+    };
+    let new = match parse(&text) {
+        Ok(new) => new,
+        Err(e) => {
+            s.state = State::Invalid;
+            s.error = Some(crate::text::lines(&format!("{e:#}")));
+            // Kept, not offered: whose text it is says where to fix it.
+            s.text = Some(text);
             return Ok(s);
         }
     };
@@ -940,23 +949,40 @@ pub enum Take {
     Folder,
 }
 
-/// What to do when both copies changed.
+/// What to do about a folder copy that differs from the env's.
 #[derive(Debug, PartialEq, Eq)]
-enum BothStep {
+enum CopyStep {
     Take,
+    /// `up`'s yes or no about a folder copy the env left alone.
+    Confirm,
+    /// Which copy to go on with.
     Ask,
     /// Keep the env's and say how to choose: nothing is overwritten unasked.
     Note,
+    /// Without a terminal, a folder copy the env left alone waits for `project apply`.
+    NoteNewer,
     /// Keep the env's without a word: the user chose it over this folder text before.
     Quiet,
 }
 
-fn both_step(take: Take, interactive: bool, kept_before: bool) -> BothStep {
+/// `both`: the env changed its copy too. `kept`: the user kept the env's over this folder
+/// text before, which holds once that copy is accepted and so no longer counts as changed.
+/// Either way the env's copy stands against the folder's: only `--from-folder` or an answer
+/// replaces it.
+fn copy_step(take: Take, both: bool, kept: bool, interactive: bool) -> CopyStep {
     match take {
-        Take::Folder => BothStep::Take,
-        Take::Asking if kept_before => BothStep::Quiet,
-        _ if interactive => BothStep::Ask,
-        _ => BothStep::Note,
+        Take::Folder => CopyStep::Take,
+        Take::Asking if kept => CopyStep::Quiet,
+        _ if both || kept => {
+            if interactive {
+                CopyStep::Ask
+            } else {
+                CopyStep::Note
+            }
+        }
+        Take::Newer => CopyStep::Take,
+        Take::Asking if interactive => CopyStep::Confirm,
+        Take::Asking => CopyStep::NoteNewer,
     }
 }
 
@@ -990,15 +1016,20 @@ pub fn copy_rows(committed: Option<bool>, diff: bool) -> Vec<(CopyChoice, String
     rows
 }
 
-/// The most lines a comparison prints.
+/// The most lines a comparison prints, and the most of each text it compares: a text is
+/// capped in bytes, not lines, and the table below grows with their product.
 const DIFF_LINES: usize = 200;
+const DIFF_SIDE: usize = 1000;
 
 /// The env's text against the folder's, line by line: `-` only in the env's, `+` only in the
 /// folder's. Every line is escaped (the env's is the sandbox's), and the whole is capped.
 pub fn copy_diff(env: &str, folder: &str) -> Vec<String> {
-    let (a, b): (Vec<&str>, Vec<&str>) = (env.lines().collect(), folder.lines().collect());
+    let (a, b): (Vec<&str>, Vec<&str>) = (
+        env.lines().take(DIFF_SIDE).collect(),
+        folder.lines().take(DIFF_SIDE).collect(),
+    );
     // Longest common subsequence, from the end: `lcs[i][j]` of `a[i..]` and `b[j..]`.
-    let mut lcs = vec![vec![0u32; b.len() + 1]; a.len() + 1];
+    let mut lcs = vec![vec![0u16; b.len() + 1]; a.len() + 1];
     for i in (0..a.len()).rev() {
         for j in (0..b.len()).rev() {
             lcs[i][j] = if a[i] == b[j] {
@@ -1037,15 +1068,25 @@ pub fn copy_diff(env: &str, folder: &str) -> Vec<String> {
 /// Whether the env's luoto.toml is committed in the env's repository; `None` where
 /// /workspace is none, or the env doesn't say.
 fn committed_in_env(ctx: &Ctx, env: &str) -> Option<bool> {
-    let script = "cd /workspace && git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0; \
-                  if [ -z \"$(git status --porcelain -- luoto.toml 2>/dev/null)\" ]; \
-                  then echo committed; else echo uncommitted; fi";
     let out = ctx
         .rt
-        .run(exec(&names::dev(env)).user(crate::env::UID).sh(script))
+        .run_limited(
+            exec(&names::dev(env)).user(crate::env::UID).sh(COMMITTED),
+            std::time::Duration::from_secs(5),
+            64,
+        )
         .ok()?;
     read_committed(&out)
 }
+
+/// Tracked and the same as in HEAD: an ignored or untracked file is not committed. The
+/// repository is the sandbox's, so nothing of its own runs: no fsmonitor hook, no diff
+/// driver or textconv.
+const COMMITTED: &str = "cd /workspace && git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0; \
+     g='git -c core.fsmonitor=false -c core.untrackedCache=false'; \
+     if $g ls-files --error-unmatch -- luoto.toml >/dev/null 2>&1 \
+        && $g diff --quiet --no-ext-diff --no-textconv HEAD -- luoto.toml >/dev/null 2>&1; \
+     then echo committed; else echo uncommitted; fi";
 
 /// Only its own two words are read of what the env printed.
 fn read_committed(output: &str) -> Option<bool> {
@@ -1101,64 +1142,77 @@ fn compare_copies(
 }
 
 /// Take the folder's luoto.toml into the env when it changed there since the env took its copy:
-/// on `up` after a yes, with `luoto project apply` at once. Where the env changed its copy too,
-/// a terminal is asked which to go on with and nothing is overwritten without one. Whether
-/// the folder's was taken; either way the copy the env then has is reviewed as any other.
-pub fn take_from_folder(ctx: &Ctx, env: &str, take: Take) -> Result<bool> {
-    let took = |text: &str| -> Result<bool> {
-        write_env(ctx, env, text)?;
-        set_taken(ctx, env, text)?;
+/// on `up` after a yes, with `luoto project apply` at once. Where the env's copy stands
+/// against it (the env changed it too, or the user kept it), a terminal is asked which to go
+/// on with and nothing is overwritten without one. The text taken, if any; either way the
+/// copy the env then has is reviewed as any other.
+pub fn take_from_folder(ctx: &Ctx, env: &str, take: Take) -> Result<Option<String>> {
+    let (folder, copy) = match folder_copy(ctx, env)? {
+        FolderCopy::Same => return Ok(None),
+        FolderCopy::Newer(folder) => (folder, None),
+        FolderCopy::Both { folder, env } => (folder, Some(env)),
+    };
+    let took = |text: String| -> Result<Option<String>> {
+        write_env(ctx, env, &text)?;
+        set_taken(ctx, env, &text)?;
         remove(&kept_path(ctx, env))?;
         println!("took luoto.toml from your folder into the env");
-        Ok(true)
+        Ok(Some(text))
     };
-    match folder_copy(ctx, env)? {
-        FolderCopy::Same => Ok(false),
-        FolderCopy::Newer(text) => {
-            if take != Take::Asking
-                || crate::prompt::confirm(
-                    "luoto.toml in your folder changed since the env took its copy, which is \
-                     the one luoto reads. Take yours into the env?",
-                )
-            {
-                return took(&text);
+    let step = copy_step(
+        take,
+        copy.is_some(),
+        kept(ctx, env, &folder),
+        crate::prompt::interactive(),
+    );
+    match step {
+        CopyStep::Take => took(folder),
+        CopyStep::Quiet => Ok(None),
+        CopyStep::Confirm => {
+            if crate::prompt::confirm(
+                "luoto.toml in your folder changed since the env took its copy, which is \
+                 the one luoto reads. Take yours into the env?",
+            ) {
+                took(folder)
+            } else {
+                Ok(None)
             }
-            if !crate::prompt::interactive() {
-                out!(
-                    "note: luoto.toml in your folder changed since the env took its copy: \
-                     `luoto project apply -e {env}` takes it in"
-                );
-            }
-            Ok(false)
         }
-        FolderCopy::Both { folder, env: copy } => {
-            let step = both_step(take, crate::prompt::interactive(), kept(ctx, env, &folder));
-            let choice = match step {
-                BothStep::Take => Some(CopyChoice::Folder),
-                BothStep::Quiet => return Ok(false),
-                BothStep::Note => None,
-                BothStep::Ask => {
-                    let committed = committed_in_env(ctx, env);
-                    let mut choice = crate::wizard::pick_copy(copy_rows(committed, true))?;
-                    if choice == Some(CopyChoice::Diff) {
-                        for line in copy_diff(&copy, &folder) {
-                            println!("  {line}");
-                        }
-                        choice = crate::wizard::pick_copy(copy_rows(committed, false))?;
-                    }
-                    choice
+        CopyStep::NoteNewer => {
+            out!(
+                "note: luoto.toml in your folder changed since the env took its copy: \
+                 `luoto project apply -e {env}` takes it in"
+            );
+            Ok(None)
+        }
+        CopyStep::Note => {
+            out_text!("{}", both_note(env, false));
+            Ok(None)
+        }
+        CopyStep::Ask => {
+            let committed = committed_in_env(ctx, env);
+            let mut choice = crate::wizard::pick_copy(copy_rows(committed, true))?;
+            if choice == Some(CopyChoice::Diff) {
+                // A kept copy is the accepted one by now: read it as it is.
+                let copy = match copy {
+                    Some(copy) => copy,
+                    None => read_env(ctx, env)?.unwrap_or_default(),
+                };
+                for line in copy_diff(&copy, &folder) {
+                    println!("  {line}");
                 }
-            };
+                choice = crate::wizard::pick_copy(copy_rows(committed, false))?;
+            }
             match choice {
-                Some(CopyChoice::Folder) => took(&folder),
+                Some(CopyChoice::Folder) => took(folder),
                 Some(CopyChoice::Env) => {
                     write_private(&kept_path(ctx, env), sha(&folder).as_bytes())?;
                     out!("kept the env's luoto.toml (`luoto project apply -e {env}` asks again)");
-                    Ok(false)
+                    Ok(None)
                 }
                 _ => {
-                    out_text!("{}", both_note(env, step == BothStep::Ask));
-                    Ok(false)
+                    out_text!("{}", both_note(env, true));
+                    Ok(None)
                 }
             }
         }
@@ -1179,6 +1233,22 @@ fn both_note(env: &str, asked: bool) -> String {
     }
 }
 
+/// Where to fix a luoto.toml that doesn't parse: in the folder, when the env's copy is the
+/// text luoto took from there.
+fn invalid_hint(env: &str, text: Option<&str>, taken: Option<&str>) -> String {
+    if text.is_some() && text == taken {
+        format!("; fix it in your folder, and `luoto up -e {env}` offers to take it in")
+    } else {
+        String::new()
+    }
+}
+
+/// The env still holds the text that was just taken from the folder: only that text was
+/// meant to be reviewed and applied, and code in the env can write the file in between.
+pub fn taken_intact(took: Option<&str>, read: Option<&str>) -> bool {
+    took.is_none() || took == read
+}
+
 /// On `up`: let the user decide on a luoto.toml the workspace changed. Never applies anything
 /// without a yes on a terminal. Whether the user applied a change.
 pub fn review(ctx: &Ctx, env: &str) -> Result<bool> {
@@ -1189,12 +1259,7 @@ pub fn review(ctx: &Ctx, env: &str) -> Result<bool> {
         State::Invalid => crate::progress::warn(&format!(
             "the project's luoto.toml is not applied: {}{}",
             st.error.as_deref().unwrap_or_default(),
-            // The env's copy is the folder's: that is where to fix it.
-            if st.text.is_some() && st.text == taken(ctx, env) {
-                format!("; fix it in your folder, and `luoto up -e {env}` offers to take it in")
-            } else {
-                String::new()
-            }
+            invalid_hint(env, st.text.as_deref(), taken(ctx, env).as_deref())
         )),
         State::Removed => out!(
             "note: the project no longer has luoto.toml; its accepted settings still apply \
@@ -1307,19 +1372,81 @@ mod tests {
     }
 
     #[test]
-    fn both_copies_changed_is_asked_about_on_a_terminal_and_never_overwritten_without_one() {
-        // `up`.
-        assert_eq!(both_step(Take::Asking, true, false), BothStep::Ask);
-        assert_eq!(both_step(Take::Asking, false, false), BothStep::Note);
+    fn a_copy_that_stands_against_the_folders_is_asked_about_and_never_overwritten_unasked() {
+        // Both changed. `up`:
+        assert_eq!(copy_step(Take::Asking, true, false, true), CopyStep::Ask);
+        assert_eq!(copy_step(Take::Asking, true, false, false), CopyStep::Note);
         // Kept over this folder text before: `up` doesn't ask again.
-        assert_eq!(both_step(Take::Asking, true, true), BothStep::Quiet);
-        assert_eq!(both_step(Take::Asking, false, true), BothStep::Quiet);
+        assert_eq!(copy_step(Take::Asking, true, true, true), CopyStep::Quiet);
+        assert_eq!(copy_step(Take::Asking, true, true, false), CopyStep::Quiet);
         // `luoto project apply` asks whatever was kept, and takes nothing without a terminal.
-        assert_eq!(both_step(Take::Newer, true, true), BothStep::Ask);
-        assert_eq!(both_step(Take::Newer, false, false), BothStep::Note);
-        // Only `--from-folder` overwrites the env's unasked.
-        assert_eq!(both_step(Take::Folder, false, false), BothStep::Take);
-        assert_eq!(both_step(Take::Folder, true, true), BothStep::Take);
+        assert_eq!(copy_step(Take::Newer, true, true, true), CopyStep::Ask);
+        assert_eq!(copy_step(Take::Newer, true, false, false), CopyStep::Note);
+
+        // The kept copy was accepted since, so only the folder's counts as changed: the
+        // choice still holds. `up` is quiet, and `project apply` asks, not overwrites.
+        assert_eq!(copy_step(Take::Asking, false, true, true), CopyStep::Quiet);
+        assert_eq!(copy_step(Take::Asking, false, true, false), CopyStep::Quiet);
+        assert_eq!(copy_step(Take::Newer, false, true, true), CopyStep::Ask);
+        assert_eq!(copy_step(Take::Newer, false, true, false), CopyStep::Note);
+
+        // A folder copy the env left alone, as ever.
+        assert_eq!(
+            copy_step(Take::Asking, false, false, true),
+            CopyStep::Confirm
+        );
+        assert_eq!(
+            copy_step(Take::Asking, false, false, false),
+            CopyStep::NoteNewer
+        );
+        assert_eq!(copy_step(Take::Newer, false, false, false), CopyStep::Take);
+
+        // Only `--from-folder` overwrites a copy that stands, unasked.
+        for (both, kept) in [(true, false), (true, true), (false, true), (false, false)] {
+            assert_eq!(copy_step(Take::Folder, both, kept, false), CopyStep::Take);
+            assert_eq!(copy_step(Take::Folder, both, kept, true), CopyStep::Take);
+        }
+    }
+
+    #[test]
+    fn a_luoto_toml_that_doesnt_parse_is_fixed_where_it_came_from() {
+        let broken = "repose = []\n";
+        assert_eq!(
+            invalid_hint("web", Some(broken), Some(broken)),
+            "; fix it in your folder, and `luoto up -e web` offers to take it in"
+        );
+        // The env's own text (a `git pull` there, the sandbox), or nothing taken: no hint.
+        assert_eq!(invalid_hint("web", Some(broken), Some("ports = [1]\n")), "");
+        assert_eq!(invalid_hint("web", Some(broken), None), "");
+        assert_eq!(invalid_hint("web", None, None), "");
+    }
+
+    #[test]
+    fn only_the_text_taken_from_the_folder_is_applied_after_taking_it() {
+        let taken = "presets = [\"npm\"]\n";
+        assert!(taken_intact(Some(taken), Some(taken)));
+        // Swapped in the env between the write and the read, or gone.
+        assert!(!taken_intact(
+            Some(taken),
+            Some("presets = [\"npm\", \"pypi\"]\n")
+        ));
+        assert!(!taken_intact(Some(taken), None));
+        // Nothing was taken: whatever is there is reviewed as usual.
+        assert!(taken_intact(None, Some(taken)));
+        assert!(taken_intact(None, None));
+    }
+
+    #[test]
+    fn the_committed_check_runs_nothing_of_the_repositorys_and_reads_ignored_as_not() {
+        for needs in [
+            "core.fsmonitor=false",
+            "ls-files --error-unmatch -- luoto.toml",
+            "--no-ext-diff",
+            "--no-textconv",
+        ] {
+            assert!(COMMITTED.contains(needs), "{needs}");
+        }
+        assert!(!COMMITTED.contains("git status"));
     }
 
     #[test]
@@ -1373,6 +1500,9 @@ mod tests {
         let capped = copy_diff(&long, "");
         assert_eq!(capped.len(), DIFF_LINES + 2);
         assert_eq!(capped.last().unwrap(), "… 300 more lines");
+        // A text of nothing but line ends is within the byte cap: its lines are capped too.
+        let blank = "\n".repeat(MAX_BYTES);
+        assert_eq!(copy_diff(&blank, &blank).len(), DIFF_LINES + 2);
     }
 
     #[test]

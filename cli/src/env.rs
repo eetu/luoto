@@ -569,8 +569,9 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
                     || workspace::push(ctx, env, &dir, None),
                 )?;
                 out!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
-                // The env's luoto.toml is the folder's, until the env changes it.
-                if let Some(text) = crate::project::read_host(&dir)? {
+                // The env's luoto.toml is the folder's, until the env changes it. One that
+                // can't be read here (a link, too large) is refused where it is reviewed.
+                if let Ok(Some(text)) = crate::project::read_host(&dir) {
                     crate::project::set_taken(ctx, env, &text)?;
                 }
             }

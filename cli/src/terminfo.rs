@@ -43,6 +43,26 @@ fn valid(term: &str, entry: &str) -> bool {
     entry.len() <= MAX_ENTRY && plain && named
 }
 
+/// `entry` without its comment lines: `infocmp` starts with the file it read, a path of
+/// this machine (the user's name, maybe not ASCII) that the env has no use for.
+fn bare(entry: &str) -> String {
+    entry
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
+/// What `luoto open --with ssh` adds where `got`, the name a session of luoto's would get,
+/// isn't this terminal's (`here`): the user's own ssh sends its `TERM` whatever luoto does.
+pub fn ssh_note(here: Option<&str>, got: &str) -> Option<String> {
+    let here = here.filter(|t| *t != got)?;
+    Some(format!(
+        "The env has no terminfo entry for this terminal ({}): start ssh with `TERM={got}`.",
+        crate::text::display(here)
+    ))
+}
+
 /// The name a session gets, and the entry to install in the env first when it lacks one:
 /// this terminal's name where the env has its entry (`in_env`) or this machine can give it
 /// (`on_host`), else the fallback. Neither is asked about a name every image knows.
@@ -56,7 +76,7 @@ fn plan(
         Some(t) if t == FALLBACK => fallback(),
         Some(t) if !safe(t) => fallback(),
         Some(t) if in_env(t) => (t.to_string(), None),
-        Some(t) => match on_host(t).filter(|e| valid(t, e)) {
+        Some(t) => match on_host(t).map(|e| bare(&e)).filter(|e| valid(t, e)) {
             Some(entry) => (t.to_string(), Some(entry)),
             None => fallback(),
         },
@@ -73,7 +93,8 @@ fn host_entry(term: &str) -> Option<String> {
         .output()
         .ok()
         .filter(|o| o.status.success())?;
-    String::from_utf8(out.stdout).ok()
+    // Lossy: only its comment, which is dropped, may hold other than ASCII.
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// The `TERM` for a terminal session of `user` in `env`: one exec where the env knows this
@@ -173,6 +194,18 @@ mod tests {
     }
 
     #[test]
+    fn ssh_of_the_users_own_is_told_when_the_env_lacks_the_terminals_entry() {
+        assert_eq!(
+            ssh_note(Some("xterm-ghostty"), FALLBACK).unwrap(),
+            "The env has no terminfo entry for this terminal (xterm-ghostty): start ssh with \
+             `TERM=xterm-256color`."
+        );
+        assert_eq!(ssh_note(Some("xterm-ghostty"), "xterm-ghostty"), None);
+        assert_eq!(ssh_note(Some(FALLBACK), FALLBACK), None);
+        assert_eq!(ssh_note(None, FALLBACK), None);
+    }
+
+    #[test]
     fn a_session_keeps_its_terminals_name_where_the_env_has_or_gets_its_entry() {
         let never = |_: &str| -> bool { panic!("not asked") };
         let none = |_: &str| -> Option<String> { panic!("not asked") };
@@ -182,9 +215,17 @@ mod tests {
             ("xterm-ghostty".to_string(), None)
         );
         // Missing in the env, here on this machine: copied.
+        let (term, entry) = plan(Some("xterm-ghostty"), |_| false, |_| Some(GHOSTTY.into()));
+        let entry = entry.unwrap();
+        assert_eq!(term, "xterm-ghostty");
+        // Without the comment that names a file of this machine.
+        assert!(entry.starts_with("xterm-ghostty|ghostty|Ghostty,\n"));
+        assert!(entry.lines().all(|l| !l.starts_with('#')) && !entry.contains("/x/terminfo"));
+        // A home that isn't ASCII is only in that comment.
+        let home = GHOSTTY.replace("/x/", "/Users/mäki/");
         assert_eq!(
-            plan(Some("xterm-ghostty"), |_| false, |_| Some(GHOSTTY.into())),
-            ("xterm-ghostty".to_string(), Some(GHOSTTY.to_string()))
+            plan(Some("xterm-ghostty"), |_| false, |_| Some(home)).1,
+            Some(entry)
         );
         // Nowhere, or not an entry for it: the fallback.
         let fallback = (FALLBACK.to_string(), None);
