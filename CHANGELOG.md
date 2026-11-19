@@ -2,6 +2,9 @@
 
 ## 0.6.2 (unreleased)
 
+- Tab completes folders and files where a command takes one: `luoto init`, `--repo`,
+  `luoto repo add`, `luoto share add`, `luoto import`, `luoto export`, `luoto run`'s files and
+  `luoto doctor --report`.
 - `luoto open --with claude-squad` on an env whose `/workspace` is no git repository (a
   launchpad, a virtual workspace, a plain folder) says so before it starts, with the terminal
   workspaces that open there; it used to fail inside the env. `luoto up` lists only the ones
