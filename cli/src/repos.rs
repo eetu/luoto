@@ -833,7 +833,7 @@ fn git_progress() -> bool {
 }
 
 /// What a repo in the env holds that no remote has.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Unpushed {
     /// `/workspace` or `/workspace/<name>`.
     pub path: String,

@@ -130,6 +130,48 @@ the gate denied 4 attempts to reach 2 hosts during the run:
 `luoto egress -e web --denied` says how to allow each.
 ```
 
+## Leftover envs
+
+`--rm` is how a job leaves nothing behind. Envs that stayed anyway (kept for their work, made
+without `--rm`, left by a run that was killed) go with `luoto prune --envs`: it removes the
+stopped envs nobody has used for 30 days, as `luoto rm` removes one, after listing them and
+one question.
+
+```console
+$ luoto prune --envs --match 'job-*' --older-than 7d
+`luoto prune --envs` removes 2 stopped env(s) named `job-*` not used for 7d,
+3.2 GB:
+  ENV     LAST USED  SIZE
+  job-12  9d ago     1.6 GB
+  job-15  8d ago     1.6 GB
+1 stopped env(s) named `job-*` not used for 7d stay for the work they hold,
+1.6 GB (`--with-work` removes them too):
+  ENV     LAST USED  SIZE
+  job-14  8d ago     1.6 GB
+      /workspace: 2 files changed, 1 commit not pushed
+? Remove 2 env(s) (3.2 GB)? [y/N]
+```
+
+- **Which envs.** An env is used when it starts, while something runs in it (a shell, an
+  agent, an editor session, a dev server: what `idle_stop` goes by) and when it stops.
+  `--older-than` sets the age (`7d`, `12h`; `0d` is every stopped env), `prune_after` in
+  `config.toml` its default. `--match` narrows them to the names a shell pattern matches
+  (`*`, `?`, `[a-z]`; case matters). A running env is never removed. `luoto list` shows each
+  env's last use under USED.
+- **Work stays.** An env holding work that is nowhere else is listed with what it holds and
+  kept: what `luoto rm` names (files changed, commits not pushed, stashes), as luoto found it
+  when the env stopped, and for an env with a folder on this machine the files that folder
+  lacks, read from the stopped env's volume. An env luoto didn't see stop (a restart of the
+  machine) counts as holding work until a `luoto up` and `luoto down` of it. `--with-work`
+  removes these too.
+- **In a script.** `--yes` skips the question. Without a terminal and without `--yes` the
+  envs are only listed, with the command that removes them. An env that can't be removed
+  leaves the rest to go, and the exit code is 1.
+- **Envs from before 0.6.3** have no record of their last use: they show `unknown`, and
+  their age counts from when luoto last wrote their config or state.
+
+`luoto prune` without `--envs` removes luoto's superseded images and no env.
+
 ## Before it runs unattended
 
 - **Credentials that need no one.** `up` loads the env's secrets into the vault, and a 1Password

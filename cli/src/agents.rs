@@ -1242,7 +1242,7 @@ pub fn headless(
                 pulled = Some(pull_and_end(&ctx, env_name, end));
             } else {
                 match end {
-                    End::Leave => {}
+                    End::Leave => crate::used::touch(&ctx.paths, env_name),
                     End::Down => stop_env(&ctx, env_name),
                     End::Remove { yes } => remove_after(&ctx, env_name, yes),
                 }
@@ -1382,15 +1382,8 @@ fn pull_and_end(ctx: &Ctx, env: &str, end: End) -> autopull::Report {
     if let (End::Remove { yes }, Some(git)) = (end, git) {
         let ws = env::layered(ctx, env).map(|c| c.workspace).ok();
         // A repo copied in from a folder has its files there now, if they all landed.
-        let pulled = |path: &str| {
-            let folder = ws
-                .as_ref()
-                .is_some_and(|ws| match path.strip_prefix("/workspace/") {
-                    Some(name) => ws.repos.get(name).is_some_and(|r| r.dir.is_some()),
-                    None => ws.dir.is_some(),
-                });
-            folder && !report.incomplete()
-        };
+        let pulled =
+            |path: &str| ws.as_ref().is_some_and(|ws| ws.folder_of(path)) && !report.incomplete();
         let mut in_files_only = false;
         let lost: Vec<String> = match &git {
             Ok(found) => found

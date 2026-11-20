@@ -28,6 +28,10 @@ pub struct GlobalConfig {
     /// 30 minutes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_stop: Option<String>,
+    /// `luoto prune --envs` removes envs not used for this long (`30d`, `12h`); default 30
+    /// days. Its `--older-than` takes precedence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prune_after: Option<String>,
     /// Forward each port an env listens on to localhost here (default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_forward: Option<bool>,
@@ -216,6 +220,15 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Whether `path` in the env (`/workspace` or `/workspace/<repo>`) was copied in from a
+    /// folder of this machine, which a pull writes back to.
+    pub fn folder_of(&self, path: &str) -> bool {
+        match path.strip_prefix("/workspace/") {
+            Some(name) => self.repos.get(name).is_some_and(|r| r.dir.is_some()),
+            None => self.dir.is_some(),
+        }
+    }
+
     /// Whether a pull has a folder of this machine to write: the env's own, or a repo's.
     pub fn has_folder(&self) -> bool {
         self.dir.is_some() || self.repos.values().any(|r| r.dir.is_some())

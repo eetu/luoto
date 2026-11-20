@@ -166,6 +166,12 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   unnamed one by podman's names history, or the build stages' `luoto.build` label), never one
   a container uses or either instance runs, never a volume. Sizes walk every volume: never on
   the UI's polls.
+- `used.rs` keeps, in an env's state folder, when it was last used (`up`, the watcher's
+  idle look finding something running, a stop) and what its repos held as it stopped
+  (`env::down` asks `repos::unpushed` while the dev container still runs). `prune.rs`
+  (`luoto prune --envs`) removes stopped envs by that age through `commands::remove_env`;
+  it never starts an env to look, so one with no record of its stop holds work, and a
+  folder's files are compared from the stopped volume (`autopull::unpulled_stopped`).
 - `watch.rs` is the one background process per config dir; port forwarding (`ports.rs`) goes
   through `exec … sandbox relay`, never a network path; on Apple it keeps the tun links and
   the gates' vault links. Its desktop notifications

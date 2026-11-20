@@ -959,6 +959,43 @@ fn never_copied(ctx: &Ctx, vol: &VolumeBox, env: &str, target: &PullTarget) -> R
     Ok(workspace::never_copied_lines(&out?))
 }
 
+/// What stopped env `env` holds that its folders don't have, read from its volume as an
+/// unattended pull reads it: `commands::unpulled` for an env that can't be asked. Nothing for
+/// an env with no folder here.
+pub fn unpulled_stopped(ctx: &Ctx, env: &str) -> Result<Vec<workspace::Unpulled>> {
+    let ws = EnvFile::load(&ctx.paths, env)?.cfg.workspace;
+    let Some(state) = EnvState::load(&ctx.paths, env)? else {
+        return Ok(Vec::new());
+    };
+    let targets = folders(&ws, &state.repos)?;
+    if targets.is_empty() || !ctx.rt.volume_exists(&names::volume(env, "work")) {
+        return Ok(Vec::new());
+    }
+    if ctx.rt.is_running(&names::dev(env)) {
+        bail!("env `{env}` is running");
+    }
+    let id_map = env::dev_id_map(&ctx.rt, state.octet);
+    let vol = VolumeBox::open(ctx, env, "work", id_map, false)?;
+    let mut found = Vec::new();
+    for t in &targets {
+        let read = read_stopped(ctx, &vol, env, t).map_err(|e| match e {
+            TarError::TooLarge => anyhow::anyhow!(
+                "the env's files are more than the {} read from a stopped env",
+                crate::disk::human(CAPS.read)
+            ),
+            e => anyhow::anyhow!("the env's files couldn't be read ({e})"),
+        })?;
+        let never = never_copied(ctx, &vol, env, t)?;
+        let base = t.base(&ctx.paths, env);
+        let plan = workspace::build_plan(&read, &t.dest, &t.skip, base.as_ref())?;
+        let u = workspace::Unpulled::of(&plan, t, never);
+        if u.any() {
+            found.push(u);
+        }
+    }
+    Ok(found)
+}
+
 /// Plan one folder: read the env's side, judge it, and fill in `report`. None when nothing
 /// is to be written for it, which `report.deferred` then explains.
 fn plan_folder(

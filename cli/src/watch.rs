@@ -519,7 +519,11 @@ pub fn watch() -> Result<ExitCode> {
             let limit = EnvFile::load(&ctx.paths, name)
                 .ok()
                 .and_then(|f| idle::limit(&ctx.global, &f.cfg));
-            let quiet = idle::activity(&ctx, name).is_some_and(|a| a.is_empty());
+            let activity = idle::activity(&ctx, name);
+            if activity.as_ref().is_some_and(|a| !a.is_empty()) {
+                crate::used::touch(&ctx.paths, name);
+            }
+            let quiet = activity.is_some_and(|a| a.is_empty());
             let (Some(limit), true) = (limit, quiet) else {
                 idle_since.remove(name);
                 continue;

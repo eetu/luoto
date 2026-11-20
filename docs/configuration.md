@@ -126,7 +126,9 @@ Credentials go only in each env's own file, and so does `dangerously_pull_on_sto
 say what it writes and holds back): `config.toml` and a `luoto.toml` refuse it, and an env
 without a folder on this machine can't have it. `notifications = false` there turns desktop
 [notifications](#notifications) off. `runtime = "container"` there (`luoto setup` offers it)
-runs envs on Apple's `container` ([install.md](install.md)).
+runs envs on Apple's `container` ([install.md](install.md)). `prune_after = "7d"` there
+(default `30d`) is how long a stopped env goes unused before `luoto prune --envs` removes it
+([leftover envs](guides/headless.md#leftover-envs)).
 
 A `[[deny]]` beats every allow: a preset's, a rule's, an approved request's. It applies to the
 HTTP(S) the gate reads: a tunnel rule can't cover a denied host, and SSH to

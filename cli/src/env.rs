@@ -472,6 +472,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     let image = env_image(ctx, &layered(ctx, env)?);
     let ids = ensure_images(ctx, &image)?;
     let state = state::ensure(ctx, env, &image)?;
+    crate::used::started(&ctx.paths, env);
     // Its warnings are about choices the user made: `edit` and `status` show them.
     let mut p = plan(ctx, env)?;
     let rt = &ctx.rt;
@@ -1471,12 +1472,17 @@ pub fn stop_vm_if_unused(ctx: &Ctx) -> Result<bool> {
     Ok(true)
 }
 
-/// Stop the env's containers; whether any was running.
+/// Stop the env's containers; whether any was running. What its repos hold that no remote
+/// has is kept first (`used::stopping`): `luoto prune --envs` can't ask a stopped env.
 pub fn down(ctx: &Ctx, env: &str) -> Result<bool> {
+    crate::used::stopping(ctx, env);
     let _waiting = crate::progress::waiting(&format!("stopping `{env}`"));
     let mut was = false;
     for c in [names::dev(env), names::gate(env)] {
         was |= ctx.rt.stop(&c)?;
+    }
+    if was {
+        crate::used::touch(&ctx.paths, env);
     }
     Ok(was)
 }

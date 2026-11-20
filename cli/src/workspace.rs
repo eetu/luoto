@@ -1779,6 +1779,18 @@ pub struct Unpulled {
 }
 
 impl Unpulled {
+    /// From a pull of `target` planned and not written, and what no pull takes (`found`).
+    pub fn of(plan: &PullPlan, target: &PullTarget, found: Vec<String>) -> Unpulled {
+        let ignored = host_ignored(&target.dest, &found);
+        Unpulled {
+            dir: plan.dir.clone(),
+            changed: plan.entries.len(),
+            refused: plan.refused.len(),
+            unread: plan.unread.is_some(),
+            never_copied: found.into_iter().filter(|p| !ignored.contains(p)).collect(),
+        }
+    }
+
     pub fn any(&self) -> bool {
         self.changed + self.refused + self.never_copied.len() > 0 || self.unread
     }
@@ -1826,14 +1838,7 @@ impl std::fmt::Display for Unpulled {
 pub fn unpulled(ctx: &Ctx, env: &str, target: &PullTarget) -> Result<Unpulled> {
     let plan = plan_pull(ctx, env, target, false)?;
     let found = never_copied(ctx, env, target)?;
-    let ignored = host_ignored(&target.dest, &found);
-    Ok(Unpulled {
-        dir: plan.dir.clone(),
-        changed: plan.entries.len(),
-        refused: plan.refused.len(),
-        unread: plan.unread.is_some(),
-        never_copied: found.into_iter().filter(|p| !ignored.contains(p)).collect(),
-    })
+    Ok(Unpulled::of(&plan, target, found))
 }
 
 /// Every folder a pull writes, and one digest over them that applying checks.

@@ -25,6 +25,15 @@
   is asked. So is an env whose files its folder doesn't have: new or changed files, ones a
   pull refuses or couldn't read, and `node_modules`-like folders the folder's `.gitignore`
   doesn't ignore.
+- `luoto prune --envs` removes the stopped envs nobody has used for 30 days (`--older-than
+  7d`, or `prune_after` in `config.toml`), optionally only those a pattern names (`--match
+  'job-*'`), after listing them with their last use and size and one question. An env holding
+  work that is nowhere else is listed and kept unless `--with-work`: what `luoto rm` names,
+  as luoto found it when the env stopped, and the files its folder lacks. `--yes` skips the
+  question; without a terminal and without it, nothing is removed.
+  [Leftover envs](docs/guides/headless.md#leftover-envs) has the rules.
+- `luoto list` shows when each env was last used (USED): its last start, the last time
+  something ran in it, or its stop. An env last used by an earlier luoto shows `unknown`.
 - An idle env stops after `idle_stop` again: luoto's own processes in the env (its network
   link on Apple's `container`, its ssh-agent, the watcher's look at listening ports) counted
   as work, so it never became idle.

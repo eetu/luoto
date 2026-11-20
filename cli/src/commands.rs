@@ -794,11 +794,17 @@ pub fn list(size: bool) -> Result<ExitCode> {
             ),
         })
         .collect();
+    let now = chrono::Utc::now();
     let rows: Vec<ListRow> = rows
         .into_iter()
         .map(|(env, from, image, presets)| {
             let (dev, gate) = states.env(&env);
+            let running = states.running(&names::dev(&env));
             ListRow {
+                used: match running {
+                    true => "now".into(),
+                    false => crate::used::of(&ctx.paths, &env).shown(now),
+                },
                 size: size.then(|| size_of(&env)),
                 env,
                 dev,
@@ -828,6 +834,8 @@ struct ListRow {
     gate: String,
     /// With `--size`.
     size: Option<String>,
+    /// When it was last used (`used.rs`): `now` while it runs.
+    used: String,
     from: String,
     image: String,
     presets: String,
@@ -848,24 +856,30 @@ fn list_lines(rows: &[ListRow], width: usize) -> Vec<String> {
         wide("FROM", &|r| &r.from),
     );
     let size_w = wide("SIZE", &|r| r.size.as_deref().unwrap_or(""));
+    let used_w = wide("USED", &|r| &r.used);
     let sized = rows.iter().any(|r| r.size.is_some());
-    let line = |env: &str, dev: &str, gate: &str, size: &str, from: &str, image: &str| {
-        let size = if sized {
-            format!("{size:<size_w$}  ")
-        } else {
-            String::new()
-        };
-        format!("{env:<env_w$}  {dev:<dev_w$}  {gate:<gate_w$}  {size}{from:<from_w$}  {image}")
+    let line =
+        |env: &str, dev: &str, gate: &str, size: &str, used: &str, from: &str, image: &str| {
+            let size = if sized {
+                format!("{size:<size_w$}  ")
+            } else {
+                String::new()
+            };
+            format!(
+                "{env:<env_w$}  {dev:<dev_w$}  {gate:<gate_w$}  {size}{used:<used_w$}  \
+             {from:<from_w$}  {image}"
+            )
             .trim_end()
             .to_string()
-    };
-    let mut out = vec![line("ENV", "DEV", "GATE", "SIZE", "FROM", "IMAGE")];
+        };
+    let mut out = vec![line("ENV", "DEV", "GATE", "SIZE", "USED", "FROM", "IMAGE")];
     for r in rows {
         out.push(line(
             &r.env,
             &r.dev,
             &r.gate,
             r.size.as_deref().unwrap_or(""),
+            &r.used,
             &r.from,
             &r.image,
         ));
@@ -2052,11 +2066,12 @@ mod tests {
 
     #[test]
     fn list_puts_an_envs_presets_under_it() {
-        let row = |env: &str, presets: &str| ListRow {
+        let row = |env: &str, used: &str, presets: &str| ListRow {
             env: env.into(),
             dev: "running".into(),
             gate: "running".into(),
             size: None,
+            used: used.into(),
             from: "~/src/web".into(),
             image: "localhost/luoto-base:dev".into(),
             presets: presets.into(),
@@ -2065,22 +2080,26 @@ mod tests {
             &[
                 row(
                     "web",
+                    "now",
                     "debian,github,github-releases,toolchains,crates,npm,pypi,go,ruby",
                 ),
-                row("api", ""),
+                row("api", "45d ago", ""),
+                row("old", "unknown", ""),
             ],
             79,
         );
         assert_eq!(
             lines,
             [
-                "ENV  DEV      GATE     FROM       IMAGE",
-                "web  running  running  ~/src/web  localhost/luoto-base:dev",
+                "ENV  DEV      GATE     USED     FROM       IMAGE",
+                "web  running  running  now      ~/src/web  localhost/luoto-base:dev",
                 "  presets  debian, github, github-releases, toolchains, crates, npm, pypi, go,",
                 "           ruby",
-                "api  running  running  ~/src/web  localhost/luoto-base:dev",
+                "api  running  running  45d ago  ~/src/web  localhost/luoto-base:dev",
+                "old  running  running  unknown  ~/src/web  localhost/luoto-base:dev",
             ]
         );
+        fits(&lines);
     }
 
     #[test]

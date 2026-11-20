@@ -41,6 +41,7 @@ mod ports;
 mod progress;
 mod project;
 mod prompt;
+mod prune;
 mod release;
 mod report;
 mod repos;
@@ -61,6 +62,7 @@ mod tunlink;
 mod ui;
 mod uninstall;
 mod upgrade;
+mod used;
 mod vars;
 mod watch;
 mod wizard;
@@ -121,10 +123,26 @@ enum Cmd {
     ///
     /// None a container uses or this luoto runs, after listing them; the freed space goes back
     /// to this machine, and volumes stay.
+    ///
+    /// With `--envs`, instead: the stopped envs nobody has used for a while, as `luoto rm`
+    /// removes one, after listing them. One holding work that is nowhere else stays.
     Prune {
         /// Don't ask first.
         #[arg(long, short)]
         yes: bool,
+        /// Remove stopped envs not used for 30 days (`prune_after` in config.toml), not images.
+        #[arg(long)]
+        envs: bool,
+        /// With `--envs`: envs not used for this long (`7d`, `12h`; `0d` for every stopped
+        /// one).
+        #[arg(long, value_name = "DURATION", requires = "envs")]
+        older_than: Option<String>,
+        /// With `--envs`: only envs whose name matches (`job-*`).
+        #[arg(long = "match", value_name = "PATTERN", requires = "envs")]
+        matching: Option<String>,
+        /// With `--envs`: also envs holding work no remote and no folder of yours has.
+        #[arg(long, requires = "envs")]
+        with_work: bool,
     },
     /// Start the local web UI.
     Ui {
@@ -809,7 +827,19 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         Cmd::Doctor { report } => setup::doctor(report),
         Cmd::Upgrade => upgrade::upgrade(),
         Cmd::Uninstall { yes } => uninstall::uninstall(yes),
-        Cmd::Prune { yes } => disk::prune(yes),
+        Cmd::Prune {
+            yes,
+            envs: true,
+            older_than,
+            matching,
+            with_work,
+        } => prune::envs(prune::Opts {
+            older_than,
+            matching,
+            with_work,
+            yes,
+        }),
+        Cmd::Prune { yes, .. } => disk::prune(yes),
         Cmd::Ui { port, no_open } => ui::serve(port, !no_open),
         Cmd::Init(o) => init::init(o),
         Cmd::Up {
@@ -1282,6 +1312,27 @@ mod tests {
         let cli = parse(&["prune", "-e", "web", "--yes"]);
         let e = run(cli.env, cli.cmd).unwrap_err().to_string();
         assert!(e.contains("drop `-e`"), "{e}");
+        let Cmd::Prune {
+            envs,
+            older_than,
+            matching,
+            with_work,
+            yes,
+        } = parse(&["prune", "--envs", "--older-than", "7d", "--match", "job-*"]).cmd
+        else {
+            panic!("not prune");
+        };
+        assert!(envs && !with_work && !yes);
+        assert_eq!(older_than.as_deref(), Some("7d"));
+        assert_eq!(matching.as_deref(), Some("job-*"));
+        // The env filters mean nothing to the image prune.
+        for alone in [
+            &["prune", "--older-than", "7d"][..],
+            &["prune", "--match", "job-*"],
+            &["prune", "--with-work"],
+        ] {
+            assert!(Cli::try_parse_from([&["luoto"], alone].concat()).is_err());
+        }
         assert!(matches!(parse(&["ls"]).cmd, Cmd::List { size: false }));
         assert!(matches!(
             parse(&["list", "--size"]).cmd,
