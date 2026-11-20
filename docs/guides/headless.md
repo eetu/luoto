@@ -4,7 +4,8 @@
 without asking anything, installs the agent if the env lacks it, runs the agent's
 non-interactive mode with its own permission prompts off (the sandbox is the boundary) and
 prints its answer. Progress goes to stderr, the answer to stdout (or `--output FILE`), and
-the exit code is the agent's. `--timeout` caps the agent's time; `--down` stops the env after.
+the exit code is the agent's. `--timeout` caps the agent's time; `--down` stops the env after,
+`--rm` removes it.
 
 ```console
 $ luoto run --agent claude --prompt "Summarize what changed on main this week"
@@ -23,6 +24,23 @@ installing the agent don't use it. When it passes, luoto stops the agent and eve
 started in the env, even processes in a group of their own: SIGTERM, then SIGKILL 10 seconds
 later. Ctrl-C stops it the same way (a second one doesn't wait), and so does an answer that
 can't be written. The env keeps running unless `--down` is given.
+
+## A one-off env
+
+`--rm` removes the env when the run ends, as `luoto rm` does: containers, volumes and its
+config file, so a job that makes its env leaves nothing behind. Work no remote has would go
+with it, so luoto looks first, as `luoto rm` does (files changed, commits not pushed and
+stashes, in `/workspace` and each of its repos). An env holding some is kept and stopped,
+and the run says what it holds; on a terminal it asks. `--rm --yes` removes it whatever the
+run leaves. Either way the exit code is the agent's.
+
+```console
+$ luoto run -e nightly --agent claude --prompt-file task.md --rm
+Work in `nightly` that no remote has:
+  /workspace/api: 2 files changed, 1 commit not pushed
+env `nightly` kept, stopped: it holds work no remote has. `luoto rm -e nightly --yes`
+removes it; `luoto run … --rm --yes` removes an env whatever its run leaves
+```
 
 | exit code   | when                                                                             |
 | ----------- | -------------------------------------------------------------------------------- |

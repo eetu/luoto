@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.3 (unreleased)
+
+- `luoto run --rm` removes the env when the run ends, as `luoto rm` does, so a one-off job
+  leaves nothing behind. An env holding work no remote has (the same check as `luoto rm`)
+  is kept and stopped instead, with what it holds; `--yes` removes it anyway, and a terminal
+  is asked.
+
 ## 0.6.2 (unreleased)
 
 - Tab completes folders and files where a command takes one: `luoto init`, `--repo`,

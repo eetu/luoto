@@ -1026,7 +1026,7 @@ pub fn headless(
     args: &[String],
     output: Option<&str>,
     timeout: Option<&str>,
-    down: bool,
+    end: End,
 ) -> Result<ExitCode> {
     use std::process::Stdio;
     let ctx = Ctx::load()?;
@@ -1184,11 +1184,11 @@ pub fn headless(
     }
     relayed?;
     crate::disk::hint_growth(&ctx, env_name);
-    if down {
-        match env::down(&ctx, env_name) {
-            Ok(_) => err!("env `{env_name}` stopped"),
-            Err(e) => crate::progress::warn(&format!("env `{env_name}` not stopped ({e:#})")),
-        }
+    // What ends the run never changes its exit code: a problem here is a warning.
+    match end {
+        End::Leave => {}
+        End::Down => stop_env(&ctx, env_name),
+        End::Remove { yes } => remove_after(&ctx, env_name, yes),
     }
     match stopped {
         Some(Stop::Timeout) => return Ok(ExitCode::from(TIMED_OUT)),
@@ -1198,6 +1198,117 @@ pub fn headless(
     Ok(ExitCode::from(
         status.code().unwrap_or(1).clamp(0, 255) as u8
     ))
+}
+
+/// What `luoto run` does with the env once the agent has ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum End {
+    /// It keeps running.
+    Leave,
+    /// `--down`.
+    Down,
+    /// `--rm`: removed as `luoto rm` removes it; `yes` also with work no remote has.
+    Remove { yes: bool },
+}
+
+impl End {
+    pub fn of(down: bool, rm: bool, yes: bool) -> End {
+        match (rm, down) {
+            (true, _) => End::Remove { yes },
+            (false, true) => End::Down,
+            (false, false) => End::Leave,
+        }
+    }
+}
+
+fn stop_env(ctx: &Ctx, env: &str) {
+    match env::down(ctx, env) {
+        Ok(_) => err!("env `{env}` stopped"),
+        Err(e) => crate::progress::warn(&format!("env `{env}` not stopped ({e:#})")),
+    }
+}
+
+/// What `--rm` does with an env whose work was looked at.
+#[derive(Debug, PartialEq, Eq)]
+enum Removal {
+    Remove,
+    /// On a terminal: the list, then the question, whose answer Enter gives is to keep it.
+    Ask,
+    /// Without a terminal nothing is lost unasked: the env stays, stopped.
+    Keep,
+}
+
+/// `unpushed`: the env holds work no remote has, or couldn't be asked.
+fn removal(unpushed: bool, yes: bool, terminal: bool) -> Removal {
+    match (unpushed, yes, terminal) {
+        (false, ..) | (_, true, _) => Removal::Remove,
+        (true, false, true) => Removal::Ask,
+        (true, false, false) => Removal::Keep,
+    }
+}
+
+/// What is said of an env `--rm` left: what it holds, and the commands that remove it.
+fn kept_note(env: &str, asked: bool) -> String {
+    if asked {
+        format!("env `{env}` kept, stopped (`luoto rm -e {env}` removes it)")
+    } else {
+        format!(
+            "env `{env}` kept, stopped: it holds work no remote has. `luoto rm -e {env} --yes` \
+             removes it; `luoto run … --rm --yes` removes an env whatever its run leaves"
+        )
+    }
+}
+
+/// `--rm`: remove the env the run was in, unless it holds work no remote has and nobody said
+/// to lose it. On stderr: stdout is the agent's answer.
+fn remove_after(ctx: &Ctx, env: &str, yes: bool) {
+    use std::io::IsTerminal;
+    let found = crate::commands::unpushed(ctx, env);
+    let lost: Vec<String> = match &found {
+        Ok(found) => found.iter().map(|w| format!("  {w}")).collect(),
+        Err(e) => vec![format!(
+            "  its repos couldn't be checked: {}",
+            crate::text::lines(&format!("{e:#}"))
+        )],
+    };
+    let terminal = crate::prompt::interactive() && std::io::stderr().is_terminal();
+    let step = removal(!lost.is_empty(), yes, terminal);
+    if !lost.is_empty() {
+        if step == Removal::Remove {
+            err!("Work in `{env}` that no remote has, removed with it:");
+        } else {
+            err!("Work in `{env}` that no remote has:");
+        }
+        for line in &lost {
+            eprintln!("{line}");
+        }
+    }
+    let remove = match step {
+        Removal::Remove => true,
+        Removal::Keep => false,
+        Removal::Ask => {
+            let question = format!("Remove env `{env}` anyway? [y/N]");
+            let line = crate::progress::pause(|| {
+                eprint!("{}", crate::style::err().question(&question));
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+                line
+            });
+            matches!(line.trim(), "y" | "Y" | "yes")
+        }
+    };
+    if !remove {
+        // The note says it is stopped: once.
+        if let Err(e) = env::down(ctx, env) {
+            crate::progress::warn(&format!("env `{env}` not stopped ({e:#})"));
+        }
+        err_text!("{}", kept_note(env, step == Removal::Ask));
+        return;
+    }
+    match crate::commands::remove_env(ctx, env) {
+        Ok(()) => err!("env `{env}` removed"),
+        Err(e) => crate::progress::warn(&format!("env `{env}` not removed ({e:#})")),
+    }
 }
 
 /// Send `signal` to the processes of the run `mark` names in the env's dev container. As the
@@ -1370,6 +1481,40 @@ fn headless_argv(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rm_after_a_run_loses_no_unpushed_work_unasked() {
+        // Nothing unpushed: removed, whoever runs it.
+        assert_eq!(removal(false, false, false), Removal::Remove);
+        assert_eq!(removal(false, false, true), Removal::Remove);
+        // Unpushed work: `--yes` removes it, a terminal is asked, a scheduled run keeps it.
+        assert_eq!(removal(true, true, false), Removal::Remove);
+        assert_eq!(removal(true, true, true), Removal::Remove);
+        assert_eq!(removal(true, false, true), Removal::Ask);
+        assert_eq!(removal(true, false, false), Removal::Keep);
+    }
+
+    #[test]
+    fn an_env_rm_kept_names_the_commands_that_remove_it() {
+        assert_eq!(
+            kept_note("job", false),
+            "env `job` kept, stopped: it holds work no remote has. `luoto rm -e job --yes` \
+             removes it; `luoto run … --rm --yes` removes an env whatever its run leaves"
+        );
+        assert_eq!(
+            kept_note("job", true),
+            "env `job` kept, stopped (`luoto rm -e job` removes it)"
+        );
+    }
+
+    #[test]
+    fn rm_ends_a_run_before_down_does() {
+        assert_eq!(End::of(false, false, false), End::Leave);
+        assert_eq!(End::of(true, false, false), End::Down);
+        assert_eq!(End::of(false, true, false), End::Remove { yes: false });
+        // `--rm` stops the env as part of removing it: `--down` beside it adds nothing.
+        assert_eq!(End::of(true, true, true), End::Remove { yes: true });
+    }
 
     fn cfg(text: &str) -> EnvConfig {
         toml::from_str(text).unwrap()

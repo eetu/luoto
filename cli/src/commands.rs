@@ -467,12 +467,7 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
              work unless pushed, goes with it"
         );
     }
-    // A state that won't load must not keep an env from being removed.
-    let repos = EnvState::load(&ctx.paths, name)
-        .ok()
-        .flatten()
-        .map(|s| s.repos)
-        .unwrap_or_default();
+    let repos = seeded_repos(&ctx, name);
     if ctx.rt.is_running(&names::dev(name)) {
         match crate::repos::unpushed(&ctx, name, &repos) {
             Ok(found) if found.is_empty() => {}
@@ -501,18 +496,40 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
     {
         bail!("aborted (`luoto rm -e {name} --yes` skips the question)");
     }
-    // Volumes live in the VM, which may have stopped on idle; a deleted VM took them along.
-    if machine::gone(&ctx.rt) {
-        env::forget(&ctx, name)?;
-    } else {
-        env::ensure_vm(&ctx)?;
-        env::remove(&ctx, name)?;
-    }
-    crate::ssh::forget_host_key(&ctx, name)?;
-    std::fs::remove_file(&cfg)?;
-    crate::ssh::write_config(&ctx)?;
+    remove_env(&ctx, name)?;
     out!("env `{name}` removed");
     Ok(ExitCode::SUCCESS)
+}
+
+/// The repos luoto put at `/workspace/<name>` in `name`. A state that won't load must not
+/// keep an env from being removed.
+fn seeded_repos(ctx: &Ctx, name: &str) -> std::collections::BTreeSet<String> {
+    EnvState::load(&ctx.paths, name)
+        .ok()
+        .flatten()
+        .map(|s| s.repos)
+        .unwrap_or_default()
+}
+
+/// The work in running env `name` that no remote has, as `luoto rm` names it: `/workspace`
+/// and each of its repos.
+pub fn unpushed(ctx: &Ctx, name: &str) -> Result<Vec<crate::repos::Unpushed>> {
+    crate::repos::unpushed(ctx, name, &seeded_repos(ctx, name))
+}
+
+/// Remove env `name`: its containers and volumes, its host key and its config file.
+pub fn remove_env(ctx: &Ctx, name: &str) -> Result<()> {
+    // Volumes live in the VM, which may have stopped on idle; a deleted VM took them along.
+    if machine::gone(&ctx.rt) {
+        env::forget(ctx, name)?;
+    } else {
+        env::ensure_vm(ctx)?;
+        env::remove(ctx, name)?;
+    }
+    crate::ssh::forget_host_key(ctx, name)?;
+    std::fs::remove_file(ctx.paths.env_config(name))?;
+    crate::ssh::write_config(ctx)?;
+    Ok(())
 }
 
 pub fn reset_home(name: &str, yes: bool) -> Result<ExitCode> {

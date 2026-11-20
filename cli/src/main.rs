@@ -285,6 +285,13 @@ enum Cmd {
         /// Stop the env when the run ends.
         #[arg(long)]
         down: bool,
+        /// Remove the env when the run ends, as `luoto rm` does, its config included. An env
+        /// holding work no remote has is kept unless you say yes, or `--yes` is given.
+        #[arg(long)]
+        rm: bool,
+        /// With `--rm`: remove the env also with work no remote has.
+        #[arg(long, short, requires = "rm")]
+        yes: bool,
         /// Arguments for the agent, after the env's `args` and `headless_args`
         /// (`luoto run --agent claude --prompt … -- --bare`).
         #[arg(last = true)]
@@ -796,6 +803,8 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             output,
             timeout,
             down,
+            rm,
+            yes,
             args,
         } => {
             let prompt = match (prompt, prompt_file) {
@@ -814,7 +823,7 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
                 &args,
                 output.as_deref(),
                 timeout.as_deref(),
-                down,
+                agents::End::of(down, rm, yes),
             )
         }
         Cmd::Agent { action } => match action {
@@ -1050,6 +1059,35 @@ mod tests {
         };
         assert_eq!(prompt.as_deref(), Some("hi"));
         assert_eq!(args, ["--bare", "--tools", "Bash,Read"]);
+    }
+
+    #[test]
+    fn run_takes_rm_and_yes_only_with_it() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(
+                [
+                    &["luoto", "run", "--agent", "claude", "--prompt", "x"],
+                    args,
+                ]
+                .concat(),
+            )
+        };
+        let flags = |args: &[&str]| match parse(args).unwrap().cmd {
+            Cmd::Run { down, rm, yes, .. } => (down, rm, yes),
+            _ => panic!("not run"),
+        };
+        assert_eq!(flags(&[]), (false, false, false));
+        assert_eq!(flags(&["--rm"]), (false, true, false));
+        assert_eq!(flags(&["--rm", "--yes"]), (false, true, true));
+        assert_eq!(flags(&["--rm", "-y", "--down"]), (true, true, true));
+        // Yes to nothing asked is a mistake.
+        assert!(parse(&["--yes"]).is_err());
+        assert!(parse(&["--down", "-y"]).is_err());
+        // After `--` they are the agent's.
+        let Cmd::Run { rm, args, .. } = parse(&["--", "--rm"]).unwrap().cmd else {
+            panic!("not run")
+        };
+        assert!(!rm && args == ["--rm"]);
     }
 
     #[test]
