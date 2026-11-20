@@ -1182,14 +1182,15 @@ pub fn headless(
         }
         Err(e) => crate::progress::warn(&format!("no summary of the gate's denials ({e:#})")),
     }
-    relayed?;
     crate::disk::hint_growth(&ctx, env_name);
-    // What ends the run never changes its exit code: a problem here is a warning.
+    // What ends the run never changes its exit code: a problem here is a warning. An answer
+    // that could be written nowhere fails the run only after its env is seen to.
     match end {
         End::Leave => {}
         End::Down => stop_env(&ctx, env_name),
         End::Remove { yes } => remove_after(&ctx, env_name, yes),
     }
+    relayed?;
     match stopped {
         Some(Stop::Timeout) => return Ok(ExitCode::from(TIMED_OUT)),
         Some(Stop::Interrupt) => return Ok(ExitCode::from(INTERRUPTED)),
@@ -1238,25 +1239,31 @@ enum Removal {
     Keep,
 }
 
-/// `unpushed`: the env holds work no remote has, or couldn't be asked.
-fn removal(unpushed: bool, yes: bool, terminal: bool) -> Removal {
-    match (unpushed, yes, terminal) {
+/// `only_here`: the env holds work no remote has or files its folder lacks, or couldn't be
+/// asked.
+fn removal(only_here: bool, yes: bool, terminal: bool) -> Removal {
+    match (only_here, yes, terminal) {
         (false, ..) | (_, true, _) => Removal::Remove,
         (true, false, true) => Removal::Ask,
         (true, false, false) => Removal::Keep,
     }
 }
 
-/// What is said of an env `--rm` left: what it holds, and the commands that remove it.
-fn kept_note(env: &str, asked: bool) -> String {
+/// What is said of an env `--rm` left: what it holds, and the commands that remove it;
+/// `files` when its folder lacks some, with the command that brings them.
+fn kept_note(env: &str, asked: bool, files: bool) -> String {
     if asked {
-        format!("env `{env}` kept, stopped (`luoto rm -e {env}` removes it)")
-    } else {
-        format!(
-            "env `{env}` kept, stopped: it holds work no remote has. `luoto rm -e {env} --yes` \
-             removes it; `luoto run … --rm --yes` removes an env whatever its run leaves"
-        )
+        return format!("env `{env}` kept, stopped (`luoto rm -e {env}` removes it)");
     }
+    let pull = if files {
+        format!(" `luoto up -e {env}` and `luoto pull -e {env}` bring its files to your folder;")
+    } else {
+        String::new()
+    };
+    format!(
+        "env `{env}` kept, stopped: it holds work that is nowhere else.{pull} `luoto rm -e {env} \
+         --yes` removes it; `luoto run … --rm --yes` removes an env whatever its run leaves"
+    )
 }
 
 /// `--rm`: remove the env the run was in, unless it holds work no remote has and nobody said
@@ -1271,15 +1278,30 @@ fn remove_after(ctx: &Ctx, env: &str, yes: bool) {
             crate::text::lines(&format!("{e:#}"))
         )],
     };
+    // Files only the env has: a folder that isn't a git repository has no other check.
+    let files: Vec<String> = match crate::commands::unpulled(ctx, env) {
+        Ok(found) => found.iter().map(|u| format!("  {u}")).collect(),
+        Err(e) => vec![format!(
+            "  its files couldn't be compared with yours: {}",
+            crate::text::lines(&format!("{e:#}"))
+        )],
+    };
     let terminal = crate::prompt::interactive() && std::io::stderr().is_terminal();
-    let step = removal(!lost.is_empty(), yes, terminal);
+    let step = removal(!lost.is_empty() || !files.is_empty(), yes, terminal);
+    let gone = if step == Removal::Remove {
+        ", removed with it"
+    } else {
+        ""
+    };
     if !lost.is_empty() {
-        if step == Removal::Remove {
-            err!("Work in `{env}` that no remote has, removed with it:");
-        } else {
-            err!("Work in `{env}` that no remote has:");
-        }
+        err!("Work in `{env}` that no remote has{gone}:");
         for line in &lost {
+            eprintln!("{line}");
+        }
+    }
+    if !files.is_empty() {
+        err!("In `{env}` and not in your folder{gone}:");
+        for line in &files {
             eprintln!("{line}");
         }
     }
@@ -1302,7 +1324,10 @@ fn remove_after(ctx: &Ctx, env: &str, yes: bool) {
         if let Err(e) = env::down(ctx, env) {
             crate::progress::warn(&format!("env `{env}` not stopped ({e:#})"));
         }
-        err_text!("{}", kept_note(env, step == Removal::Ask));
+        err_text!(
+            "{}",
+            kept_note(env, step == Removal::Ask, !files.is_empty())
+        );
         return;
     }
     match crate::commands::remove_env(ctx, env) {
@@ -1497,12 +1522,16 @@ mod tests {
     #[test]
     fn an_env_rm_kept_names_the_commands_that_remove_it() {
         assert_eq!(
-            kept_note("job", false),
-            "env `job` kept, stopped: it holds work no remote has. `luoto rm -e job --yes` \
-             removes it; `luoto run … --rm --yes` removes an env whatever its run leaves"
+            kept_note("job", false, false),
+            "env `job` kept, stopped: it holds work that is nowhere else. `luoto rm -e job \
+             --yes` removes it; `luoto run … --rm --yes` removes an env whatever its run leaves"
+        );
+        assert!(
+            kept_note("job", false, true)
+                .contains("`luoto up -e job` and `luoto pull -e job` bring its files")
         );
         assert_eq!(
-            kept_note("job", true),
+            kept_note("job", true, true),
             "env `job` kept, stopped (`luoto rm -e job` removes it)"
         );
     }

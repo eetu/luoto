@@ -5,7 +5,19 @@
 - `luoto run --rm` removes the env when the run ends, as `luoto rm` does, so a one-off job
   leaves nothing behind. An env holding work no remote has (the same check as `luoto rm`)
   is kept and stopped instead, with what it holds; `--yes` removes it anyway, and a terminal
-  is asked.
+  is asked. So is an env whose files its folder doesn't have: new or changed files, ones a
+  pull refuses or couldn't read, and `node_modules`-like folders the folder's `.gitignore`
+  doesn't ignore.
+- `luoto pull` holds back more as risky: `.env` and `.env.*`, `bunfig.toml`, `.mcp.json`,
+  `AGENTS.md`, `CLAUDE.md` and `.github/workflows`.
+- `luoto pull` writes every file it can and names the ones it couldn't; it used to stop at
+  the first that failed. What it writes is synced to disk, an existing file keeps its
+  permissions (they became 0644 or 0755), and a file of yours named `<name>.luoto-tmp` is no
+  longer replaced.
+- `luoto pull` says when the env's files couldn't all be read; it took what came for all of
+  them.
+- `luoto run --down` and `--rm` still stop or remove the env when the agent's answer couldn't
+  be written.
 
 ## 0.6.2 (unreleased)
 

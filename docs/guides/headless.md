@@ -30,16 +30,19 @@ can't be written. The env keeps running unless `--down` is given.
 `--rm` removes the env when the run ends, as `luoto rm` does: containers, volumes and its
 config file, so a job that makes its env leaves nothing behind. Work no remote has would go
 with it, so luoto looks first, as `luoto rm` does (files changed, commits not pushed and
-stashes, in `/workspace` and each of its repos). An env holding some is kept and stopped,
-and the run says what it holds; on a terminal it asks. `--rm --yes` removes it whatever the
-run leaves. Either way the exit code is the agent's.
+stashes, in `/workspace` and each of its repos). For an env with a folder on this machine it
+also compares the env's files with the folder's, as `luoto pull` does: files new or changed
+in the env, ones a pull refuses or couldn't read, and what no pull takes (`node_modules`,
+`target`, …) unless the folder's `.gitignore` ignores it. An env holding any of that is kept
+and stopped, and the run says what it holds; on a terminal it asks. `--rm --yes` removes it
+whatever the run leaves. Either way the exit code is the agent's.
 
 ```console
 $ luoto run -e nightly --agent claude --prompt-file task.md --rm
 Work in `nightly` that no remote has:
   /workspace/api: 2 files changed, 1 commit not pushed
-env `nightly` kept, stopped: it holds work no remote has. `luoto rm -e nightly --yes`
-removes it; `luoto run … --rm --yes` removes an env whatever its run leaves
+env `nightly` kept, stopped: it holds work that is nowhere else. `luoto rm -e nightly
+--yes` removes it; `luoto run … --rm --yes` removes an env whatever its run leaves
 ```
 
 | exit code   | when                                                                             |

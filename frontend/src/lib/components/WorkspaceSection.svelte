@@ -34,9 +34,10 @@
     // Written or not, the reviewed plan is spent: a failure leaves a fresh review to do.
     pull = null;
     if (!result) return;
-    say(
-      `wrote ${plural(result.written, "file")}${result.skipped ? `, skipped ${result.skipped} risky` : ""}`,
-    );
+    const skipped = result.skipped ? `, skipped ${result.skipped} risky` : "";
+    // Which ones and why: `luoto pull` in a terminal names them.
+    const failed = result.failed.length ? `, ${result.failed.length} not written` : "";
+    say(`wrote ${plural(result.written, "file")}${skipped}${failed}`);
   }
 
   const entries = $derived(pull?.plans.flatMap((p) => p.entries) ?? []);
@@ -127,6 +128,9 @@
             {#each p.refused as [path, why], n (n)}
               <p class="small muted">refused {path} — {why}</p>
             {/each}
+            {#if p.unread}
+              <p class="warn">not all of the env's files could be read: {p.unread}</p>
+            {/if}
           </div>
         {/each}
         {#if anyRisky}

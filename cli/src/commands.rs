@@ -311,10 +311,18 @@ pub fn pull(
         bail!("nothing written (use --yes to skip the prompt)");
     }
     let (mut written, mut skipped) = (0, 0);
+    let mut failed = Vec::new();
     for plan in &plans {
-        let (w, s) = workspace::apply_pull(plan, include_risky)?;
-        written += w;
-        skipped += s;
+        let done = crate::progress::wait("writing", || workspace::apply_pull(plan, include_risky));
+        written += done.written.len();
+        skipped += done.skipped;
+        failed.extend(done.failed);
+        if let Some(why) = done.unsynced {
+            crate::progress::warn(&format!(
+                "{} not synced to disk ({why}): a power cut now could lose what was written",
+                plan.dir
+            ));
+        }
     }
     head!(
         "wrote {written} file(s){}",
@@ -324,7 +332,21 @@ pub fn pull(
             String::new()
         }
     );
-    Ok(ExitCode::SUCCESS)
+    if failed.is_empty() {
+        return Ok(ExitCode::SUCCESS);
+    }
+    err!("{} file(s) not written:", failed.len());
+    for (path, why) in failed.iter().take(30) {
+        eprintln!(
+            "  {} — {}",
+            crate::text::display(path),
+            crate::text::display(why)
+        );
+    }
+    if failed.len() > 30 {
+        eprintln!("  … and {} more", failed.len() - 30);
+    }
+    Ok(ExitCode::FAILURE)
 }
 
 pub fn up(name: &str, selftest: bool, recreate: bool, quiet: bool) -> Result<ExitCode> {
@@ -515,6 +537,33 @@ fn seeded_repos(ctx: &Ctx, name: &str) -> std::collections::BTreeSet<String> {
 /// and each of its repos.
 pub fn unpushed(ctx: &Ctx, name: &str) -> Result<Vec<crate::repos::Unpushed>> {
     crate::repos::unpushed(ctx, name, &seeded_repos(ctx, name))
+}
+
+/// What running env `name` holds that its folder, and its repos' folders, don't have: for
+/// each folder with something, what. Nothing for an env with no folder here.
+pub fn unpulled(ctx: &Ctx, name: &str) -> Result<Vec<workspace::Unpulled>> {
+    let ws = env::layered(ctx, name)?.workspace;
+    let targets = if ws.dir.is_some() {
+        pull_targets(ctx, name, None, None)?
+    } else {
+        // Without a folder of its own, only its repos copied in from one have a folder.
+        let mut all = Vec::new();
+        for repo in seeded_repos(ctx, name) {
+            if ws.repos.get(&repo).is_some_and(|r| r.dir.is_some()) {
+                all.extend(pull_targets(ctx, name, None, Some(&repo))?);
+            }
+        }
+        all
+    };
+    let _waiting = crate::progress::waiting("comparing the env's files with yours");
+    let mut found = Vec::new();
+    for t in &targets {
+        let u = workspace::unpulled(ctx, name, t)?;
+        if u.any() {
+            found.push(u);
+        }
+    }
+    Ok(found)
 }
 
 /// Remove env `name`: its containers and volumes, its host key and its config file.

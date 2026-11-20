@@ -437,6 +437,8 @@ export type PullPlan = {
   unchanged: number;
   /** Entries refused outright (unsafe paths, links leaving the folder, special files). */
   refused: [string, string][];
+  /** What tar said when reading the env's files failed: some may be missing from the plan. */
+  unread: string | null;
   /**
    * Hash over what would be written; applying re-checks it so a sandbox can't swap files
    * between your review and the write.
@@ -453,6 +455,8 @@ export type PullPlans = {
 export type Pulled = {
   written: number;
   skipped: number;
+  /** Files that couldn't be written, and why. */
+  failed: [string, string][];
 };
 
 /** What [`reload`] did. */

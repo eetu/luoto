@@ -843,6 +843,7 @@ test("a pull is reviewed, then written, risky files only when ticked", async ({ 
     ],
     unchanged: 12,
     refused: [],
+    unread: null,
     digest: "d1",
   };
   await page.route(
@@ -852,7 +853,7 @@ test("a pull is reviewed, then written, risky files only when ticked", async ({ 
         return route.fulfill({ json: { plans: [plan], digest: "all" } satisfies PullPlans });
       }
       applied.push(req.postDataJSON());
-      return route.fulfill({ json: { written: 2, skipped: 0 } satisfies Pulled });
+      return route.fulfill({ json: { written: 2, skipped: 0, failed: [] } satisfies Pulled });
     },
   );
   await open(page);
@@ -881,7 +882,15 @@ test("a pull with only risky files writes nothing until they are ticked", async 
       route.fulfill({
         json: {
           plans: [
-            { dir: "/d", repo: null, entries: [entry], unchanged: 0, refused: [], digest: "x" },
+            {
+              dir: "/d",
+              repo: null,
+              entries: [entry],
+              unchanged: 0,
+              refused: [],
+              unread: null,
+              digest: "x",
+            },
           ],
           digest: "x",
         } satisfies PullPlans,

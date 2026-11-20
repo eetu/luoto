@@ -146,9 +146,17 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   reviewed `pull`. `pull` reviews changes, holds back risky files in any folder within the pull
   (compared case-insensitively, as macOS and Windows name them), refuses `.git` under any
   spelling, names that collide by case, and paths and symlinks that leave the folder. What
-  it holds back is what tools run by themselves; the rest is still code the sandbox wrote,
+  it holds back is what acts without you running it: git metadata, `.gitattributes` and
+  `.gitmodules`, direnv and dotenv files (`.envrc`, `.env`, `.env.*`), editor and IDE
+  folders, coding agents' settings, MCP servers and instructions (`.claude`, `.cursor`,
+  `.mcp.json`, `AGENTS.md`, `CLAUDE.md`), hook managers, package managers' and build tools'
+  own config and wrappers (`.npmrc`, `.yarnrc.yml`, `bunfig.toml`, `.cargo/config.toml`,
+  mise, `gradlew`, `mvnw`), CI workflows (`.github/workflows`), files that become
+  executable and symlinks. The rest is still code the sandbox wrote,
   and building or running it on your machine runs it outside the sandbox: read the diff
-  first. A pulled `.gitignore` decides what later copies leave out, so review its changes. `pull`
+  first. A pulled `.gitignore` decides what later copies leave out, so review its changes. A
+  file that can't be written is named and the rest are written, each through a temporary
+  file of luoto's own beside it, keeping the permissions of the file it replaces. `pull`
   never writes into your home folder or a folder that holds it. With podman on macOS and
   Windows, envs run only in luoto's own VM, which mounts none of your folders but luoto's
   shares folder, read-only (`luoto doctor` checks), so an escape reaches what you shared, not
