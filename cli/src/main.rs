@@ -6,8 +6,10 @@
 mod style;
 mod agents;
 mod archive;
+mod autopull;
 mod azure;
 mod azure_identity;
+mod base;
 mod ca;
 mod commands;
 mod compile;
@@ -156,10 +158,15 @@ enum Cmd {
         quiet: bool,
     },
     /// Stop the env (volumes and config are kept).
+    ///
+    /// An env set to (`luoto pull --on-stop on`) has its files pulled into its folder first.
     Down {
         /// Every env that runs (the vault keeps running).
         #[arg(long)]
         all: bool,
+        /// The watcher's stop of an idle env: only the pull's report is printed.
+        #[arg(long, hide = true, conflicts_with = "all")]
+        idle: bool,
     },
     /// Delete the env: its containers, volumes and config.
     ///
@@ -292,6 +299,18 @@ enum Cmd {
         /// With `--rm`: remove the env also with work no remote has.
         #[arg(long, short, requires = "rm")]
         yes: bool,
+        /// When the agent has ended, `luoto pull`: its files listed, written into your folder
+        /// after your yes. Without a terminal nothing is written.
+        #[arg(long)]
+        pull: bool,
+        /// When the agent has ended, stop the env and write its files into your folder with
+        /// nobody reviewing them. What tools here run by themselves is held back, as are
+        /// files you changed too; exits with 75 when the agent succeeded and something was.
+        #[arg(long, conflicts_with = "pull")]
+        dangerously_pull: bool,
+        /// Write what the unattended pull did to this file, as JSON.
+        #[arg(long, value_name = "FILE", add = ArgValueCompleter::new(PathCompleter::any()))]
+        report: Option<String>,
         /// Arguments for the agent, after the env's `args` and `headless_args`
         /// (`luoto run --agent claude --prompt … -- --bare`).
         #[arg(last = true)]
@@ -344,9 +363,20 @@ enum Cmd {
         /// Include .git (its hooks and config count as risky).
         #[arg(long)]
         include_git: bool,
+        /// Also replace files you changed here since the env's copy with the env's.
+        #[arg(long)]
+        overwrite: bool,
         /// Write without asking.
         #[arg(long, short)]
         yes: bool,
+        /// `on`: from now on every stop of the env first pulls its files into its folder,
+        /// with nobody reviewing them. `off` ends that.
+        #[arg(
+            long,
+            value_name = "on|off",
+            conflicts_with_all = ["to", "repo", "include_risky", "include_git", "overwrite", "yes"]
+        )]
+        on_stop: Option<OnOff>,
     },
     /// Allow egress to a host.
     Allow(rules::AllowOpts),
@@ -449,6 +479,9 @@ enum Cmd {
     /// Internal: the background watcher that forwards ports and stops idle envs.
     #[command(hide = true)]
     Watch,
+    /// Internal: finish the pulls a crash left owed, as every command does first.
+    #[command(hide = true)]
+    Recover,
 }
 
 #[derive(Subcommand)]
@@ -651,6 +684,12 @@ enum ProjectCmd {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum OnOff {
+    On,
+    Off,
+}
+
 #[derive(Subcommand)]
 enum VaultCmd {
     /// Locked or not, and each env's credentials.
@@ -690,6 +729,22 @@ fn main() -> ExitCode {
     }
 }
 
+/// Whether `cmd` first finishes pulls a crash left owed (`autopull::recover`): not the
+/// watcher (it starts a luoto for that), nor commands that act on no env or whose output is
+/// someone else's stream.
+fn recovers(cmd: &Cmd) -> bool {
+    !matches!(
+        cmd,
+        Cmd::Watch
+            | Cmd::SshProxy { .. }
+            | Cmd::Setup(_)
+            | Cmd::Doctor { .. }
+            | Cmd::Upgrade
+            | Cmd::Uninstall { .. }
+            | Cmd::Logs { .. }
+    )
+}
+
 /// Why `cmd` refuses the global `-e`: it acts on no env, on every env, or names its env
 /// another way.
 fn refuses_env(cmd: &Cmd) -> Option<String> {
@@ -719,10 +774,11 @@ fn refuses_env(cmd: &Cmd) -> Option<String> {
             action: Some(VaultCmd::Lock),
         } => none("vault lock"),
         Cmd::Watch => none("watch"),
+        Cmd::Recover => none("recover"),
         Cmd::SshProxy { .. } => {
             Some("`luoto ssh-proxy` names the env as its argument, not -e".into())
         }
-        Cmd::Up { all: true, .. } | Cmd::Down { all: true } => {
+        Cmd::Up { all: true, .. } | Cmd::Down { all: true, .. } => {
             Some("`--all` acts on every env; drop `-e`".into())
         }
         Cmd::Init(_) => Some("`luoto init` names the env with --name, not -e".into()),
@@ -739,6 +795,14 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         anyhow::bail!("{why}");
     }
     let paths = paths::Paths::get()?;
+    // What a crash, or a stop luoto didn't see, left owed to a folder is seen to before
+    // anything else acts on the env.
+    if recovers(&cmd)
+        && autopull::any_owing(&paths)
+        && let Ok(ctx) = env::Ctx::load()
+    {
+        autopull::recover(&ctx);
+    }
     let env = || workspace::resolve(&paths, env_arg.as_deref());
     match cmd {
         Cmd::Setup(o) => setup::setup(o),
@@ -768,8 +832,8 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             }
             Err(e) => Err(e),
         },
-        Cmd::Down { all: true } => c::down_all(),
-        Cmd::Down { all: false } => c::down(&env()?),
+        Cmd::Down { all: true, .. } => c::down_all(),
+        Cmd::Down { all: false, idle } => c::down(&env()?, idle),
         Cmd::Rm { yes } => c::rm(&env()?, yes),
         Cmd::ResetHome { yes } => c::reset_home(&env()?, yes),
         Cmd::Export { file, no_home, yes } => {
@@ -805,6 +869,9 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             down,
             rm,
             yes,
+            pull,
+            dangerously_pull,
+            report,
             args,
         } => {
             let prompt = match (prompt, prompt_file) {
@@ -823,7 +890,14 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
                 &args,
                 output.as_deref(),
                 timeout.as_deref(),
-                agents::End::of(down, rm, yes),
+                agents::Finish {
+                    end: agents::End::of(down, rm, yes),
+                    pull: agents::RunPull {
+                        reviewed: pull,
+                        unattended: dangerously_pull,
+                        report,
+                    },
+                },
             )
         }
         Cmd::Agent { action } => match action {
@@ -860,18 +934,26 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             VarCmd::Rm { name } => vars::rm_cmd(&env()?, &name),
         },
         Cmd::Pull {
+            on_stop: Some(on), ..
+        } => c::pull_on_stop(&env()?, on == OnOff::On),
+        Cmd::Pull {
             to,
             repo,
             include_risky,
             include_git,
+            overwrite,
             yes,
+            on_stop: None,
         } => c::pull(
             &env()?,
-            to.as_deref(),
-            repo.as_deref(),
-            include_risky,
-            include_git,
-            yes,
+            c::PullOpts {
+                to: to.as_deref(),
+                repo: repo.as_deref(),
+                include_risky,
+                include_git,
+                overwrite,
+                yes,
+            },
         ),
         Cmd::Allow(o) => c::allow(&env()?, o),
         Cmd::Revoke { rule } => c::revoke(&env()?, &rule),
@@ -944,6 +1026,8 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         },
         Cmd::SshProxy { name } => connect::ssh_proxy(&name),
         Cmd::Watch => watch::watch(),
+        // Done above, as for every command.
+        Cmd::Recover => Ok(ExitCode::SUCCESS),
     }
 }
 
@@ -1059,6 +1143,57 @@ mod tests {
         };
         assert_eq!(prompt.as_deref(), Some("hi"));
         assert_eq!(args, ["--bare", "--tools", "Bash,Read"]);
+    }
+
+    #[test]
+    fn a_run_pulls_reviewed_or_unreviewed_never_both() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(
+                [
+                    &["luoto", "run", "--agent", "claude", "--prompt", "x"],
+                    args,
+                ]
+                .concat(),
+            )
+        };
+        let flags = |args: &[&str]| match parse(args).unwrap().cmd {
+            Cmd::Run {
+                pull,
+                dangerously_pull,
+                report,
+                ..
+            } => (pull, dangerously_pull, report),
+            _ => panic!("not run"),
+        };
+        assert_eq!(flags(&[]), (false, false, None));
+        assert_eq!(flags(&["--pull"]), (true, false, None));
+        assert_eq!(
+            flags(&["--dangerously-pull", "--rm", "--report", "r.json"]),
+            (false, true, Some("r.json".into()))
+        );
+        assert!(parse(&["--pull", "--dangerously-pull"]).is_err());
+    }
+
+    #[test]
+    fn pull_on_stop_is_set_by_its_own_command() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["luoto", "pull"], args].concat());
+        let on_stop = |args: &[&str]| match parse(args).unwrap().cmd {
+            Cmd::Pull { on_stop, .. } => on_stop.map(|o| o == OnOff::On),
+            _ => panic!("not pull"),
+        };
+        assert_eq!(on_stop(&[]), None);
+        assert_eq!(on_stop(&["--on-stop", "on"]), Some(true));
+        assert_eq!(on_stop(&["--on-stop", "off"]), Some(false));
+        // On is typed out, and never comes with a pull's own flags.
+        assert!(parse(&["--on-stop"]).is_err());
+        assert!(parse(&["--on-stop", "yes"]).is_err());
+        assert!(parse(&["--on-stop", "on", "--yes"]).is_err());
+        assert!(parse(&["--on-stop", "on", "--include-risky"]).is_err());
+        assert!(parse(&["--overwrite", "--include-risky", "-y"]).is_ok());
+        // The watcher's stop names one env.
+        let down = |args: &[&str]| Cli::try_parse_from([&["luoto", "down"], args].concat());
+        assert!(down(&["--idle"]).is_ok());
+        assert!(down(&["--idle", "--all"]).is_err());
     }
 
     #[test]

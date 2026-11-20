@@ -5,7 +5,8 @@ without asking anything, installs the agent if the env lacks it, runs the agent'
 non-interactive mode with its own permission prompts off (the sandbox is the boundary) and
 prints its answer. Progress goes to stderr, the answer to stdout (or `--output FILE`), and
 the exit code is the agent's. `--timeout` caps the agent's time; `--down` stops the env after,
-`--rm` removes it.
+`--rm` removes it, and `--pull` or `--dangerously-pull` bring what it changed into your folder
+([below](#its-changes-in-your-folder)).
 
 ```console
 $ luoto run --agent claude --prompt "Summarize what changed on main this week"
@@ -25,6 +26,65 @@ started in the env, even processes in a group of their own: SIGTERM, then SIGKIL
 later. Ctrl-C stops it the same way (a second one doesn't wait), and so does an answer that
 can't be written. The env keeps running unless `--down` is given.
 
+## Its changes in your folder
+
+The agent works on the env's copy. What it changed reaches your folder by `git push` from the
+env, or by a pull:
+
+| | |
+| --- | --- |
+| `luoto run … --pull` | after the agent, `luoto pull`: the files listed, written after your yes. Without a terminal nothing is written |
+| `luoto run … --dangerously-pull` | after the agent the env stops, and its files are written with nobody reviewing them |
+| `luoto pull --on-stop on` | from now on every stop of this env does that: `luoto down`, the stop after `idle_stop`, the UI's stop, a run's `--down` or `--rm`. `off` ends it |
+
+```console
+$ luoto run -e web --agent claude --prompt-file task.md --dangerously-pull
+env `web` stopped
+pulled 3 file(s) from `web` into ~/dev/web
+wrote:
+  src/export.rs
+  src/reports.rs
+  tests/export.rs
+held back (`luoto pull -e web` reviews them):
+  vite.config.ts — a tool's config that is code: editors and dev servers load it
+changed here and in the env (yours kept):
+  README.md
+```
+
+An unattended pull is narrower than a reviewed one, because nobody chooses when its files
+land:
+
+- **Only what the env changed.** luoto keeps a fingerprint of every file as it was copied
+  in. A file is written when the env changed it and you didn't. One you changed too is a
+  conflict: yours stays. One the env deleted stays. Nothing is ever deleted.
+- **Nothing that runs by itself.** Held back: everything `luoto pull` calls risky, executable
+  files, tool configs that are code (`vite.config.*`, `eslint.config.*`, `build.rs`,
+  `conftest.py`, Gradle scripts, `Gemfile`, `flake.nix`, yarn's own files), the folder your
+  repository runs hooks from, and anything laid out as a git repository. `luoto pull -e web`
+  reviews what was held back, and `--overwrite` there takes the env's side of a conflict.
+- **Within limits.** At most 5000 files and 256 MB per folder, 64 MB per file; over that,
+  nothing is written. What your `.gitignore` ignores stays in the env. A folder in the middle
+  of a merge or rebase is left alone; `luoto down -e web` tries again.
+- **From the stopped env.** The files are read from the env's volume once it has stopped,
+  never while code in it could still change them.
+- **Not after Ctrl-C.** An interrupted agent's half-done files are not pulled, and the env is
+  kept; after that the env's stops pull nothing until `luoto pull -e web` has reviewed them.
+
+Anything watching your folder (a dev server, a test watcher, an editor's language server)
+acts on a file the moment it lands, which is what `dangerously` says: the code in it is the
+sandbox's, and it then runs on your machine. Stop watchers you don't want fed, or use `--pull`.
+
+An env made before luoto kept fingerprints, or imported, has none: its stops pull nothing
+until a reviewed `luoto pull` has left the folder with every file the env has.
+
+A pull cut short (a crash, a power cut) is seen to by the next luoto command: it removes the
+half-written temporary files and says how many files had landed. An env set to pull when it
+stops then has the rest pulled from its volume, as does one that stopped without luoto
+seeing it (a restart of the machine); after a one-off `--dangerously-pull` luoto says so and
+`luoto pull` reviews the rest. An env a run was to remove (`--rm`) is never removed later.
+The last pull's report stays in luoto's data folder (`pulls/<env>/report.json`);
+`--report FILE` writes a run's own, with every file name.
+
 ## A one-off env
 
 `--rm` removes the env when the run ends, as `luoto rm` does: containers, volumes and its
@@ -36,6 +96,12 @@ in the env, ones a pull refuses or couldn't read, and what no pull takes (`node_
 `target`, …) unless the folder's `.gitignore` ignores it. An env holding any of that is kept
 and stopped, and the run says what it holds; on a terminal it asks. `--rm --yes` removes it
 whatever the run leaves. Either way the exit code is the agent's.
+
+With `--dangerously-pull` (or pull-on-stop) the folder gets the files first, and the env is
+removed only if they all landed: nothing held back, in conflict, refused or unread, no
+`node_modules`-like folder your `.gitignore` doesn't ignore. Changed files and commits on the
+checked-out branch no longer keep it, since their files are in your folder (the commits
+themselves go with the env); stashes and commits on other branches still do.
 
 ```console
 $ luoto run -e nightly --agent claude --prompt-file task.md --rm
@@ -50,6 +116,7 @@ env `nightly` kept, stopped: it holds work that is nowhere else. `luoto rm -e ni
 | the agent's | the agent finished                                                               |
 | 124         | the agent ran past `--timeout` and was stopped (as `timeout(1)` exits)           |
 | 130         | Ctrl-C stopped it                                                                |
+| 75          | the agent succeeded, and its unattended pull left something out (above)          |
 | 1           | luoto itself failed, the reason on stderr: the env didn't come up, no credential |
 
 After the run, stderr lists what the gate denied while the agent ran, without what a

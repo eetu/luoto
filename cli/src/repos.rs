@@ -842,8 +842,24 @@ pub struct Unpushed {
     /// Commits on a local branch or HEAD and on no remote-tracking one.
     pub commits: usize,
     pub stashes: usize,
+    /// Of `commits`, those HEAD doesn't reach: on another branch, so in no file of the work
+    /// tree.
+    pub elsewhere: usize,
     /// A repo git couldn't read: what it holds is unknown.
     pub unread: bool,
+}
+
+impl Unpushed {
+    /// Whether this still holds work once the repo's files were pulled into a folder
+    /// (`pulled`): then the changed files and the commits HEAD reaches are in the folder as
+    /// files, and only stashes and other branches' commits exist nowhere else.
+    pub fn only_here(&self, pulled: bool) -> bool {
+        if pulled {
+            self.unread || self.stashes + self.elsewhere > 0
+        } else {
+            self.unread || self.changed + self.commits + self.stashes > 0
+        }
+    }
 }
 
 impl fmt::Display for Unpushed {
@@ -883,8 +899,9 @@ const UNPUSHED_SCRIPT: &str = r#"for d; do
   h=; git -C "$d" rev-parse -q --verify HEAD >/dev/null 2>&1 && h=HEAD
   c=$(git -c core.fsmonitor=false -C "$d" status --porcelain 2>/dev/null | wc -l)
   u=$(git -C "$d" rev-list --count $h --branches --not --remotes 2>/dev/null) || u='?'
+  o=$(git -C "$d" rev-list --count --branches --not $h --remotes 2>/dev/null) || o='?'
   s=$(git -C "$d" stash list 2>/dev/null | wc -l)
-  printf '%s\t%s\t%s\t%s\n' "$d" "$c" "$u" "$s"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$d" "$c" "$u" "$s" "$o"
 done; true"#;
 
 /// The repos in the env (`/workspace` and its seeded `repos`) holding work no remote has, run
@@ -920,16 +937,17 @@ fn parse_unpushed(out: &str, dirs: &[String]) -> Vec<Unpushed> {
             continue;
         }
         let n = |i: usize| f.get(i).and_then(|x| x.trim().parse::<usize>().ok());
-        let counts = match (f.len(), n(1), n(2), n(3)) {
-            (4, Some(c), Some(u), Some(s)) => Some((c, u, s)),
+        let counts = match (f.len(), n(1), n(2), n(3), n(4)) {
+            (5, Some(c), Some(u), Some(s), Some(o)) => Some((c, u, s, o)),
             _ => None,
         };
-        let (changed, commits, stashes) = counts.unwrap_or_default();
+        let (changed, commits, stashes, elsewhere) = counts.unwrap_or_default();
         found.push(Unpushed {
             path: path.clone(),
             changed,
             commits,
             stashes,
+            elsewhere,
             unread: counts.is_none(),
         });
     }
@@ -958,11 +976,12 @@ pub fn undecline(ctx: &Ctx, env: &str, url: &str) -> Result<bool> {
 fn copy_in(ctx: &Ctx, env: &str, ws: &Workspace, name: &str, dir: &str) -> Result<()> {
     let dir = workspace::canonical(dir)?;
     check_folder(ws.dir.as_deref(), &dir)?;
-    let n = crate::progress::step(
+    let pushed = crate::progress::step(
         &format!("copying {} into /workspace/{name}", crate::ssh::tilde(&dir)),
         || workspace::push(ctx, env, &dir, Some(name)),
     )?;
-    println!("copied {n} file(s)");
+    workspace::keep_base(ctx, env, Some(name), &dir, pushed.files);
+    println!("copied {} file(s)", pushed.count);
     Ok(())
 }
 
@@ -2669,11 +2688,11 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
             "/workspace/api".to_string(),
             "/workspace/web".to_string(),
         ];
-        let out = "/workspace\t2\t0\t0\n\
-                   /workspace/api\t      0\t0\t0\n\
-                   /etc\t1\t1\t1\n\
-                   /workspace/api\x1b[2K\t1\t1\t1\n\
-                   /workspace/api\t1\t1\t1\n\
+        let out = "/workspace\t2\t0\t0\t0\n\
+                   /workspace/api\t      0\t0\t0\t0\n\
+                   /etc\t1\t1\t1\t0\n\
+                   /workspace/api\x1b[2K\t1\t1\t1\t0\n\
+                   /workspace/api\t1\t1\t1\t0\n\
                    /workspace/web\t?\n";
         let found = parse_unpushed(out, &dirs);
         let shown: Vec<String> = found.iter().map(ToString::to_string).collect();
@@ -2690,6 +2709,7 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
             changed: 1,
             commits: 3,
             stashes: 1,
+            elsewhere: 0,
             unread: false,
         };
         assert_eq!(
@@ -2697,9 +2717,27 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
             "/workspace/api: 1 file changed, 3 commits not pushed, 1 stash"
         );
         assert_eq!(
-            parse_unpushed("/workspace\t0\t?\t0\n", &dirs)[0].to_string(),
+            parse_unpushed("/workspace\t0\t?\t0\t0\n", &dirs)[0].to_string(),
             "/workspace: git couldn't read it; look before removing"
         );
+        // A line of fewer counts than the script prints is no reading.
+        assert!(parse_unpushed("/workspace\t1\t1\t1\n", &dirs)[0].unread);
+    }
+
+    #[test]
+    fn a_pulled_folder_keeps_an_env_only_for_what_files_dont_carry() {
+        let dirs = ["/workspace".to_string()];
+        let of = |line: &str| parse_unpushed(line, &dirs).remove(0);
+        // Changed files and commits HEAD reaches: in the folder as files once pulled.
+        let work = of("/workspace\t2\t3\t0\t0\n");
+        assert!(work.only_here(false) && !work.only_here(true));
+        // Stashes and other branches' commits are in no file.
+        let stash = of("/workspace\t0\t0\t1\t0\n");
+        assert!(stash.only_here(true));
+        let branch = of("/workspace\t0\t2\t0\t2\n");
+        assert_eq!((branch.commits, branch.elsewhere), (2, 2));
+        assert!(branch.only_here(true));
+        assert!(of("/workspace\t?\n").only_here(true));
     }
 
     #[test]

@@ -713,7 +713,9 @@ async fn env_action(Path((name, action)): Path<(String, String)>) -> ApiResult<V
                 },
             )?,
             "down" => {
-                env::down(&ctx, &name)?;
+                // Its files are pulled first when its own file says so; the report is kept
+                // (`autopull::report_file`).
+                crate::autopull::stop(&ctx, &name, crate::autopull::Why::Ui, false)?;
             }
             "rebuild" => {
                 env::remove_dev(&ctx, &name)?;

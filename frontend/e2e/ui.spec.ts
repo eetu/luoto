@@ -840,10 +840,15 @@ test("a pull is reviewed, then written, risky files only when ticked", async ({ 
         executable: true,
         risky: "git runs it",
       },
+      { path: "src/mine.ts", change: "conflict", size: 9, executable: false, risky: null },
     ],
     unchanged: 12,
+    yours: 1,
+    deleted: ["old.ts"],
     refused: [],
     unread: null,
+    based: true,
+    head_moved: null,
     digest: "d1",
   };
   await page.route(
@@ -853,15 +858,22 @@ test("a pull is reviewed, then written, risky files only when ticked", async ({ 
         return route.fulfill({ json: { plans: [plan], digest: "all" } satisfies PullPlans });
       }
       applied.push(req.postDataJSON());
-      return route.fulfill({ json: { written: 2, skipped: 0, failed: [] } satisfies Pulled });
+      return route.fulfill({
+        json: { written: 2, skipped: 0, conflicts: 1, failed: [] } satisfies Pulled,
+      });
     },
   );
   await open(page);
   await page.getByRole("button", { name: /^web/ }).click();
   await page.getByRole("button", { name: "Pull changes…" }).click();
 
-  await expect(page.getByText("2 new or changed, 12 unchanged")).toBeVisible();
+  await expect(
+    page.getByText("3 new or changed, 12 unchanged, 1 changed only in your folder"),
+  ).toBeVisible();
   await expect(page.getByText("changed src/app.ts")).toBeVisible();
+  await expect(page.getByText("changed in your folder too")).toBeVisible();
+  await expect(page.getByText("src/mine.ts")).toBeVisible();
+  await expect(page.getByText("1 file deleted in the env, kept in your folder")).toBeVisible();
   await expect(page.getByText("— git runs it")).toBeVisible();
   const risky = page.getByRole("checkbox", { name: "also write risky files" });
   await expect(risky).not.toBeChecked();
@@ -869,7 +881,7 @@ test("a pull is reviewed, then written, risky files only when ticked", async ({ 
   await page.getByRole("button", { name: "Write to folder" }).click();
 
   await expect.poll(() => applied).toEqual([{ digest: "all", include_risky: true }]);
-  await expect(page.getByRole("status")).toHaveText("wrote 2 files");
+  await expect(page.getByRole("status")).toHaveText("wrote 2 files, kept 1 of yours");
   await expect(page.getByRole("button", { name: "Pull changes…" })).toBeVisible();
 });
 
@@ -887,8 +899,12 @@ test("a pull with only risky files writes nothing until they are ticked", async 
               repo: null,
               entries: [entry],
               unchanged: 0,
+              yours: 0,
+              deleted: [],
               refused: [],
               unread: null,
+              based: true,
+              head_moved: null,
               digest: "x",
             },
           ],

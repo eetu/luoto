@@ -213,14 +213,30 @@ pub fn pull_targets(
     workspace::pull_targets(&ws, to, repo, &present)
 }
 
-pub fn pull(
-    name: &str,
-    to: Option<&str>,
-    repo: Option<&str>,
-    include_risky: bool,
-    include_git: bool,
-    yes: bool,
-) -> Result<ExitCode> {
+/// What `luoto pull` was asked for.
+#[derive(Default)]
+pub struct PullOpts<'a> {
+    pub to: Option<&'a str>,
+    pub repo: Option<&'a str>,
+    pub include_risky: bool,
+    pub include_git: bool,
+    pub overwrite: bool,
+    pub yes: bool,
+}
+
+pub fn pull(name: &str, o: PullOpts) -> Result<ExitCode> {
+    let PullOpts {
+        to,
+        repo,
+        include_risky,
+        include_git,
+        overwrite,
+        yes,
+    } = o;
+    let take = workspace::Take {
+        risky: include_risky,
+        conflicts: overwrite,
+    };
     let ctx = Ctx::load()?;
     let ws = EnvFile::load(&ctx.paths, name)?.cfg.workspace;
     if let (None, Some(url)) = (&ws.dir, &ws.url)
@@ -233,6 +249,7 @@ pub fn pull(
         );
     }
     crate::connect::ensure_running(&ctx, name)?;
+    let _lock = crate::autopull::lock(&ctx.paths, name)?;
     let to = match to {
         Some(t) => {
             std::fs::create_dir_all(workspace::expand(t))?;
@@ -272,9 +289,9 @@ pub fn pull(
             left.join(", ")
         );
     }
-    for t in targets {
+    for t in &targets {
         let plan = crate::progress::wait("comparing the env's files with yours", || {
-            workspace::plan_pull(&ctx, name, &t, include_git)
+            workspace::plan_pull(&ctx, name, t, include_git)
         })?;
         if let Some(r) = &plan.repo {
             head!("\nrepo {r}:");
@@ -282,19 +299,33 @@ pub fn pull(
         workspace::describe(&plan, &mut std::io::stdout(), crate::style::out())?;
         plans.push(plan);
     }
-    let changed = |p: &workspace::PullPlan| {
-        p.entries
-            .iter()
-            .filter(|e| include_risky || e.risky.is_none())
-            .count()
+    let changed = |p: &workspace::PullPlan| p.entries.iter().filter(|e| take.takes(e)).count();
+    // What is the same on both sides is known from here on, written or not.
+    let settle = |written: &[Vec<String>]| {
+        for ((t, plan), w) in targets.iter().zip(&plans).zip(written) {
+            workspace::settle(&ctx, name, t, plan, w);
+        }
     };
+    let none = vec![Vec::new(); plans.len()];
     if plans.iter().all(|p| p.entries.is_empty()) {
         println!("nothing to pull");
+        settle(&none);
+        crate::autopull::reviewed(&ctx.paths, name);
         return Ok(ExitCode::SUCCESS);
     }
     let writable: usize = plans.iter().map(changed).sum();
     if writable == 0 {
-        println!("only risky files changed; re-run with --include-risky after reviewing them");
+        println!("nothing written:");
+        let all = || plans.iter().flat_map(|p| &p.entries);
+        let conflicts = all().filter(|e| e.conflict()).count();
+        let risky = all().filter(|e| !e.conflict()).count();
+        if risky > 0 {
+            out!("  {risky} risky: `--include-risky` after reviewing them");
+        }
+        if conflicts > 0 {
+            out!("  {conflicts} changed here too: `--overwrite` takes the env's");
+        }
+        settle(&none);
         return Ok(ExitCode::SUCCESS);
     }
     let dirs: Vec<String> = plans
@@ -310,12 +341,13 @@ pub fn pull(
     {
         bail!("nothing written (use --yes to skip the prompt)");
     }
-    let (mut written, mut skipped) = (0, 0);
+    let (mut skipped, mut conflicts) = (0, 0);
+    let mut written = Vec::new();
     let mut failed = Vec::new();
     for plan in &plans {
-        let done = crate::progress::wait("writing", || workspace::apply_pull(plan, include_risky));
-        written += done.written.len();
+        let done = crate::progress::wait("writing", || workspace::apply_pull(plan, take));
         skipped += done.skipped;
+        conflicts += done.conflicts;
         failed.extend(done.failed);
         if let Some(why) = done.unsynced {
             crate::progress::warn(&format!(
@@ -323,15 +355,20 @@ pub fn pull(
                 plan.dir
             ));
         }
+        written.push(done.written);
     }
+    settle(&written);
+    crate::autopull::reviewed(&ctx.paths, name);
     head!(
-        "wrote {written} file(s){}",
-        if skipped > 0 {
-            format!("; skipped {skipped} risky (review, then --include-risky)")
-        } else {
-            String::new()
-        }
+        "wrote {} file(s)",
+        written.iter().map(Vec::len).sum::<usize>()
     );
+    if skipped > 0 {
+        println!("skipped {skipped} risky (review, then --include-risky)");
+    }
+    if conflicts > 0 {
+        println!("kept {conflicts} of yours changed here too (--overwrite takes the env's)");
+    }
     if failed.is_empty() {
         return Ok(ExitCode::SUCCESS);
     }
@@ -347,6 +384,92 @@ pub fn pull(
         eprintln!("  … and {} more", failed.len() - 30);
     }
     Ok(ExitCode::FAILURE)
+}
+
+/// `luoto pull --on-stop on|off`: whether every stop of the env first pulls its files into
+/// its folders, with nobody reviewing them. Then the summary.
+pub fn pull_on_stop(name: &str, on: bool) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    let mut f = EnvFile::load(&ctx.paths, name)?;
+    let pull = format!("luoto pull -e {name}");
+    if !on {
+        let was = f.cfg.workspace.dangerously_pull_on_stop;
+        if was {
+            f.set_pull_on_stop(false)?;
+            crate::autopull::turned_off(&ctx.paths, name);
+        }
+        let title = format!(
+            "env `{name}` {} when it stops",
+            if was {
+                "no longer pulls"
+            } else {
+                "doesn't pull"
+            }
+        );
+        let rows = [
+            ("pull", format!("{pull} (reviewed)")),
+            ("turn on", format!("luoto pull --on-stop on -e {name}")),
+        ];
+        block!("{}", crate::prompt::summary(&title, &rows));
+        return Ok(ExitCode::SUCCESS);
+    }
+    let ws = &f.cfg.workspace;
+    if !ws.has_folder() {
+        bail!(
+            "env `{name}` has no folder on this machine to pull into ({}): its work leaves by \
+             git push, or `luoto pull --to <folder>`",
+            match &ws.url {
+                Some(url) => format!("it is cloned from {}", crate::text::display(url)),
+                None => "a virtual workspace whose repos are all clones".to_string(),
+            }
+        );
+    }
+    let mut folders: Vec<String> = ws.dir.iter().cloned().collect();
+    folders.extend(ws.repos.values().filter_map(|r| r.dir.clone()));
+    let present = seeded_repos(&ctx, name);
+    // A copy with no record of what it started from waits for one reviewed pull.
+    let unbased = EnvState::load(&ctx.paths, name).ok().flatten().is_some()
+        && workspace::pull_targets(ws, None, None, &present)
+            .unwrap_or_default()
+            .iter()
+            .any(|t| t.home && t.base(&ctx.paths, name).is_none());
+    f.set_pull_on_stop(true)?;
+    if ctx.rt.is_running(&names::dev(name)) {
+        crate::autopull::started(&ctx.paths, name);
+    }
+    let folders: Vec<String> = folders
+        .iter()
+        .map(|d| crate::ssh::tilde(&workspace::expand(d)))
+        .collect();
+    let mut rows = vec![
+        ("into", folders.join(", ")),
+        (
+            "when",
+            "`luoto down`, the idle stop, the UI's stop, a run's --down/--rm".to_string(),
+        ),
+        (
+            "writes",
+            "what the env changed and you didn't, with nobody reviewing it".to_string(),
+        ),
+        (
+            "held back",
+            "what tools here run by themselves, and files you changed too".to_string(),
+        ),
+        ("review", pull.clone()),
+        ("turn off", format!("luoto pull --on-stop off -e {name}")),
+    ];
+    if unbased {
+        rows.insert(
+            1,
+            (
+                "first",
+                "a reviewed pull that leaves nothing: its copy has no base yet".to_string(),
+            ),
+        );
+    }
+    let title = format!("env `{name}` pulls into your folder whenever it stops");
+    block!("{}", crate::prompt::summary(&title, &rows));
+    Ok(ExitCode::SUCCESS)
 }
 
 pub fn up(name: &str, selftest: bool, recreate: bool, quiet: bool) -> Result<ExitCode> {
@@ -431,26 +554,45 @@ pub fn down_all() -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     let failed = each_env(&running, |name| {
-        env::down(&ctx, name)?;
+        let stopped = crate::autopull::stop(&ctx, name, crate::autopull::Why::Down, false)?;
         out!("env `{name}` stopped");
+        if let Some(r) = &stopped.report {
+            r.print(&mut std::io::stdout(), crate::style::out(), 30);
+        }
         Ok(())
     });
     crate::watch::spawn(&ctx);
     Ok(each_env_result("down", running.len(), &failed))
 }
 
-pub fn down(name: &str) -> Result<ExitCode> {
+/// `luoto down`: stop the env, its files pulled into its folder first when its own file
+/// says so (`autopull::stop`). `idle` is the watcher's stop, whose output is its log.
+pub fn down(name: &str, idle: bool) -> Result<ExitCode> {
+    use crate::autopull::{self, Why};
     let ctx = Ctx::load()?;
-    if machine::stopped(&ctx.rt) {
+    // A pull still owed to its folder is done from its volume, VM started for it.
+    let owed = autopull::on(&ctx.paths, name) && autopull::Pending::load(&ctx.paths, name).owed();
+    if machine::stopped(&ctx.rt) && !owed {
         out!("env `{name}` is not running (luoto's VM is stopped)");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if idle {
+        let stopped = autopull::stop(&ctx, name, Why::Idle, false)?;
+        if let Some(r) = &stopped.report {
+            r.print(&mut std::io::stdout(), crate::style::out(), 10);
+        }
         return Ok(ExitCode::SUCCESS);
     }
     // While its dev container still runs, to name its build folders.
     disk::hint_growth(&ctx, name);
-    if env::down(&ctx, name)? {
+    let stopped = autopull::stop(&ctx, name, Why::Down, false)?;
+    if stopped.was_running {
         out!("env `{name}` stopped");
     } else {
         out!("env `{name}` was not running");
+    }
+    if let Some(r) = &stopped.report {
+        r.print(&mut std::io::stdout(), crate::style::out(), 30);
     }
     // The VM stays up for a quick `up`; the watcher stops it after `idle_stop` without envs.
     crate::watch::spawn(&ctx);
@@ -833,6 +975,15 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
             format!("{dir} (copied in; `luoto pull -e {name}` brings changes back)"),
         ),
     });
+    if f.cfg.workspace.dangerously_pull_on_stop {
+        rows.push((
+            "pull",
+            format!(
+                "at every stop, with nobody reviewing it (`luoto pull --on-stop off -e {name}` \
+                 ends that)"
+            ),
+        ));
+    }
     let ca_dir = ctx.paths.env_state(name);
     if let Some(n) = crate::ca::notice(&ca_dir, name) {
         rows.push(("CA", n));

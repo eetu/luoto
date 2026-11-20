@@ -22,6 +22,7 @@ node = "lts"
 [workspace]
 dir = "/Users/me/dev/web"     # the project folder, copied in on the first `up`
 # url = "acme/web"            # instead of `dir`: a remote cloned into the env (`branch = "dev"`)
+# dangerously_pull_on_stop = true   # every stop pulls into the folder, unreviewed
 
 [[allow]]
 host = "docs.rs"
@@ -120,7 +121,10 @@ hosts = ["dl.k8s.io"]         # extra hosts readable only while installs run
 `config.toml` takes `[tools]`, `[deps]`, `[[deny]]`, `[[mute]]`, `idle_stop` and `auto_forward`
 too, for every env, and `[agents.<name>]` options (`model`, `effort`, `args`, `headless_args`)
 for every env that has that agent; an env's own, and its `luoto.toml`'s, come on top.
-Credentials go only in each env's own file. `notifications = false` there turns desktop
+Credentials go only in each env's own file, and so does `dangerously_pull_on_stop`
+(`luoto pull --on-stop on|off` writes it; [headless runs](guides/headless.md#its-changes-in-your-folder)
+say what it writes and holds back): `config.toml` and a `luoto.toml` refuse it, and an env
+without a folder on this machine can't have it. `notifications = false` there turns desktop
 [notifications](#notifications) off. `runtime = "container"` there (`luoto setup` offers it)
 runs envs on Apple's `container` ([install.md](install.md)).
 
@@ -322,6 +326,8 @@ language servers would run project code outside the sandbox.
 ## Notifications
 
 The background watcher shows a desktop notification for each new access request and the first
-denial at each host, and when the disk that holds envs runs low. macOS asks once to allow
+denial at each host, when the disk that holds envs runs low, and when an idle env's stop
+pulled its files (`dangerously_pull_on_stop`: how many, into which folder, how many were held
+back). macOS asks once to allow
 them; Linux needs `notify-send`. Where they are off (`notifications = false` in
 `config.toml`) or missing, the bell in `luoto ui` gives browser notifications for requests.

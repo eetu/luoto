@@ -344,7 +344,10 @@ export type Overview = {
 
 export type PlanEntry = {
   path: string;
-  /** `new` or `changed`. */
+  /**
+   * `new`, `changed`, or `conflict`: changed in the env and in the folder since the env's
+   * copy (or a file the folder has and the copy never did).
+   */
   change: string;
   size: number;
   executable: boolean;
@@ -435,10 +438,24 @@ export type PullPlan = {
   repo: string | null;
   entries: PlanEntry[];
   unchanged: number;
+  /** Files the env left as it got them while the folder's changed: they stay as they are. */
+  yours: number;
+  /** Files the env deleted and the folder has: kept, a pull deletes nothing. */
+  deleted: string[];
   /** Entries refused outright (unsafe paths, links leaving the folder, special files). */
   refused: [string, string][];
   /** What tar said when reading the env's files failed: some may be missing from the plan. */
   unread: string | null;
+  /**
+   * Whether the env's copy has a base (`base.rs`): without one, every difference is listed
+   * as the env's change.
+   */
+  based: boolean;
+  /**
+   * The folder's git HEAD when the env's copy was made or last pulled, and now, when it
+   * moved (short).
+   */
+  head_moved: [string, string] | null;
   /**
    * Hash over what would be written; applying re-checks it so a sandbox can't swap files
    * between your review and the write.
@@ -455,6 +472,8 @@ export type PullPlans = {
 export type Pulled = {
   written: number;
   skipped: number;
+  /** Files changed in the folder too, left as they are. */
+  conflicts: number;
   /** Files that couldn't be written, and why. */
   failed: [string, string][];
 };

@@ -19,8 +19,13 @@ const LINGERING: &[&str] = &[
     "dbus-daemon",
 ];
 
-/// Lists the dev container's processes besides init (PID 1) and its `sleep`, using builtins
-/// only, so the check doesn't see itself.
+/// What marks, in its environment, a process luoto itself keeps in the dev container (the
+/// watcher's look at its listening ports): it is no one's work there.
+pub const PROBE: &str = "LUOTO_PROBE=1";
+
+/// Lists the dev container's processes besides init (PID 1), what init keeps running (its
+/// `sleep`, luoto's `sandbox` for the env's network link and ssh-agent), luoto's own probes
+/// ([`PROBE`]) and the check itself, whose children it skips.
 const PROCESSES: &str = r#"me=$$
 for d in /proc/[0-9]*; do
   p=${d#/proc/}
@@ -31,7 +36,8 @@ for d in /proc/[0-9]*; do
   read -r c 2>/dev/null <"$d/comm"
   [ -z "$c" ] && continue
   [ "$pp" = "$me" ] && continue
-  [ "$pp" = 1 ] && [ "$c" = sleep ] && continue
+  [ "$pp" = 1 ] && { [ "$c" = sleep ] || [ "$c" = sandbox ]; } && continue
+  tr '\0' '\n' 2>/dev/null <"$d/environ" | grep -qxF LUOTO_PROBE=1 && continue
   echo "$c"
 done"#;
 
@@ -65,6 +71,12 @@ pub fn activity(ctx: &Ctx, env: &str) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn luotos_own_processes_in_the_env_are_no_activity() {
+        assert!(PROCESSES.contains(&format!("grep -qxF {PROBE} && continue")));
+        assert!(PROCESSES.contains(r#"[ "$c" = sandbox ]"#));
+    }
 
     #[test]
     fn idle_stop_defaults_to_30_minutes_and_an_env_overrides_it() {

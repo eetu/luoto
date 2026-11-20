@@ -58,6 +58,17 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   push/pull (tar over exec, so no VM file sharing needed). Anything that brings
   sandbox-written files to the host goes through its `risky_nested()` and path/symlink checks;
   `pull` never writes into the home folder or one that holds it.
+- `base.rs` keeps a fingerprint per file of each folder copied into an env (written from the
+  bytes sent, brought up to date by every pull, in the env's state); every pull judges a file
+  by it (`base::judge`: the env's change is written, yours is kept, both is a conflict,
+  nothing is deleted). `autopull.rs` owns the pull nobody reviews
+  (`[workspace] dangerously_pull_on_stop`, only the env's own file; `luoto run
+  --dangerously-pull`) and `autopull::stop`, the one way an env stops (CLI, UI, watcher): it
+  reads the stopped env's volume through a tools container, never the running env, holds back
+  `risky` and `autopull::unattended`, journals before it writes, and keeps its records in
+  `<data>/pulls/<env>` (outside the env's state). The watcher stops such an env through a
+  child luoto, and `autopull::recover` (every command's first step) finishes a pull cut short;
+  a removal is never resumed.
 - `repos.rs` owns an env's repos at `/workspace/<name>`: a host folder copied in, or a remote
   cloned in the env (through the gate, as the dev user) on `up`; seeded names live in the env's
   state. A `luoto.toml` names remotes only, never host folders.

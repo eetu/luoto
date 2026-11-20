@@ -2,12 +2,32 @@
 
 ## 0.6.3 (unreleased)
 
+- An agent's changes can land in your folder when its env stops, with nobody at the terminal.
+  `luoto run --dangerously-pull` stops the env after the agent and writes its files;
+  `luoto pull --on-stop on` makes every stop of an env do that (`luoto down`, the idle stop,
+  the UI's stop, a run's `--down` or `--rm`). Only files the env changed and you didn't are
+  written; conflicts, deletions, executable files and files your tools run by themselves are
+  held back for `luoto pull`, and the files are read from the stopped env. `luoto run --pull`
+  is the reviewed pull after a run. A run exits with 75 when the agent succeeded and its pull
+  left something out, `--report FILE` writes what it did, and a pull cut short is finished by
+  the next command. [Headless runs](docs/guides/headless.md#its-changes-in-your-folder) has
+  the rules, [SECURITY.md](SECURITY.md) what stays at risk.
+- `luoto pull` knows what the env changed: a file you changed in your folder since the env's
+  copy is no longer listed for overwriting. Changed on both sides, it is a conflict and
+  yours is kept unless `--overwrite`; a file the env deleted is listed and kept. An env made
+  by an earlier luoto lists every difference as before, until one pull has left its folder
+  with every file the env has.
+- `luoto run --rm` with a pull removes the env only once all its files are in your folder;
+  changed files and commits on the checked-out branch then no longer keep it.
 - `luoto run --rm` removes the env when the run ends, as `luoto rm` does, so a one-off job
   leaves nothing behind. An env holding work no remote has (the same check as `luoto rm`)
   is kept and stopped instead, with what it holds; `--yes` removes it anyway, and a terminal
   is asked. So is an env whose files its folder doesn't have: new or changed files, ones a
   pull refuses or couldn't read, and `node_modules`-like folders the folder's `.gitignore`
   doesn't ignore.
+- An idle env stops after `idle_stop` again: luoto's own processes in the env (its network
+  link on Apple's `container`, its ssh-agent, the watcher's look at listening ports) counted
+  as work, so it never became idle.
 - `luoto pull` holds back more as risky: `.env` and `.env.*`, `bunfig.toml`, `.mcp.json`,
   `AGENTS.md`, `CLAUDE.md` and `.github/workflows`.
 - `luoto pull` writes every file it can and names the ones it couldn't; it used to stop at

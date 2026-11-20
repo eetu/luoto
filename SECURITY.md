@@ -143,7 +143,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Filesystem.** The sandbox sees only its env's folder and the folders of the repos you add
   to it (a repository's `luoto.toml` names remotes only). It gets a copy, without what git
   ignores in a repository, and never writes to the host; work leaves through git pushes or a
-  reviewed `pull`. `pull` reviews changes, holds back risky files in any folder within the pull
+  `pull`, reviewed unless you say otherwise (Unattended pulls, below). luoto keeps a
+  fingerprint of each file it copied in, so a pull offers what the env changed: a file you
+  changed too is a conflict, kept unless `--overwrite`, and nothing is deleted. `pull` reviews
+  changes, holds back risky files in any folder within the pull
   (compared case-insensitively, as macOS and Windows name them), refuses `.git` under any
   spelling, names that collide by case, and paths and symlinks that leave the folder. What
   it holds back is what acts without you running it: git metadata, `.gitattributes` and
@@ -161,6 +164,24 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   Windows, envs run only in luoto's own VM, which mounts none of your folders but luoto's
   shares folder, read-only (`luoto doctor` checks), so an escape reaches what you shared, not
   your home directory.
+- **Unattended pulls** (`luoto pull --on-stop on`, `luoto run --dangerously-pull`). Off unless
+  you turn it on, per env: only the env's own file sets `dangerously_pull_on_stop` (not
+  `config.toml`, not a `luoto.toml`, and `luoto import` leaves an archive's out). The env's
+  files are then written into its folder with nobody reviewing them, when it stops. They are
+  read from the stopped env's volume by a container with no network and a read-only mount, so
+  code in the env can neither stall the read nor change a file after it was judged, and the
+  read is bounded in time and size. Written: files the env changed and you didn't, by the
+  fingerprints above. Never written: a conflict, a deletion, what `pull` holds back or
+  refuses, and what is held back only here: executable files, tool configs that are code
+  (`*.config.js` and its kin, `.eslintrc.js`, `build.rs`, `conftest.py`, `sitecustomize.py`,
+  Gradle build scripts, `Gemfile`, `*.gemspec`, `flake.nix`, `shell.nix`, `.pnp.cjs`,
+  `.yarn/releases`, `nodemon.json`), the folder your repository's `core.hooksPath` names, and
+  folders laid out as a git repository. Over 5000 files, 256 MB or 64 MB in one file, or with
+  too little disk left, nothing is written; a folder mid-merge or mid-rebase waits. Each file
+  is checked again for a change of yours just before it is replaced. What is planned is
+  journaled before the first write, so a pull cut short is cleaned up and finished by the next
+  command; a removal that was to follow (`--rm`) is never resumed. After Ctrl-C nothing is
+  pulled until you have reviewed a pull.
 - **Shared folders** (`luoto share`). A folder you share is cloned into luoto's shares
   folder and the env's clones are mounted read-only at `/shares`, readable by any code
   there; nothing flows back, and a change in the folder arrives only with a sync. Only its
@@ -321,7 +342,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Notifications.** A desktop notification shows the host and reason of a request, and a
   denied host, as the sandbox wrote them: control and format characters become spaces, the
   text is capped, and it reaches the notifier as an argument, never as script. Denials notify
-  at most twice a minute per env. The UI's browser notifications carry no sandbox text.
+  at most twice a minute per env. An unattended pull's notification carries counts and your
+  folder's path, never a file's name. The UI's browser notifications carry no sandbox text.
 - **IDE attachment.** VS Code's host-side client talks to the server in the container; UI
   extensions run on the host. Keep host-side extensions minimal.
 - **SSH logins relayed out.** The vault checks that a session is bound to a pinned host key,
@@ -329,6 +351,14 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   session someone else opened to that host from anywhere and hand back the signed login, so
   that party logs in with the key too. The key's reach at the forge is the limit: prefer a
   deploy key.
+- **Unattended pulls.** With `dangerously_pull_on_stop` or `--dangerously-pull`, files the
+  sandbox wrote land in your folder without a person choosing when. Whatever watches the
+  folder then runs them outside the sandbox: a dev server reloading, a test watcher, a
+  language server, a build on save, your next `cargo test`. What is held back narrows that to
+  ordinary source files; it doesn't remove it, since source is what those tools run. The
+  three-way rule keeps your own edits, but a file only the env changed is replaced without
+  your having read it. Use it for folders nothing watches, and read the diff before you run
+  or commit what landed.
 - **Risky pulls.** `luoto pull --include-risky` writes the sandbox's symlinks. Each target is
   checked to stay in the folder as written, but it can lead through another link (one on the
   host, or one the same pull writes) that points elsewhere.

@@ -82,8 +82,24 @@ pub struct GlobalConfig {
         deserialize_with = "open_per_env"
     )]
     _egress: (),
+    /// Refused: a workspace is one env's ([`workspace_per_env`]).
+    #[serde(
+        rename = "workspace",
+        default,
+        skip_serializing,
+        deserialize_with = "workspace_per_env"
+    )]
+    _workspace: (),
     #[serde(default)]
     pub sources: Sources,
+}
+
+/// `[workspace]` in config.toml: where an env's files come from and go is that env's own.
+fn workspace_per_env<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
+    Err(serde::de::Error::custom(
+        "a workspace is one env's: `dangerously_pull_on_stop` is set per env (`luoto pull \
+         --on-stop on -e <env>`), not in config.toml",
+    ))
 }
 
 /// `[credentials.*]` in config.toml. Each env names its own, so none reaches an account it
@@ -192,6 +208,18 @@ pub struct Workspace {
     /// accepted luoto.toml's of the same name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub repos: BTreeMap<String, Repo>,
+    /// Every stop of the env first pulls its files into its folder (and its folder repos'),
+    /// with nobody reviewing them (`autopull.rs`). Only this file sets it (`luoto pull
+    /// --on-stop`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dangerously_pull_on_stop: bool,
+}
+
+impl Workspace {
+    /// Whether a pull has a folder of this machine to write: the env's own, or a repo's.
+    pub fn has_folder(&self) -> bool {
+        self.dir.is_some() || self.repos.values().any(|r| r.dir.is_some())
+    }
 }
 
 /// A repository in the workspace: a host folder copied in, or a remote cloned in the env.
@@ -1733,6 +1761,23 @@ impl EnvFile {
         self.retain_rules(|r| !r.expired(now))
     }
 
+    /// `[workspace] dangerously_pull_on_stop`: set, or removed with `false`.
+    pub fn set_pull_on_stop(&mut self, on: bool) -> Result<()> {
+        let path = self.path.display().to_string();
+        let table = self
+            .doc
+            .entry("workspace")
+            .or_insert_with(toml_edit::table)
+            .as_table_like_mut()
+            .with_context(|| format!("`workspace` in {path} is not a table"))?;
+        if on {
+            table.insert("dangerously_pull_on_stop", toml_edit::value(true));
+        } else {
+            table.remove("dangerously_pull_on_stop");
+        }
+        self.save()
+    }
+
     /// `[egress]`: open until `until`, or closed with `None` (`open = true` goes too). The
     /// table goes when nothing is left in it.
     pub fn set_open(&mut self, until: Option<chrono::DateTime<chrono::Utc>>) -> Result<()> {
@@ -2118,6 +2163,53 @@ host = "telemetry.example"
 
         let e = parse_global("[egress]\nopen = true\n").unwrap_err();
         assert!(format!("{e:#}").contains("luoto egress open -e"), "{e:#}");
+    }
+
+    #[test]
+    fn pulling_on_stop_is_set_in_an_envs_own_file_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("web.toml");
+        let text = "# my env\n[workspace]\ndir = \"/srv/web\"\n";
+        std::fs::write(&path, text).unwrap();
+        let mut f = EnvFile::parse(path.clone(), text).unwrap();
+        assert!(!f.cfg.workspace.dangerously_pull_on_stop);
+        f.set_pull_on_stop(true).unwrap();
+        assert!(f.cfg.workspace.dangerously_pull_on_stop);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            saved.contains("dir = \"/srv/web\"\ndangerously_pull_on_stop = true"),
+            "{saved}"
+        );
+        f.set_pull_on_stop(false).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+
+        let e = parse_global("[workspace]\ndangerously_pull_on_stop = true\n").unwrap_err();
+        assert!(
+            format!("{e:#}").contains("luoto pull --on-stop on -e"),
+            "{e:#}"
+        );
+
+        let folder = |dir: Option<&str>, repo: Option<&str>| Workspace {
+            dir: dir.map(str::to_string),
+            repos: repo
+                .map(|d| {
+                    let r = Repo {
+                        dir: Some(d.to_string()),
+                        ..Default::default()
+                    };
+                    BTreeMap::from([("api".to_string(), r)])
+                })
+                .unwrap_or_default(),
+            ..Default::default()
+        };
+        assert!(folder(Some("/srv/web"), None).has_folder());
+        assert!(folder(None, Some("/srv/api")).has_folder());
+        assert!(!folder(None, None).has_folder());
+        let cloned = Workspace {
+            url: Some("acme/web".into()),
+            ..Default::default()
+        };
+        assert!(!cloned.has_folder());
     }
 
     #[test]

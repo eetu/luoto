@@ -76,7 +76,9 @@ on your machine. Development happens inside, in Zed or VS Code attached to the e
 leaves as git pushes (with a `[credentials.github]`, `[credentials.azure_devops]` or
 `[[credentials.git]]` for the repo, which SSH remotes to those hosts use over HTTPS, or
 `[credentials.ssh]`; `up` asks for the ones the env's remotes need, `luoto repo auth` changes
-one). `luoto pull` brings files back when you need them on the host: it lists changed files,
+one). `luoto pull` brings files back when you need them on the host: it lists the files the
+env changed since its copy (one you changed too is kept as yours unless `--overwrite`; one
+the env deleted stays),
 skips risky ones (in the folder or any folder within it: a repository's own `.git`, `.envrc`
 and `.env` files, editor settings, `AGENTS.md` and `CLAUDE.md`, CI workflows; the
 [security model](../SECURITY.md) lists them) unless you pass `--include-risky`, refuses paths

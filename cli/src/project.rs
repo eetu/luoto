@@ -96,6 +96,13 @@ pub fn parse(text: &str) -> Result<ProjectConfig> {
     if table.contains_key("tools") {
         bail!("luoto.toml doesn't take [tools]: pin toolchains in mise.toml or .tool-versions");
     }
+    if table.contains_key("workspace") || table.contains_key("dangerously_pull_on_stop") {
+        bail!(
+            "luoto.toml can't hold `workspace` or `dangerously_pull_on_stop`: whether an env's \
+             files land in a folder of yours with nobody reviewing them is only yours to say \
+             (`luoto pull --on-stop on`)"
+        );
+    }
     if let Some(repos) = table.get("repos").and_then(|r| r.as_table())
         && let Some(name) = repos
             .iter()
@@ -1687,6 +1694,21 @@ credentials = ["anthropic"]
         let needs = crate::needs::snippets(&p.needs, &cfg, &Default::default());
         assert_eq!(needs.len(), 2);
         assert!(needs[0].contains("repos = [\"acme/web\"]"));
+    }
+
+    #[test]
+    fn pulling_unreviewed_is_never_a_projects_to_set() {
+        for text in [
+            "[workspace]\ndangerously_pull_on_stop = true\n",
+            "dangerously_pull_on_stop = true\n",
+            "[workspace]\ndir = \"/home/me\"\n",
+        ] {
+            let e = parse(text).unwrap_err();
+            assert!(
+                format!("{e:#}").contains("luoto pull --on-stop on"),
+                "{text}: {e:#}"
+            );
+        }
     }
 
     #[test]

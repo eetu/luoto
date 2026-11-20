@@ -485,6 +485,8 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     let stale_ca = matches!(made, ca::Made::Renewed(_))
         || state.dev_ca.as_deref().is_some_and(|h| h != ca_sha);
 
+    // A pull of the stopped env reads its volume: the env starts once that has ended.
+    let pulling = crate::autopull::lock(&ctx.paths, env)?;
     // Quick when the env runs, so it says nothing then.
     let starting = crate::progress::waiting(&format!("starting `{env}`"));
     crate::progress::wait("starting the vault", || start_vault(ctx, &ids.vault))?;
@@ -537,6 +539,8 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         Restart::No
     };
     let dev = start_dev(ctx, env, &p, &state, &ids, restart)?;
+    crate::autopull::started(&ctx.paths, env);
+    drop(pulling);
     if state.dev_ca.as_deref() != Some(ca_sha.as_str()) {
         EnvState::update(&ctx.paths, env, |s| s.dev_ca = Some(ca_sha))?;
     }
@@ -564,11 +568,15 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         match (&ws.dir, &ws.url) {
             (Some(dir), _) => {
                 let dir = workspace::canonical(dir)?;
-                let n = crate::progress::step(
+                let pushed = crate::progress::step(
                     &format!("copying {} into the env", crate::ssh::tilde(&dir)),
                     || workspace::push(ctx, env, &dir, None),
                 )?;
-                out!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
+                workspace::keep_base(ctx, env, None, &dir, pushed.files);
+                out!(
+                    "copied {} file(s); bring changes back with `luoto pull -e {env}`",
+                    pushed.count
+                );
                 // The env's luoto.toml is the folder's, until the env changes it. One that
                 // can't be read here (a link, too large) is refused where it is reviewed.
                 if let Ok(Some(text)) = crate::project::read_host(&dir) {
@@ -1507,6 +1515,7 @@ pub fn forget(ctx: &Ctx, env: &str) -> Result<()> {
         std::fs::remove_dir_all(&state)?;
     }
     crate::shares::forget(env);
+    crate::autopull::forget(&ctx.paths, env);
     Ok(())
 }
 

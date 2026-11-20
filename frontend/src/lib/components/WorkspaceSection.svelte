@@ -35,14 +35,17 @@
     pull = null;
     if (!result) return;
     const skipped = result.skipped ? `, skipped ${result.skipped} risky` : "";
+    const kept = result.conflicts ? `, kept ${result.conflicts} of yours` : "";
     // Which ones and why: `luoto pull` in a terminal names them.
     const failed = result.failed.length ? `, ${result.failed.length} not written` : "";
-    say(`wrote ${plural(result.written, "file")}${skipped}${failed}`);
+    say(`wrote ${plural(result.written, "file")}${skipped}${kept}${failed}`);
   }
 
+  // A file changed here too is never written from the UI: `luoto pull --overwrite` does.
+  const conflict = (e: { change: string }) => e.change === "conflict";
   const entries = $derived(pull?.plans.flatMap((p) => p.entries) ?? []);
-  const anyRisky = $derived(entries.some((e) => e.risky));
-  const anySafe = $derived(entries.some((e) => !e.risky));
+  const anyRisky = $derived(entries.some((e) => e.risky && !conflict(e)));
+  const anySafe = $derived(entries.some((e) => !e.risky && !conflict(e)));
   const stopped = $derived(d?.dev !== "running");
 </script>
 
@@ -101,8 +104,9 @@
           <p class="small muted">nothing to pull</p>
         {/if}
         {#each pull.plans.filter((p) => pull?.plans.length === 1 || p.entries.length || p.refused.length) as p (p.dir)}
-          {@const safe = p.entries.filter((e) => !e.risky)}
-          {@const risky = p.entries.filter((e) => e.risky)}
+          {@const safe = p.entries.filter((e) => !e.risky && !conflict(e))}
+          {@const risky = p.entries.filter((e) => e.risky && !conflict(e))}
+          {@const conflicts = p.entries.filter(conflict)}
           <div class="target">
             {#if pull.plans.length > 1}
               <p class="small">
@@ -110,7 +114,9 @@
               </p>
             {/if}
             <p class="small">
-              {p.entries.length} new or changed, {p.unchanged} unchanged
+              {p.entries.length} new or changed, {p.unchanged} unchanged{p.yours
+                ? `, ${p.yours} changed only in your folder`
+                : ""}
             </p>
             {#each safe.slice(0, 20) as e, n (n)}
               <p class="small mono">{e.change} {e.path}</p>
@@ -124,6 +130,23 @@
                   {e.path} <span class="muted">— {e.risky}</span>
                 </p>
               {/each}
+            {/if}
+            {#if conflicts.length > 0}
+              <p class="warn">
+                changed in your folder too — yours are kept (<code>luoto pull --overwrite</code>
+                takes the env's):
+              </p>
+              {#each conflicts.slice(0, 20) as e, n (n)}
+                <p class="small mono">{e.path}</p>
+              {/each}
+              {#if conflicts.length > 20}
+                <p class="small muted">… {conflicts.length - 20} more</p>
+              {/if}
+            {/if}
+            {#if p.deleted.length > 0}
+              <p class="small muted">
+                {plural(p.deleted.length, "file")} deleted in the env, kept in your folder
+              </p>
             {/if}
             {#each p.refused as [path, why], n (n)}
               <p class="small muted">refused {path} — {why}</p>

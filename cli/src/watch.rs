@@ -21,7 +21,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use crate::config::{self, EnvFile};
 use crate::env::{self, Ctx};
 use crate::paths::Paths;
-use crate::{azure_identity, events, idle, machine, names, notify, ports, secrets, sync};
+use crate::{autopull, azure_identity, events, idle, machine, names, notify, ports, secrets, sync};
 
 const TICK: Duration = Duration::from_secs(2);
 const IDLE_EVERY: Duration = Duration::from_secs(60);
@@ -40,6 +40,67 @@ const AZCLI_AGAIN: Duration = Duration::from_secs(60);
 const AZCLI_FAILED_AGAIN: Duration = Duration::from_secs(300);
 /// How long `stop` waits: past a tick and the slowest round of work in it.
 const STOP_WAIT: Duration = Duration::from_secs(20);
+/// How long an idle env's stop may take when it pulls the env's files first, before the luoto
+/// doing it is ended.
+const PULL_STOP_LIMIT: Duration = Duration::from_secs(1800);
+
+/// Run this luoto with `args` as a child whose output is the watcher's log.
+fn luoto(args: &[&str]) -> std::io::Result<std::process::Child> {
+    Command::new(std::env::current_exe()?)
+        .args(args)
+        .stdin(Stdio::null())
+        .spawn()
+}
+
+/// An idle env being stopped by a luoto of its own, which pulls its files first: a pull that
+/// hangs then holds up nothing the watcher carries.
+struct Stopping {
+    child: std::process::Child,
+    since: Instant,
+    began: DateTime<Utc>,
+    limit: Duration,
+}
+
+/// Say what became of each stop that has ended, in the log and (with `notifying`) as a
+/// notification, and end one that ran past [`PULL_STOP_LIMIT`].
+fn settle_stops(paths: &Paths, stopping: &mut HashMap<String, Stopping>, notifying: bool) {
+    stopping.retain(|name, s| {
+        let status = match s.child.try_wait() {
+            Ok(None) if s.since.elapsed() < PULL_STOP_LIMIT => return true,
+            Ok(None) => {
+                let _ = s.child.kill();
+                let _ = s.child.wait();
+                out!(
+                    "{} gave up stopping `{name}`: its pull took over {} min; the next luoto \
+                     command sees to it",
+                    Utc::now(),
+                    PULL_STOP_LIMIT.as_secs() / 60
+                );
+                return false;
+            }
+            Ok(Some(status)) => status,
+            Err(_) => return false,
+        };
+        match autopull::Report::last(paths, name, s.began) {
+            Some(r) => {
+                out!(
+                    "{} stopped `{name}`: idle for {:?}; {}",
+                    Utc::now(),
+                    s.limit,
+                    r.line()
+                );
+                if let Some(note) = r.note().filter(|_| notifying) {
+                    notify::show_logged(&note);
+                }
+            }
+            None if status.success() => {
+                out!("{} stopped `{name}`: idle for {:?}", Utc::now(), s.limit)
+            }
+            None => out!("{} could not stop `{name}` ({status})", Utc::now()),
+        }
+        false
+    });
+}
 
 /// Start the watcher in the background; a second one exits at once (it holds a lock). The
 /// running one is told which luoto this is, and gives way to it if it isn't that one.
@@ -210,6 +271,15 @@ pub fn watch() -> Result<ExitCode> {
     let mut disk_checked: Option<Instant> = None;
     // Open egress closed here, by the end it had.
     let mut closed: HashMap<String, chrono::DateTime<Utc>> = HashMap::new();
+    let mut stopping: HashMap<String, Stopping> = HashMap::new();
+    // A pull a crash left owed is finished by a luoto of its own (every command does that
+    // first), so this loop starts at once.
+    if autopull::any_owing(&ctx.paths) {
+        match luoto(&["recover"]) {
+            Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
+            Err(e) => println!("{} pulls owed not seen to: {e}", Utc::now()),
+        }
+    }
     loop {
         std::thread::sleep(TICK);
         // `stop` (luoto uninstall) removed it, and waits for this process to leave.
@@ -248,12 +318,17 @@ pub fn watch() -> Result<ExitCode> {
             Err(e) if links.is_empty() => return Err(e),
             Err(_) => continue,
         };
+        settle_stops(
+            &ctx.paths,
+            &mut stopping,
+            ctx.global.notifications.unwrap_or(true),
+        );
         let states = match ctx.rt.states() {
             Ok(s) => s,
             Err(_) if !links.is_empty() => continue,
             Err(_) => Default::default(),
         };
-        if states.vm_stopped {
+        if states.vm_stopped && stopping.is_empty() {
             return Ok(ExitCode::SUCCESS);
         }
         let envs = match config::list_envs(&ctx.paths) {
@@ -313,6 +388,10 @@ pub fn watch() -> Result<ExitCode> {
             forwards.clear();
             refused.clear();
             record(&ctx.paths, &forwards, &refused, &mut recorded);
+            // An env being stopped is still to be reported.
+            if !stopping.is_empty() {
+                continue;
+            }
             // Without a VM of luoto's own there is nothing left to stop.
             if !machine::is_luoto(ctx.rt.connection.as_deref()) {
                 return Ok(ExitCode::SUCCESS);
@@ -434,6 +513,9 @@ pub fn watch() -> Result<ExitCode> {
         }
         idle_checked = Instant::now();
         for name in &running {
+            if stopping.contains_key(name) {
+                continue;
+            }
             let limit = EnvFile::load(&ctx.paths, name)
                 .ok()
                 .and_then(|f| idle::limit(&ctx.global, &f.cfg));
@@ -447,6 +529,22 @@ pub fn watch() -> Result<ExitCode> {
                 continue;
             }
             idle_since.remove(name);
+            if autopull::on(&ctx.paths, name) {
+                match luoto(&["down", "-e", name, "--idle"]) {
+                    Ok(child) => {
+                        out!("{} stopping `{name}` and pulling its files", Utc::now());
+                        let s = Stopping {
+                            child,
+                            since: Instant::now(),
+                            began: Utc::now(),
+                            limit,
+                        };
+                        stopping.insert(name.clone(), s);
+                    }
+                    Err(e) => out!("{} could not stop `{name}`: {e}", Utc::now()),
+                }
+                continue;
+            }
             match env::down(&ctx, name) {
                 Ok(_) => out!("{} stopped `{name}`: idle for {limit:?}", Utc::now()),
                 Err(e) => out!("{} could not stop `{name}`: {e:#}", Utc::now()),

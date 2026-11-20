@@ -111,7 +111,8 @@ Hosts that get your credentials keep to their rules throughout, and muted hosts 
 ## 6. Bring files back and stop
 
 `luoto pull` brings files back to your folder when you need them there; it holds back git
-hooks and other files your own tools would run. `luoto down` stops the env, and it stops by
+hooks and other files your own tools would run, and keeps yours where you changed a file
+too. `luoto down` stops the env, and it stops by
 itself after 30 minutes with nothing running in it (`idle_stop`). With podman on macOS and
 Windows, luoto's VM stops too once no env has run for as long; on Apple's `container` each
 container is a VM of its own, which stops with its env. `luoto up` brings it back in about
