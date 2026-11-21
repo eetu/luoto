@@ -61,6 +61,9 @@ pub struct Compiled {
     pub git_config: String,
     /// Pinned host keys of the hosts git over SSH may log in to (`/run/luoto/ssh_known_hosts`).
     pub known_hosts: String,
+    /// Placeholder logins for hosts the gate adds a credential on, for clients that send none
+    /// without one (`/run/luoto/netrc`, which `NETRC` names).
+    pub netrc: String,
     /// CA certificates (PEM) the gate trusts upstream besides the public roots, each for its
     /// own host only: those of self-hosted git hosts.
     pub upstream_cas: BTreeMap<String, String>,
@@ -81,6 +84,10 @@ impl Compiled {
 }
 
 const GH_PLACEHOLDER: &str = "ghs_luotoPlaceholder0000000000000000000";
+/// What clients of an Azure DevOps feed send as their login; the gate puts the PAT instead.
+const FEED_PLACEHOLDER: &str = "luoto-placeholder";
+/// Where the env's netrc is (`Compiled::netrc`).
+pub const NETRC_PATH: &str = "/run/luoto/netrc";
 
 #[derive(Default)]
 struct Builder {
@@ -100,6 +107,7 @@ struct Builder {
     /// Hosts on this machine that take credentials over plain HTTP (model servers).
     plain_http_credentials: Vec<String>,
     redirects: Vec<Redirect>,
+    netrc: String,
 }
 
 impl Builder {
@@ -307,6 +315,7 @@ pub fn compile(
         dev_env: b.dev_env,
         git_config: git_config(&b.rewrites),
         known_hosts,
+        netrc: b.netrc,
         upstream_cas,
         tenant_from: b.tenant_from,
         warnings: b.warnings,
@@ -1592,6 +1601,26 @@ fn compile_azure_feeds(b: &mut Builder, feeds: &[azure::Feed]) {
         let legacy = vec!["/_packaging/**".to_string(), "/*/_packaging/**".to_string()];
         sites.push((azure::legacy_pkgs_host(o), legacy));
     }
+    if sites.is_empty() {
+        return;
+    }
+    // Clients that send nothing without a login of their own get placeholders, which the gate
+    // replaces: uv with `authenticate = "always"` (a netrc login), cargo for a registry that
+    // requires auth (a token from a provider, given whatever registry asks).
+    for (host, _) in &sites {
+        b.netrc.push_str(&format!(
+            "machine {host} login luoto password {FEED_PLACEHOLDER}\n"
+        ));
+    }
+    b.dev_env.insert("NETRC".into(), NETRC_PATH.into());
+    b.dev_env.insert(
+        "CARGO_CREDENTIAL_ALIAS_LUOTO".into(),
+        format!("cargo:token-from-stdout echo {FEED_PLACEHOLDER}"),
+    );
+    b.dev_env.insert(
+        "CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS".into(),
+        "cargo:token luoto".into(),
+    );
     for (host, paths) in sites {
         b.injections.push(Injection {
             binding: "azure_devops".into(),
@@ -1970,6 +1999,22 @@ feeds = ["https://pkgs.dev.azure.com/acme/Web/_packaging/packages/pypi/simple/",
                 .is_empty()
         );
         assert!(c.vault_refs().contains("op://v/ado/pat"));
+        // Placeholder logins for clients that send none without one; never the token.
+        assert_eq!(
+            c.netrc.lines().collect::<Vec<_>>(),
+            [
+                "machine pkgs.dev.azure.com login luoto password luoto-placeholder",
+                "machine acme.pkgs.visualstudio.com login luoto password luoto-placeholder",
+                "machine contoso.pkgs.visualstudio.com login luoto password luoto-placeholder",
+            ]
+        );
+        assert_eq!(c.dev_env["NETRC"], NETRC_PATH);
+        assert_eq!(
+            c.dev_env["CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS"],
+            "cargo:token luoto"
+        );
+        let none = compile("t", &cfg(""), GATE, &alias()).unwrap();
+        assert!(none.netrc.is_empty() && !none.dev_env.contains_key("NETRC"));
     }
 
     #[test]
