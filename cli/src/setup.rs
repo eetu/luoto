@@ -545,11 +545,11 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
     if let Some(before) = before.filter(|b| *b != choice.flavor()) {
         let envs = config::list_envs(&paths)?.len();
         if envs > 0 {
-            println!(
-                "! {envs} env(s) keep their containers and volumes on {}: work not pulled to \
+            crate::progress::note(&format!(
+                "{envs} env(s) keep their containers and volumes on {}: work not pulled to \
                  this machine stays there",
                 RuntimeChoice::of(before).name()
-            );
+            ));
         }
     }
     // Another runtime's VM connection and gVisor path aren't this one's.
@@ -561,10 +561,7 @@ pub fn setup(o: SetupOpts) -> Result<ExitCode> {
     match choice {
         RuntimeChoice::Container => apple_start()?,
         RuntimeChoice::Podman => podman_ready(&o, &d, &paths, &mut global)?,
-        RuntimeChoice::Docker => out_text!(
-            "\n{}",
-            crate::text::hang("! ", &docker_note(&d.os), crate::text::columns())
-        ),
+        RuntimeChoice::Docker => crate::progress::note(&docker_note(&d.os)),
     }
     let other = options
         .iter()
@@ -1075,10 +1072,10 @@ fn swap_line(v: &luoto_shared::ctl::VaultStatus) -> Option<String> {
             "{swap}; the vault and gates never swap, but `[sandbox_secrets]` in env shells can"
         ),
         Some(_) => format!(
-            "{swap}, and THE VAULT CAN BE SWAPPED to it: the next `luoto up` recreates it without"
+            "{swap}, and the vault can be swapped to it: the next `luoto up` recreates it without"
         ),
         None => format!(
-            "{swap}, and THE VAULT CAN BE SWAPPED to it: the runtime limits no swap (cgroup v1); \
+            "{swap}, and the vault can be swapped to it: the runtime limits no swap (cgroup v1); \
              turn swap off there"
         ),
     })
@@ -1124,9 +1121,9 @@ mod tests {
         let off = swap_line(&v(1_048_576, Some("0"))).unwrap();
         assert!(off.starts_with("swap: 1024 MiB") && off.contains("never swap"));
         let old = swap_line(&v(1_048_576, Some("max"))).unwrap();
-        assert!(old.contains("THE VAULT CAN BE SWAPPED") && old.contains("`luoto up`"));
+        assert!(old.contains("the vault can be swapped") && old.contains("`luoto up`"));
         let v1 = swap_line(&v(1_048_576, None)).unwrap();
-        assert!(v1.contains("THE VAULT CAN BE SWAPPED") && v1.contains("cgroup v1"));
+        assert!(v1.contains("the vault can be swapped") && v1.contains("cgroup v1"));
     }
 
     fn det(os: &str, runtimes: Vec<RuntimeInfo>) -> Detection {

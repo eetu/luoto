@@ -227,12 +227,19 @@ pub fn note(msg: &str) {
     labelled("note: ", msg);
 }
 
+/// `luoto: msg` on stderr, as an error that ends a command reads: for one failure among
+/// several that leaves the rest to go on.
+pub fn error(msg: &str) {
+    labelled("luoto: ", msg);
+}
+
 fn labelled(label: &str, msg: &str) {
     let style = crate::style::err();
     let s = style.commands(&text::hang(label, msg, text::columns()));
     // The label is the line's start, so styling it moves nothing.
     let s = match (label, s.strip_prefix(label)) {
         ("warning: ", Some(rest)) => format!("{}{rest}", style.warning(label)),
+        ("luoto: ", Some(rest)) => format!("{}{rest}", style.error(label)),
         (_, Some(rest)) => format!("{}{rest}", style.dim(label)),
         _ => s,
     };

@@ -462,18 +462,24 @@ pub fn export(env: &str, file: Option<&str>, no_home: bool, yes: bool) -> Result
          and vault token (import makes new ones), and what `up` rebuilds."
     );
     let states = ctx.rt.states()?;
+    // A pull-on-stop env's pull when it stops for the export, if it left something out.
+    let mut incomplete = false;
     if states.running(&names::dev(env)) || states.running(&names::gate(env)) {
         out!(
             "\n`{env}` is running, and its files would change under the copy: it stops for the \
              export (`luoto up -e {env}` starts it again)."
         );
         if !yes && !confirm(&format!("Stop `{env}` and export it?")) {
-            bail!("nothing exported (`luoto down -e {env}` first, or `--yes` stops it)");
+            return Err(crate::prompt::declined(
+                "exported",
+                &format!("luoto export -e {env} --yes"),
+            ));
         }
         let stopped = crate::autopull::stop(&ctx, env, crate::autopull::Why::Down, false)?;
         out!("env `{env}` stopped");
         if let Some(r) = &stopped.report {
             r.print(&mut std::io::stdout(), crate::style::out(), 30);
+            incomplete = r.incomplete();
         }
     }
     env::ensure_image(&ctx, &ctx.image("tools"))?;
@@ -521,6 +527,9 @@ pub fn export(env: &str, file: Option<&str>, no_home: bool, yes: bool) -> Result
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default()
     );
+    if incomplete {
+        return Ok(ExitCode::from(crate::autopull::INCOMPLETE));
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1084,7 +1093,10 @@ pub fn import(file: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
     repos::check_folders_text(&cfg.cfg.workspace).context("its config")?;
     block!("{}", summary(&path, &head, &name, &cfg.cfg).join("\n"));
     if !yes && !confirm(&format!("Import it as `{name}`?")) {
-        bail!("nothing imported (`--yes` imports without asking)");
+        return Err(crate::prompt::declined(
+            "imported",
+            &format!("luoto import {} --name {name} --yes", path.display()),
+        ));
     }
     keep_this_machines_own(&mut cfg);
     env::ensure_vm(&ctx)?;
@@ -1141,7 +1153,7 @@ pub fn import(file: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
         names::addrs(octet).subnet
     );
     for n in notes(&ctx, &name, &head, &cfg.cfg) {
-        println!("note: {n}");
+        crate::progress::note(&n);
     }
     out!("`luoto up -e {name}` starts it, and asks for what it needs here");
     Ok(ExitCode::SUCCESS)

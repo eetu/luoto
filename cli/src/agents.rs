@@ -24,7 +24,52 @@ use crate::wizard::{Answer, Mode};
 use crate::{autopull, events, model_servers, names, secrets, sync};
 use sha2::{Digest, Sha256};
 
-pub fn list() -> Result<ExitCode> {
+/// `luoto agent list`: the env's agents (its luoto.toml's included) and how each signs in.
+pub fn list(env_name: &str) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    let cfg = env::layered(&ctx, env_name)?;
+    if cfg.agents.is_empty() {
+        out!(
+            "env `{env_name}` has no agents (`luoto agent add -e {env_name} <agent>`; \
+             `luoto agent list --available` lists them)"
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    let width = crate::text::columns();
+    let wide = cfg.agents.names().map(String::len).max().unwrap_or(0);
+    for name in cfg.agents.names() {
+        let Some(a) = profiles::agent(name) else {
+            continue;
+        };
+        let how = match (current(&cfg, &a), starts_on(&cfg, &a)) {
+            _ if a.providers.is_empty() => "needs no credential".to_string(),
+            (_, Some((server, _))) => format!("starts on model server `{server}`"),
+            (
+                Some(Auth::Kind {
+                    kind,
+                    reference,
+                    provider,
+                }),
+                None,
+            ) => {
+                let label = profiles::provider(&provider)
+                    .and_then(|p| p.auth.get(&kind).map(|k| k.label.clone()))
+                    .unwrap_or(kind);
+                format!("{label} = {}", secrets::shown_ref(&reference))
+            }
+            (Some(Auth::LoginInside { .. }), None) => "logs in inside the env".to_string(),
+            (None, None) => format!("no credential (`luoto agent auth -e {env_name} {name}`)"),
+        };
+        out_text!(
+            "{}",
+            crate::text::hang(&format!("  {name:<wide$}  "), &how, width)
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `luoto agent list --available`: every agent and model provider luoto knows.
+pub fn available() -> Result<ExitCode> {
     let width = crate::text::columns();
     // A name, then what it is, wrapped under itself.
     let row = |name: &str, wide: usize, what: String| {
@@ -44,7 +89,7 @@ pub fn list() -> Result<ExitCode> {
             format!("{} (providers: {})", a.description, a.providers.join(", ")),
         );
     }
-    head!("\nproviders (configure under [credentials.<provider>]):");
+    head!("\nproviders (an agent's credential: `luoto agent auth`):");
     let w = wide(&mut profiles::provider_names());
     for n in profiles::provider_names() {
         let p = profiles::provider(n).context("provider profile")?;
@@ -60,7 +105,7 @@ pub fn list() -> Result<ExitCode> {
 
 fn profile(agent: &str) -> Result<profiles::Agent> {
     profiles::agent(agent)
-        .with_context(|| format!("unknown agent `{agent}` (see `luoto agent list`)"))
+        .with_context(|| format!("unknown agent `{agent}` (`luoto agent list --available`)"))
 }
 
 /// Whether the agent's command is on the dev user's login PATH.
@@ -537,12 +582,12 @@ fn scripted(a: &profiles::Agent) -> Vec<String> {
 
 /// `luoto agent add … --credential` with each of [`scripted`]'s values: the first in the
 /// command, the others after it.
-fn scripted_command(env_name: &str, name: &str, a: &profiles::Agent) -> String {
+fn scripted_command(env_name: &str, name: &str, a: &profiles::Agent, sub: &str) -> String {
     let forms = scripted(a);
     let Some((first, rest)) = forms.split_first() else {
         return String::new();
     };
-    let mut out = format!("`luoto agent add -e {env_name} {name} --credential {first}`");
+    let mut out = format!("`luoto agent {sub} -e {env_name} {name} --credential {first}`");
     if !rest.is_empty() {
         let rest: Vec<String> = rest.iter().map(|r| format!("`{r}`")).collect();
         out.push_str(&format!(" (or {})", rest.join(", ")));
@@ -555,7 +600,7 @@ fn scripted_command(env_name: &str, name: &str, a: &profiles::Agent) -> String {
 fn credential_help(env_name: &str, name: &str, a: &profiles::Agent) -> String {
     let provider = a.providers.first().and_then(|p| profiles::provider(p));
     let mut how = format!("`luoto agent auth -e {env_name} {name}` on a terminal");
-    let scripted = scripted_command(env_name, name, a);
+    let scripted = scripted_command(env_name, name, a, "auth");
     if !scripted.is_empty() {
         how.push_str(&format!(", or {scripted}"));
     }
@@ -780,6 +825,7 @@ pub fn set_credentials(
         .flat_map(|a| a.providers)
         .filter_map(|p| Some((p.clone(), profiles::provider(&p)?)))
         .collect();
+    let mut written = BTreeSet::new();
     for spec in specs {
         let (key, reference) = match spec.split_once('=') {
             Some((k, r)) => (k.trim(), Some(r.trim())),
@@ -831,7 +877,16 @@ pub fn set_credentials(
             None => ProviderValue::Flag(true),
         };
         EnvFile::load(&ctx.paths, env_name)?.set_provider_kind(provider, kind, &value)?;
-        out!("[credentials.{provider}] {kind} written to env `{env_name}`");
+        written.insert(provider.clone());
+    }
+    // Each agent the credentials were for ends with its summary, as after the questions.
+    let cfg = EnvFile::load(&ctx.paths, env_name)?.cfg;
+    for name in agents {
+        if let Some(a) = profiles::agent(name)
+            && a.providers.iter().any(|p| written.contains(p))
+        {
+            settle(env_name, name, &a, &cfg);
+        }
     }
     Ok(())
 }
@@ -859,7 +914,7 @@ pub fn add(env_name: &str, agent: &str, credential: Option<&str>) -> Result<Exit
         )?;
     }
     for other in lacking.iter().filter(|n| *n != agent) {
-        println!("still without a credential: {other} (luoto agent auth -e {env_name} {other})");
+        out!("still without a credential: {other} (`luoto agent auth -e {env_name} {other}`)");
         mark_settled(env_name, other);
     }
     // A running env stays as it was but for the agent: no closing block about the env.
@@ -878,7 +933,7 @@ pub fn add(env_name: &str, agent: &str, credential: Option<&str>) -> Result<Exit
 /// `luoto agent auth`: the credential questions again for an agent the env has, each opening
 /// on what its config says. The answer replaces only how the agent authenticates, and a
 /// running env takes it at once.
-pub fn auth(env_name: &str, agent: &str) -> Result<ExitCode> {
+pub fn auth(env_name: &str, agent: &str, credential: Option<&str>) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let a = profile(agent)?;
     if !env::layered(&ctx, env_name)?.agents.contains(agent) {
@@ -901,10 +956,15 @@ pub fn auth(env_name: &str, agent: &str) -> Result<ExitCode> {
         );
         return Ok(ExitCode::SUCCESS);
     }
+    if let Some(c) = credential {
+        set_credentials(&ctx, env_name, &[agent.to_string()], &[c.to_string()])?;
+        sync::reapply(&ctx, env_name)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     if !crate::prompt::interactive() {
         bail!(
-            "agent auth needs a terminal; without one, {}",
-            scripted_command(env_name, agent, &a)
+            "`luoto agent auth` asks on a terminal; without one: {}",
+            scripted_command(env_name, agent, &a, "auth")
         );
     }
     if ask(&ctx, env_name, agent, &a, Mode::Change)? {
@@ -975,7 +1035,7 @@ const CLOCK_SLACK: TimeDelta = TimeDelta::minutes(10);
 
 /// `--timeout`: a duration as rules take it (30m, 2h), above zero.
 fn parse_timeout(s: &str) -> Result<Duration> {
-    crate::rules::parse_ttl(s)?
+    crate::rules::parse_duration(s)?
         .to_std()
         .ok()
         .filter(|d| !d.is_zero())
@@ -1666,18 +1726,20 @@ pub fn rm(env_name: &str, agent: &str) -> Result<ExitCode> {
     if !f.cfg.agents.contains(agent) {
         if env::layered(&ctx, env_name)?.agents.contains(agent) {
             bail!(
-                "{agent} comes from the team's luoto.toml; `luoto project ignore` stops applying \
-                 that file"
+                "{agent} comes from the team's luoto.toml; `luoto project ignore -e \
+                 {env_name}` stops applying that file"
             );
         }
-        bail!("env `{env_name}` has no agent `{agent}`");
+        bail!(
+            "env `{env_name}` has no agent `{agent}` (`luoto agent list -e {env_name}` lists \
+             its agents)"
+        );
     }
     f.remove_agent(agent)?;
     sync::reapply(&ctx, env_name)?;
     out!(
-        "removed {} from env `{env_name}`; its files stay in the env's home (`{}` in \
-         ~/.local/bin), and its [credentials] stay in the config",
-        a.description,
+        "removed agent `{agent}` from env `{env_name}`; its files stay in the env's home \
+         (`{}` in ~/.local/bin), and its credential in the env's config",
         a.command
     );
     Ok(ExitCode::SUCCESS)
@@ -2016,8 +2078,8 @@ model_server = "box"
         );
         assert_eq!(scripted(&agent("agy")), ["login_inside"]);
         assert_eq!(
-            scripted_command("web", "claude", &agent("claude")),
-            "`luoto agent add -e web claude --credential oauth_token=<ref>` (or `api_key=<ref>`, \
+            scripted_command("web", "claude", &agent("claude"), "auth"),
+            "`luoto agent auth -e web claude --credential oauth_token=<ref>` (or `api_key=<ref>`, \
              `login_inside`)"
         );
         let open = scripted(&agent("opencode"));

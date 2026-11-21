@@ -42,7 +42,7 @@ pub fn limit(global: &GlobalConfig, older_than: Option<&str>) -> Result<(String,
         (None, Some(s)) => (s, "`prune_after` in config.toml"),
         (None, None) => (DEFAULT, "the default"),
     };
-    let d = crate::rules::parse_ttl(text).with_context(|| from.to_string())?;
+    let d = crate::rules::parse_duration(text).with_context(|| from.to_string())?;
     Ok((text.trim().to_string(), d))
 }
 
@@ -493,13 +493,10 @@ pub fn envs(o: Opts) -> Result<ExitCode> {
                 disk::human(total(&remove))
             );
             if !crate::prompt::confirm(&question) {
-                bail!("nothing removed (`{}` skips the question)", scripted(&o));
+                return Err(crate::prompt::declined("removed", &scripted(&o)));
             }
         }
-        Step::List => {
-            say(format!("nothing removed: `{}` removes them", scripted(&o)));
-            return Ok(ExitCode::SUCCESS);
-        }
+        Step::List => return Err(crate::prompt::declined("removed", &scripted(&o))),
     }
     let mut failed: Vec<(String, String)> = Vec::new();
     let mut gone: Vec<&Row> = Vec::new();
@@ -525,12 +522,13 @@ pub fn envs(o: Opts) -> Result<ExitCode> {
                 machine::trim(&ctx.rt.bin)
             })
     {
-        println!("note: {e:#}");
+        crate::progress::note(&format!("{e:#}"));
     }
     if failed.is_empty() {
         return Ok(ExitCode::SUCCESS);
     }
-    eprintln!("\nluoto: {} env(s) not removed:", failed.len());
+    eprintln!();
+    crate::progress::error(&format!("{} env(s) not removed:", failed.len()));
     for (name, e) in &failed {
         eprintln!("{}", text::hang(&format!("  {name}: "), e, width));
     }

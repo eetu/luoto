@@ -15,7 +15,7 @@ use crate::{names, ssh};
 
 pub fn ensure_running(ctx: &Ctx, name: &str) -> Result<()> {
     if !ctx.rt.is_running(&names::dev(name)) {
-        bail!("env `{name}` is not running — `luoto up -e {name}`");
+        bail!("env `{name}` is not running: `luoto up -e {name}` starts it");
     }
     // Forwards and idle stop follow every session (a newer luoto replaces an older watcher).
     crate::watch::spawn(ctx);
@@ -333,11 +333,10 @@ pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
     }
     let config = ssh::write_config(&ctx)?;
     if !ssh::include_present(&ctx.paths) {
-        println!(
-            "Editors find envs through ~/.ssh/config. {}",
+        bail!(
+            "editors find envs through ~/.ssh/config, which doesn't include luoto's. {}",
             ssh::include_hint(&ctx)
         );
-        return Ok(ExitCode::FAILURE);
     }
     let host = names::dev(name);
     let user =
@@ -413,12 +412,11 @@ pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
         // It ran in the env and said why it stopped there.
         Ok(_) if editor.in_env() => Ok(ExitCode::FAILURE),
         _ => {
-            out!(
-                "could not start `{}`; install its command-line launcher, or run: {}",
+            bail!(
+                "could not start `{}`: install its command-line launcher, or run `{}`",
                 argv[0],
                 argv.join(" ")
-            );
-            Ok(ExitCode::FAILURE)
+            )
         }
     }
 }

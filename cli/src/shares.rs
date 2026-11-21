@@ -631,7 +631,7 @@ pub fn add(env: &str, folder: &str, name: Option<&str>, yes: bool) -> Result<Exi
             &[
                 ("folder", real.display().to_string()),
                 ("in the env", format!("{IN_ENV}/{name}, read-only")),
-                ("change it", format!("luoto share rm -e {env} {name}")),
+                ("remove it", format!("luoto share rm -e {env} {name}")),
             ],
         )
     );
@@ -656,7 +656,7 @@ pub fn sync_cmd(env: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
         && !cfg.shares.contains_key(n)
     {
         bail!(
-            "env `{env}` has no share `{}` (`luoto share list`)",
+            "env `{env}` has no share `{}` (`luoto share list -e {env}` lists its shares)",
             display(n)
         );
     }
@@ -686,7 +686,7 @@ pub fn rm(env: &str, name: &str) -> Result<ExitCode> {
     let paths = Paths::get()?;
     if !EnvFile::load(&paths, env)?.remove_from_table("shares", name)? {
         bail!(
-            "env `{env}` has no share `{}` (`luoto share list`)",
+            "env `{env}` has no share `{}` (`luoto share list -e {env}` lists its shares)",
             display(name)
         );
     }

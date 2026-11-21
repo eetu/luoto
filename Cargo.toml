@@ -51,7 +51,7 @@ libc = "0.2"
 time = "0.3"
 zeroize = { version = "1.9", features = ["derive", "serde"] }
 
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
 inquire = { version = "0.9", default-features = false, features = ["crossterm"] }
 toml = "1"

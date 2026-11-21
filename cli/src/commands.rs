@@ -78,8 +78,8 @@ pub fn project(
         }
         project::State::Unread => {
             out!(
-                "`{name}` is stopped and its luoto.toml is only in the env: `luoto up -e {name}` \
-                 reads it"
+                "env `{name}` is not running, and its luoto.toml is only in the env: `luoto up \
+                 -e {name}` reads it"
             );
             if !st.accepted.is_empty() {
                 println!("the accepted settings apply:");
@@ -94,9 +94,9 @@ pub fn project(
     let pending = st.pending();
     if !accept {
         if pending {
-            println!("apply:  luoto project apply -e {name}");
+            out!("apply:  `luoto project apply -e {name}`");
             if st.state != project::State::Declined {
-                println!("ignore: luoto project ignore -e {name}");
+                out!("ignore: `luoto project ignore -e {name}`");
             }
         }
         return Ok(ExitCode::SUCCESS);
@@ -105,8 +105,10 @@ pub fn project(
         return Ok(ExitCode::SUCCESS);
     };
     if !yes && !confirm("Apply these settings to this env?") {
-        println!("nothing changed (non-interactive: add --yes)");
-        return Ok(ExitCode::FAILURE);
+        return Err(crate::prompt::declined(
+            "applied",
+            &format!("luoto project apply -e {name} --yes"),
+        ));
     }
     let running = project::apply(&ctx, name, &text)?;
     if running {
@@ -125,9 +127,9 @@ pub fn project(
 }
 
 /// Print a luoto.toml from the env's settings, or write it to the env's folder, or into the
-/// running env for an env cloned from a remote (replacing one there only with `force`, after
-/// showing what changes).
-pub fn project_suggest(name: &str, write: bool, force: bool) -> Result<ExitCode> {
+/// running env for an env cloned from a remote (replacing one there only with `overwrite`,
+/// after showing what changes).
+pub fn project_suggest(name: &str, write: bool, overwrite: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let cfg = EnvFile::load(&ctx.paths, name)?.cfg;
     let accepted = project::accepted(&ctx, name).map(|(_, p)| p);
@@ -186,9 +188,11 @@ pub fn project_suggest(name: &str, write: bool, force: bool) -> Result<ExitCode>
                 crate::text::lines(&format!("{e:#}"))
             ),
         }
-        if !force {
-            println!("not written: --force replaces it (its comments too)");
-            return Ok(ExitCode::FAILURE);
+        if !overwrite {
+            bail!(
+                "{path} not written: `luoto project suggest -e {name} --write --overwrite` \
+                 replaces it (its comments too)"
+            );
         }
     }
     match &dir {
@@ -341,7 +345,10 @@ pub fn pull(name: &str, o: PullOpts) -> Result<ExitCode> {
             dirs.join(", ")
         ))
     {
-        bail!("nothing written (use --yes to skip the prompt)");
+        return Err(crate::prompt::declined(
+            "written",
+            &format!("luoto pull -e {name} --yes"),
+        ));
     }
     let (mut skipped, mut conflicts) = (0, 0);
     let mut written = Vec::new();
@@ -366,10 +373,13 @@ pub fn pull(name: &str, o: PullOpts) -> Result<ExitCode> {
         written.iter().map(Vec::len).sum::<usize>()
     );
     if skipped > 0 {
-        println!("skipped {skipped} risky (review, then --include-risky)");
+        out!("skipped {skipped} risky (review them, then `luoto pull -e {name} --include-risky`)");
     }
     if conflicts > 0 {
-        println!("kept {conflicts} of yours changed here too (--overwrite takes the env's)");
+        out!(
+            "kept {conflicts} of yours changed here too (`luoto pull -e {name} --overwrite` \
+             takes the env's)"
+        );
     }
     if failed.is_empty() {
         return Ok(ExitCode::SUCCESS);
@@ -500,7 +510,10 @@ fn each_env(envs: &[String], mut f: impl FnMut(&str) -> Result<()>) -> Vec<Strin
     let mut failed = Vec::new();
     for name in envs {
         if let Err(e) = f(name) {
-            err!("luoto: `{name}`: {}", crate::text::lines(&format!("{e:#}")));
+            crate::progress::error(&format!(
+                "`{name}`: {}",
+                crate::text::lines(&format!("{e:#}"))
+            ));
             failed.push(name.clone());
         }
     }
@@ -512,11 +525,12 @@ fn each_env_result(verb: &str, total: usize, failed: &[String]) -> ExitCode {
     if failed.is_empty() {
         return ExitCode::SUCCESS;
     }
-    eprintln!(
-        "\nluoto: {verb} failed for {} of {total} env(s): {}",
+    eprintln!();
+    crate::progress::error(&format!(
+        "{verb} failed for {} of {total} env(s): {}",
         failed.len(),
         failed.join(", ")
-    );
+    ));
     ExitCode::FAILURE
 }
 
@@ -664,8 +678,8 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
         }
     } else if url.is_some() || !repos.is_empty() {
         out!(
-            "`{name}` is stopped: after `luoto up -e {name}`, `luoto rm` names the repos with work \
-             no remote has"
+            "env `{name}` is not running: after `luoto up -e {name}`, `luoto rm` names the repos \
+             with work no remote has"
         );
     }
     if !yes
@@ -674,7 +688,10 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
              Work not pushed or pulled (`luoto pull`) is lost"
         ))
     {
-        bail!("aborted (`luoto rm -e {name} --yes` skips the question)");
+        return Err(crate::prompt::declined(
+            "removed",
+            &format!("luoto rm -e {name} --yes"),
+        ));
     }
     remove_env(&ctx, name)?;
     out!("env `{name}` removed");
@@ -751,11 +768,14 @@ pub fn reset_home(name: &str, yes: bool) -> Result<ExitCode> {
              toolchains? The workspace stays"
         ))
     {
-        bail!("aborted (`luoto reset-home -e {name} --yes` skips the question)");
+        return Err(crate::prompt::declined(
+            "discarded",
+            &format!("luoto reset-home -e {name} --yes"),
+        ));
     }
     let running = ctx.rt.is_running(&names::dev(name));
     if !env::reset_home(&ctx, name)? {
-        out!("`{name}` has no home yet: nothing to discard");
+        out!("env `{name}` has no home yet: nothing to discard");
         return Ok(ExitCode::SUCCESS);
     }
     out!("discarded the home of `{name}`");
@@ -768,15 +788,19 @@ pub fn reset_home(name: &str, yes: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn list(size: bool) -> Result<ExitCode> {
+pub fn list(size: bool, json: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let envs = config::list_envs(&ctx.paths)?;
+    if envs.is_empty() && json {
+        println!("[]");
+        return Ok(ExitCode::SUCCESS);
+    }
     if envs.is_empty() {
         out!("no envs yet: `luoto init` in a project folder, or `luoto init <new-folder>`");
         return Ok(ExitCode::SUCCESS);
     }
     let states = ctx.rt.states().unwrap_or_default();
-    if states.vm_stopped {
+    if states.vm_stopped && !json {
         out!("luoto's VM is stopped; `luoto up` starts it with the env\n");
     }
     let sizes = if size && !states.vm_stopped {
@@ -811,6 +835,34 @@ pub fn list(size: bool) -> Result<ExitCode> {
         })
         .collect();
     let now = chrono::Utc::now();
+    if json {
+        let listed: Vec<ListedEnv> = rows
+            .into_iter()
+            .map(|(env, from, image, presets)| {
+                let (dev, gate) = states.env(&env);
+                let running = states.running(&names::dev(&env));
+                ListedEnv {
+                    last_used: match running {
+                        true => Some(now),
+                        false => crate::used::of(&ctx.paths, &env).time(),
+                    },
+                    size: sizes.as_ref().map(|s| s.env(&env).total),
+                    presets: presets
+                        .split(',')
+                        .filter(|p| !p.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                    env,
+                    dev,
+                    gate,
+                    from,
+                    image,
+                }
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&listed)?);
+        return Ok(ExitCode::SUCCESS);
+    }
     let rows: Vec<ListRow> = rows
         .into_iter()
         .map(|(env, from, image, presets)| {
@@ -841,6 +893,22 @@ pub fn list(size: bool) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// An env in `luoto list --json`.
+#[derive(serde::Serialize)]
+struct ListedEnv {
+    env: String,
+    dev: String,
+    gate: String,
+    /// Bytes on disk, with `--size`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    /// When it was last used: now while it runs; none without a record.
+    last_used: Option<chrono::DateTime<chrono::Utc>>,
+    from: String,
+    image: String,
+    presets: Vec<String>,
 }
 
 /// An env in `luoto list`.
@@ -924,13 +992,24 @@ fn from(ws: &config::Workspace) -> String {
     }
 }
 
-pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
+/// How `luoto status` prints.
+pub enum StatusAs {
+    Text,
+    /// What the text says, as JSON.
+    Json,
+    /// The compiled policy the gate gets.
+    PolicyJson,
+}
+
+pub fn status(name: &str, shape: StatusAs, size: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
-    if json {
+    if let StatusAs::PolicyJson = shape {
         let p = env::plan(&ctx, name)?;
         println!("{}", serde_json::to_string_pretty(&p.compiled.policy)?);
         return Ok(ExitCode::SUCCESS);
     }
+    let json = matches!(shape, StatusAs::Json);
+    let mut j = serde_json::Map::new();
     let f = EnvFile::load(&ctx.paths, name)?;
     let states = ctx.rt.states().unwrap_or_default();
     let (dev, gate) = if states.vm_stopped {
@@ -965,11 +1044,39 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
             },
         ),
     ];
-    if let Some(until) = f.cfg.egress.open_at(chrono::Utc::now())? {
+    j.insert("env".into(), name.into());
+    j.insert("config".into(), f.path.display().to_string().into());
+    j.insert("dev".into(), dev.clone().into());
+    j.insert("gate".into(), gate.clone().into());
+    j.insert("isolation".into(), rows[3].1.clone().into());
+    j.insert(
+        "idle_stop".into(),
+        crate::idle::limit(&ctx.global, &f.cfg)
+            .map(|d| serde_json::json!({ "seconds": d.as_secs() }))
+            .unwrap_or_default(),
+    );
+    let open = f.cfg.egress.open_at(chrono::Utc::now())?;
+    // Open: `{"until": null}` with no end.
+    j.insert(
+        "egress_open".into(),
+        open.map(|until| serde_json::json!({ "until": until }))
+            .unwrap_or_default(),
+    );
+    if let Some(until) = open {
         let width = crate::text::columns().saturating_sub(STATUS_KEYS);
         rows.push(("egress", egress::state_line(name, until, width)));
     }
     let ws = &f.cfg.workspace;
+    j.insert(
+        "workspace".into(),
+        serde_json::json!({
+            "folder": ws.dir,
+            "remote": ws.url,
+            "branch": ws.branch,
+            "repos": ws.repos.keys().collect::<Vec<_>>(),
+        }),
+    );
+    j.insert("pull_on_stop".into(), ws.dangerously_pull_on_stop.into());
     rows.push(match (&ws.dir, &ws.url) {
         (None, Some(url)) => (
             "workspace",
@@ -1021,13 +1128,10 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
     let plan = env::plan(&ctx, name);
     if dev == "running" {
         let published = plan.as_ref().map_or(&f.cfg.ports, |p| &p.cfg.ports);
-        rows.push((
-            "ports",
-            ports_text(
-                name,
-                &ports::of_env(&ctx.paths, name, published, gate == "running"),
-            ),
-        ));
+        let p = ports::of_env(&ctx.paths, name, published, gate == "running");
+        let urls: Vec<String> = p.open().into_iter().map(ports::url).collect();
+        j.insert("ports".into(), urls.into());
+        rows.push(("ports", ports_text(name, &p)));
     }
     if gate == "running" {
         let s = ctl::gate_status(&ctx.rt, name)?;
@@ -1039,6 +1143,15 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
             }
             _ => "ok".to_string(),
         };
+        j.insert(
+            "policy".into(),
+            serde_json::json!({
+                "rules": s.rules,
+                "ca": ca,
+                "vault_configured": s.vault_configured,
+                "pending_requests": s.pending_requests,
+            }),
+        );
         rows.push((
             "policy",
             format!(
@@ -1054,11 +1167,21 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
         ));
     }
     if let Ok(v) = ctl::vault_status(&ctx.rt) {
+        j.insert("vault_locked".into(), v.locked.into());
         rows.push((
             "vault",
             if v.locked { LOCKED } else { "unlocked" }.to_string(),
         ));
         if let Some(e) = v.envs.iter().find(|e| e.env == name) {
+            j.insert("credentials".into(), e.bindings.clone().into());
+            j.insert(
+                "missing_secrets".into(),
+                e.missing
+                    .iter()
+                    .map(|r| crate::secrets::shown_ref(r))
+                    .collect::<Vec<_>>()
+                    .into(),
+            );
             if !e.bindings.is_empty() {
                 rows.push(("credentials", e.bindings.join(", ")));
             }
@@ -1070,10 +1193,21 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
     // Last of the rows: the runtime walks every volume for it.
     if size && !states.vm_stopped {
         let disk = match crate::progress::wait("measuring every volume", || disk::sizes(&ctx.rt)) {
-            Ok(s) => s.env(name).describe(),
+            Ok(s) => {
+                j.insert("size".into(), s.env(name).total.into());
+                s.env(name).describe()
+            }
             Err(e) => format!("not read ({e:#})"),
         };
         rows.push(("disk", disk));
+    }
+    if json {
+        let plan = plan?;
+        j.insert("warnings".into(), plan.compiled.warnings.clone().into());
+        let policy = serde_json::to_value(&plan.compiled.policy)?;
+        j.insert("rules".into(), policy["rules"].clone());
+        println!("{}", serde_json::to_string_pretty(&j)?);
+        return Ok(ExitCode::SUCCESS);
     }
     block!(
         "{}",
@@ -1091,7 +1225,7 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
 const STATUS_KEYS: usize = 2 + "missing secrets".len() + 3;
 
 /// What `status` and `vault status` say of a locked vault.
-const LOCKED: &str = "LOCKED: `luoto vault unlock` (or `luoto up`) loads the secrets";
+const LOCKED: &str = "locked: `luoto vault unlock` (or `luoto up`) loads the secrets";
 
 /// The env's forwarded ports, and a line for each taken here.
 fn ports_text(name: &str, p: &ports::EnvPorts) -> String {
@@ -1373,13 +1507,27 @@ fn print_request(e: &str, r: &AccessRequest) {
     );
 }
 
-pub fn requests(name: Option<&str>, watch: bool) -> Result<ExitCode> {
+pub fn requests(name: Option<&str>, follow: bool, json: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let now = pending(&ctx, name)?;
+    if json {
+        #[derive(serde::Serialize)]
+        struct Pending<'a> {
+            env: &'a str,
+            #[serde(flatten)]
+            request: &'a AccessRequest,
+        }
+        let listed: Vec<Pending> = now
+            .iter()
+            .map(|(env, request)| Pending { env, request })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&listed)?);
+        return Ok(ExitCode::SUCCESS);
+    }
     for (e, r) in &now {
         print_request(e, r);
     }
-    if !watch {
+    if !follow {
         if now.is_empty() {
             println!("no pending requests");
         }
@@ -1432,7 +1580,10 @@ pub fn approve(
         println!("grants less: {}", rules::describe(&rule));
     }
     if !yes && !confirm("Approve?") {
-        bail!("not approved (use --yes to skip the prompt)");
+        return Err(crate::prompt::declined(
+            "approved",
+            &format!("luoto approve -e {name} {id} --yes"),
+        ));
     }
     match rules::accepting_risks(force, |force| {
         rules::approve(&ctx, name, &req, ttl, narrow, force)
@@ -1680,7 +1831,7 @@ pub fn egress_open(name: &str, window: Option<&str>) -> Result<ExitCode> {
         ("keep hosts", format!("luoto egress keep -e {name}")),
     ];
     if !running {
-        rows.push(("applies", format!("when it starts: luoto up -e {name}")));
+        rows.push(("applies", format!("at `luoto up -e {name}`")));
     }
     let title = format!(
         "egress of `{name}` is open {}",
@@ -1783,8 +1934,10 @@ pub fn egress_keep(name: &str, since: Option<&str>, yes: bool) -> Result<ExitCod
         match crate::wizard::pick_kept(&rows)? {
             Some(picked) => picked,
             None => {
-                println!("nothing kept");
-                return Ok(ExitCode::SUCCESS);
+                return Err(crate::prompt::declined(
+                    "kept",
+                    &format!("luoto egress keep -e {name} --yes"),
+                ));
             }
         }
     };

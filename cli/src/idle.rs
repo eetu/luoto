@@ -78,7 +78,15 @@ pub fn limit(global: &GlobalConfig, cfg: &EnvConfig) -> Option<Duration> {
     if matches!(s, "off" | "never" | "0") {
         return None;
     }
-    crate::rules::parse_ttl(s)
+    // Files written while a bare number meant minutes keep meaning that.
+    let minutes;
+    let s = if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        minutes = format!("{s}m");
+        &minutes
+    } else {
+        s
+    };
+    crate::rules::parse_duration(s)
         .ok()
         .and_then(|d| d.to_std().ok())
 }

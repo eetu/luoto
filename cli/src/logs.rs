@@ -77,7 +77,7 @@ fn gate(name: &str, follow: bool, lines: Option<usize>) -> Result<ExitCode> {
         if machine::stopped(&ctx.rt) {
             bail!("luoto's VM is stopped, and the gate's log is in it (`luoto up -e {name}`)");
         }
-        bail!("`{name}` has no gate yet (`luoto up -e {name}` starts it)");
+        bail!("env `{name}` has no gate yet: `luoto up -e {name}` starts it");
     };
     let in_file = crate::events::in_file(&ctx.rt, &gate);
     if in_file && state != "running" {

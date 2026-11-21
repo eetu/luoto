@@ -219,7 +219,7 @@ impl Need {
                      + tenant\nsubscriptions = [{subs}]"
                 )
             }
-            Need::Secret(s) => format!("{s} = {REF}"),
+            Need::Secret(s) => format!("`luoto var set -e {{env}} {s} --ref <REF>`"),
         }
     }
 
@@ -272,16 +272,17 @@ pub fn review(n: &Needs) -> Vec<String> {
 
 /// The snippets to add what the env's own file `cfg` lacks (repos answered as public,
 /// `declined`, need none).
-pub fn snippets(n: &Needs, cfg: &EnvConfig, declined: &BTreeSet<String>) -> Vec<String> {
+pub fn snippets(env: &str, n: &Needs, cfg: &EnvConfig, declined: &BTreeSet<String>) -> Vec<String> {
     let missing: Vec<Need> = Need::all(n)
         .into_iter()
         .filter(|x| !x.met(cfg, declined))
         .collect();
-    grouped(&missing)
+    grouped(env, &missing)
 }
 
-/// Each need's snippet: GitHub repos in one credential, sandbox secrets in one table.
-fn grouped(missing: &[Need]) -> Vec<String> {
+/// Each need's snippet: GitHub repos in one credential, sandbox secrets as the commands that
+/// set them, together.
+fn grouped(env: &str, missing: &[Need]) -> Vec<String> {
     let repos: Vec<String> = missing
         .iter()
         .filter(|x| matches!(x, Need::Github(_)))
@@ -290,7 +291,7 @@ fn grouped(missing: &[Need]) -> Vec<String> {
     let secrets: Vec<String> = missing
         .iter()
         .filter(|x| matches!(x, Need::Secret(_)))
-        .map(Need::snippet)
+        .map(|x| x.snippet().replace("{env}", env))
         .collect();
     let mut out = Vec::new();
     if !repos.is_empty() {
@@ -307,7 +308,7 @@ fn grouped(missing: &[Need]) -> Vec<String> {
             .map(Need::snippet),
     );
     if !secrets.is_empty() {
-        out.push(format!("[sandbox_secrets]\n{}", secrets.join("\n")));
+        out.push(secrets.join("\n"));
     }
     out
 }
@@ -349,9 +350,9 @@ pub fn ask(ctx: &Ctx, env: &str, mode: Mode) -> Result<bool> {
     if !crate::prompt::interactive() {
         if mode == Mode::Change {
             bail!(
-                "`luoto project needs -e {env}` asks on a terminal; what its answers set in the \
-                 env's file:\n\n{}",
-                grouped(&asked).join("\n\n")
+                "`luoto project needs -e {env}` asks on a terminal; without one, what gives the \
+                 env each:\n\n{}",
+                grouped(env, &asked).join("\n\n")
             );
         }
         // A repo the env has is in the repo questions' hint already.
@@ -365,7 +366,7 @@ pub fn ask(ctx: &Ctx, env: &str, mode: Mode) -> Result<bool> {
             .into_iter()
             .filter(|x| !matches!(x, Need::Github(r) if have.contains(&r.to_lowercase())))
             .collect();
-        crate::init::print_needs(env, &grouped(&left));
+        crate::init::print_needs(env, &grouped(env, &left));
         return Ok(false);
     }
     println!(
@@ -717,7 +718,7 @@ subscriptions = ["00000000-0000-0000-0000-00000000000a"]
 host = "api.stripe.com"
 "#,
         );
-        let s = snippets(&n, &EnvConfig::default(), &BTreeSet::new());
+        let s = snippets("web", &n, &EnvConfig::default(), &BTreeSet::new());
         assert!(
             s[0].contains("repos = [\"acme/web\", \"acme/api\"]"),
             "{s:?}"
@@ -727,7 +728,11 @@ host = "api.stripe.com"
             s.iter()
                 .any(|x| x.contains("00000000-0000-0000-0000-00000000000a"))
         );
-        assert!(s.last().unwrap().starts_with("[sandbox_secrets]\nA = "));
+        assert!(
+            s.last()
+                .unwrap()
+                .starts_with("`luoto var set -e web A --ref <REF>`")
+        );
         assert_eq!(review(&n).len(), 6);
     }
 }

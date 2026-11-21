@@ -111,8 +111,8 @@ pub struct Rule {
 /// The longest `idle` a rule may set.
 pub const MAX_IDLE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
-/// A rule's `idle`: a whole number of seconds, minutes or hours (`90s`, `30m`, `2h`), above
-/// zero and at most [`MAX_IDLE`].
+/// A rule's `idle`: a whole number of seconds, minutes, hours or days (`90s`, `30m`, `2h`,
+/// `1d`), above zero and at most [`MAX_IDLE`].
 pub fn parse_idle(s: &str) -> Result<std::time::Duration, String> {
     let s = s.trim();
     let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
@@ -124,7 +124,8 @@ pub fn parse_idle(s: &str) -> Result<std::time::Duration, String> {
         "s" => Some(n),
         "m" => n.checked_mul(60),
         "h" => n.checked_mul(3600),
-        _ => return Err(format!("idle `{s}`: use s, m or h")),
+        "d" => n.checked_mul(86400),
+        _ => return Err(format!("idle `{s}`: use s, m, h or d")),
     };
     match secs.map(std::time::Duration::from_secs) {
         Some(d) if !d.is_zero() && d <= MAX_IDLE => Ok(d),
@@ -1151,10 +1152,11 @@ mod tests {
         assert_eq!(parse_idle("90s"), Ok(std::time::Duration::from_secs(90)));
         assert_eq!(parse_idle("30m"), Ok(std::time::Duration::from_secs(1800)));
         assert_eq!(parse_idle("24h"), Ok(MAX_IDLE));
+        assert_eq!(parse_idle("1d"), Ok(MAX_IDLE));
         for bad in [
             "0m",
             "25h",
-            "1d",
+            "2d",
             "soon",
             "",
             "-5m",

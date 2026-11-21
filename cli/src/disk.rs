@@ -999,7 +999,7 @@ pub fn prune(yes: bool) -> Result<ExitCode> {
             p.kept, p.others
         );
         if !yes && !confirm("Remove them?") {
-            bail!("nothing removed (`{inst} prune --yes` skips the question)");
+            return Err(crate::prompt::declined("removed", "luoto prune --yes"));
         }
         let (errors, left) = crate::progress::step(
             &format!("removing {} image(s)", p.remove.len()),
@@ -1027,7 +1027,7 @@ pub fn prune(yes: bool) -> Result<ExitCode> {
                 machine::trim(&rt.bin)
             })
     {
-        println!("note: {e:#}");
+        crate::progress::note(&format!("{e:#}"));
     }
     if let (Some(b), Some(a)) = (before, space(rt).ok().flatten()) {
         println!(

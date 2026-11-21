@@ -47,6 +47,13 @@ pub fn confirm(question: &str) -> bool {
     matches!(line.trim(), "y" | "Y" | "yes")
 }
 
+/// What a command ends with when the yes it needed didn't come (a no, Esc, or no terminal to
+/// ask on): an error, so a script sees it, saying nothing was `done` and the command that does
+/// it without the question.
+pub fn declined(done: &str, scripted: &str) -> anyhow::Error {
+    anyhow::anyhow!("nothing {done} (`{scripted}` skips the question)")
+}
+
 /// `question` (its answers in brackets at its end), then the line typed after it, with the
 /// spinner paused.
 fn read_answer(question: &str) -> String {

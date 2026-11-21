@@ -65,24 +65,21 @@ pub fn file_args(container: &str, follow: bool, lines: Option<usize>) -> Vec<Str
     args
 }
 
-/// The time `since` (`30m`, `2h`, `1d`, `45s` ago, Unix seconds, or an RFC 3339 time) names.
-fn since_cut(since: &str) -> Option<DateTime<Utc>> {
-    if let Ok(t) = DateTime::parse_from_rfc3339(since) {
-        return Some(t.with_timezone(&Utc));
-    }
-    if !since.is_empty() && since.bytes().all(|b| b.is_ascii_digit()) {
-        return DateTime::from_timestamp(since.parse().ok()?, 0);
-    }
-    let (n, unit) = since.split_at(since.char_indices().last()?.0);
-    let n: i64 = n.parse().ok()?;
-    let d = match unit {
-        "s" => chrono::Duration::seconds(n),
-        "m" => chrono::Duration::minutes(n),
-        "h" => chrono::Duration::hours(n),
-        "d" => chrono::Duration::days(n),
-        _ => return None,
+/// `--since` as given (a duration ago, `30m`, or an RFC 3339 time) as the RFC 3339 time every
+/// runtime's `logs --since` and the gate's event file read alike.
+pub fn since(given: &str) -> Result<String> {
+    let at = match DateTime::parse_from_rfc3339(given.trim()) {
+        Ok(t) => t.with_timezone(&Utc),
+        Err(_) => Utc::now() - crate::rules::parse_duration(given).context("--since")?,
     };
-    Some(Utc::now() - d)
+    Ok(at.to_rfc3339())
+}
+
+/// The time a `since` from [`since`] names.
+fn since_cut(since: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(since)
+        .ok()
+        .map(|t| t.with_timezone(&Utc))
 }
 
 /// Whether `e` falls in the window the runtime itself didn't cut (Apple's).
@@ -92,7 +89,7 @@ fn in_window(rt: &Runtime, cut: Option<DateTime<Utc>>, e: &Event) -> bool {
 
 /// What a stopped gate whose events are in its file means for reading them.
 pub fn gate_down(env: &str) -> String {
-    format!("`{env}`'s gate isn't running: its events show once it is (`luoto up -e {env}`)")
+    format!("env `{env}`'s gate is not running: its events show once `luoto up -e {env}` starts it")
 }
 
 pub fn gate_events(rt: &Runtime, env: &str, since: Option<&str>) -> Result<Vec<Event>> {
@@ -630,16 +627,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn since_reads_ages_unix_seconds_and_times_and_never_panics() {
+    fn since_is_a_duration_ago_or_a_time_and_nothing_else() {
+        let ago = |s: &str| Utc::now() - since_cut(&since(s).unwrap()).unwrap();
+        assert!((7199..=7201).contains(&ago("2h").num_seconds()));
         assert_eq!(
-            since_cut("1731360000").map(|t| t.timestamp()),
-            Some(1_731_360_000)
+            since("2024-11-11T12:00:00Z").unwrap(),
+            "2024-11-11T12:00:00+00:00"
         );
-        let age = Utc::now() - since_cut("2h").unwrap();
-        assert!((7199..=7201).contains(&age.num_seconds()));
-        assert!(since_cut("2024-11-11T12:00:00Z").is_some());
-        assert!(since_cut("5µ").is_none());
-        assert!(since_cut("").is_none());
+        for bad in ["typo", "5x", "", "30", "-5m"] {
+            assert!(since(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

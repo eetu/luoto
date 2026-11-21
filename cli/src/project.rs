@@ -846,7 +846,7 @@ fn source(running: bool, ws: &crate::config::Workspace) -> Source {
 pub fn status(ctx: &Ctx, env: &str) -> Result<Status> {
     let cfg = EnvFile::load(&ctx.paths, env)?.cfg;
     let public = crate::repos::declined(ctx, env);
-    let missing = |p: &ProjectConfig| crate::needs::snippets(&p.needs, &cfg, &public);
+    let missing = |p: &ProjectConfig| crate::needs::snippets(env, &p.needs, &cfg, &public);
     let old = accepted(ctx, env);
     let mut s = Status {
         state: State::None,
@@ -1691,7 +1691,7 @@ credentials = ["anthropic"]
         assert_eq!(cfg.ports, [5173, 3000]);
         assert_eq!(cfg.allow[0].id.as_deref(), Some("project-1"));
         assert_eq!(cfg.deps.system, ["libpq-dev"]);
-        let needs = crate::needs::snippets(&p.needs, &cfg, &Default::default());
+        let needs = crate::needs::snippets("web", &p.needs, &cfg, &Default::default());
         assert_eq!(needs.len(), 2);
         assert!(needs[0].contains("repos = [\"acme/web\"]"));
     }

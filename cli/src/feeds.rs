@@ -28,7 +28,10 @@ pub fn list(env_name: &str) -> Result<ExitCode> {
         .map(|c| c.feeds)
         .unwrap_or_default();
     if feeds.is_empty() {
-        out!("env `{env_name}` installs from no Azure DevOps feed (`luoto feed add <feed URL>`)");
+        out!(
+            "env `{env_name}` installs from no Azure DevOps feed (`luoto feed add -e {env_name} \
+             <feed URL>`)"
+        );
     }
     for e in feeds {
         println!("{}", display(&e));
@@ -49,11 +52,14 @@ pub fn add(env_name: &str, entry: &str, token: Option<&str>) -> Result<ExitCode>
         .as_ref()
         .is_some_and(|c| c.feeds.iter().any(|e| same(e, &feed)));
     let token = match (token, &have) {
-        (Some(t), _) => Some(t.to_string()),
+        (Some(t), _) => {
+            crate::secrets::check_ref(t)?;
+            Some(t.to_string())
+        }
         (None, Some(_)) => None,
         (None, None) if !crate::prompt::interactive() => bail!(
             "env `{env_name}` has no Azure DevOps credential yet, so the feed needs a token: \
-             `luoto feed add -e {env_name} {} --token <ref>` (a PAT with Packaging (Read))",
+             `luoto feed add -e {env_name} {} --token <REF>` (a PAT with Packaging (Read))",
             feed.entry()
         ),
         (None, None) => match ask_token(&ctx, &org)? {
@@ -90,8 +96,8 @@ pub fn rm(env_name: &str, entry: &str) -> Result<ExitCode> {
     let mut f = EnvFile::load(&ctx.paths, env_name)?;
     if !f.remove_azure_feed(&|e| same(e, &feed))? {
         bail!(
-            "env `{env_name}` doesn't install from `{}`; `luoto feed -e {env_name}` lists its \
-             feeds",
+            "env `{env_name}` doesn't install from `{}` (`luoto feed list -e {env_name}` lists \
+             its feeds)",
             feed.entry()
         );
     }

@@ -16,18 +16,20 @@ use crate::env::{self, Ctx};
 use crate::runtime::States;
 use crate::{ctl, names, sync};
 
-pub fn parse_ttl(s: &str) -> Result<TimeDelta> {
+/// A duration as every flag that takes one writes it: a whole number and its unit, s, m, h
+/// or d (`30m`, `2h`, `1d`).
+pub fn parse_duration(s: &str) -> Result<TimeDelta> {
     let s = s.trim();
     let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
     let n: i64 = num
         .parse()
-        .with_context(|| format!("bad duration `{s}` (use 30m, 1h, 2d)"))?;
+        .with_context(|| format!("bad duration `{s}` (30m, 2h, 1d)"))?;
     let d = match unit {
         "s" => TimeDelta::try_seconds(n),
-        "m" | "" => TimeDelta::try_minutes(n),
+        "m" => TimeDelta::try_minutes(n),
         "h" => TimeDelta::try_hours(n),
         "d" => TimeDelta::try_days(n),
-        _ => bail!("bad duration unit in `{s}` (use s, m, h, d)"),
+        _ => bail!("bad duration `{s}`: a number and s, m, h or d (30m, 2h, 1d)"),
     };
     d.with_context(|| format!("duration `{s}` is too long"))
 }
@@ -40,30 +42,30 @@ pub struct AllowOpts {
     #[arg(long)]
     pub write: bool,
     /// Specific methods instead of read/write (repeatable).
-    #[arg(long = "method")]
+    #[arg(long = "method", value_name = "METHOD")]
     pub methods: Vec<String>,
     /// Path globs (repeatable), e.g. `/serde/**`.
-    #[arg(long = "path")]
+    #[arg(long = "path", value_name = "GLOB")]
     pub paths: Vec<String>,
-    /// Expire after a duration: 30m, 1h, 2d.
-    #[arg(long)]
-    pub ttl: Option<String>,
+    /// Expire after this long (30m, 2h, 1d).
+    #[arg(long = "for", value_name = "DURATION")]
+    pub window: Option<String>,
     /// Opaque tunnel (no inspection) for any client and protocol: certificate-pinning
-    /// clients, gRPC, a database with --port.
+    /// clients, gRPC, a database with `--port`.
     #[arg(long)]
     pub tunnel: bool,
     /// Allow websocket upgrades.
     #[arg(long)]
     pub ws: bool,
-    /// How long the host may stay silent before the gate closes the connection (30m, 2h; at
-    /// most 24h), for long polls such as `kubectl logs -f`.
+    /// How long the host may stay silent before the gate closes the connection (30m, 2h, 1d;
+    /// at most a day), for long polls such as `kubectl logs -f`.
     #[arg(long, value_name = "DURATION")]
     pub idle: Option<String>,
     /// Allow private/host addresses (e.g. a service on your machine).
     #[arg(long)]
     pub private: bool,
     /// The one port it covers (default: 80 and 443).
-    #[arg(long)]
+    #[arg(long, value_name = "PORT")]
     pub port: Option<u16>,
     /// Why the rule is there, kept with it.
     #[arg(long)]
@@ -97,9 +99,9 @@ pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
         access,
         paths: o.paths.clone(),
         expires: o
-            .ttl
+            .window
             .as_deref()
-            .map(parse_ttl)
+            .map(parse_duration)
             .transpose()?
             .map(|d| Utc::now() + d),
         mode: if o.tunnel {
@@ -239,10 +241,10 @@ pub fn accepting_risks<T>(force: bool, add: impl Fn(bool) -> Result<T>) -> Resul
         Err(e) => match e.downcast::<Risks>() {
             Ok(Risks(risks)) => {
                 for r in &risks {
-                    eprintln!("risk: {r}");
+                    crate::progress::warn(r);
                 }
                 if !crate::prompt::confirm("Accept these risks?") {
-                    bail!("not added (`{}` accepts these risks)", with_force());
+                    return Err(crate::prompt::declined("added", &with_force()));
                 }
                 add(true)
             }
@@ -392,7 +394,7 @@ pub fn approve(
         );
     }
     let mut rule = grant(req, narrow)?;
-    rule.expires = ttl.map(parse_ttl).transpose()?.map(|d| Utc::now() + d);
+    rule.expires = ttl.map(parse_duration).transpose()?.map(|d| Utc::now() + d);
     rule.note = Some(format!("approved request #{}", req.id));
     let rule = add_rule_checked(ctx, name, rule, force)?;
     // The sandbox reads the note: it learns what it got, if less than it asked for.
@@ -532,12 +534,13 @@ mod tests {
 
     #[test]
     fn ttls() {
-        assert_eq!(parse_ttl("30m").unwrap(), TimeDelta::minutes(30));
-        assert_eq!(parse_ttl("2h").unwrap(), TimeDelta::hours(2));
-        assert_eq!(parse_ttl("1d").unwrap(), TimeDelta::days(1));
-        assert!(parse_ttl("1y").is_err());
-        assert!(parse_ttl("-5m").is_err());
-        assert!(parse_ttl("99999999999999d").is_err());
+        assert_eq!(parse_duration("30m").unwrap(), TimeDelta::minutes(30));
+        assert_eq!(parse_duration("2h").unwrap(), TimeDelta::hours(2));
+        assert_eq!(parse_duration("1d").unwrap(), TimeDelta::days(1));
+        assert!(parse_duration("1y").is_err());
+        assert!(parse_duration("30").is_err());
+        assert!(parse_duration("-5m").is_err());
+        assert!(parse_duration("99999999999999d").is_err());
     }
 
     #[test]

@@ -1181,77 +1181,30 @@ fn hint(
     if needs.is_empty() {
         return None;
     }
-    let list = |repos: &[String]| {
-        repos
-            .iter()
-            .map(|r| format!("\"{}\"", display(r)))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let github: Vec<(&String, &Vec<String>)> = needs
-        .iter()
-        .filter_map(|(f, r)| match f {
-            Forge::Github(o) => Some((o, r)),
-            _ => None,
-        })
-        .collect();
-    let azure: Vec<String> = needs
-        .iter()
-        .filter(|(f, _)| matches!(f, Forge::Azure(_)))
-        .flat_map(|(_, r)| r.clone())
-        .collect();
-    let mut blocks = Vec::new();
-    if creds.github.is_empty() {
-        let header = if github.len() > 1 {
-            "[[credentials.github]]"
+    let mut lines = Vec::new();
+    let mut new_host = false;
+    for (forge, repos) in needs {
+        // An account whose credential has a token (or is a GitHub App) takes none here.
+        let (have, app) = account_token(creds, forge);
+        let token = if have.is_some() || app {
+            ""
         } else {
-            "[credentials.github]"
+            " --token <REF>"
         };
-        for (owner, repos) in &github {
-            blocks.push(format!(
-                "{header}\ntoken = \"op://<vault>/<item>/<field>\"   # fine-grained token for {}, or an App\nrepos = [{}]   # read and write: push, pull requests\n# read_repos = []   # private repos it only reads",
-                display(owner),
-                list(repos)
+        new_host |= matches!(forge, Forge::Git(_)) && !token.is_empty();
+        for r in repos {
+            lines.push(format!(
+                "  `luoto repo auth -e {env} {} --access push{token}`",
+                display(r)
             ));
         }
-    } else if !github.is_empty() {
-        let all: Vec<String> = github.iter().flat_map(|(_, r)| r.iter().cloned()).collect();
-        blocks.push(format!(
-            "# [credentials.github] doesn't list {}: add each to `repos` (read and write) or\n\
-             # `read_repos`; another owner's need a credential of their own, one\n\
-             # [[credentials.github]] each (the existing table becomes one too)",
-            list(&all)
-        ));
     }
-    if !azure.is_empty() {
-        blocks.push(match &creds.azure_devops {
-            None => format!(
-                "[credentials.azure_devops]\ntoken = \"op://<vault>/<item>/<field>\"   # PAT with Code (Read & write)\nrepos = [{}]\n# read_repos = []",
-                list(&azure)
-            ),
-            Some(_) => format!(
-                "# [credentials.azure_devops] doesn't list {}: add each to `repos` or `read_repos`",
-                list(&azure)
-            ),
-        });
-    }
-    for (forge, repos) in needs {
-        let Forge::Git(host) = forge else { continue };
-        let existing = creds.git.iter().any(|c| c.host.eq_ignore_ascii_case(host));
-        blocks.push(if existing {
-            format!(
-                "# [[credentials.git]] for {} doesn't list {}: add each to `repos` or `read_repos`",
-                display(host),
-                list(repos)
-            )
-        } else {
-            format!(
-                "[[credentials.git]]\nhost = \"{}\"\ntoken = \"op://<vault>/<item>/<field>\"   # read and write access to the repos\nusername = \"oauth2\"   # GitLab; Forgejo and Gitea: the token's owner\nrepos = [{}]\n# read_repos = []   # fetch only; without a token, public ones\n# private = true   # a host on a private network\n# ca = \"~/certs/ca.pem\"   # its internal CA",
-                display(host),
-                list(repos)
-            )
-        });
-    }
+    let git_note = if new_host {
+        "\n\nA forge on a private network, or one whose token needs a user name or an internal \
+         CA, is asked about on a terminal (`luoto repo auth`)."
+    } else {
+        ""
+    };
     let ssh_note = if ssh {
         "\n\nSSH remotes work with these as they are: the env sends them over HTTPS. \
          [credentials.ssh] keeps them on SSH, with a key that reaches every repo it can and \
@@ -1260,14 +1213,10 @@ fn hint(
         ""
     };
     Some(format!(
-        "Public repos need none of these. For a private one, or to push from the env, give it \
-         HTTPS credentials (`luoto repo auth -e {env} <repo>` on a terminal); each reaches only \
-         the repos it lists:\n\n{}{ssh_note}",
-        blocks
-            .iter()
-            .map(|b| format!("  {}", b.replace('\n', "\n  ")))
-            .collect::<Vec<_>>()
-            .join("\n\n")
+        "Public repos need nothing (`--access fetch`). For a private one, or to push from the \
+         env, give each its access (`--access read` only fetches); each credential reaches only \
+         the repos it lists:\n\n{}{git_note}{ssh_note}",
+        lines.join("\n")
     ))
 }
 
@@ -1368,6 +1317,36 @@ pub fn waits(env: &str, url: &str) -> bool {
     );
     out_text!("{line}");
     true
+}
+
+/// A repo's access given on the command line, the scripted form of its question.
+#[derive(clap::Args, Default)]
+pub struct AccessArgs {
+    /// What the env may do with the repo, without the question: `fetch` (public, no token),
+    /// `read` or `push` (with the forge's token).
+    #[arg(long, value_enum, value_name = "ACCESS")]
+    pub access: Option<AccessArg>,
+    /// Where the forge's token is kept (`op://…`, `keyring:…`, `env:NAME`), for `read` or
+    /// `push`; replaces the token of the forge account's credential.
+    #[arg(long, value_name = "REF", requires = "access")]
+    pub token: Option<String>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum AccessArg {
+    Fetch,
+    Read,
+    Push,
+}
+
+impl AccessArg {
+    fn access(self) -> Access {
+        match self {
+            AccessArg::Fetch => Access::Public,
+            AccessArg::Read => Access::Read,
+            AccessArg::Push => Access::Push,
+        }
+    }
 }
 
 /// What the env may do with a repo of a forge.
@@ -2049,6 +2028,7 @@ pub fn add(
     name: Option<&str>,
     branch: Option<&str>,
     inside: bool,
+    given: &AccessArgs,
 ) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let mut f = EnvFile::load(&ctx.paths, env_name)?;
@@ -2064,14 +2044,14 @@ pub fn add(
     check_name(&name)?;
     if f.cfg.workspace.repos.contains_key(&name) {
         bail!(
-            "env `{env_name}` has a repo `{name}` already (`luoto repo rm {name}` first, or pick \
-             another --name)"
+            "env `{env_name}` has a repo `{name}` already (`luoto repo rm -e {env_name} {name}` \
+             first, or pick another `--name`)"
         );
     }
     let repo = match &src {
         Source::Folder(d) => {
             if branch.is_some() {
-                bail!("--branch is for a remote; a folder is copied as it is");
+                bail!("`--branch` is for a remote; a folder is copied as it is");
             }
             check_folder(f.cfg.workspace.dir.as_deref(), d)?;
             Repo {
@@ -2093,6 +2073,17 @@ pub fn add(
     let mut ws = f.cfg.workspace.clone();
     ws.repos.insert(name.clone(), repo.clone());
     check(&ws)?;
+    // The remote `--access` is for, known before anything is written.
+    let target = match given.access {
+        Some(a) => match find(&ws, &name) {
+            Some((forge, r, _)) => Some((forge, r, a.access())),
+            None => bail!(
+                "`--access` is for a remote, or a folder whose repository has one; `{}` has none",
+                display(spec)
+            ),
+        },
+        None => None,
+    };
     f.set_repo(&name, &repo)?;
     out!("added repo `{name}` to env `{env_name}`, at /workspace/{name}");
     if project::accepted(&ctx, env_name).is_some_and(|(_, p)| p.repos.contains_key(&name)) {
@@ -2100,7 +2091,13 @@ pub fn add(
     }
     let running = ctx.rt.is_running(&names::dev(env_name));
     // Its credential before its clone, which needs it.
-    if ask_missing(&ctx, env_name, &env::layered(&ctx, env_name)?)? && running {
+    let given_now = match &target {
+        Some((forge, r, access)) => {
+            give_access(&ctx, env_name, forge, r, *access, given.token.as_deref())?
+        }
+        None => false,
+    };
+    if (ask_missing(&ctx, env_name, &env::layered(&ctx, env_name)?)? || given_now) && running {
         crate::sync::reapply(&ctx, env_name)?;
     }
     let cfg = env::layered(&ctx, env_name)?;
@@ -2147,12 +2144,15 @@ pub fn rm(env_name: &str, name: &str) -> Result<ExitCode> {
     if !f.cfg.workspace.repos.contains_key(name) {
         if in_project {
             bail!(
-                "`{}` comes from the team's luoto.toml; `luoto project ignore` stops applying \
-                 that file",
+                "`{}` comes from the team's luoto.toml; `luoto project ignore -e {env_name}` \
+                 stops applying that file",
                 display(name)
             );
         }
-        bail!("env `{env_name}` has no repo `{}`", display(name));
+        bail!(
+            "env `{env_name}` has no repo `{}` (`luoto repo list -e {env_name}` lists its repos)",
+            display(name)
+        );
     }
     f.remove_repo(name)?;
     let mut was_there = false;
@@ -2191,9 +2191,66 @@ fn find(ws: &Workspace, which: &str) -> Option<(Forge, String, String)> {
         .find_map(|u| forge_repo(&u).map(|(f, r)| (f, r, u)))
 }
 
+/// Write `access` for `repo` of `forge`, given on the command line, as [`ask_repo`] writes an
+/// answer, and end with the repo's summary. Whether the config changed.
+fn give_access(
+    ctx: &Ctx,
+    env: &str,
+    forge: &Forge,
+    repo: &str,
+    access: Access,
+    token: Option<&str>,
+) -> Result<bool> {
+    let mut f = EnvFile::load(&ctx.paths, env)?;
+    let now = access_of(&f.cfg.credentials, &declined(ctx, env), forge, repo);
+    let (have, app) = account_token(&f.cfg.credentials, forge);
+    match (access, token) {
+        (Access::Public, Some(_)) => {
+            bail!("`--access fetch` takes no `--token`: a public repo is fetched without one")
+        }
+        (Access::Read | Access::Push, None) if have.is_none() && !app => bail!(
+            "{} has no {} credential with a token yet: `luoto repo auth -e {env} {} --access \
+             {} --token <REF>`",
+            display(repo),
+            forge.name(),
+            display(repo),
+            if access == Access::Read {
+                "read"
+            } else {
+                "push"
+            }
+        ),
+        (_, Some(t)) => crate::secrets::check_ref(t)?,
+        _ => {}
+    }
+    let mut git = GitCred::default();
+    if let Forge::Git(h) = forge {
+        git.host = h.clone();
+        git.private = private_host(h);
+    }
+    if now
+        .as_ref()
+        .is_some_and(|(a, t)| *a == access && (token.is_none() || t.as_deref() == token))
+    {
+        block!("{}", access_summary(env, forge, repo, now.as_ref(), None));
+        return Ok(false);
+    }
+    let public = access == Access::Public && !matches!(forge, Forge::Git(_));
+    set_declined(ctx, env, &forge.key(repo), public)?;
+    write_access(&mut f, forge, repo, access, token, &git)?;
+    if let Ok(mut s) = LATER.lock() {
+        s.remove(&forge.key(repo));
+    }
+    let after = access_of(&f.cfg.credentials, &declined(ctx, env), forge, repo);
+    let was = replaced(now.as_ref(), after.as_ref());
+    block!("{}", access_summary(env, forge, repo, after.as_ref(), was));
+    Ok(true)
+}
+
 /// `luoto repo auth`: the access question again for one of the env's repos, opening on what
-/// the env has. A running env takes the answer at once, and clones a repo that waited for it.
-pub fn auth(env_name: &str, which: &str) -> Result<ExitCode> {
+/// the env has, or the access `given`. A running env takes it at once, and clones a repo that
+/// waited for it.
+pub fn auth(env_name: &str, which: &str, given: &AccessArgs) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let cfg = env::layered(&ctx, env_name)?;
     let Some((forge, repo, url)) = find(&cfg.workspace, which) else {
@@ -2221,13 +2278,23 @@ pub fn auth(env_name: &str, which: &str) -> Result<ExitCode> {
         );
         return Ok(ExitCode::SUCCESS);
     }
-    if !crate::prompt::interactive() {
-        bail!(
-            "`luoto repo auth` asks on a terminal; without one, a repo's access is what the \
-             env's [credentials] give it"
-        );
-    }
-    if !ask_repo(&ctx, env_name, &forge, &repo, Mode::Change)? {
+    let changed = match given.access {
+        Some(a) => give_access(
+            &ctx,
+            env_name,
+            &forge,
+            &repo,
+            a.access(),
+            given.token.as_deref(),
+        )?,
+        None if !crate::prompt::interactive() => bail!(
+            "`luoto repo auth` asks on a terminal; without one: `luoto repo auth -e {env_name} \
+             {} --access fetch|read|push [--token <REF>]`",
+            display(&repo)
+        ),
+        None => ask_repo(&ctx, env_name, &forge, &repo, Mode::Change)?,
+    };
+    if !changed {
         return Ok(ExitCode::SUCCESS);
     }
     let state = EnvState::load(&ctx.paths, env_name)?;
@@ -2256,7 +2323,8 @@ pub fn list(env_name: &str) -> Result<ExitCode> {
     let repos = listed(&ctx, env_name)?;
     if repos.is_empty() {
         out!(
-            "env `{env_name}` has no repos besides its folder (`luoto repo add <folder|owner/repo|url>`)"
+            "env `{env_name}` has no repos besides its folder (`luoto repo add -e {env_name} \
+             <folder|owner/repo|url>`)"
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -2773,13 +2841,19 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
         .map(String::from)
         .to_vec();
         let hint = credential_hint("e", &remotes, &none).unwrap();
-        assert_eq!(hint.matches("[[credentials.github]]").count(), 2);
-        assert!(hint.contains("repos = [\"globex/infra-dev\"]"));
-        assert!(hint.contains("[credentials.azure_devops]"));
-        assert!(hint.contains("fabrikam/Infra/agent"));
-        assert!(hint.contains("SSH remotes work"));
+        for repo in [
+            "globex/infra-dev",
+            "initech/portal",
+            "fabrikam/Infra/agent",
+            "o/r",
+        ] {
+            let cmd = format!("`luoto repo auth -e e {repo} --access push --token <REF>`");
+            assert!(hint.contains(&cmd), "{hint}");
+        }
+        assert!(hint.contains("SSH remotes work") && hint.contains("on a terminal"));
+        assert!(!hint.contains("[credentials.github"), "{hint}");
         let one = credential_hint("e", &remotes[1..2], &none).unwrap();
-        assert!(one.contains("[credentials.github]\n") && !one.contains("SSH"));
+        assert!(!one.contains("SSH") && !one.contains("on a terminal"));
 
         let have: Credentials = toml::from_str(
             "[github]\ntoken = \"env:T\"\nread_repos = [\"initech/portal\"]\n\
@@ -2793,13 +2867,14 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
         assert!(
             credential_hint("e", &remotes, &have)
                 .unwrap()
-                .contains("host = \"gitlab.com\"")
+                .contains("`luoto repo auth -e e o/r --access push --token <REF>`")
         );
-        let other = ["https://github.com/acme/x".to_string()];
+        // Another repo of an account whose credential has its token: no token to give.
+        let other = ["https://github.com/initech/x".to_string()];
         assert!(
             credential_hint("e", &other, &have)
                 .unwrap()
-                .contains("doesn't list \"acme/x\"")
+                .contains("`luoto repo auth -e e initech/x --access push`")
         );
     }
 
@@ -2828,7 +2903,7 @@ mkdir -p "$last/.git" "$last/src" "$last/.luoto-clone" && echo x > "$last/src/ma
         assert!(
             credential_hint("e", &remotes, &none)
                 .unwrap()
-                .contains("[[credentials.git]]")
+                .contains("group/api --access push --token <REF>")
         );
         let have: Credentials = toml::from_str(
             "[[git]]\nhost = \"gitlab.com\"\ntoken = \"env:T\"\nrepos = [\"Group/API\"]\n",
