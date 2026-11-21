@@ -940,6 +940,57 @@ test("a stopped env greys pull and self-test, saying why", async ({ page }) => {
   }
 });
 
+test("an env that pulls when it stops says so, and its stop says what the pull did", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const last = "pulled 2 file(s) from `web` into ~/dev/web";
+  const now =
+    "pulled 3 file(s) from `web` into ~/dev/web; 1 left for you: `luoto up -e web`, then " +
+    "`luoto pull -e web` reviews";
+  await page.route(
+    (url) => url.pathname === "/api/envs/web",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...fixture("env"),
+          pull_on_stop: true,
+          last_pull: { at: "2026-11-20T10:00:00Z", line: last, incomplete: false },
+        },
+      }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/down",
+    (route) =>
+      route.fulfill({
+        json: { pull: { at: "2026-11-20T11:00:00Z", line: now, incomplete: true } },
+      }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+
+  await expect(
+    page.getByText(/pulls when it stops: what the env changed is written/),
+  ).toBeVisible();
+  await expect(page.getByText("luoto pull --on-stop off -e web")).toBeVisible();
+  await expect(page.getByText(`last pull at a stop: ${last}`)).toBeVisible();
+
+  // Something left to review is said as a problem, in the pull's own words.
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  const status = page.getByRole("status");
+  await expect(status).toHaveText(now);
+  await expect(status).toHaveClass(/error/);
+});
+
+test("an env that doesn't pull when it stops shows no pull of its own", async ({ page }) => {
+  await mockApi(page);
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await expect(page.getByText("copied in: the sandbox never writes here")).toBeVisible();
+  await expect(page.getByText(/pulls when it stops/)).toHaveCount(0);
+  await expect(page.getByText(/last pull at a stop/)).toHaveCount(0);
+});
+
 test("the self-test report lists each check, a failure flagged", async ({ page }) => {
   await mockApi(page);
   await page.route(

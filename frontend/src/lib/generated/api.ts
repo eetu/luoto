@@ -111,6 +111,12 @@ export type DiskSpace = {
   free: number;
 };
 
+/** What stopping an env did. */
+export type Downed = {
+  /** The unattended pull before it, for an env whose own file says to pull at every stop. */
+  pull: PullSummary | null;
+};
+
 export type EnvDetail = {
   name: string;
   path: string;
@@ -132,6 +138,10 @@ export type EnvDetail = {
   ports: EnvPorts;
   /** How the dev container is separated, as `luoto status` says it. */
   isolation: string;
+  /** Its own file says every stop first pulls its files into its folders, unreviewed. */
+  pull_on_stop: boolean;
+  /** Its last unattended pull. */
+  last_pull: PullSummary | null;
 };
 
 /** One env's disk use. */
@@ -467,6 +477,17 @@ export type PullPlan = {
 export type PullPlans = {
   plans: PullPlan[];
   digest: string;
+};
+
+/**
+ * An unattended pull as the UI shows it: what it came to in one line, which carries counts
+ * and the folders, never a name the sandbox chose.
+ */
+export type PullSummary = {
+  at: string | null;
+  line: string;
+  /** Something the env holds didn't land: there is something to review. */
+  incomplete: boolean;
 };
 
 export type Pulled = {

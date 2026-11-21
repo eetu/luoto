@@ -24,7 +24,8 @@ how it is started (`headless` in `shared/agents/<agent>.toml`).
 installing the agent don't use it. When it passes, luoto stops the agent and everything it
 started in the env, even processes in a group of their own: SIGTERM, then SIGKILL 10 seconds
 later. Ctrl-C stops it the same way (a second one doesn't wait), and so does an answer that
-can't be written. The env keeps running unless `--down` is given.
+can't be written. The env keeps running unless `--down` is given. A run luoto stopped pulls
+nothing ([below](#its-changes-in-your-folder)).
 
 ## Its changes in your folder
 
@@ -45,10 +46,11 @@ wrote:
   src/export.rs
   src/reports.rs
   tests/export.rs
-held back (`luoto pull -e web` reviews them):
+held back for your review:
   vite.config.ts — a tool's config that is code: editors and dev servers load it
 changed here and in the env (yours kept):
   README.md
+`luoto up -e web`, then `luoto pull -e web` reviews what was left
 ```
 
 An unattended pull is narrower than a reviewed one, because nobody chooses when its files
@@ -60,15 +62,34 @@ land:
 - **Nothing that runs by itself.** Held back: everything `luoto pull` calls risky, executable
   files, tool configs that are code (`vite.config.*`, `eslint.config.*`, `build.rs`,
   `conftest.py`, Gradle scripts, `Gemfile`, `flake.nix`, yarn's own files), the folder your
-  repository runs hooks from, and anything laid out as a git repository. `luoto pull -e web`
-  reviews what was held back, and `--overwrite` there takes the env's side of a conflict.
-- **Within limits.** At most 5000 files and 256 MB per folder, 64 MB per file; over that,
-  nothing is written. What your `.gitignore` ignores stays in the env. A folder in the middle
-  of a merge or rebase is left alone; `luoto down -e web` tries again.
+  repository runs hooks from, and anything laid out as a git repository.
+- **No manifest.** A project's manifests are held back too, because editors, language servers
+  and installs evaluate them without being asked: `package.json`, `Cargo.toml`,
+  `pyproject.toml`, `setup.py`, `setup.cfg`, `pytest.ini`, `tox.ini`, `go.mod`, `go.work`,
+  `Makefile`, `CMakeLists.txt`, `pom.xml`, `build.sbt`, `mix.exs`, `Package.swift`,
+  `build.zig`, MSBuild project files (`*.csproj`, `Directory.Build.props`, …) and
+  `.eslintrc*` and `.prettierrc*`. So is `.gitignore`, which decides what the next copy into
+  an env leaves out of your folder. The price: a change that adds a dependency or touches the
+  build lands without its manifest, the run exits with 75 and `--rm` keeps the env, until
+  you have reviewed the rest.
+- **Within limits.** At most 5000 files and 256 MB of changes per folder, 64 MB per file; over
+  that, nothing is written. The folder itself may be any size up to a million files. A folder
+  in the middle of a merge or rebase is left alone; `luoto down -e web` tries again.
+- **Not what git ignores.** What your folder's `.gitignore` ignores is build output by your
+  own rules: it stays in the env, and it doesn't keep `--rm` or `luoto prune --envs` from
+  removing the env. Have the agent write what you want back to a path git doesn't ignore.
 - **From the stopped env.** The files are read from the env's volume once it has stopped,
   never while code in it could still change them.
-- **Not after Ctrl-C.** An interrupted agent's half-done files are not pulled, and the env is
-  kept; after that the env's stops pull nothing until `luoto pull -e web` has reviewed them.
+- **Not after a run cut short.** Ctrl-C, `--timeout`, an answer that couldn't be written, a
+  `luoto run` that was killed, an env stopped under its agent: the half-done files are not
+  pulled and the env is kept (stopped, where the run was to stop or remove it). After that
+  the env's stops pull nothing until `luoto pull -e web` has reviewed them.
+
+The env is stopped by the time a pull reports, and a reviewed pull asks a running one:
+`luoto up -e web`, then `luoto pull -e web` reviews what was held back, and `--overwrite`
+there takes the env's side of a conflict. `luoto down` exits with 75, as a run does, when its
+pull left something out. `luoto ui` shows on an env's panel that it pulls when it stops, and
+what its last such pull came to.
 
 Anything watching your folder (a dev server, a test watcher, an editor's language server)
 acts on a file the moment it lands, which is what `dangerously` says: the code in it is the
@@ -77,11 +98,14 @@ sandbox's, and it then runs on your machine. Stop watchers you don't want fed, o
 An env made before luoto kept fingerprints, or imported, has none: its stops pull nothing
 until a reviewed `luoto pull` has left the folder with every file the env has.
 
-A pull cut short (a crash, a power cut) is seen to by the next luoto command: it removes the
-half-written temporary files and says how many files had landed. An env set to pull when it
-stops then has the rest pulled from its volume, as does one that stopped without luoto
-seeing it (a restart of the machine); after a one-off `--dangerously-pull` luoto says so and
-`luoto pull` reviews the rest. An env a run was to remove (`--rm`) is never removed later.
+A pull cut short (a crash, a power cut) is cleaned up by the next luoto command: it removes
+the half-written temporary files and says how many files had landed. An env set to pull when
+it stops that stopped without luoto seeing it (a crash, a restart of the machine) is pulled
+from its volume in the background, by the watcher: no command waits for it, `luoto logs
+watcher` shows it and a notification says what it came to. Where that needs luoto's VM
+started, luoto says once that `luoto down -e web` pulls them. After a one-off
+`--dangerously-pull` it says so and a reviewed pull takes the rest. An env a run was to
+remove (`--rm`) is never removed later.
 The last pull's report stays in luoto's data folder (`pulls/<env>/report.json`);
 `--report FILE` writes a run's own, with every file name.
 
@@ -93,9 +117,9 @@ with it, so luoto looks first, as `luoto rm` does (files changed, commits not pu
 stashes, in `/workspace` and each of its repos). For an env with a folder on this machine it
 also compares the env's files with the folder's, as `luoto pull` does: files new or changed
 in the env, ones a pull refuses or couldn't read, and what no pull takes (`node_modules`,
-`target`, …) unless the folder's `.gitignore` ignores it. An env holding any of that is kept
-and stopped, and the run says what it holds; on a terminal it asks. `--rm --yes` removes it
-whatever the run leaves. Either way the exit code is the agent's.
+`target`, …). What the folder's `.gitignore` ignores doesn't count. An env holding any of
+that is kept and stopped, and the run says what it holds; on a terminal it asks. `--rm --yes`
+removes it whatever the run leaves. Either way the exit code is the agent's.
 
 With `--dangerously-pull` (or pull-on-stop) the folder gets the files first, and the env is
 removed only if they all landed: nothing held back, in conflict, refused or unread, no
@@ -161,9 +185,13 @@ $ luoto prune --envs --match 'job-*' --older-than 7d
 - **Work stays.** An env holding work that is nowhere else is listed with what it holds and
   kept: what `luoto rm` names (files changed, commits not pushed, stashes), as luoto found it
   when the env stopped, and for an env with a folder on this machine the files that folder
-  lacks, read from the stopped env's volume. An env luoto didn't see stop (a restart of the
-  machine) counts as holding work until a `luoto up` and `luoto down` of it. `--with-work`
-  removes these too.
+  lacks, read from the stopped env's volume (what its `.gitignore` ignores doesn't count). An
+  env luoto didn't see stop (a restart of the machine, or its last stop was an earlier
+  luoto's) counts as holding work until a `luoto up` and `luoto down` of it. `--with-work`
+  removes these too: `luoto prune --envs --match 'job-*' --with-work` clears a pile of them
+  you know to hold nothing.
+- **As listed.** An env started, used or stopped since the list was made stays, as does one
+  another luoto is starting or pulling.
 - **In a script.** `--yes` skips the question. Without a terminal and without `--yes` the
   envs are only listed, with the command that removes them. An env that can't be removed
   leaves the rest to go, and the exit code is 1.

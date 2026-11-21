@@ -80,7 +80,7 @@ one). `luoto pull` brings files back when you need them on the host: it lists th
 env changed since its copy (one you changed too is kept as yours unless `--overwrite`; one
 the env deleted stays),
 skips risky ones (in the folder or any folder within it: a repository's own `.git`, `.envrc`
-and `.env` files, editor settings, `AGENTS.md` and `CLAUDE.md`, CI workflows; the
+and `.env` files, editor settings, `AGENTS.md` and `CLAUDE.md`, CI workflows, `luoto.toml`; the
 [security model](../SECURITY.md) lists them) unless you pass `--include-risky`, refuses paths
 or symlinks that leave the folder, and never writes through host symlinks. `.git` and heavy
 directories (`node_modules`, `target`, …) are skipped.

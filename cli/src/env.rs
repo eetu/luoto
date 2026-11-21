@@ -471,6 +471,12 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     ask_credentials(ctx, env)?;
     let image = env_image(ctx, &layered(ctx, env)?);
     let ids = ensure_images(ctx, &image)?;
+    // A pull of the stopped env reads its volume, and `luoto prune --envs` removes it: the
+    // env starts once that has ended, if it is still there.
+    let pulling = crate::autopull::lock(&ctx.paths, env)?;
+    if !ctx.paths.env_config(env).exists() {
+        return Err(config::no_env(env));
+    }
     let state = state::ensure(ctx, env, &image)?;
     crate::used::started(&ctx.paths, env);
     // Its warnings are about choices the user made: `edit` and `status` show them.
@@ -486,8 +492,6 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     let stale_ca = matches!(made, ca::Made::Renewed(_))
         || state.dev_ca.as_deref().is_some_and(|h| h != ca_sha);
 
-    // A pull of the stopped env reads its volume: the env starts once that has ended.
-    let pulling = crate::autopull::lock(&ctx.paths, env)?;
     // Quick when the env runs, so it says nothing then.
     let starting = crate::progress::waiting(&format!("starting `{env}`"));
     crate::progress::wait("starting the vault", || start_vault(ctx, &ids.vault))?;
@@ -1475,7 +1479,12 @@ pub fn stop_vm_if_unused(ctx: &Ctx) -> Result<bool> {
 /// Stop the env's containers; whether any was running. What its repos hold that no remote
 /// has is kept first (`used::stopping`): `luoto prune --envs` can't ask a stopped env.
 pub fn down(ctx: &Ctx, env: &str) -> Result<bool> {
-    crate::used::stopping(ctx, env);
+    down_with(ctx, env, None)
+}
+
+/// [`down`] by a caller that has just asked the env's repos what they hold (`work`).
+pub fn down_with(ctx: &Ctx, env: &str, work: Option<crate::used::Work>) -> Result<bool> {
+    crate::used::stopping(ctx, env, work);
     let _waiting = crate::progress::waiting(&format!("stopping `{env}`"));
     let mut was = false;
     for c in [names::dev(env), names::gate(env)] {

@@ -110,30 +110,46 @@ pub struct Work {
     pub error: Option<String>,
 }
 
+impl Work {
+    /// What asking the env's repos gave.
+    pub fn of(asked: &anyhow::Result<Vec<Unpushed>>) -> Work {
+        match asked {
+            Ok(unpushed) => Work {
+                unpushed: unpushed.clone(),
+                error: None,
+            },
+            Err(e) => Work {
+                unpushed: Vec::new(),
+                error: Some(crate::text::lines(&format!("{e:#}"))),
+            },
+        }
+    }
+}
+
 /// The env is about to stop: while its dev container still runs, keep what its repos hold
-/// that no remote has.
-pub fn stopping(ctx: &Ctx, env: &str) {
+/// that no remote has; `known` when the caller has just asked them.
+pub fn stopping(ctx: &Ctx, env: &str, known: Option<Work>) {
     if !ctx.rt.is_running(&names::dev(env)) {
         return;
     }
-    let repos = EnvState::load(&ctx.paths, env)
-        .ok()
-        .flatten()
-        .map(|s| s.repos)
-        .unwrap_or_default();
-    let work = match crate::repos::unpushed(ctx, env, &repos) {
-        Ok(unpushed) => Work {
-            unpushed,
-            error: None,
-        },
-        Err(e) => Work {
-            unpushed: Vec::new(),
-            error: Some(crate::text::lines(&format!("{e:#}"))),
-        },
-    };
+    let work = known.unwrap_or_else(|| {
+        let repos = EnvState::load(&ctx.paths, env)
+            .ok()
+            .flatten()
+            .map(|s| s.repos)
+            .unwrap_or_default();
+        Work::of(&crate::repos::unpushed(ctx, env, &repos))
+    });
     if let Ok(b) = serde_json::to_vec_pretty(&work) {
         let _ = write_private(&work_file(&ctx.paths, env), &b);
     }
+}
+
+/// When the record of the env's last stop was written, and its size: another one means the
+/// env ran and stopped since.
+pub fn work_stamp(paths: &Paths, env: &str) -> Option<(std::time::SystemTime, u64)> {
+    let m = std::fs::metadata(work_file(paths, env)).ok()?;
+    Some((m.modified().ok()?, m.len()))
 }
 
 /// What the stopped env held as it stopped; None when it stopped with no luoto there to ask

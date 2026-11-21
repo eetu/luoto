@@ -80,6 +80,11 @@ types:
 it:
     cargo test -p luoto-integration -- --ignored --test-threads=1
 
+# Pull-on-stop end to end: one env made and removed in this build's instance (`luoto-dev`).
+# Needs a container runtime and `just images`.
+e2e:
+    cargo test -p luoto --test pull_on_stop -- --ignored --nocapture
+
 # UI tests: the built SPA against fixtures of a real API (Playwright, headless Chromium).
 test-ui:
     cd frontend && {{yarn}} test:ui

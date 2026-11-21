@@ -90,6 +90,7 @@ pub fn routes() -> Router<Ui> {
         )
         .route("/envs/{name}/pull", get(pull_plan).post(pull_apply))
         .route("/envs/{name}/shares", get(shares_view).post(shares_sync))
+        .route("/envs/{name}/down", post(env_down))
         .route("/envs/{name}/{action}", post(env_action))
         .route("/vault", get(vault_view))
         .route("/vault/{action}", post(vault_action))
@@ -489,6 +490,10 @@ struct EnvDetail {
     ports: ports::EnvPorts,
     /// How the dev container is separated, as `luoto status` says it.
     isolation: String,
+    /// Its own file says every stop first pulls its files into its folders, unreviewed.
+    pull_on_stop: bool,
+    /// Its last unattended pull.
+    last_pull: Option<crate::autopull::Summary>,
 }
 
 async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
@@ -514,6 +519,8 @@ async fn env_detail(Path(name): Path<String>) -> ApiResult<EnvDetail> {
         Ok(EnvDetail {
             ports,
             isolation,
+            pull_on_stop: crate::autopull::on(&ctx.paths, &name),
+            last_pull: crate::autopull::last(&ctx.paths, &name),
             path: p.path.display().to_string(),
             rules: p.compiled.policy.rules.clone(),
             denies: p.compiled.policy.denies.len(),
@@ -712,11 +719,6 @@ async fn env_action(Path((name, action)): Path<(String, String)>) -> ApiResult<V
                     ..Default::default()
                 },
             )?,
-            "down" => {
-                // Its files are pulled first when its own file says so; the report is kept
-                // (`autopull::report_file`).
-                crate::autopull::stop(&ctx, &name, crate::autopull::Why::Ui, false)?;
-            }
             "rebuild" => {
                 env::remove_dev(&ctx, &name)?;
                 env::up(
@@ -742,6 +744,25 @@ async fn env_action(Path((name, action)): Path<(String, String)>) -> ApiResult<V
             other => anyhow::bail!("unknown action `{other}`"),
         }
         Ok(json!({ "ok": true }))
+    })
+    .await
+    .map(Json)
+}
+
+/// What stopping an env did.
+#[derive(Serialize)]
+struct Downed {
+    /// The unattended pull before it, for an env whose own file says to pull at every stop.
+    pull: Option<crate::autopull::Summary>,
+}
+
+async fn env_down(Path(name): Path<String>) -> ApiResult<Downed> {
+    blocking(move || {
+        let ctx = Ctx::load()?;
+        let stopped = crate::autopull::stop(&ctx, &name, crate::autopull::Why::Ui, false)?;
+        Ok(Downed {
+            pull: stopped.report.map(|r| r.summary()),
+        })
     })
     .await
     .map(Json)

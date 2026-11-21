@@ -126,8 +126,9 @@ pub fn sizes(rt: &Runtime) -> Result<Sizes> {
 }
 
 /// Apple's volumes and containers are disk images on this machine: each takes the blocks its
-/// files have allocated (a volume's file is sparse, as big as its 512 GiB capacity). Only
-/// their metadata is read.
+/// files have allocated (a volume's file is sparse, as big as its 512 GiB capacity) and share
+/// with no other file: a container's root disk, init disk and kernel start as clones of its
+/// image's, which removing the container frees nothing of. Only their metadata is read.
 fn apple_sizes(rt: &Runtime) -> Result<Sizes> {
     let mut s = Sizes::default();
     for (name, file) in parse_apple_volumes(&rt.run(["volume", "list", "--format", "json"])?)? {
@@ -157,8 +158,8 @@ fn apple_root(rt: &Runtime) -> Result<std::path::PathBuf> {
         .context("`container system status` names no app root")
 }
 
-/// The bytes the files at `path` have allocated on disk, a folder's walked without following
-/// links.
+/// The bytes the files at `path` have allocated on disk for themselves (what removing them
+/// frees), a folder's walked without following links.
 fn allocated(path: &std::path::Path) -> u64 {
     let Ok(m) = std::fs::symlink_metadata(path) else {
         return 0;
@@ -171,15 +172,66 @@ fn allocated(path: &std::path::Path) -> u64 {
             .map(|e| allocated(&e.path()))
             .sum();
     }
+    if !m.is_file() {
+        return 0;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if m.is_file() { m.blocks() * 512 } else { 0 }
+        let blocks = m.blocks() * 512;
+        own_blocks(path).map_or(blocks, |own| own.min(blocks))
     }
     #[cfg(not(unix))]
     {
-        if m.is_file() { m.len() } else { 0 }
+        m.len()
     }
+}
+
+/// The bytes of the file at `path` that no clone of it shares (APFS copies a file by sharing
+/// its blocks until one side changes them), where the filesystem says.
+#[cfg(target_os = "macos")]
+fn own_blocks(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    /// What `getattrlist` writes for the one attribute asked for.
+    #[repr(C, packed(4))]
+    struct Reply {
+        length: u32,
+        private_size: i64,
+    }
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut asked = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: 0,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: libc::ATTR_CMNEXT_PRIVATESIZE,
+    };
+    let mut reply = Reply {
+        length: 0,
+        private_size: 0,
+    };
+    // SAFETY: `c` is a NUL-terminated path, `asked` an attribute list and `reply` a buffer
+    // of the size given, laid out as the call fills it for that list.
+    let got = unsafe {
+        libc::getattrlist(
+            c.as_ptr(),
+            std::ptr::from_mut(&mut asked).cast(),
+            std::ptr::from_mut(&mut reply).cast(),
+            std::mem::size_of::<Reply>(),
+            libc::FSOPT_ATTR_CMN_EXTENDED | libc::FSOPT_NOFOLLOW,
+        )
+    };
+    let (length, size) = (reply.length, reply.private_size);
+    (got == 0 && length as usize >= std::mem::size_of::<Reply>())
+        .then(|| u64::try_from(size).ok())
+        .flatten()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn own_blocks(_path: &std::path::Path) -> Option<u64> {
+    None
 }
 
 /// The size and free space of the filesystem holding `path`.
@@ -1902,5 +1954,45 @@ CACHE ID   CACHE TYPE   SIZE      CREATED   LAST USED   USAGE     SHARED
         assert_eq!(allocated(&dir.path().join("missing")), 0);
         let s = fs_space(dir.path()).unwrap();
         assert!(s.size > 0 && s.free <= s.size && s.used == s.size - s.free);
+    }
+
+    /// A container's disks start as clones of its image's: what they share is the image's.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_clone_counts_only_what_it_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("image");
+        std::fs::create_dir(&image).unwrap();
+        use std::io::{Seek, Write};
+        // On disk before it is measured: blocks are counted once they are allocated.
+        let mut f = std::fs::File::create(image.join("rootfs.ext4")).unwrap();
+        f.write_all(&vec![7u8; 8 << 20]).unwrap();
+        f.sync_all().unwrap();
+        let before = allocated(&image);
+        assert!(before >= 8 << 20, "{before}");
+        let container = dir.path().join("container");
+        std::fs::create_dir(&container).unwrap();
+        let cloned = std::process::Command::new("cp")
+            .arg("-c")
+            .args([image.join("rootfs.ext4"), container.join("rootfs.ext4")])
+            .status()
+            .unwrap();
+        assert!(cloned.success());
+        let shared = allocated(&container);
+        // A filesystem that can't clone copies the file whole: nothing to tell apart there.
+        if shared >= 8 << 20 {
+            return;
+        }
+        assert!(shared < 1 << 20, "a clone shares its blocks: {shared}");
+        // What the container writes is its own.
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(container.join("rootfs.ext4"))
+            .unwrap();
+        f.seek(std::io::SeekFrom::Start(0)).unwrap();
+        f.write_all(&vec![9u8; 2 << 20]).unwrap();
+        f.sync_all().unwrap();
+        let own = allocated(&container);
+        assert!((2 << 20..4 << 20).contains(&own), "{own}");
     }
 }

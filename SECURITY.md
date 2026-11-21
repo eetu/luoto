@@ -154,7 +154,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   folders, coding agents' settings, MCP servers and instructions (`.claude`, `.cursor`,
   `.mcp.json`, `AGENTS.md`, `CLAUDE.md`), hook managers, package managers' and build tools'
   own config and wrappers (`.npmrc`, `.yarnrc.yml`, `bunfig.toml`, `.cargo/config.toml`,
-  mise, `gradlew`, `mvnw`), CI workflows (`.github/workflows`), files that become
+  mise, `gradlew`, `mvnw`), CI workflows (`.github/workflows`), `luoto.toml` (an env made
+  from the folder with `luoto init --yes` takes its settings), files that become
   executable and symlinks. The rest is still code the sandbox wrote,
   and building or running it on your machine runs it outside the sandbox: read the diff
   first. A pulled `.gitignore` decides what later copies leave out, so review its changes. A
@@ -169,19 +170,29 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   `config.toml`, not a `luoto.toml`, and `luoto import` leaves an archive's out). The env's
   files are then written into its folder with nobody reviewing them, when it stops. They are
   read from the stopped env's volume by a container with no network and a read-only mount, so
-  code in the env can neither stall the read nor change a file after it was judged, and the
-  read is bounded in time and size. Written: files the env changed and you didn't, by the
-  fingerprints above. Never written: a conflict, a deletion, what `pull` holds back or
-  refuses, and what is held back only here: executable files, tool configs that are code
-  (`*.config.js` and its kin, `.eslintrc.js`, `build.rs`, `conftest.py`, `sitecustomize.py`,
-  Gradle build scripts, `Gemfile`, `*.gemspec`, `flake.nix`, `shell.nix`, `.pnp.cjs`,
-  `.yarn/releases`, `nodemon.json`), the folder your repository's `core.hooksPath` names, and
-  folders laid out as a git repository. Over 5000 files, 256 MB or 64 MB in one file, or with
-  too little disk left, nothing is written; a folder mid-merge or mid-rebase waits. Each file
-  is checked again for a change of yours just before it is replaced. What is planned is
-  journaled before the first write, so a pull cut short is cleaned up and finished by the next
-  command; a removal that was to follow (`--rm`) is never resumed. After Ctrl-C nothing is
-  pulled until you have reviewed a pull.
+  code in the env can neither stall the read nor change a file after it was judged. The read
+  is bounded in time, and holds no file: each is fingerprinted as it comes, and the ones to
+  write are read again and taken only if they match the fingerprint they were judged by.
+  Written: files the env changed and you didn't, by the fingerprints above. Never written: a
+  conflict, a deletion, what `pull` holds back or refuses, what your repository ignores (by
+  its own rules build output, which keeps no env from being removed either), and what is held
+  back only here: executable files, tool configs that are code (`*.config.js` and its kin,
+  `build.rs`, `conftest.py`, `sitecustomize.py`, Gradle build scripts, `Gemfile`,
+  `*.gemspec`, `flake.nix`, `shell.nix`, `.pnp.cjs`, `.yarn/releases`, `nodemon.json`), the
+  manifests editors, language servers and installs evaluate unasked (`package.json`,
+  `Cargo.toml`, `pyproject.toml`, `setup.py`, `setup.cfg`, `pytest.ini`, `tox.ini`, `go.mod`,
+  `go.work`, `Makefile` and `*.mk`, `CMakeLists.txt` and `*.cmake`, `pom.xml`, `*.sbt`,
+  `mix.exs`, `Package.swift`, `build.zig`, MSBuild's `*.csproj`, `*.props` and `*.targets`,
+  `.eslintrc*`, `.prettierrc*`), `.gitignore` in any folder (it decides what the next copy
+  into an env takes of yours), the folder your repository's `core.hooksPath` names, and
+  folders laid out as a git repository. Over 5000 files, 256 MB or 64 MB in one file to
+  write, with too little disk left, or with over a million files to read, nothing is written;
+  a folder mid-merge or mid-rebase waits. Each file is checked again for a change of yours
+  just before it is replaced. What is planned is journaled before the first write, so a pull
+  cut short is cleaned up by the next command, and an env that stopped unseen is pulled in
+  the background; a removal that was to follow (`--rm`) is never resumed. After a run cut
+  short (Ctrl-C, `--timeout`, a kill, a stop under the agent) nothing is pulled until you
+  have reviewed a pull.
 - **Shared folders** (`luoto share`). A folder you share is cloned into luoto's shares
   folder and the env's clones are mounted read-only at `/shares`, readable by any code
   there; nothing flows back, and a change in the folder arrives only with a sync. Only its
@@ -355,7 +366,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   sandbox wrote land in your folder without a person choosing when. Whatever watches the
   folder then runs them outside the sandbox: a dev server reloading, a test watcher, a
   language server, a build on save, your next `cargo test`. What is held back narrows that to
-  ordinary source files; it doesn't remove it, since source is what those tools run. The
+  ordinary source files and lock files; it doesn't remove it, since source is what those tools
+  run, and a changed lock file is other code at your next install. The
   three-way rule keeps your own edits, but a file only the env changed is replaced without
   your having read it. Use it for folders nothing watches, and read the diff before you run
   or commit what landed.

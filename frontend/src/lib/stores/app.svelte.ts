@@ -252,6 +252,16 @@ export const act = <T>(
     onRisks,
   );
 
+/**
+ * Stop an env and say what came of it: for one that pulls when it stops, what its pull did,
+ * flagged when something was left to review.
+ */
+export const stopEnv = (name: string): Promise<unknown> =>
+  act("stopping…", async () => {
+    const { pull } = await api.down(name);
+    say(pull ? pull.line : `${name} stopped`, pull?.incomplete ?? false);
+  });
+
 export type VaultAction = "unlock" | "lock" | "reload";
 
 /** Unlock, lock or reload the vault, report what came of it, and refresh the vault view. */

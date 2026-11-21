@@ -4,14 +4,17 @@
 //!
 //! The pull reads the stopped env's `work` volume through a container of luoto's tools image
 //! (no network, read-only), never the running env: code there could stall the read or change
-//! files after they were judged. It writes only what the three-way rule gives the env
-//! (`base::judge`), less what `workspace::risky` and `unattended` hold back, within `CAPS`.
+//! files after they were judged. It reads twice: every file once, as it comes, for its
+//! fingerprint, and then the bytes of the files to write, checked against that fingerprint;
+//! so the size of the folder is no limit, only what changed. It writes only what the
+//! three-way rule gives the env (`base::judge`), less what `workspace::risky` and
+//! `unattended` hold back, within `CAPS`.
 //! What it plans is journaled before the first write, so a pull cut short (a crash, a power
 //! cut) is told apart from a finished one, and `recover` cleans up after it.
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -27,7 +30,7 @@ use crate::paths::Paths;
 use crate::state::EnvState;
 use crate::text::display;
 use crate::transfer::{MOUNT, VolumeBox};
-use crate::workspace::{self, PullPlan, PullTarget, TarError, TarRead};
+use crate::workspace::{self, Keep, PullPlan, PullTarget, TarError};
 use crate::{names, notify};
 
 /// `luoto run`'s exit code when the agent succeeded and its unattended pull left something
@@ -46,9 +49,9 @@ const FIND_CAP: usize = 256 << 10;
 /// The most an unattended pull reads and writes for one folder. Over one, nothing is written.
 #[derive(Debug, Clone, Copy)]
 pub struct Caps {
-    /// The env's files as a tar, held in memory while they are judged.
-    pub read: u64,
-    /// Bytes written.
+    /// Files and folders the env holds: each is a line of what is kept while they are judged.
+    pub entries: usize,
+    /// Bytes written, held in memory until they are.
     pub bytes: u64,
     /// Files written.
     pub files: usize,
@@ -59,7 +62,7 @@ pub struct Caps {
 }
 
 pub const CAPS: Caps = Caps {
-    read: 512 << 20,
+    entries: 1_000_000,
     bytes: 256 << 20,
     files: 5000,
     file: 64 << 20,
@@ -129,60 +132,115 @@ fn free_space(dir: &Path) -> Option<u64> {
 /// JavaScript as a tool loads it: its config files are programs.
 const SCRIPT_EXTS: &[&str] = &["js", "cjs", "mjs", "ts", "cts", "mts"];
 
-/// Files that are code a tool on the host loads by itself: an editor or language server
-/// opening the folder, a test runner collecting tests. Named without their folder.
+const BUILD_SCRIPT: &str = "a build script: editors and build tools run it";
+const GRADLE: &str = "a Gradle build script: an IDE's import runs it";
+const NIX: &str = "direnv and nix tools evaluate it";
+const PNP: &str = "node loads it for every yarn command";
+const PYTHON_START: &str = "Python runs it at start";
+const RUBY: &str = "Ruby tools evaluate it";
+const PYTEST: &str = "names plugins pytest and editors' test discovery load";
+const MAKE: &str = "make evaluates it, an IDE's on opening the folder";
+const CMAKE: &str = "CMake runs it when an IDE configures the project";
+const MSBUILD: &str = "an MSBuild project: IDEs evaluate it on load";
+const GO: &str = "names the Go toolchain go and gopls download and run";
+const LINTER: &str = "names plugins and configs editors load as code";
+
+/// Files a tool on the host evaluates by itself, running code they hold or name: an editor
+/// or language server opening the folder, a test runner collecting tests, a watcher. A
+/// project's manifests are among them, so a change to one waits for a review. Named
+/// without their folder, folded.
 const LOADED_BY_NAME: &[(&str, &str)] = &[
     ("build.rs", "a build script: rust-analyzer runs it"),
+    (
+        "cargo.toml",
+        "names build scripts and proc macros rust-analyzer runs",
+    ),
+    (
+        "package.json",
+        "names scripts and tool configs editors and installs run",
+    ),
+    (
+        "pyproject.toml",
+        "names build backends and plugins Python tools load",
+    ),
+    ("setup.py", "Python tools run it"),
+    ("setup.cfg", PYTEST),
+    ("pytest.ini", PYTEST),
+    ("tox.ini", PYTEST),
     ("conftest.py", "pytest and editors' test discovery run it"),
-    ("sitecustomize.py", "Python runs it at start"),
-    ("usercustomize.py", "Python runs it at start"),
-    ("gemfile", "Ruby tools evaluate it"),
-    ("rakefile", "Ruby tools evaluate it"),
+    ("sitecustomize.py", PYTHON_START),
+    ("usercustomize.py", PYTHON_START),
+    ("gemfile", RUBY),
+    ("rakefile", RUBY),
+    ("build.gradle", GRADLE),
+    ("build.gradle.kts", GRADLE),
+    ("settings.gradle", GRADLE),
+    ("settings.gradle.kts", GRADLE),
     (
-        "build.gradle",
-        "a Gradle build script: an IDE's import runs it",
+        "pom.xml",
+        "names plugins and extensions an IDE's import runs",
     ),
-    (
-        "build.gradle.kts",
-        "a Gradle build script: an IDE's import runs it",
-    ),
-    (
-        "settings.gradle",
-        "a Gradle build script: an IDE's import runs it",
-    ),
-    (
-        "settings.gradle.kts",
-        "a Gradle build script: an IDE's import runs it",
-    ),
-    ("flake.nix", "direnv and nix tools evaluate it"),
-    ("shell.nix", "direnv and nix tools evaluate it"),
-    (".pnp.cjs", "node loads it for every yarn command"),
-    (".pnp.loader.mjs", "node loads it for every yarn command"),
+    ("build.sbt", BUILD_SCRIPT),
+    ("build.zig", BUILD_SCRIPT),
+    ("mix.exs", BUILD_SCRIPT),
+    ("package.swift", BUILD_SCRIPT),
+    ("makefile", MAKE),
+    ("gnumakefile", MAKE),
+    ("cmakelists.txt", CMAKE),
+    ("cmakepresets.json", CMAKE),
+    ("cmakeuserpresets.json", CMAKE),
+    ("go.mod", GO),
+    ("go.work", GO),
+    ("flake.nix", NIX),
+    ("shell.nix", NIX),
+    (".pnp.cjs", PNP),
+    (".pnp.loader.mjs", PNP),
     (
         "nodemon.json",
         "a running nodemon runs the command it names",
     ),
+    (
+        ".gitignore",
+        "decides what later copies into an env leave out",
+    ),
+];
+
+/// The same by what a name ends in.
+const LOADED_BY_EXT: &[(&str, &str)] = &[
+    ("gemspec", RUBY),
+    ("sbt", BUILD_SCRIPT),
+    ("mk", MAKE),
+    ("cmake", CMAKE),
+    ("csproj", MSBUILD),
+    ("fsproj", MSBUILD),
+    ("vbproj", MSBUILD),
+    ("props", MSBUILD),
+    ("targets", MSBUILD),
 ];
 
 /// What an unattended pull holds back beyond `workspace::risky`: files nobody runs by hand,
-/// which run all the same once they are in the folder. `rel` in the folder or any folder
-/// within it, compared as the filesystem compares names.
+/// which run all the same once they are in the folder, and `.gitignore`, which decides what
+/// of the folder the next copy into an env leaves out (its secrets, by its own rules). `rel`
+/// in the folder or any folder within it, compared as the filesystem compares names.
 pub fn unattended(rel: &str) -> Option<&'static str> {
     let parts: Vec<String> = rel.split('/').map(workspace::fold).collect();
     let name = parts.last()?.as_str();
     if let Some((_, why)) = LOADED_BY_NAME.iter().find(|(n, _)| *n == name) {
         return Some(why);
     }
+    // `.eslintrc`, `.prettierrc` and each with any ending (`.json`, `.yml`, `.cjs`).
+    if [".eslintrc", ".prettierrc"]
+        .iter()
+        .any(|rc| name == *rc || name.strip_prefix(rc).is_some_and(|r| r.starts_with('.')))
+    {
+        return Some(LINTER);
+    }
     if let Some((stem, ext)) = name.rsplit_once('.') {
-        let script = SCRIPT_EXTS.contains(&ext);
-        if script && stem.ends_with(".config") {
+        if SCRIPT_EXTS.contains(&ext) && stem.ends_with(".config") {
             return Some("a tool's config that is code: editors and dev servers load it");
         }
-        if script && matches!(stem, ".eslintrc" | ".prettierrc") {
-            return Some("a tool's config that is code: editors and dev servers load it");
-        }
-        if ext == "gemspec" {
-            return Some("Ruby tools evaluate it");
+        if let Some((_, why)) = LOADED_BY_EXT.iter().find(|(e, _)| *e == ext) {
+            return Some(why);
         }
     }
     let yarn = parts
@@ -377,7 +435,7 @@ pub fn lock(paths: &Paths, env: &str) -> Result<Lock> {
 }
 
 /// The env's pull lock, unless someone holds it.
-fn try_lock(paths: &Paths, env: &str) -> Option<Lock> {
+pub fn try_lock(paths: &Paths, env: &str) -> Option<Lock> {
     let f = lock_file(paths, env).ok()?;
     f.try_lock().ok().map(|()| Lock(f))
 }
@@ -395,13 +453,20 @@ pub struct Pending {
     /// The env started with pull-on-stop set and hasn't been pulled since.
     #[serde(default)]
     pub dirty: bool,
-    /// An interrupted run left its files half done: no unattended pull until a person has
-    /// reviewed one.
+    /// A run cut short (Ctrl-C, `--timeout`, a kill) left its files half done: no unattended
+    /// pull until a person has reviewed one.
     #[serde(default)]
     pub hold: bool,
     /// How often a pull that was owed was tried and couldn't run.
     #[serde(default)]
     pub attempts: u32,
+    /// The runs under way in the env that haven't said how they ended: a stop that finds
+    /// one was not the agent's own end.
+    #[serde(default)]
+    pub runs: u32,
+    /// That the env stopped with its pull owed was said on a terminal: once is enough.
+    #[serde(default)]
+    pub told: bool,
 }
 
 impl Pending {
@@ -449,7 +514,13 @@ impl Pending {
             self.pull = false;
             self.dirty = false;
             self.attempts = 0;
+            self.told = false;
         }
+    }
+
+    /// Whether a run of the env was cut short: no unattended pull then.
+    fn held(&self) -> bool {
+        self.hold || self.runs > 0
     }
 }
 
@@ -462,13 +533,19 @@ pub fn on(paths: &Paths, env: &str) -> bool {
 /// restart of the machine) leaves a pull owed.
 pub fn started(paths: &Paths, env: &str) {
     if on(paths, env) {
-        let _ = Pending::update(paths, env, |p| p.dirty = true);
+        let _ = Pending::update(paths, env, |p| {
+            p.dirty = true;
+            p.told = false;
+        });
     }
 }
 
 /// Pull-on-stop was turned off: no pull is owed to the env's folder any more.
 pub fn turned_off(paths: &Paths, env: &str) {
-    let _ = Pending::update(paths, env, |p| p.settled(false));
+    let _ = Pending::update(paths, env, |p| {
+        p.settled(false);
+        p.runs = 0;
+    });
 }
 
 /// A person reviewed a pull of the env: unattended pulls go on.
@@ -476,21 +553,29 @@ pub fn reviewed(paths: &Paths, env: &str) {
     let _ = Pending::update(paths, env, |p| p.hold = false);
 }
 
-/// A run of the env was interrupted: its files wait for a reviewed pull, and no pull is
-/// owed until then (the run says so).
+/// A run of the env was cut short (Ctrl-C, `--timeout`, its output lost): its files wait for
+/// a reviewed pull, and no pull is owed until then (the run says so).
 pub fn hold(paths: &Paths, env: &str) {
     let _ = Pending::update(paths, env, |p| {
         p.settled(false);
         p.hold = true;
+        p.runs = 0;
     });
 }
 
-/// A run that ends in an unattended pull starts.
-pub fn expect(paths: &Paths, env: &str, rm: bool) -> Result<()> {
+/// A run starts in an env whose files an unattended pull takes: at its own end (`pull`) or
+/// at the env's stop. A run that never says it ended (`ended`) was cut short.
+pub fn expect(paths: &Paths, env: &str, pull: bool, rm: bool) -> Result<()> {
     Pending::update(paths, env, |p| {
-        p.pull = true;
-        p.rm = rm;
+        p.runs += 1;
+        p.pull |= pull;
+        p.rm = pull && rm;
     })
+}
+
+/// The run's agent ended by itself: its files are as it left them.
+pub fn ended(paths: &Paths, env: &str) {
+    let _ = Pending::update(paths, env, |p| p.runs = p.runs.saturating_sub(1));
 }
 
 /// Forget what was owed to a removed env's folder; the last report stays.
@@ -656,6 +741,33 @@ impl FolderReport {
     }
 }
 
+/// An unattended pull as the UI shows it: what it came to in one line, which carries counts
+/// and the folders, never a name the sandbox chose.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Summary {
+    pub at: Option<DateTime<Utc>>,
+    pub line: String,
+    /// Something the env holds didn't land: there is something to review.
+    pub incomplete: bool,
+}
+
+/// The env's last unattended pull, if it had one: not one of an env of the same name that
+/// was there before it (a removed env's report stays).
+pub fn last(paths: &Paths, env: &str) -> Option<Summary> {
+    let made = std::fs::metadata(paths.env_state(env)).ok()?.created().ok();
+    let r: Report = serde_json::from_slice(&std::fs::read(report_file(paths, env)).ok()?).ok()?;
+    let its_own = match (r.at, made) {
+        (Some(at), Some(made)) => at >= DateTime::<Utc>::from(made),
+        _ => true,
+    };
+    its_own.then(|| r.summary())
+}
+
+/// The commands that review a stopped env's files: a pull asks the running env.
+fn review(env: &str) -> String {
+    format!("`luoto up -e {env}`, then `luoto pull -e {env}`")
+}
+
 /// `s` in lines the terminal holds, those after the first indented.
 fn wrapped(s: &str) -> String {
     let w = crate::text::wrap(s, "  ", crate::text::columns());
@@ -718,8 +830,9 @@ impl Report {
         let env = &self.env;
         if self.held {
             return format!(
-                "nothing pulled from `{env}`: an interrupted run left its files half done; \
-                 `luoto pull -e {env}` reviews them"
+                "nothing pulled from `{env}`: a run cut short left its files half done; {} \
+                 reviews them",
+                review(env)
             );
         }
         if let Some(e) = &self.error {
@@ -743,9 +856,17 @@ impl Report {
             s.push_str(&format!("; {waiting} folder(s) not pulled whole"));
         }
         if left + waiting > 0 {
-            s.push_str(&format!(": `luoto pull -e {env}` reviews"));
+            s.push_str(&format!(": {} reviews", review(env)));
         }
         s
+    }
+
+    pub fn summary(&self) -> Summary {
+        Summary {
+            at: self.at,
+            line: self.line(),
+            incomplete: self.incomplete(),
+        }
     }
 
     /// The desktop notification of a pull: counts and the folders, which are yours. No file
@@ -772,7 +893,7 @@ impl Report {
             if !body.is_empty() {
                 body.push_str("; ");
             }
-            body.push_str(&format!("{left}: `luoto pull -e {env}`"));
+            body.push_str(&format!("{left}: {}", review(env)));
         }
         Some(notify::Note { title, body })
     }
@@ -830,8 +951,7 @@ impl Report {
             );
             writeln!(w, "{}", style.head(&wrapped(&head)))?;
             list(w, "wrote:", &names(&f.written))?;
-            let held = format!("held back (`luoto pull -e {env}` reviews them):");
-            list(w, &held, &whys(&f.held))?;
+            list(w, "held back for your review:", &whys(&f.held))?;
             list(
                 w,
                 "changed here and in the env (yours kept):",
@@ -861,6 +981,10 @@ impl Report {
                 let first = why.lines().next().unwrap_or_default();
                 writeln!(w, "not all of the env's files could be read: {first}")?;
             }
+        }
+        if self.incomplete() {
+            let how = format!("{} reviews what was left", review(env));
+            writeln!(w, "{}", style.commands(&wrapped(&how)))?;
         }
         Ok(())
     }
@@ -906,57 +1030,135 @@ struct Work {
     old: Base,
 }
 
-/// tar's output for `target` from the stopped env's volume.
-fn read_stopped(
+/// Where `target`'s files are in the container that reads the env's volume.
+fn root_of(target: &PullTarget) -> String {
+    match &target.repo {
+        Some(name) => format!("{MOUNT}/{name}"),
+        None => MOUNT.to_string(),
+    }
+}
+
+/// A name for a container that reads the env's volume, its own: one a luoto that was ended
+/// left reading is never in the next one's way.
+fn reader_name(env: &str, what: &str) -> String {
+    let tag = hex::encode(rand::random::<[u8; 4]>());
+    format!("{}.{what}-{tag}", names::dev(env))
+}
+
+/// Judge the stopped env's files under `target` as tar writes them, keeping a fingerprint
+/// of each and no file's bytes. With what tar said if it failed.
+fn scan_stopped(
     ctx: &Ctx,
     vol: &VolumeBox,
     env: &str,
     target: &PullTarget,
-) -> std::result::Result<TarRead, TarError> {
-    let root = match &target.repo {
-        Some(name) => format!("{MOUNT}/{name}"),
-        None => MOUNT.to_string(),
-    };
-    let name = format!("{}.pull", names::dev(env));
-    let args = vol.args_named(&name, workspace::tar_args(&root, &target.skip, false));
+    base: Option<&Base>,
+) -> std::result::Result<(workspace::Scanned, Option<String>), TarError> {
+    let name = reader_name(env, "pull");
+    let tar = workspace::tar_args(&root_of(target), &target.skip, false);
     let child = ctx
         .rt
         .command()
-        .args(&args)
+        .args(vol.args_named(&name, tar))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(TarError::Io)?;
-    let read = workspace::read_tar(child, CAPS.read, Some(READ_LIMIT));
-    if read.is_err() {
+    let read = workspace::scan_tar(child, READ_LIMIT, |out| {
+        workspace::scan_plan(
+            out,
+            &target.dest,
+            &target.skip,
+            base,
+            Keep::Prints,
+            CAPS.entries,
+        )
+    });
+    if !matches!(&read, Ok((s, _)) if !s.over) {
         // Its client was ended; a container of its own would read on.
         vol.forget(&name);
     }
     read
 }
 
+/// Read from the stopped env the bytes of `plan`'s entries at `wanted` into it, each checked
+/// against the fingerprint it was judged by. The paths that didn't come, and why.
+fn fetch_stopped(
+    ctx: &Ctx,
+    vol: &VolumeBox,
+    env: &str,
+    target: &PullTarget,
+    plan: &mut PullPlan,
+    wanted: &[String],
+) -> Vec<(String, String)> {
+    // tar takes the names a line each.
+    let (odd, listed): (Vec<&String>, Vec<&String>) =
+        wanted.iter().partition(|p| p.contains(['\n', '\r']));
+    let mut missing: Vec<(String, String)> = odd
+        .into_iter()
+        .map(|p| (p.clone(), "a line break in its name".to_string()))
+        .collect();
+    if listed.is_empty() {
+        return missing;
+    }
+    let all = |why: String| listed.iter().map(move |p| ((*p).clone(), why.clone()));
+    let name = reader_name(env, "fetch");
+    let tar = workspace::tar_listed_args(&root_of(target));
+    let child = ctx
+        .rt
+        .command()
+        .args(vol.args_input_named(&name, tar))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            missing.extend(all(format!("the env's files couldn't be read again ({e})")));
+            return missing;
+        }
+    };
+    let list: String = listed.iter().map(|p| format!("{p}\n")).collect();
+    let stdin = child.stdin.take();
+    let writer = std::thread::spawn(move || {
+        if let Some(mut stdin) = stdin {
+            let _ = stdin.write_all(list.as_bytes());
+        }
+    });
+    let set: BTreeSet<String> = listed.iter().map(|p| (*p).clone()).collect();
+    let read = workspace::scan_tar(child, READ_LIMIT, |out| plan.fill(out, &set));
+    let _ = writer.join();
+    match read {
+        Ok((left, _)) => missing.extend(left),
+        Err(e) => {
+            vol.forget(&name);
+            missing.extend(all(format!("the env's files couldn't be read again ({e})")));
+        }
+    }
+    missing
+}
+
 /// What the stopped env holds under `target` that no pull takes.
 fn never_copied(ctx: &Ctx, vol: &VolumeBox, env: &str, target: &PullTarget) -> Result<Vec<String>> {
-    let root = match &target.repo {
-        Some(name) => format!("{MOUNT}/{name}"),
-        None => MOUNT.to_string(),
-    };
-    let mut argv = vec![
-        "sh".to_string(),
-        "-c".into(),
-        r#"cd "$0" && exec find "$@""#.into(),
-        root,
-    ];
-    argv.extend(workspace::never_copied_find(&target.skip));
-    let name = format!("{}.find", names::dev(env));
+    let find = workspace::rooted(&root_of(target), workspace::never_copied_find(&target.skip));
+    let name = reader_name(env, "find");
     let out = ctx
         .rt
-        .run_limited(vol.args_named(&name, argv), FIND_LIMIT, FIND_CAP);
+        .run_limited(vol.args_named(&name, find), FIND_LIMIT, FIND_CAP);
     if out.is_err() {
         vol.forget(&name);
     }
     Ok(workspace::never_copied_lines(&out?))
+}
+
+/// Why a stopped env with more files than [`CAPS`] reads isn't read.
+fn too_many() -> String {
+    format!(
+        "the env holds more than the {} files and folders read from a stopped env",
+        CAPS.entries
+    )
 }
 
 /// What stopped env `env` holds that its folders don't have, read from its volume as an
@@ -978,16 +1180,14 @@ pub fn unpulled_stopped(ctx: &Ctx, env: &str) -> Result<Vec<workspace::Unpulled>
     let vol = VolumeBox::open(ctx, env, "work", id_map, false)?;
     let mut found = Vec::new();
     for t in &targets {
-        let read = read_stopped(ctx, &vol, env, t).map_err(|e| match e {
-            TarError::TooLarge => anyhow::anyhow!(
-                "the env's files are more than the {} read from a stopped env",
-                crate::disk::human(CAPS.read)
-            ),
-            e => anyhow::anyhow!("the env's files couldn't be read ({e})"),
-        })?;
-        let never = never_copied(ctx, &vol, env, t)?;
         let base = t.base(&ctx.paths, env);
-        let plan = workspace::build_plan(&read, &t.dest, &t.skip, base.as_ref())?;
+        let (scanned, failed) = scan_stopped(ctx, &vol, env, t, base.as_ref())
+            .map_err(|e| anyhow::anyhow!("the env's files couldn't be read ({e})"))?;
+        if scanned.over {
+            bail!("{}", too_many());
+        }
+        let plan = scanned.finish(&t.dest, &t.skip, base.as_ref(), failed)?;
+        let never = never_copied(ctx, &vol, env, t)?;
         let u = workspace::Unpulled::of(&plan, t, never);
         if u.any() {
             found.push(u);
@@ -996,8 +1196,9 @@ pub fn unpulled_stopped(ctx: &Ctx, env: &str) -> Result<Vec<workspace::Unpulled>
     Ok(found)
 }
 
-/// Plan one folder: read the env's side, judge it, and fill in `report`. None when nothing
-/// is to be written for it, which `report.deferred` then explains.
+/// Plan one folder: read the env's side, judge it, read the bytes of what is to be written,
+/// and fill in `report`. None when nothing is to be written for it, which `report.deferred`
+/// then explains.
 fn plan_folder(
     ctx: &Ctx,
     vol: &VolumeBox,
@@ -1006,10 +1207,11 @@ fn plan_folder(
     report: &mut FolderReport,
 ) -> Option<Work> {
     let Some(old) = target.base(&ctx.paths, env) else {
-        report.deferred = Some(format!(
+        report.deferred = Some(
             "luoto has no record of what the env's copy started from (an env made before it \
-             kept one, or imported); `luoto pull -e {env}` reviews its files and starts one"
-        ));
+             kept one, or imported): a reviewed pull that leaves nothing starts one"
+                .to_string(),
+        );
         return None;
     };
     if let Some(op) = mid_operation(&target.dest) {
@@ -1017,23 +1219,21 @@ fn plan_folder(
         report.retry = true;
         return None;
     }
-    let read = match read_stopped(ctx, vol, env, target) {
+    let (scanned, failed) = match scan_stopped(ctx, vol, env, target, Some(&old)) {
         Ok(r) => r,
         Err(e) => {
-            report.retry = !matches!(e, TarError::TooLarge);
-            report.deferred = Some(match e {
-                TarError::TooLarge => format!(
-                    "the env's files are more than the {} an unattended pull reads",
-                    crate::disk::human(CAPS.read)
-                ),
-                e => format!("the env's files couldn't be read ({e})"),
-            });
+            report.retry = true;
+            report.deferred = Some(format!("the env's files couldn't be read ({e})"));
             return None;
         }
     };
+    if scanned.over {
+        report.deferred = Some(too_many());
+        return None;
+    }
     let found = never_copied(ctx, vol, env, target);
-    let plan = workspace::build_plan(&read, &target.dest, &target.skip, Some(&old));
-    let (plan, found) = match (plan, found) {
+    let plan = scanned.finish(&target.dest, &target.skip, Some(&old), failed);
+    let (mut plan, found) = match (plan, found) {
         (Ok(p), Ok(f)) => (p, f),
         (Err(e), _) | (_, Err(e)) => {
             report.deferred = Some(format!("the env's files couldn't be read ({e:#})"));
@@ -1053,6 +1253,8 @@ fn plan_folder(
     report.deleted = plan.deleted.clone();
     report.refused = plan.refused.clone();
     report.unread = plan.unread.clone();
+    // The files are as they were: a read that failed was the runtime's, and may not again.
+    report.retry = plan.unread.is_some();
     report.head_moved = plan.head_moved.clone();
     report.conflicts = decided.conflicts;
     report.held = decided.held;
@@ -1061,20 +1263,29 @@ fn plan_folder(
         .into_iter()
         .filter(|p| !facts.ignored.contains(p))
         .collect();
+    let writes: BTreeSet<&str> = decided.write.iter().map(String::as_str).collect();
     let sizes: Vec<u64> = plan
         .entries
         .iter()
-        .filter(|e| decided.write.contains(&e.path))
+        .filter(|e| writes.contains(e.path.as_str()))
         .map(|e| e.size)
         .collect();
     if let Some(why) = over(&CAPS, &sizes, free_space(&target.dest)) {
-        report.deferred = Some(format!("{why}; `luoto pull -e {env}` reviews them"));
+        report.deferred = Some(why);
         return None;
     }
+    let missing = fetch_stopped(ctx, vol, env, target, &mut plan, &decided.write);
+    let write = decided
+        .write
+        .into_iter()
+        .filter(|p| !missing.iter().any(|(m, _)| m == p))
+        .collect();
+    report.retry |= !missing.is_empty();
+    report.held.extend(missing);
     Some(Work {
         target: target.clone(),
         plan,
-        write: decided.write,
+        write,
         old,
     })
 }
@@ -1232,25 +1443,47 @@ pub struct Stopped {
 /// (`dangerously_pull_on_stop`) or `asked` (`luoto run --dangerously-pull`): from its volume,
 /// once it has stopped. An env that wasn't running is pulled when a pull is owed to it.
 pub fn stop(ctx: &Ctx, env: &str, why: Why, asked: bool) -> Result<Stopped> {
+    stop_with(ctx, env, why, asked, None)
+}
+
+/// [`stop`] by a caller that has asked the env's repos what they hold (`work`), so the stop
+/// doesn't ask again.
+pub fn stop_with(
+    ctx: &Ctx,
+    env: &str,
+    why: Why,
+    asked: bool,
+    work: Option<crate::used::Work>,
+) -> Result<Stopped> {
     if !asked && !on(&ctx.paths, env) {
         return Ok(Stopped {
-            was_running: env::down(ctx, env)?,
+            was_running: env::down_with(ctx, env, work)?,
             report: None,
         });
     }
     let _lock = lock(&ctx.paths, env)?;
-    stop_locked(ctx, env, why, asked)
+    stop_locked(ctx, env, why, asked, work)
 }
 
 /// [`stop`] for an env that pulls, under its lock: what is owed is read only now, so two
 /// stops of one env never both pull for the same reason.
-fn stop_locked(ctx: &Ctx, env: &str, why: Why, asked: bool) -> Result<Stopped> {
+fn stop_locked(
+    ctx: &Ctx,
+    env: &str,
+    why: Why,
+    asked: bool,
+    work: Option<crate::used::Work>,
+) -> Result<Stopped> {
     let pending = Pending::load(&ctx.paths, env);
-    let pull = pull_at_stop(on(&ctx.paths, env), asked, pending.hold);
+    let pull = pull_at_stop(on(&ctx.paths, env), asked, pending.held());
+    if pending.runs > 0 {
+        // A run that never said it ended: this stop, or a kill, cut it short.
+        hold(&ctx.paths, env);
+    }
     if pull == Pull::Yes {
         Pending::update(&ctx.paths, env, |p| p.pull = true)?;
     }
-    let was_running = env::down(ctx, env)?;
+    let was_running = env::down_with(ctx, env, work)?;
     let mut report = Report {
         env: env.to_string(),
         at: Some(Utc::now()),
@@ -1284,6 +1517,8 @@ fn stop_locked(ctx: &Ctx, env: &str, why: Why, asked: bool) -> Result<Stopped> {
             report: None,
         });
     }
+    // What an earlier pull left half made goes before this one plans its own.
+    tidy(&ctx.paths, env);
     if let Err(e) = pull_stopped(ctx, env, &mut report) {
         report.error = Some(crate::text::lines(&format!("{e:#}")));
     }
@@ -1304,34 +1539,38 @@ fn owing(paths: &Paths) -> Vec<String> {
     dirs.flatten()
         .filter_map(|d| d.file_name().into_string().ok())
         .filter(|n| config::validate_name(n).is_ok())
-        .filter(|n| {
-            Pending::load(paths, n).owed() || Journal::load(paths, n).is_some_and(|j| !j.complete)
-        })
+        .filter(|n| Pending::load(paths, n).owed() || cut_short(paths, n))
         .collect()
 }
 
-/// Whether any env has a pull to recover: cheap, for every command to ask.
-pub fn any_owing(paths: &Paths) -> bool {
+/// Whether a pull of the env never marked its journal complete.
+fn cut_short(paths: &Paths, env: &str) -> bool {
+    Journal::load(paths, env).is_some_and(|j| !j.complete)
+}
+
+/// Whether any env has a pull owed or cut short.
+#[cfg(test)]
+fn any_owing(paths: &Paths) -> bool {
     !owing(paths).is_empty()
 }
 
-/// What `recover` does about an env's pending record.
+/// What is done about an env's pending record once the env has stopped.
 #[derive(Debug, PartialEq, Eq)]
 enum Owed {
     /// Nothing to do now: nothing is owed, or it was tried often enough and waits for
     /// `luoto down`.
     Nothing,
-    /// Pull it, if it has stopped.
+    /// Pull it.
     Pull,
-    /// Say that it stopped unpulled, if it has: its file no longer says to pull, or an
-    /// interrupted run's files wait for a review.
+    /// Say that it stopped unpulled: its file no longer says to pull, or a run cut short
+    /// left files that wait for a review.
     Tell,
 }
 
 fn owed(pending: &Pending, setting: bool) -> Owed {
     if !pending.owed() {
         Owed::Nothing
-    } else if !setting || pending.hold {
+    } else if !setting || pending.held() {
         Owed::Tell
     } else if pending.attempts >= MAX_ATTEMPTS {
         Owed::Nothing
@@ -1340,10 +1579,118 @@ fn owed(pending: &Pending, setting: bool) -> Owed {
     }
 }
 
-/// Finish what a crash or a stop luoto didn't see left undone, for every env: clean up after
-/// a pull cut short, and pull an env that stopped with one owed, when its file still says to
-/// (else say so). On stderr. A removal that was to follow is never done here.
+/// Clean up after a pull of the env that was cut short, and say what it had done. Only files
+/// of this machine are read: under the env's lock, quick.
+fn tidy(paths: &Paths, env: &str) {
+    if let Some(r) = recover_journal(paths, env) {
+        crate::progress::note(&format!(
+            "a pull of `{env}` was cut short: {} file(s) had been written, {} had not, {} \
+             changed since",
+            r.done, r.not_done, r.changed
+        ));
+    }
+}
+
+/// What is said of a stopped env whose pull nobody does unasked. `removal`: its run was to
+/// remove it, which is said and never done.
+fn unpulled_note(env: &str, removal: bool) -> String {
+    let removal = match removal {
+        true => format!(" Its run was to remove it afterwards: `luoto rm -e {env}` does."),
+        false => String::new(),
+    };
+    format!(
+        "env `{env}` stopped before its files were pulled: {} reviews them.{removal}",
+        review(env)
+    )
+}
+
+/// Whether a stopped env has a pull to finish that no luoto is at: for the watcher, which
+/// knows which envs run (`running`) and starts `luoto recover` for the rest.
+pub fn due(paths: &Paths, running: &dyn Fn(&str) -> bool) -> bool {
+    owing(paths).iter().any(|env| {
+        let waits = cut_short(paths, env)
+            || owed(&Pending::load(paths, env), on(paths, env)) != Owed::Nothing;
+        waits && !running(env) && try_lock(paths, env).is_some()
+    })
+}
+
+/// What every command does first about pulls cut short or owed, without holding it up. A
+/// pull cut short is cleaned up (files of this machine only). A pull owed to an env that
+/// stopped unseen is the background's to do: the watcher's while one runs, else, after one
+/// look at the runtime, a watcher started for it; what a person must do is said once.
+pub fn attend(paths: &Paths) {
+    let mut untold = Vec::new();
+    for env in owing(paths) {
+        if !paths.env_config(&env).exists() {
+            forget(paths, &env);
+            continue;
+        }
+        // Whoever holds the lock is at it.
+        if cut_short(paths, &env)
+            && let Some(_lock) = try_lock(paths, &env)
+        {
+            tidy(paths, &env);
+        }
+        let pending = Pending::load(paths, &env);
+        if !pending.told && owed(&pending, on(paths, &env)) != Owed::Nothing {
+            untold.push(env);
+        }
+    }
+    // A running watcher sees an env stop, and has `luoto recover` pull it.
+    if untold.is_empty() || crate::watch::running(paths) {
+        return;
+    }
+    let Ok(ctx) = Ctx::load() else {
+        return;
+    };
+    let vm_stopped = crate::machine::stopped(&ctx.rt);
+    let mut watch = false;
+    for env in untold {
+        let Some(_lock) = try_lock(paths, &env) else {
+            continue;
+        };
+        if !vm_stopped && ctx.rt.is_running(&names::dev(&env)) {
+            // Pulled when it stops; a watcher is what sees that.
+            watch = true;
+            continue;
+        }
+        let pending = Pending::load(paths, &env);
+        let told = |p: &mut Pending| p.told = true;
+        match owed(&pending, on(paths, &env)) {
+            Owed::Nothing => {}
+            Owed::Tell => {
+                let _ = Pending::update(paths, &env, |p| p.settled(false));
+                crate::progress::note(&unpulled_note(&env, pending.rm));
+            }
+            Owed::Pull if vm_stopped => {
+                let _ = Pending::update(paths, &env, told);
+                crate::progress::note(&format!(
+                    "env `{env}` stopped before its files were pulled: `luoto down -e {env}` \
+                     pulls them"
+                ));
+            }
+            Owed::Pull => {
+                let _ = Pending::update(paths, &env, told);
+                watch = true;
+                crate::progress::note(&format!(
+                    "env `{env}` stopped before its files were pulled: luoto pulls them in the \
+                     background (`luoto logs watcher` shows it; `luoto down -e {env}` waits \
+                     for it)"
+                ));
+            }
+        }
+    }
+    if watch {
+        crate::watch::spawn(&ctx);
+    }
+}
+
+/// `luoto recover`, which the watcher runs: finish what a crash or a stop luoto didn't see
+/// left undone, for every env. Clean up after a pull cut short, and pull an env that stopped
+/// with one owed, when its file still says to (else say so). On stderr, and as a
+/// notification when that is no terminal. A removal that was to follow is never done here.
 pub fn recover(ctx: &Ctx) {
+    let notifying = ctx.global.notifications.unwrap_or(true) && !std::io::stderr().is_terminal();
     for env in owing(&ctx.paths) {
         if !ctx.paths.env_config(&env).exists() {
             forget(&ctx.paths, &env);
@@ -1353,7 +1700,13 @@ pub fn recover(ctx: &Ctx) {
         let Some(_lock) = try_lock(&ctx.paths, &env) else {
             continue;
         };
+        tidy(&ctx.paths, &env);
         let note = |msg: String| crate::progress::note(&msg);
+        let pending = Pending::load(&ctx.paths, &env);
+        let todo = owed(&pending, on(&ctx.paths, &env));
+        if todo == Owed::Nothing {
+            continue;
+        }
         if crate::machine::stopped(&ctx.rt) {
             note(format!(
                 "env `{env}` stopped before its files were pulled: `luoto down -e {env}` pulls \
@@ -1361,17 +1714,19 @@ pub fn recover(ctx: &Ctx) {
             ));
             continue;
         }
-        if let Some(r) = recover_journal(&ctx.paths, &env) {
-            note(format!(
-                "a pull of `{env}` was cut short: {} file(s) had been written, {} had not, {} \
-                 changed since",
-                r.done, r.not_done, r.changed
-            ));
-        }
-        let pending = Pending::load(&ctx.paths, &env);
-        let todo = owed(&pending, on(&ctx.paths, &env));
         // A running env is pulled when it stops.
-        if todo == Owed::Nothing || ctx.rt.is_running(&names::dev(&env)) {
+        if ctx.rt.is_running(&names::dev(&env)) {
+            continue;
+        }
+        if todo == Owed::Tell {
+            let _ = Pending::update(&ctx.paths, &env, |p| p.settled(false));
+            note(unpulled_note(&env, pending.rm));
+            if notifying {
+                notify::show_logged(&notify::Note {
+                    title: format!("luoto pulled nothing from `{env}`"),
+                    body: format!("it stopped before its files were pulled: {}", review(&env)),
+                });
+            }
             continue;
         }
         // Said, never done: a removal is not resumed.
@@ -1379,21 +1734,18 @@ pub fn recover(ctx: &Ctx) {
             true => format!(" Its run was to remove it afterwards: `luoto rm -e {env}` does."),
             false => String::new(),
         };
-        if todo == Owed::Tell {
-            let _ = Pending::update(&ctx.paths, &env, |p| p.settled(false));
-            note(format!(
-                "env `{env}` stopped before its files were pulled: `luoto up -e {env}`, then \
-                 `luoto pull -e {env}` reviews them.{removal}"
-            ));
-            continue;
-        }
         note(format!(
             "env `{env}` stopped before its files were pulled: pulling them now.{removal}"
         ));
-        match stop_locked(ctx, &env, Why::Recovery, false) {
+        match stop_locked(ctx, &env, Why::Recovery, false, None) {
             Ok(Stopped {
                 report: Some(r), ..
-            }) => r.print(&mut std::io::stderr(), crate::style::err(), 30),
+            }) => {
+                r.print(&mut std::io::stderr(), crate::style::err(), 30);
+                if let Some(n) = r.note().filter(|_| notifying) {
+                    notify::show_logged(&n);
+                }
+            }
             Ok(_) => {}
             Err(e) => crate::progress::warn(&format!("`{env}` not pulled ({e:#})")),
         }
@@ -1403,7 +1755,7 @@ pub fn recover(ctx: &Ctx) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::PlanEntry;
+    use crate::workspace::{PlanEntry, TarRead};
 
     fn paths(dir: &Path) -> Paths {
         Paths {
@@ -1432,6 +1784,9 @@ mod tests {
             ".yarn/releases/yarn-4.5.0.cjs",
             "web/.yarn/plugins/x.cjs",
             "nodemon.json",
+            ".eslintrc",
+            ".eslintrc.json",
+            "web/.prettierrc.yaml",
         ] {
             assert!(unattended(p).is_some(), "{p}");
         }
@@ -1440,14 +1795,68 @@ mod tests {
             "src/config.ts",
             "docs/vite.config.md",
             "app.config.json",
-            ".eslintrc.json",
+            ".eslintrcx",
             "src/build.rs.txt",
             ".yarn/cache/x.zip",
             "yarn/releases/x.cjs",
             "README.md",
+            "Cargo.lock",
+            "src/package.json.md",
+            "tsconfig.json",
         ] {
             assert!(unattended(p).is_none(), "{p}");
         }
+    }
+
+    #[test]
+    fn manifests_tools_evaluate_by_themselves_are_held_back_at_any_depth() {
+        for p in [
+            "Cargo.toml",
+            "crates/core/Cargo.toml",
+            "package.json",
+            "web/package.json",
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            "pytest.ini",
+            "tox.ini",
+            "Makefile",
+            "GNUmakefile",
+            "rules/common.mk",
+            "CMakeLists.txt",
+            "cmake/Find.cmake",
+            "mix.exs",
+            "Package.swift",
+            "build.zig",
+            "build.sbt",
+            "project/plugins.sbt",
+            "pom.xml",
+            "App/App.csproj",
+            "Directory.Build.props",
+            "Directory.Build.targets",
+            "go.mod",
+            "go.work",
+        ] {
+            assert!(unattended(p).is_some(), "{p}");
+        }
+    }
+
+    #[test]
+    fn what_decides_the_next_copy_into_an_env_never_lands_unreviewed() {
+        // A `.gitignore` the env rewrote would let the next copy take in what it kept out.
+        for p in [
+            ".gitignore",
+            "web/.gitignore",
+            ".GITIGNORE",
+            "a/b/.gitignore",
+        ] {
+            assert!(unattended(p).is_some(), "{p}");
+        }
+        // And `luoto init --yes` in the folder accepts its luoto.toml: held in every pull.
+        for p in ["luoto.toml", "api/luoto.toml", "Luoto.TOML"] {
+            assert!(workspace::risky_nested(p).is_some(), "{p}");
+        }
+        assert!(workspace::risky_nested("docs/luoto.toml.md").is_none());
     }
 
     #[test]
@@ -1512,7 +1921,7 @@ mod tests {
     #[test]
     fn over_a_cap_nothing_is_written() {
         let caps = Caps {
-            read: 1000,
+            entries: 1000,
             bytes: 100,
             files: 3,
             file: 60,
@@ -1636,11 +2045,12 @@ mod tests {
         let p = paths(dir.path());
         assert!(!Pending::load(&p, "web").owed());
         assert!(!any_owing(&p));
-        expect(&p, "web", true).unwrap();
+        expect(&p, "web", true, true).unwrap();
         let now = Pending::load(&p, "web");
-        assert!(now.owed() && now.pull && now.rm);
+        assert!(now.owed() && now.pull && now.rm && now.runs == 1);
         assert!(any_owing(&p));
-        // A pull that couldn't run stays owed, counted.
+        // The agent ended by itself; a pull that then couldn't run stays owed, counted.
+        ended(&p, "web");
         Pending::update(&p, "web", |x| x.settled(true)).unwrap();
         let now = Pending::load(&p, "web");
         assert_eq!((now.pull, now.rm, now.attempts), (true, false, 1));
@@ -1648,19 +2058,83 @@ mod tests {
         Pending::update(&p, "web", |x| x.settled(false)).unwrap();
         assert_eq!(Pending::load(&p, "web"), Pending::default());
         assert!(!Pending::file(&p, "web").exists());
-        // An interrupted run: on hold, with no pull owed, until a reviewed pull.
-        expect(&p, "web", false).unwrap();
+        // A run cut short: on hold, with no pull owed, until a reviewed pull.
+        expect(&p, "web", true, false).unwrap();
         Pending::update(&p, "web", |x| x.dirty = true).unwrap();
         hold(&p, "web");
         let held = Pending::load(&p, "web");
-        assert!(held.hold && !held.owed());
+        assert!(held.hold && !held.owed() && held.runs == 0);
         reviewed(&p, "web");
         assert!(!Pending::load(&p, "web").hold);
         // A removed env's records go; its report stays.
-        expect(&p, "web", false).unwrap();
+        expect(&p, "web", true, false).unwrap();
         std::fs::write(report_file(&p, "web"), b"{}").unwrap();
         forget(&p, "web");
         assert!(!any_owing(&p) && report_file(&p, "web").exists());
+    }
+
+    #[test]
+    fn a_run_that_never_said_it_ended_holds_its_envs_pulls() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = paths(dir.path());
+        // A run in an env that pulls when it stops, with no pull of its own.
+        expect(&p, "web", false, false).unwrap();
+        let running = Pending::load(&p, "web");
+        assert!(running.held() && !running.owed() && !running.pull);
+        // Killed: nothing clears it, and the env's next stop pulls nothing.
+        let at_stop = Pending::load(&p, "web");
+        assert_eq!(pull_at_stop(true, false, at_stop.held()), Pull::Held);
+        // One that ended is no hold, and of two the one still running is.
+        ended(&p, "web");
+        assert_eq!(Pending::load(&p, "web"), Pending::default());
+        expect(&p, "web", false, false).unwrap();
+        expect(&p, "web", true, false).unwrap();
+        ended(&p, "web");
+        assert!(Pending::load(&p, "web").held());
+        // Turning the setting off forgets the lot.
+        turned_off(&p, "web");
+        assert_eq!(Pending::load(&p, "web"), Pending::default());
+    }
+
+    #[test]
+    fn a_stop_unseen_is_said_once_and_a_new_start_says_it_anew() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = paths(dir.path());
+        Pending::update(&p, "web", |x| {
+            x.dirty = true;
+            x.told = true;
+        })
+        .unwrap();
+        // A pull that has to be tried again changes nothing about what was said.
+        Pending::update(&p, "web", |x| x.settled(true)).unwrap();
+        assert!(Pending::load(&p, "web").told);
+        Pending::update(&p, "web", |x| x.settled(false)).unwrap();
+        assert!(!Pending::load(&p, "web").told);
+    }
+
+    #[test]
+    fn the_watcher_recovers_only_stopped_envs_nobody_is_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = paths(dir.path());
+        let none = |_: &str| false;
+        assert!(!due(&p, &none), "nothing owed");
+        std::fs::create_dir_all(p.envs_dir()).unwrap();
+        let cfg = "[workspace]\ndir = \"/srv/work/web\"\ndangerously_pull_on_stop = true\n";
+        std::fs::write(p.env_config("web"), cfg).unwrap();
+        Pending::update(&p, "web", |x| x.dirty = true).unwrap();
+        assert!(due(&p, &none));
+        // It runs, or its stop is under way: pulled when that ends.
+        assert!(!due(&p, &|e: &str| e == "web"));
+        {
+            let _held = lock(&p, "web").unwrap();
+            assert!(!due(&p, &none), "another luoto is at it");
+        }
+        // Tried often enough: it waits for `luoto down`.
+        Pending::update(&p, "web", |x| x.attempts = MAX_ATTEMPTS).unwrap();
+        assert!(!due(&p, &none));
+        // A pull cut short is cleaned up whatever is owed.
+        Journal::default().save(&p, "web").unwrap();
+        assert!(due(&p, &none));
     }
 
     #[test]
@@ -1681,6 +2155,12 @@ mod tests {
             p.hold = true;
         });
         assert_eq!(owed(&held, true), Owed::Tell);
+        // A run that was killed never said it ended: its pull waits for a review too.
+        let killed = pending(&|p| {
+            p.pull = true;
+            p.runs = 1;
+        });
+        assert_eq!(owed(&killed, true), Owed::Tell);
         // Tried and deferred three times: it waits for `luoto down`.
         let tried = pending(&|p| {
             p.pull = true;
@@ -1856,17 +2336,16 @@ mod tests {
         assert_eq!(note.title, "luoto pulled 14 files from `web`");
         assert_eq!(
             note.body,
-            "into /srv/work/web; 2 held back: `luoto pull -e web`"
+            "into /srv/work/web; 2 held back: `luoto up -e web`, then `luoto pull -e web`"
         );
         assert!(!note.body.contains("envrc") && !note.body.contains("evil"));
         let mut deferred = folder(0);
         deferred.deferred = Some("a merge is under way in it".into());
         let note = report(vec![deferred]).note().unwrap();
         assert_eq!(note.title, "luoto pulled nothing from `web`");
-        assert!(
-            note.body
-                .ends_with("not all of it could be pulled: `luoto pull -e web`")
-        );
+        assert!(note.body.ends_with(
+            "not all of it could be pulled: `luoto up -e web`, then `luoto pull -e web`"
+        ));
         assert_eq!(
             report(vec![folder(1)]).note().unwrap().title,
             "luoto pulled 1 file from `web`"
@@ -1889,20 +2368,52 @@ mod tests {
             text,
             "pulled 3 file(s) from `web` into /srv/work/web\n\
              wrote:\n  f0\n  f1\n  … and 1 more\n\
-             held back (`luoto pull -e web` reviews them):\n  a\\u{1b}[2J.envrc — direnv loads it\n\
+             held back for your review:\n  a\\u{1b}[2J.envrc — direnv loads it\n\
              changed here and in the env (yours kept):\n  src/both.rs\n\
              deleted in the env, kept here:\n  old.rs\n\
              never copied, so only in the env:\n  node_modules\n\
-             2 file(s) your .gitignore ignores stay in the env\n"
+             2 file(s) your .gitignore ignores stay in the env\n\
+             `luoto up -e web`, then `luoto pull -e web` reviews what was left\n"
         );
         assert_eq!(
             r.line(),
-            "pulled 3 file(s) from `web` into /srv/work/web; 2 left for you: `luoto pull -e web` \
-             reviews"
+            "pulled 3 file(s) from `web` into /srv/work/web; 2 left for you: `luoto up -e web`, \
+             then `luoto pull -e web` reviews"
+        );
+        // The env is stopped by then, and a pull asks a running one.
+        assert_eq!(
+            r.summary(),
+            Summary {
+                at: None,
+                line: r.line(),
+                incomplete: true
+            }
         );
         for l in text.lines() {
             assert!(l.chars().count() <= 80, "{l}");
         }
+    }
+
+    #[test]
+    fn the_last_pull_shown_is_the_envs_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = paths(dir.path());
+        let pulled = |at: DateTime<Utc>| {
+            let r = Report {
+                at: Some(at),
+                ..report(vec![folder(2)])
+            };
+            r.save(&p, "web");
+        };
+        pulled(Utc::now());
+        assert_eq!(last(&p, "web"), None, "an env that never started");
+        std::fs::create_dir_all(p.env_state("web")).unwrap();
+        // A report from before this env was made is another env's, of the same name.
+        pulled(Utc::now() - chrono::TimeDelta::days(2));
+        assert_eq!(last(&p, "web"), None);
+        pulled(Utc::now() + chrono::TimeDelta::seconds(5));
+        let shown = last(&p, "web").unwrap();
+        assert!(!shown.incomplete && shown.line.starts_with("pulled 2 file(s) from `web`"));
     }
 
     #[test]

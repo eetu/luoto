@@ -88,6 +88,20 @@
     {/each}
   {/if}
 
+  {#if d?.pull_on_stop}
+    <p class="warn">
+      pulls when it stops: what the env changed is written into {dir ? "the folder" : "its folders"}
+      with nobody reviewing it
+    </p>
+    <CopyCommand cmd={`luoto pull --on-stop off -e ${app.env}`} />
+  {/if}
+  {#if d?.last_pull}
+    <p class="small" class:warn={d.last_pull.incomplete}>
+      <span class="muted">last pull at a stop:</span>
+      {d.last_pull.line}
+    </p>
+  {/if}
+
   {#if dir}
     {#if !pull || stopped}
       <div class="actions">

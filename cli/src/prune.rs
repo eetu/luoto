@@ -2,7 +2,8 @@
 //! rm` removes one. Never a running env, and never, unasked, one holding work that is
 //! nowhere else: what its repos held as it stopped (`used::work`), and what its volume holds
 //! that its folders lack (`autopull::unpulled_stopped`). An env that can't be checked holds
-//! work.
+//! work. Each is removed under its lock (`autopull::lock`, which an `up` and a pull hold) and
+//! only as it was listed: one used or stopped since stays.
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -215,6 +216,10 @@ fn check(ctx: &Ctx, env: &str, vm_gone: bool) -> Vec<String> {
     if record.is_none() && !ctx.rt.volume_exists(&names::volume(env, "work")) {
         return Vec::new();
     }
+    // Its volume is read below: not under an `up` or a pull of it.
+    let Some(_lock) = autopull::try_lock(&ctx.paths, env) else {
+        return vec![Changed::Busy.why().to_string()];
+    };
     let files = match &record {
         Some(r) if r.error.is_none() && ws.has_folder() => {
             let _waiting =
@@ -226,11 +231,68 @@ fn check(ctx: &Ctx, env: &str, vm_gone: bool) -> Vec<String> {
     held(env, &ws, record.as_ref(), &files)
 }
 
+/// What tells that an env was started, used or stopped since it was looked at: its last
+/// use, and the record of its last stop.
+type Seen = (Used, Option<(std::time::SystemTime, u64)>);
+
+fn seen(ctx: &Ctx, env: &str) -> Seen {
+    (used::of(&ctx.paths, env), used::work_stamp(&ctx.paths, env))
+}
+
+/// Why a listed env is not removed after all, if it isn't.
+#[derive(Debug, PartialEq, Eq)]
+enum Changed {
+    /// An `up`, a stop or a pull of it is under way.
+    Busy,
+    Running,
+    /// Started, used or stopped since: what it holds is no longer what was listed.
+    Used,
+}
+
+impl Changed {
+    fn why(&self) -> &'static str {
+        match self {
+            Changed::Busy => "another luoto is starting, stopping or pulling it",
+            Changed::Running => "it runs now",
+            Changed::Used => "it was used since it was listed",
+        }
+    }
+}
+
+/// Whether an env listed as `was` may still be removed: `locked` (its lock is ours), not
+/// `running`, and `now` as it was.
+fn unchanged(locked: bool, running: bool, was: &Seen, now: &Seen) -> Result<(), Changed> {
+    if !locked {
+        Err(Changed::Busy)
+    } else if running {
+        Err(Changed::Running)
+    } else if was != now {
+        Err(Changed::Used)
+    } else {
+        Ok(())
+    }
+}
+
+/// Remove the listed env `r`, under its lock, if it is still what was listed.
+fn remove_listed(ctx: &Ctx, r: &Row, vm_gone: bool) -> Result<()> {
+    let lock = autopull::try_lock(&ctx.paths, &r.name);
+    let running = lock.is_some()
+        && !vm_gone
+        && [names::dev(&r.name), names::gate(&r.name)]
+            .iter()
+            .any(|c| ctx.rt.is_running(c));
+    unchanged(lock.is_some(), running, &r.seen, &seen(ctx, &r.name))
+        .map_err(|c| anyhow::anyhow!("{}", c.why()))?;
+    crate::commands::remove_env(ctx, &r.name)
+}
+
 /// An unused env in the lists.
 #[derive(Debug)]
 struct Row {
     name: String,
     used: Used,
+    /// As it was before its work was looked at.
+    seen: Seen,
     /// What its volumes and containers take; None when that wasn't read.
     bytes: Option<u64>,
     held: Vec<String>,
@@ -339,13 +401,13 @@ pub fn envs(o: Opts) -> Result<ExitCode> {
         false => ctx.rt.states()?,
     };
     let now = Utc::now();
-    let unused: Vec<(String, Used)> = all
+    let unused: Vec<(String, Seen)> = all
         .iter()
         .filter_map(|name| {
             let running = states.running(&names::dev(name)) || states.running(&names::gate(name));
-            let used = used::of(&ctx.paths, name);
-            (fate(name, running, used, now, limit, glob.as_ref()) == Fate::Unused)
-                .then(|| (name.clone(), used))
+            let seen = seen(&ctx, name);
+            (fate(name, running, seen.0, now, limit, glob.as_ref()) == Fate::Unused)
+                .then(|| (name.clone(), seen))
         })
         .collect();
     let named = o.matching.as_ref().map(|g| format!(" named `{g}`"));
@@ -367,13 +429,14 @@ pub fn envs(o: Opts) -> Result<ExitCode> {
     }
     let rows: Vec<Row> = unused
         .into_iter()
-        .map(|(name, used)| {
+        .map(|(name, seen)| {
             let disk = sizes.as_ref().map(|s| s.env(&name));
             Row {
                 held: check(&ctx, &name, vm_gone),
                 bytes: disk.filter(|d| !d.parts.is_empty()).map(|d| d.total),
                 name,
-                used,
+                used: seen.0,
+                seen,
             }
         })
         .collect();
@@ -442,15 +505,7 @@ pub fn envs(o: Opts) -> Result<ExitCode> {
     let mut gone: Vec<&Row> = Vec::new();
     crate::progress::step(&format!("removing {} env(s)", remove.len()), || {
         for r in &remove {
-            let started = !vm_gone
-                && [names::dev(&r.name), names::gate(&r.name)]
-                    .iter()
-                    .any(|c| ctx.rt.is_running(c));
-            let done = match started {
-                true => Err(anyhow::anyhow!("it runs now")),
-                false => crate::commands::remove_env(&ctx, &r.name),
-            };
-            match done {
+            match remove_listed(&ctx, r, vm_gone) {
                 Ok(()) => gone.push(r),
                 Err(e) => failed.push((r.name.clone(), text::lines(&format!("{e:#}")))),
             }
@@ -654,7 +709,46 @@ mod tests {
             used: Used::At(Utc::now() - TimeDelta::days(45)),
             bytes: Some(1_200_000_000),
             held: held.iter().map(|s| s.to_string()).collect(),
+            seen: (Used::Unrecorded(None), None),
         }
+    }
+
+    #[test]
+    fn an_env_is_removed_only_as_it_was_listed() {
+        let then = Utc::now() - TimeDelta::days(45);
+        let stopped = std::time::SystemTime::UNIX_EPOCH;
+        let was: Seen = (Used::At(then), Some((stopped, 120)));
+        assert_eq!(unchanged(true, false, &was, &was), Ok(()));
+        // An `up` or a pull holds its lock: its volumes are in use, whatever else shows.
+        assert_eq!(unchanged(false, false, &was, &was), Err(Changed::Busy));
+        assert_eq!(unchanged(true, true, &was, &was), Err(Changed::Running));
+        // Started since (`used::started` forgets the last stop's record), or started, used
+        // and stopped again: it may hold work nobody looked at.
+        let started: Seen = (Used::At(Utc::now()), None);
+        assert_eq!(unchanged(true, false, &was, &started), Err(Changed::Used));
+        let again: Seen = (Used::At(then), Some((std::time::SystemTime::now(), 120)));
+        assert_eq!(unchanged(true, false, &was, &again), Err(Changed::Used));
+        for c in [Changed::Busy, Changed::Running, Changed::Used] {
+            assert!(!c.why().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_listed_env_that_ran_since_shows_as_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths {
+            config: dir.path().join("config"),
+            data: dir.path().join("data"),
+        };
+        std::fs::create_dir_all(paths.env_state("job")).unwrap();
+        let stamp = || (used::of(&paths, "job"), used::work_stamp(&paths, "job"));
+        std::fs::write(paths.env_state("job").join("used"), "2020-01-01T00:00:00Z").unwrap();
+        std::fs::write(paths.env_state("job").join("work.json"), "{}").unwrap();
+        let listed = stamp();
+        assert_eq!(listed, stamp());
+        // An `up` in flight has said so before it starts anything.
+        used::started(&paths, "job");
+        assert_ne!(listed, stamp());
     }
 
     #[test]

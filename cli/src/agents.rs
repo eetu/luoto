@@ -1115,11 +1115,23 @@ pub fn headless(
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let interrupts = count_interrupts();
-    // Said before the agent starts, so a run cut short leaves its pull owed.
-    if unattended {
-        autopull::expect(&ctx.paths, env_name, matches!(end, End::Remove { .. }))?;
+    // Said before the agent starts: a run cut short, even by a kill, then leaves it said
+    // that its files are half done, and one that ends leaves its pull owed.
+    let pulls = unattended || autopull::on(&ctx.paths, env_name);
+    if pulls {
+        let rm = matches!(end, End::Remove { .. });
+        autopull::expect(&ctx.paths, env_name, unattended, rm)?;
     }
-    let mut child = cmd.spawn()?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            // No agent ran: nothing of this run is half done.
+            if pulls {
+                autopull::ended(&ctx.paths, env_name);
+            }
+            return Err(e.into());
+        }
+    };
     let started = Instant::now();
     let errs = child
         .stderr
@@ -1212,15 +1224,13 @@ pub fn headless(
     // What ends the run never changes its exit code: a problem here is a warning. An answer
     // that could be written nowhere fails the run only after its env is seen to.
     let mut pulled = None;
-    match after(
-        matches!(stopped, Some(Stop::Interrupt)),
-        pull.reviewed,
-        unattended,
-    ) {
-        After::Kept => {
-            // An interrupted agent's half-done files land nowhere unreviewed.
-            if unattended {
+    match after(stopped, pull.reviewed, pulls) {
+        After::Kept(why) => {
+            // Half-done files land nowhere unreviewed: not now, nor when the env stops.
+            if pulls {
                 autopull::hold(&ctx.paths, env_name);
+            }
+            if unattended {
                 pulled = Some(autopull::Report {
                     env: env_name.to_string(),
                     at: Some(chrono::Utc::now()),
@@ -1229,12 +1239,12 @@ pub fn headless(
                     ..Default::default()
                 });
             }
-            keep_interrupted(&ctx, env_name, end);
+            keep_cut(&ctx, env_name, end, why);
         }
-        After::Ended {
-            reviewed,
-            unattended,
-        } => {
+        After::Ended { reviewed } => {
+            if pulls {
+                autopull::ended(&ctx.paths, env_name);
+            }
             if reviewed {
                 reviewed_pull(env_name);
             }
@@ -1300,30 +1310,37 @@ pub struct RunPull {
 /// What follows the agent.
 #[derive(Debug, PartialEq, Eq)]
 enum After {
-    /// Ctrl-C stopped it with a pull to come: nothing is pulled and the env is kept.
-    Kept,
-    /// The pulls asked for, then what ends the run (`--down`, `--rm`).
-    Ended { reviewed: bool, unattended: bool },
+    /// luoto stopped the agent (Ctrl-C, `--timeout`, an answer that couldn't be written)
+    /// with a pull to come, then or at the env's stop: nothing is pulled and the env is
+    /// kept. Why, for the note.
+    Kept(&'static str),
+    /// The reviewed pull if asked for, the unattended one if the run or its env has one,
+    /// then what ends the run (`--down`, `--rm`).
+    Ended { reviewed: bool },
 }
 
-fn after(interrupted: bool, reviewed: bool, unattended: bool) -> After {
-    if interrupted && (reviewed || unattended) {
-        After::Kept
+/// `pulls`: the run's files are pulled unattended, at its end or when its env stops.
+fn after(stopped: Option<Stop>, reviewed: bool, pulls: bool) -> After {
+    let why = match stopped {
+        Some(Stop::Interrupt) => "interrupted",
+        Some(Stop::Timeout) => "stopped at its --timeout",
+        Some(Stop::Output) => "stopped with its answer unwritten",
+        None => return After::Ended { reviewed },
+    };
+    if reviewed || pulls {
+        After::Kept(why)
     } else {
-        After::Ended {
-            reviewed,
-            unattended,
-        }
+        After::Ended { reviewed }
     }
 }
 
-/// An interrupted run whose files were to be pulled: the env is kept, stopped if the run was
-/// to stop or remove it, and nothing is written.
-fn keep_interrupted(ctx: &Ctx, env: &str, end: End) {
+/// A run cut short whose files were to be pulled: the env is kept, stopped if the run was to
+/// stop or remove it, and nothing is written.
+fn keep_cut(ctx: &Ctx, env: &str, end: End, why: &str) {
     if end == End::Leave {
         crate::progress::note(&format!(
-            "interrupted: nothing pulled from `{env}`. `luoto pull -e {env}` reviews what the \
-             agent left"
+            "{why}: nothing pulled from `{env}`. `luoto pull -e {env}` reviews what the agent \
+             left"
         ));
         return;
     }
@@ -1331,7 +1348,7 @@ fn keep_interrupted(ctx: &Ctx, env: &str, end: End) {
         crate::progress::warn(&format!("env `{env}` not stopped ({e:#})"));
     }
     crate::progress::note(&format!(
-        "interrupted: nothing pulled, and env `{env}` is kept, stopped. `luoto up -e {env}` and \
+        "{why}: nothing pulled, and env `{env}` is kept, stopped. `luoto up -e {env}` and \
          `luoto pull -e {env}` review what the agent left"
     ));
 }
@@ -1367,7 +1384,8 @@ fn reviewed_pull(env: &str) {
 /// if they all landed. The pull's report.
 fn pull_and_end(ctx: &Ctx, env: &str, end: End) -> autopull::Report {
     let git = matches!(end, End::Remove { .. }).then(|| crate::commands::unpushed(ctx, env));
-    let report = match autopull::stop(ctx, env, autopull::Why::Run, true) {
+    let work = git.as_ref().map(crate::used::Work::of);
+    let report = match autopull::stop_with(ctx, env, autopull::Why::Run, true, work) {
         Ok(stopped) => {
             err!("env `{env}` stopped");
             stopped.report.unwrap_or_default()
@@ -1406,7 +1424,7 @@ fn pull_and_end(ctx: &Ctx, env: &str, end: End) -> autopull::Report {
         if in_files_only && lost.is_empty() && files.is_empty() {
             err!("the env's commits go with it: your folder has their files, not the commits");
         }
-        finish_removal(ctx, env, yes, &lost, &files);
+        finish_removal(ctx, env, yes, &lost, &files, None);
     }
     report
 }
@@ -1495,12 +1513,21 @@ fn remove_after(ctx: &Ctx, env: &str, yes: bool) {
             crate::text::lines(&format!("{e:#}"))
         )],
     };
-    finish_removal(ctx, env, yes, &lost, &files);
+    let work = crate::used::Work::of(&found);
+    finish_removal(ctx, env, yes, &lost, &files, Some(work));
 }
 
 /// `--rm`'s end: `lost` (work no remote has) and `files` (what the env's folder lacks) are
-/// listed, and the env is removed unless they keep it.
-fn finish_removal(ctx: &Ctx, env: &str, yes: bool, lost: &[String], files: &[String]) {
+/// listed, and the env is removed unless they keep it. `work`: what its repos were just
+/// found to hold, for an env that still runs.
+fn finish_removal(
+    ctx: &Ctx,
+    env: &str,
+    yes: bool,
+    lost: &[String],
+    files: &[String],
+    work: Option<crate::used::Work>,
+) {
     let terminal = crate::prompt::interactive() && std::io::stderr().is_terminal();
     let step = removal(!lost.is_empty() || !files.is_empty(), yes, terminal);
     let gone = if step == Removal::Remove {
@@ -1536,7 +1563,7 @@ fn finish_removal(ctx: &Ctx, env: &str, yes: bool, lost: &[String], files: &[Str
     };
     if !remove {
         // The note says it is stopped: once.
-        if let Err(e) = env::down(ctx, env) {
+        if let Err(e) = env::down_with(ctx, env, work) {
             crate::progress::warn(&format!("env `{env}` not stopped ({e:#})"));
         }
         err_text!(
@@ -1752,20 +1779,23 @@ mod tests {
     }
 
     #[test]
-    fn a_run_pulls_after_the_agent_unless_ctrl_c_stopped_it() {
-        // (interrupted, --pull, an unattended pull)
-        let ended = |reviewed, unattended| After::Ended {
-            reviewed,
-            unattended,
-        };
-        assert_eq!(after(false, false, false), ended(false, false));
-        assert_eq!(after(false, true, false), ended(true, false));
-        assert_eq!(after(false, false, true), ended(false, true));
-        // Interrupted: half-done files don't land, and the env is kept.
-        assert_eq!(after(true, true, false), After::Kept);
-        assert_eq!(after(true, false, true), After::Kept);
-        // With no pull to come an interrupted run ends as it was told to.
-        assert_eq!(after(true, false, false), ended(false, false));
+    fn a_run_pulls_after_the_agent_unless_luoto_stopped_it() {
+        // (why luoto stopped the agent, --pull, an unattended pull then or at the env's stop)
+        let ended = |reviewed| After::Ended { reviewed };
+        assert_eq!(after(None, false, false), ended(false));
+        assert_eq!(after(None, true, false), ended(true));
+        assert_eq!(after(None, false, true), ended(false));
+        // Cut short, whatever cut it: half-done files don't land, and the env is kept.
+        for stop in [Stop::Interrupt, Stop::Timeout, Stop::Output] {
+            assert!(matches!(after(Some(stop), true, false), After::Kept(_)));
+            assert!(matches!(after(Some(stop), false, true), After::Kept(_)));
+            // With no pull to come the run ends as it was told to.
+            assert_eq!(after(Some(stop), false, false), ended(false));
+        }
+        assert_eq!(
+            after(Some(Stop::Timeout), false, true),
+            After::Kept("stopped at its --timeout")
+        );
     }
 
     #[test]

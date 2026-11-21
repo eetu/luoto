@@ -254,4 +254,6 @@ export default {
   luoto_variables: ["GIT_TERMINAL_PROMPT"],
   ports: { published: [], forwarded: [5173], temporary: [54815], taken: [3000] },
   isolation: "gVisor: its own user-space kernel (builds about 1.6× slower)",
+  pull_on_stop: false,
+  last_pull: null,
 } satisfies EnvDetail;

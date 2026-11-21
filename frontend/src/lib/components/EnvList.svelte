@@ -14,6 +14,7 @@
     openVault,
     plural,
     selectEnv,
+    stopEnv,
     vaultAction,
   } from "$lib/stores/app.svelte";
   import type { EnvRow } from "$lib/types";
@@ -63,7 +64,7 @@
       },
       {
         label: "Stop",
-        run: () => void act("stopping…", () => api.action(env.name, "down"), `${env.name} stopped`),
+        run: () => void stopEnv(env.name),
         disabled: !running,
         hint: running ? undefined : "stopped",
       },

@@ -144,6 +144,20 @@ impl VolumeBox<'_> {
         a
     }
 
+    /// [`args_named`](Self::args_named) for a command that reads its input.
+    pub(crate) fn args_input_named(&self, name: &str, cmd: Vec<String>) -> Vec<String> {
+        let mut a = self.args(true, cmd);
+        if self.helper.is_none() {
+            let mut flags = vec!["--name".to_string(), name.to_string()];
+            // A container that writes the volume reads its input already.
+            if !self.write {
+                flags.push("-i".into());
+            }
+            a.splice(1..1, flags);
+        }
+        a
+    }
+
     /// Remove the container [`args_named`](Self::args_named) named, if its command still runs.
     pub(crate) fn forget(&self, name: &str) {
         if self.helper.is_none() {

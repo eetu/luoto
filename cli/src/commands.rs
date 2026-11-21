@@ -326,6 +326,8 @@ pub fn pull(name: &str, o: PullOpts) -> Result<ExitCode> {
             out!("  {conflicts} changed here too: `--overwrite` takes the env's");
         }
         settle(&none);
+        // Looked at, which is what a run cut short waits for.
+        crate::autopull::reviewed(&ctx.paths, name);
         return Ok(ExitCode::SUCCESS);
     }
     let dirs: Vec<String> = plans
@@ -553,16 +555,30 @@ pub fn down_all() -> Result<ExitCode> {
         println!("no env is running");
         return Ok(ExitCode::SUCCESS);
     }
+    let mut incomplete = false;
     let failed = each_env(&running, |name| {
         let stopped = crate::autopull::stop(&ctx, name, crate::autopull::Why::Down, false)?;
         out!("env `{name}` stopped");
         if let Some(r) = &stopped.report {
             r.print(&mut std::io::stdout(), crate::style::out(), 30);
+            incomplete |= r.incomplete();
         }
         Ok(())
     });
     crate::watch::spawn(&ctx);
+    if failed.is_empty() && incomplete {
+        return Ok(ExitCode::from(crate::autopull::INCOMPLETE));
+    }
     Ok(each_env_result("down", running.len(), &failed))
+}
+
+/// `luoto down`'s exit code: [`autopull::INCOMPLETE`] when the stop pulled and something the
+/// env holds didn't land, so a job doesn't take the folder for done.
+fn down_code(stopped: &crate::autopull::Stopped) -> ExitCode {
+    match &stopped.report {
+        Some(r) if r.incomplete() => ExitCode::from(crate::autopull::INCOMPLETE),
+        _ => ExitCode::SUCCESS,
+    }
 }
 
 /// `luoto down`: stop the env, its files pulled into its folder first when its own file
@@ -581,7 +597,7 @@ pub fn down(name: &str, idle: bool) -> Result<ExitCode> {
         if let Some(r) = &stopped.report {
             r.print(&mut std::io::stdout(), crate::style::out(), 10);
         }
-        return Ok(ExitCode::SUCCESS);
+        return Ok(down_code(&stopped));
     }
     // While its dev container still runs, to name its build folders.
     disk::hint_growth(&ctx, name);
@@ -596,7 +612,7 @@ pub fn down(name: &str, idle: bool) -> Result<ExitCode> {
     }
     // The VM stays up for a quick `up`; the watcher stops it after `idle_stop` without envs.
     crate::watch::spawn(&ctx);
-    Ok(ExitCode::SUCCESS)
+    Ok(down_code(&stopped))
 }
 
 pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {

@@ -497,7 +497,7 @@ enum Cmd {
     /// Internal: the background watcher that forwards ports and stops idle envs.
     #[command(hide = true)]
     Watch,
-    /// Internal: finish the pulls a crash left owed, as every command does first.
+    /// Internal: finish the pulls a crash left owed; the watcher runs it.
     #[command(hide = true)]
     Recover,
 }
@@ -747,19 +747,28 @@ fn main() -> ExitCode {
     }
 }
 
-/// Whether `cmd` first finishes pulls a crash left owed (`autopull::recover`): not the
-/// watcher (it starts a luoto for that), nor commands that act on no env or whose output is
-/// someone else's stream.
-fn recovers(cmd: &Cmd) -> bool {
+/// Whether `cmd` first sees to pulls a crash left cut short or owed (`autopull::attend`):
+/// not the watcher and `recover` (they do the pulling), nor commands that act on no env or
+/// whose output is someone else's stream, nor those that start or stop an env or change
+/// whether it pulls, which settle what is owed to it themselves.
+fn attends(cmd: &Cmd) -> bool {
     !matches!(
         cmd,
         Cmd::Watch
+            | Cmd::Recover
             | Cmd::SshProxy { .. }
             | Cmd::Setup(_)
             | Cmd::Doctor { .. }
             | Cmd::Upgrade
             | Cmd::Uninstall { .. }
             | Cmd::Logs { .. }
+            | Cmd::Up { .. }
+            | Cmd::Down { .. }
+            | Cmd::Run { .. }
+            | Cmd::Pull {
+                on_stop: Some(_),
+                ..
+            }
     )
 }
 
@@ -813,13 +822,8 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         anyhow::bail!("{why}");
     }
     let paths = paths::Paths::get()?;
-    // What a crash, or a stop luoto didn't see, left owed to a folder is seen to before
-    // anything else acts on the env.
-    if recovers(&cmd)
-        && autopull::any_owing(&paths)
-        && let Ok(ctx) = env::Ctx::load()
-    {
-        autopull::recover(&ctx);
+    if attends(&cmd) {
+        autopull::attend(&paths);
     }
     let env = || workspace::resolve(&paths, env_arg.as_deref());
     match cmd {
@@ -1056,8 +1060,10 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
         },
         Cmd::SshProxy { name } => connect::ssh_proxy(&name),
         Cmd::Watch => watch::watch(),
-        // Done above, as for every command.
-        Cmd::Recover => Ok(ExitCode::SUCCESS),
+        Cmd::Recover => {
+            autopull::recover(&env::Ctx::load()?);
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 

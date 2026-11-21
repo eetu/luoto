@@ -10,7 +10,7 @@
   import SharesSection from "$lib/components/SharesSection.svelte";
   import VariablesSection from "$lib/components/VariablesSection.svelte";
   import WorkspaceSection from "$lib/components/WorkspaceSection.svelte";
-  import { act, app } from "$lib/stores/app.svelte";
+  import { act, app, stopEnv } from "$lib/stores/app.svelte";
 
   const d = $derived(app.detail);
 </script>
@@ -27,11 +27,7 @@
       <p class="muted small">isolation: {d.isolation}</p>
       <div class="actions">
         {#if d.dev === "running"}
-          <button
-            class="btn"
-            disabled={!!app.busy}
-            onclick={() =>
-              void act("stopping…", () => api.action(d.name, "down"), `${d.name} stopped`)}
+          <button class="btn" disabled={!!app.busy} onclick={() => void stopEnv(d.name)}
             >Stop</button
           >
         {:else}
