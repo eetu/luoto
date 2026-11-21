@@ -288,7 +288,7 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   HTTP(S) host and download what it likes. What still holds: secrets stay in the vault and go
   only where their rules allow, private addresses and services on your machine stay
   unreachable, raw TCP and SSH still need tunnel rules, and UDP still goes nowhere.
-  `luoto egress --open` shows where requests went; keep the window short.
+  `luoto egress --unruled` shows where requests went; keep the window short.
 - **Model APIs.** Prompts to an allowed model API can carry data, and the API key can be
   spent by anything in the sandbox. Anthropic's, OpenAI's and Gemini's file and batch
   endpoints are denied, as are Anthropic's managed agents, sessions and environments (code

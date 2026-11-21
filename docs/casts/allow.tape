@@ -35,7 +35,7 @@ Enter
 Wait+Screen@60s /luoto allow -e tz data.iana.org/
 Sleep 3s
 
-Type "luoto allow data.iana.org --ttl 1h"
+Type "luoto allow data.iana.org --for 1h"
 Sleep 500ms
 Enter
 Wait+Screen@60s /allowed data.iana.org/

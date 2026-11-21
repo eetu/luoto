@@ -44,9 +44,9 @@ Each writes the env's own file and ends with a summary: what it set, and the com
 changes it again.
 
 A rule applies at once, to a running env: a fetch the gate denied works the next time it is
-tried. `--ttl` makes the rule expire by itself.
+tried. `--for` makes the rule expire by itself.
 
-![A fetch the gate denies, luoto allow with --ttl 1h, and the same fetch answered](../casts/allow.gif)
+![A fetch the gate denies, luoto allow with --for 1h, and the same fetch answered](../casts/allow.gif)
 
 ## Toolchains and packages
 

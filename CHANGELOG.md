@@ -2,6 +2,40 @@
 
 ## 0.7.0 (unreleased)
 
+- **Commands and flags that read the same everywhere; the old names are gone:**
+  - `luoto allow` and `luoto approve` take `--for 1h` for how long, as `luoto egress open`
+    does, not `--ttl`. `luoto init --open` opens egress for an hour, `--open-for 2h` for as
+    long as given; `--open=2h` is gone.
+  - `luoto run` names its agent first: `luoto run claude --prompt …`, not `--agent`. Its
+    `--report FILE` is `--pull-report FILE`.
+  - `luoto egress --open`, the hosts open egress let through, is `--unruled`.
+  - `luoto requests --watch` is `--follow` (`-f`), as for `egress` and `logs`.
+  - `luoto project suggest --write --force` is `--overwrite`, as for `pull`.
+  - `luoto agent list` lists the env's agents and how each signs in; `--available` lists
+    every agent and provider luoto knows. `luoto agent remove` is only `luoto agent rm`.
+  - `luoto status --json` prints the status; `--policy-json` prints the compiled policy.
+  - `-e` comes after the command (`luoto status -e web`), and only commands that act on one
+    env take it. `luoto requests` lists every env's requests unless `-e` names one, also in
+    an env's folder.
+  - A duration names its unit (`30m`, `2h`, `1d`): a bare number is refused, except as
+    `idle_stop` in a config file, where it stays minutes. A rule's `--idle` takes `1d`.
+  - A question a command needs a yes to ends it with exit code 1 when the yes doesn't come
+    (a no, Esc, or no terminal to ask): nothing is done, and the message names the command
+    with `--yes`. So `luoto init` without a terminal creates nothing without `--yes`, and
+    `luoto prune --envs` exits with 1 after listing.
+- `--help` wraps at 80 columns, or the terminal's width.
+- `luoto list --json` and `luoto requests --json` print what the tables show.
+- `luoto repo add` and `luoto repo auth` take `--access fetch|read|push` and `--token
+  <REF>`, and `luoto agent auth` takes `--credential`: without a terminal, the hints of `up`,
+  `repo auth` and `project needs` name these commands rather than config to write.
+- `luoto egress --since` takes a duration or an RFC 3339 time and refuses anything else; on
+  Apple's `container`, a value it couldn't read showed every attempt.
+- `luoto export` exits with 75 when the env it stopped pulled its files and left some out,
+  as `luoto down` does.
+- Errors and hints read the same for the same thing: an env that isn't running, or a repo,
+  share, variable, agent or feed it doesn't have, each with the command that lists or fixes
+  it, `-e` included. `luoto agent add --credential` ends with the agent's summary.
+
 - Private Azure DevOps feeds install in an env with your PAT, which the gate adds:
   `luoto feed add <feed URL>` takes the URL as your package manager's settings have it and
   asks where the token is kept, and uv, pip, npm and cargo use the feed as the project

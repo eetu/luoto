@@ -213,7 +213,8 @@ What the CLI asks and prints follows one grammar, whatever the feature:
   (nothing written) or, when changing a setting, "unchanged". A weaker choice (login inside,
   a write grant) is written only when picked, never because of Esc, a bare Enter or a missing
   terminal, unless that no-terminal default is documented. A menu with one option is no
-  question.
+  question. A yes a command needs that doesn't come (a no, Esc, no terminal) ends it with
+  `prompt::declined`: exit 1, and the command line with `--yes`.
 - **Nothing is stored before what it is for is confirmed:** a pasted secret reaches the
   keychain or 1Password only for an env that exists or is being changed.
 - **A step that writes config ends with one summary:** the thing, what it is set to (a ref
@@ -222,9 +223,15 @@ What the CLI asks and prints follows one grammar, whatever the feature:
 - **Say a thing once.** A warning repeated on every `up` is one the user can act on. "Ready"
   means it works; an agent without a credential is "installed". A command asks only about what
   it names.
+- **Commands and flags:** `-e` is on each command that acts on one env (`EnvArg`, or
+  `GroupEnv` for a group's commands), never global; a duration is `--for`, `--timeout`,
+  `--idle` or `--since` with a unit (`rules::parse_duration`); following output is
+  `-f/--follow`; replacing a file is `--overwrite`; `--json` prints what the text shows.
 - **Errors and hints** give the cause in one line and the command that fixes it, in
-  backticks. Without a terminal nothing blocks: the message gives the scripted form with the
-  real choices (`--credential oauth_token=<ref>`).
+  backticks, with `-e`. Without a terminal nothing blocks: the message gives the scripted
+  form with the real choices (`--credential oauth_token=<ref>`, `--access push --token
+  <REF>`). An env that isn't running is "env `x` is not running", then the command; a name the
+  env lacks names the command that lists them.
 - **Output** fits 80 columns. Text from the sandbox or a remote goes through `text::display` /
   `text::Relay`; what a command prints, through `progress::tool` (in the env) or
   `progress::host` (on this machine): on the terminal after `o`, with `-v`, or its last lines

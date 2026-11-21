@@ -9,10 +9,10 @@ the exit code is the agent's. `--timeout` caps the agent's time; `--down` stops 
 ([below](#its-changes-in-your-folder)).
 
 ```console
-$ luoto run --agent claude --prompt "Summarize what changed on main this week"
-$ luoto run -e web --agent codex --prompt-file task.md --output answer.md --down
-$ luoto run -e web --agent claude --prompt-file task.md --timeout 45m
-$ git diff | luoto run --agent claude          # the prompt from stdin
+$ luoto run claude --prompt "Summarize what changed on main this week"
+$ luoto run -e web codex --prompt-file task.md --output answer.md --down
+$ luoto run -e web claude --prompt-file task.md --timeout 45m
+$ git diff | luoto run claude          # the prompt from stdin
 ```
 
 Claude Code, Codex, OpenCode and Copilot CLI have a headless mode; the agent's profile says
@@ -39,7 +39,7 @@ env, or by a pull:
 | `luoto pull --on-stop on` | from now on every stop of this env does that: `luoto down`, the stop after `idle_stop`, the UI's stop, a run's `--down` or `--rm`. `off` ends it |
 
 ```console
-$ luoto run -e web --agent claude --prompt-file task.md --dangerously-pull
+$ luoto run -e web claude --prompt-file task.md --dangerously-pull
 env `web` stopped
 pulled 3 file(s) from `web` into ~/dev/web
 wrote:
@@ -107,7 +107,7 @@ started, luoto says once that `luoto down -e web` pulls them. After a one-off
 `--dangerously-pull` it says so and a reviewed pull takes the rest. An env a run was to
 remove (`--rm`) is never removed later.
 The last pull's report stays in luoto's data folder (`pulls/<env>/report.json`);
-`--report FILE` writes a run's own, with every file name.
+`--pull-report FILE` writes a run's own, with every file name.
 
 ## A one-off env
 
@@ -128,7 +128,7 @@ checked-out branch no longer keep it, since their files are in your folder (the 
 themselves go with the env); stashes and commits on other branches still do.
 
 ```console
-$ luoto run -e nightly --agent claude --prompt-file task.md --rm
+$ luoto run -e nightly claude --prompt-file task.md --rm
 Work in `nightly` that no remote has:
   /workspace/api: 2 files changed, 1 commit not pushed
 env `nightly` kept, stopped: it holds work that is nowhere else. `luoto rm -e nightly
@@ -193,8 +193,8 @@ $ luoto prune --envs --match 'job-*' --older-than 7d
 - **As listed.** An env started, used or stopped since the list was made stays, as does one
   another luoto is starting or pulling.
 - **In a script.** `--yes` skips the question. Without a terminal and without `--yes` the
-  envs are only listed, with the command that removes them. An env that can't be removed
-  leaves the rest to go, and the exit code is 1.
+  envs are only listed, with the command that removes them, and the exit code is 1. An env
+  that can't be removed leaves the rest to go, and the exit code is 1.
 - **Envs from before 0.6.3** have no record of their last use: they show `unknown`, and
   their age counts from when luoto last wrote their config or state.
 
@@ -234,7 +234,7 @@ left it. `--bare` reads no subscription token: with `oauth_token` the run isn't 
 use it with an `api_key` or a model server. For one run, give them after `--`:
 
 ```sh
-luoto run --agent claude --prompt "Summarize this repo in 5 bullets" -- --bare --tools Bash,Read
+luoto run claude --prompt "Summarize this repo in 5 bullets" -- --bare --tools Bash,Read
 ```
 
 ## Examples
@@ -242,14 +242,14 @@ luoto run --agent claude --prompt "Summarize this repo in 5 bullets" -- --bare -
 **A report.** The env reads the code; the answer lands on your machine.
 
 ```console
-$ luoto run --agent claude --output audit.md --prompt "Audit /workspace for
+$ luoto run claude --output audit.md --prompt "Audit /workspace for
   injection risks. Report each finding with file, line and a fix; change nothing."
 ```
 
 **A value for a script.** Ask for the bare answer, and check the exit code.
 
 ```sh
-count=$(luoto run --agent claude --prompt "How many rows of data/orders.csv have \
+count=$(luoto run claude --prompt "How many rows of data/orders.csv have \
   status=failed? Print only the number.") || exit 1
 ```
 
@@ -268,7 +268,7 @@ Add CSV export to the reports page (issue #142).
 ```
 
 ```console
-$ luoto run -e web --agent claude --prompt-file task.md --down
+$ luoto run -e web claude --prompt-file task.md --down
 ```
 
 In a [multi-repo env](multi-repo.md) the same prompt can change several repos and open a pull
@@ -280,7 +280,7 @@ command in a script, as cron treats `%` specially.
 ```sh
 #!/bin/sh
 # ~/jobs/weekly-deps.sh, from cron: 0 6 * * 1 ~/jobs/weekly-deps.sh
-luoto run -e web --agent claude --down --timeout 1h \
+luoto run -e web claude --down --timeout 1h \
   --output "$HOME/jobs/deps-$(date +%F).md" \
   --prompt "Update the npm dependencies that have patch releases, run the tests, and open
   a pull request with what changed."
