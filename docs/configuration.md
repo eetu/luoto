@@ -50,10 +50,11 @@ read_repos = ["owner/lib"]    # fetched and read only (an App mints a read-only 
 permissions = { contents = "write", pull_requests = "write" }
 protected_branches = ["main"]
 
-[credentials.azure_devops]    # Azure DevOps git over HTTPS
-token = "op://Dev/ado/pat"    # a PAT with Code (Read & write)
+[credentials.azure_devops]    # Azure DevOps git over HTTPS, and its package feeds
+token = "op://Dev/ado/pat"    # a PAT with Code (Read & write), Packaging (Read) for feeds
 repos = ["fabrikam/Apps/web"]    # `org/project/repo`, or the clone URL
 # read_repos = ["fabrikam/Apps/lib"]   # fetched only
+# feeds = ["fabrikam/Apps/packages"]   # installed from; `luoto feed add` writes these
 protected_branches = ["main"]
 
 [credentials.azure]           # Azure: az, terraform and the SDKs see a managed identity
@@ -183,6 +184,8 @@ working as they are: SSH ones (`git@ssh.dev.azure.com:v3/…`, or a host alias f
 API by the repository's name (`…/_apis/git/repositories/<repo>/pullrequests`): opened,
 commented on, their title, description, draft state and target changed; completing them, and
 votes, stay with you. `az repos pr` addresses repos by ID, which the gate doesn't match.
+Its `feeds` (`luoto feed add`) are installed from with the same token, on every feed of their
+organizations, for reads ([guide](guides/package-feeds.md)).
 
 An Azure credential gives the env a managed identity: the gate answers the instance metadata
 service (`169.254.169.254`) itself, so `az` (logged in by `up`), terraform's azurerm

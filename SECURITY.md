@@ -103,6 +103,13 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   A pushed branch or an opened pull request runs the pipelines that trigger on it, with code
   the sandbox wrote, outside the sandbox: keep their secrets behind approvals and branch
   checks.
+- **Azure DevOps feeds.** The PAT goes on the feeds' organizations' packaging paths, with GET
+  and HEAD only: installs, never a publish. Every feed of those organizations gets it, as a
+  feed's own links name its files by project and feed ID; a PAT with only Packaging (Read)
+  keeps it to what it reads. A stored package downloads from a signed Azure Storage URL on a
+  host per file, so no rule names those hosts: the gate lets through only the exact URL a
+  feed's redirect named, for GET and HEAD, for ten minutes, without the client's own
+  authorization or cookies. The sandbox never chooses that URL.
 - **Other forges** (`[[credentials.git]]`). The token goes only on the granted repositories'
   smart-HTTP and LFS paths, pushes pass the same guard, and push options (which can open merge
   requests or skip CI) are refused. The forge's API is not reachable with it; the token's

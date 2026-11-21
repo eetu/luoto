@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0 (unreleased)
+
+- Private Azure DevOps feeds install in an env with your PAT, which the gate adds:
+  `luoto feed add <feed URL>` takes the URL as your package manager's settings have it and
+  asks where the token is kept, and uv, pip, npm and cargo use the feed as the project
+  configures it. Packages the feed stores download from Azure Storage, which the env
+  reaches only at the URL the feed sent it to. `luoto egress` names the command for a feed's
+  denials, and agents in the env ask for it.
+  [Private package feeds](docs/guides/package-feeds.md).
+
 ## 0.6.3 (unreleased)
 
 - An agent's changes can land in your folder when its env stops, with nobody at the terminal.

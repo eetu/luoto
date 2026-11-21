@@ -86,6 +86,14 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
 - The SSH key is a vault binding (`SshAgent`) that never leaves the vault, not even to the
   gate. The agent signs only logins to sessions a pinned host key bound
   (`shared/src/forges.rs`, plus `host_keys`; `vault/src/agent.rs`).
+- Azure DevOps feeds (`[credentials.azure_devops] feeds`, `luoto feed` in `feeds.rs`,
+  `azure::parse_feed`): the PAT on the feeds' organizations' packaging paths, GET and HEAD
+  only, by organization (a feed's links name its files by ID). Their stored packages
+  redirect to signed Azure Storage URLs, which pass only as the gate's redirect permits
+  (`Policy.redirects`, `gate/src/redirects.rs`): the exact URL a response named, for reads,
+  ten minutes, without the client's auth. Only `compile` adds a redirect, never a rule.
+  Clients that send nothing without a login get placeholders the gate replaces: a netrc
+  (`Compiled::netrc`, `/run/luoto/netrc`) and a cargo credential provider.
 - Azure (`[credentials.azure]`, not Azure DevOps' `azure.rs`): audiences, their hosts and
   name rules in `shared/src/azure_identity.rs`; one binding per audience. The gate answers IMDS
   itself (`gate/src/imds.rs`) with placeholders (real header, the claims tools read, unusable
