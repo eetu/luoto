@@ -1374,32 +1374,7 @@ fn compile_git(
             });
         }
         if let Some(ca) = &c.ca {
-            if crate::workspace::network_path(ca) {
-                bail!(
-                    "credentials.git ({host}): its CA `{}` is on another machine; give a file on \
-                     this one",
-                    crate::text::display(ca)
-                );
-            }
-            let path = crate::workspace::expand(ca);
-            let text = std::fs::read_to_string(&path).with_context(|| {
-                format!("credentials.git ({host}): read its CA {}", path.display())
-            })?;
-            // Only the certificates: a file that also holds a key keeps it here.
-            let certs: String = text
-                .split_inclusive("-----END CERTIFICATE-----")
-                .filter_map(|c| {
-                    let start = c.find("-----BEGIN CERTIFICATE-----")?;
-                    c.ends_with("-----END CERTIFICATE-----")
-                        .then(|| format!("{}\n", &c[start..]))
-                })
-                .collect();
-            if certs.is_empty() {
-                bail!(
-                    "credentials.git ({host}): {} holds no PEM certificate",
-                    path.display()
-                );
-            }
+            let certs = git_ca(&host, ca)?;
             // The instance's own storage is its CA's too.
             for s in &c.storage_hosts {
                 cas.insert(s.to_ascii_lowercase(), certs.clone());
@@ -1409,6 +1384,49 @@ fn compile_git(
         b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     }
     Ok((guards, cas))
+}
+
+/// The certificates of a `[[credentials.git]]`'s `ca` file, a file on this machine; only the
+/// certificates, so a file that also holds a key keeps it here.
+pub(crate) fn git_ca(host: &str, ca: &str) -> Result<String> {
+    if crate::workspace::network_path(ca) {
+        bail!(
+            "credentials.git ({host}): its CA `{}` is on another machine; give a file on this one",
+            crate::text::display(ca)
+        );
+    }
+    let path = crate::workspace::expand(ca);
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("credentials.git ({host}): read its CA {}", path.display()))?;
+    let certs: String = text
+        .split_inclusive("-----END CERTIFICATE-----")
+        .filter_map(|c| {
+            let start = c.find("-----BEGIN CERTIFICATE-----")?;
+            c.ends_with("-----END CERTIFICATE-----")
+                .then(|| format!("{}\n", &c[start..]))
+        })
+        .collect();
+    if certs.is_empty() {
+        bail!(
+            "credentials.git ({host}): {} holds no PEM certificate",
+            path.display()
+        );
+    }
+    Ok(certs)
+}
+
+/// A `storage_hosts` entry as the gate takes it: one exact host name, lowercased.
+pub(crate) fn storage_host(host: &str, r: &str) -> Result<String> {
+    let ok = !r.contains(['*', '/', ':'])
+        && luoto_shared::host::normalize_host(r).is_ok_and(|h| h == r.to_ascii_lowercase());
+    if !ok {
+        bail!(
+            "credentials.git ({host}): storage_hosts are exact host names (`minio.acme.internal`), \
+             not `{}`",
+            crate::text::display(r)
+        );
+    }
+    Ok(r.to_ascii_lowercase())
 }
 
 /// A `[[credentials.git]]`'s feeds (Gitea, Forgejo, GitLab), with its binding `id`: the token
@@ -1433,16 +1451,7 @@ fn compile_forge_feeds(
     }
     let mut to: Vec<String> = Vec::new();
     for r in &c.storage_hosts {
-        let ok = !r.contains(['*', '/', ':'])
-            && luoto_shared::host::normalize_host(r).is_ok_and(|h| h == r.to_ascii_lowercase());
-        if !ok {
-            bail!(
-                "credentials.git ({host}): storage_hosts are exact host names (`minio.acme.internal`), \
-                 not `{}`",
-                crate::text::display(r)
-            );
-        }
-        to.push(r.to_ascii_lowercase());
+        to.push(storage_host(host, r)?);
     }
     // Bearer is what every package endpoint of both takes: GitLab's npm refuses basic auth,
     // Gitea's every endpoint takes either.
@@ -1719,6 +1728,8 @@ fn compile_azure(
 /// Placeholders for clients of a feed on `host` that send nothing without a login of their
 /// own, which the gate replaces: uv with `authenticate = "always"` (a netrc login), cargo for
 /// a registry that requires auth (a token from a provider, given whatever registry asks).
+/// Cargo's later providers win, so `cargo:token` (a real token in a variable or
+/// `credentials.toml`) comes after the placeholder, which answers only when it has none.
 fn feed_placeholders(b: &mut Builder, host: &str) {
     let name = host.split(':').next().unwrap_or(host);
     let line = format!("machine {name} login luoto password {FEED_PLACEHOLDER}\n");
@@ -1732,7 +1743,7 @@ fn feed_placeholders(b: &mut Builder, host: &str) {
     );
     b.dev_env.insert(
         "CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS".into(),
-        "cargo:token luoto".into(),
+        "luoto cargo:token".into(),
     );
 }
 
@@ -2206,7 +2217,7 @@ feeds = ["https://pkgs.dev.azure.com/acme/Web/_packaging/packages/pypi/simple/",
         assert_eq!(c.dev_env["NETRC"], NETRC_PATH);
         assert_eq!(
             c.dev_env["CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS"],
-            "cargo:token luoto"
+            "luoto cargo:token"
         );
         let none = compile("t", &cfg(""), GATE, &alias()).unwrap();
         assert!(none.netrc.is_empty() && !none.dev_env.contains_key("NETRC"));
@@ -2274,6 +2285,31 @@ feeds = ["acme", "@Tools"]
             panic!("an App with feeds compiled");
         };
         assert!(e.to_string().contains("token"), "{e}");
+    }
+
+    #[test]
+    fn a_gitlab_project_feed_reaches_its_packages_never_the_rest_of_its_api() {
+        let text = "[[credentials.git]]\nhost = \"git.acme.internal\"\ntoken = \"env:F\"\n\
+                    feeds = [\"/api/v4/projects/12\"]\n";
+        let c = compile("t", &cfg(text), GATE, &alias()).unwrap();
+        let p = &c.policy;
+        let host = "git.acme.internal";
+        for path in [
+            "/api/v4/projects/12/packages/npm/@acme%2fhello",
+            "/api/v4/projects/12/packages/pypi/files/abc/hello.whl",
+        ] {
+            assert!(!p.injections_for("GET", host, path).is_empty(), "{path}");
+        }
+        for path in [
+            "/api/v4/projects/12/repository/files/a",
+            "/api/v4/projects/12/repository/archive",
+            "/api/v4/projects/12/variables",
+            "/api/v4/projects/12/jobs/1/trace",
+            "/api/v4/projects/12/secure_files/1/download",
+            "/api/v4/projects/13/packages/npm/x",
+        ] {
+            assert!(p.injections_for("GET", host, path).is_empty(), "{path}");
+        }
     }
 
     #[test]

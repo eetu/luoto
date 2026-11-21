@@ -113,7 +113,8 @@ the merge request.
   the gate adds. Don't request its host, put a token in the project's settings or try a
   keyring or login. Ask the user to run `luoto feed add -e $LUOTO_ENV <feed URL>` on their
   machine, with the URL from the project's settings (`pip.conf`, its uv index, `.npmrc`,
-  `nuget.config`, a Maven or cargo registry); a running env takes it at once.
+  `nuget.config`, a Maven or cargo registry); a running env takes it at once, and a new
+  shell has its placeholder logins.
 - CLI tools installed for the user (`npm i -g`, `pipx install`) land in `~/.local/bin` and
   persist. A system package of your own (`sudo apt-get install …`) vanishes when the container
   is recreated. For one the project needs, or a toolchain it doesn't pin, ask the user to keep

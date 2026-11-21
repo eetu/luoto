@@ -999,7 +999,10 @@ pub fn prune(yes: bool) -> Result<ExitCode> {
             p.kept, p.others
         );
         if !yes && !confirm("Remove them?") {
-            return Err(crate::prompt::declined("removed", "luoto prune --yes"));
+            return Err(crate::prompt::declined(
+                "removed",
+                &format!("{inst} prune --yes"),
+            ));
         }
         let (errors, left) = crate::progress::step(
             &format!("removing {} image(s)", p.remove.len()),

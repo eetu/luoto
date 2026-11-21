@@ -314,6 +314,8 @@ async fn handle_inner(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
 
+    // Before the policy: a policy applied in between leaves this request's redirect ungranted.
+    let generation = state.redirects.generation();
     let policy = state.policy();
     let info = RequestInfo {
         host: &target.host,
@@ -561,7 +563,9 @@ async fn handle_inner(
             let plain = |host: &str| test_server(&state, host).is_some();
             if let Some(url) = Url::redirect(loc, &to, plain) {
                 let private = policy.redirect_private(&target.host, &path, &url.host);
-                state.redirects.grant(url, &rule, private, Instant::now());
+                state
+                    .redirects
+                    .grant(url, &rule, private, generation, Instant::now());
             }
         }
     }

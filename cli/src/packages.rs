@@ -75,15 +75,17 @@ impl Scope {
         }
     }
 
-    /// The paths the feed's packages and downloads are under. A GitLab group's or the
-    /// instance's endpoints link files to their projects, by ID: every project's packages.
+    /// The paths the feed's packages and downloads are under: a GitLab project's packages,
+    /// never the rest of its API. A group's or the instance's endpoints link files to their
+    /// projects, by ID: every project's packages.
     pub fn paths(&self) -> Vec<String> {
         match self {
-            Scope::Gitea { .. } | Scope::GitlabProject { .. } => {
-                vec![format!("{}/**", self.entry())]
-            }
+            Scope::Gitea { .. } => vec![format!("{}/**", self.entry())],
+            Scope::GitlabProject { .. } => vec![format!("{}/packages/**", self.entry())],
             Scope::GitlabGroup { prefix, group } => vec![
                 format!("{prefix}/api/v4/groups/{group}/-/packages/**"),
+                // Composer's group endpoint is `group`, singular.
+                format!("{prefix}/api/v4/group/{group}/-/packages/**"),
                 format!("{prefix}/api/v4/projects/*/packages/**"),
             ],
             Scope::GitlabInstance { prefix } => vec![
@@ -156,6 +158,8 @@ pub fn parse(entry: &str) -> Result<Feed> {
         Some((s, url)) if s.starts_with('@') => (Some(s.trim_start_matches('@')), url.trim()),
         _ => (None, e),
     };
+    // cargo writes a sparse registry's index as `sparse+https://…`.
+    let e = e.strip_prefix("sparse+").unwrap_or(e);
     let Some(rest) = e
         .strip_prefix("https://")
         .or_else(|| e.strip_prefix("http://"))
@@ -259,11 +263,11 @@ fn forge_scope(seg: &[&str]) -> Option<Result<Scope>> {
                     "name a GitLab project by its ID (on its page, under the name), not its \
                      path: `…/api/v4/projects/<ID>/packages/…`"
                 )),
-                ("groups", Some(g)) if plain(g) => Ok(Scope::GitlabGroup {
+                ("groups" | "group", Some(g)) if plain(g) => Ok(Scope::GitlabGroup {
                     prefix: p,
                     group: g.to_ascii_lowercase(),
                 }),
-                ("groups", Some(_)) => Err(anyhow::anyhow!(
+                ("groups" | "group", Some(_)) => Err(anyhow::anyhow!(
                     "name a GitLab subgroup by its ID, not its path: \
                      `…/api/v4/groups/<ID>/-/packages/…`"
                 )),
@@ -389,6 +393,14 @@ mod tests {
             forge("https://gitlab.acme.internal/api/v4/packages/npm/"),
             ("gitlab.acme.internal".into(), "/api/v4/packages".into())
         );
+        assert_eq!(
+            forge("https://gitlab.acme.internal/api/v4/group/7/-/packages/composer/packages.json"),
+            ("gitlab.acme.internal".into(), "/api/v4/groups/7".into())
+        );
+        assert_eq!(
+            forge("sparse+https://git.acme.internal/api/packages/acme/cargo/"),
+            ("git.acme.internal".into(), "/api/packages/acme".into())
+        );
         for bad in [
             "https://gitlab.acme.internal/api/v4/projects/acme%2Fweb/packages/npm/",
             "https://repo.acme.internal/pypi/simple",
@@ -406,12 +418,17 @@ mod tests {
             s.paths(),
             [
                 "/api/v4/groups/7/-/packages/**",
+                "/api/v4/group/7/-/packages/**",
                 "/api/v4/projects/*/packages/**"
             ]
         );
         assert_eq!(
             forge_entry("/api/packages/acme").unwrap().paths(),
             ["/api/packages/acme/**"]
+        );
+        assert_eq!(
+            forge_entry("/api/v4/projects/12").unwrap().paths(),
+            ["/api/v4/projects/12/packages/**"]
         );
         assert!(forge_entry("/api/v3/x").is_err());
         assert_eq!(github_entry("@Acme").unwrap(), "acme");

@@ -26,9 +26,10 @@ sockets, then drops to uid 65534 (`system.rs`).
   metered, replayed prefix).
 - `redirects.rs` keeps the permits a redirect opens: a GET or HEAD whose response, where
   `Policy::redirect_targets` names hosts, redirects to one of them lets that exact URL (scheme,
-  host, port, canonical path, decoded query) through for GET and HEAD for ten minutes,
-  checked before the policy (explicit denies still refuse it), with the client's auth headers
-  and cookies removed. Memory only; applying a policy drops them.
+  host, port, canonical path, the query compared pair by pair with each piece decoded)
+  through for GET and HEAD for ten minutes, checked before the policy (explicit denies still
+  refuse it), with the client's auth headers and cookies removed. Memory only; applying a
+  policy drops them, and a response to a request begun under the old one grants none.
 - `imds.rs` for an env with an Azure identity, answers 169.254.169.254:80 `/metadata/…` from
   either intake before the policy: managed identity tokens for the granted audiences, as
   placeholders (the real token's header and the claims tools read, a signature that can't

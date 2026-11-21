@@ -18,7 +18,9 @@ The URL is the feed's as the project's settings have it (`pip.conf`, a uv index,
 `nuget.config`, a Maven or cargo registry), in any of its protocols; luoto tells the service
 from it. When the env has no token for that service yet, luoto asks where it is kept: pasted
 into your keychain or 1Password, or a reference. Without a terminal, `--token <ref>` names it.
-A running env takes the feed at once. `luoto feed` lists the env's feeds and
+A running env's gate takes the feed at once; the placeholders below reach shells started
+after it (a first feed, in a shell already open, waits for a new one). `luoto feed` lists the
+env's feeds and
 `luoto feed rm <feed>` removes one.
 
 What each service's token reaches, with GET and HEAD only (installs, never a publish):
@@ -125,7 +127,8 @@ signed:
   (`storage_hosts` in the credential). The env then reaches only the URL a feed sent it to,
   for reads, ten minutes, on the private network when the credential is, and the
   credential's `ca` covers that host too. Don't allow the storage host with a rule: that
-  opens every object on it.
+  opens every object on it. Never name a public registry (`registry.npmjs.org`, `pypi.org`)
+  there: GitLab redirects a package it lacks to one, so the env would pick the URL.
 
 ## In the project
 
@@ -138,7 +141,9 @@ replaces with your token:
   own in the env isn't read. A keyring setup (`keyring-provider = "subprocess"`,
   `VssSessionToken@` in the URL) needs no keyring in the env.
 - cargo, for a registry that requires authentication, gets a token from a credential
-  provider luoto sets (`CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS`).
+  provider luoto sets (`CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS`), after a real token in a
+  `CARGO_REGISTRIES_<NAME>_TOKEN` variable or `credentials.toml`, which wins. A provider list
+  in your own `.cargo/config.toml` is replaced by it.
 - npm needs nothing: an `.npmrc` that reads its token or password from a variable works with
   the variable unset.
 

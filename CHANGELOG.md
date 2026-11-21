@@ -29,7 +29,7 @@ release may break.
 - **Breaking:** `-e` comes after the command (`luoto status -e web`), and only commands that
   act on one env take it. `luoto requests` lists every env's requests unless `-e` names one.
 - **Breaking:** a duration names its unit (`30m`, `2h`, `1d`); a bare number is refused,
-  except as `idle_stop` in a config file, where it stays minutes.
+  except as `idle_stop` in a config file, where it stays minutes. A rule's `--idle` takes `1d`.
 - **Breaking:** a question that gets no yes (a no, Esc, no terminal) ends the command with
   exit code 1 and nothing done, so `luoto init` without a terminal needs `--yes`.
 - `luoto agent list` lists the env's agents and how each signs in; `--available` lists every

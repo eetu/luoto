@@ -1416,19 +1416,12 @@ impl EnvFile {
         Ok(true)
     }
 
-    /// Add `owners` to the GitHub credential that holds feeds alone (a classic token, which a
-    /// repo's fine-grained token or App isn't), or else to a new one with `token`; `token`
-    /// replaces its token when given.
+    /// Add `owners` to the GitHub credential that lists feeds (a classic token, which a repo's
+    /// fine-grained token or App isn't), or else to a new one with `token`; `token` replaces
+    /// its token when given.
     pub fn add_github_feeds(&mut self, token: Option<&str>, owners: &[String]) -> Result<()> {
         let path = self.path.display().to_string();
-        let feeds_only = |t: &toml_edit::Table| {
-            t.get("feeds").is_some()
-                && ["repos", "read_repos"].iter().all(|k| {
-                    t.get(k)
-                        .and_then(|i| i.as_array())
-                        .is_none_or(|a| a.is_empty())
-                })
-        };
+        let feeds_only = |t: &toml_edit::Table| t.get("feeds").is_some();
         let new = |token: Option<&str>| -> Result<toml_edit::Table> {
             let token = token.context("a new GitHub credential for feeds needs its token")?;
             let mut t = toml_edit::Table::new();
@@ -1574,7 +1567,9 @@ impl EnvFile {
             arr.retain(|v| !v.as_str().is_some_and(same));
             let removed = arr.len() != before;
             if arr.is_empty() {
+                // Storage hosts are where feeds download from: none without a feed.
                 t.remove("feeds");
+                t.remove("storage_hosts");
             }
             removed
         };

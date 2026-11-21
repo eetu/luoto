@@ -2084,6 +2084,9 @@ pub fn add(
         },
         None => None,
     };
+    if let Some((forge, r, access)) = &target {
+        check_access(&ctx, env_name, forge, r, *access, given.token.as_deref())?;
+    }
     f.set_repo(&name, &repo)?;
     out!("added repo `{name}` to env `{env_name}`, at /workspace/{name}");
     if project::accepted(&ctx, env_name).is_some_and(|(_, p)| p.repos.contains_key(&name)) {
@@ -2201,28 +2204,9 @@ fn give_access(
     access: Access,
     token: Option<&str>,
 ) -> Result<bool> {
+    check_access(ctx, env, forge, repo, access, token)?;
     let mut f = EnvFile::load(&ctx.paths, env)?;
     let now = access_of(&f.cfg.credentials, &declined(ctx, env), forge, repo);
-    let (have, app) = account_token(&f.cfg.credentials, forge);
-    match (access, token) {
-        (Access::Public, Some(_)) => {
-            bail!("`--access fetch` takes no `--token`: a public repo is fetched without one")
-        }
-        (Access::Read | Access::Push, None) if have.is_none() && !app => bail!(
-            "{} has no {} credential with a token yet: `luoto repo auth -e {env} {} --access \
-             {} --token <REF>`",
-            display(repo),
-            forge.name(),
-            display(repo),
-            if access == Access::Read {
-                "read"
-            } else {
-                "push"
-            }
-        ),
-        (_, Some(t)) => crate::secrets::check_ref(t)?,
-        _ => {}
-    }
     let mut git = GitCred::default();
     if let Forge::Git(h) = forge {
         git.host = h.clone();
@@ -2245,6 +2229,40 @@ fn give_access(
     let was = replaced(now.as_ref(), after.as_ref());
     block!("{}", access_summary(env, forge, repo, after.as_ref(), was));
     Ok(true)
+}
+
+/// Whether `--access` with `token` can be given to `repo` as the env's credentials stand:
+/// checked before anything is written.
+fn check_access(
+    ctx: &Ctx,
+    env: &str,
+    forge: &Forge,
+    repo: &str,
+    access: Access,
+    token: Option<&str>,
+) -> Result<()> {
+    let f = EnvFile::load(&ctx.paths, env)?;
+    let (have, app) = account_token(&f.cfg.credentials, forge);
+    match (access, token) {
+        (Access::Public, Some(_)) => {
+            bail!("`--access fetch` takes no `--token`: a public repo is fetched without one")
+        }
+        (Access::Read | Access::Push, None) if have.is_none() && !app => bail!(
+            "{} has no {} credential with a token yet: `luoto repo auth -e {env} {} --access \
+             {} --token <REF>`",
+            display(repo),
+            forge.name(),
+            display(repo),
+            if access == Access::Read {
+                "read"
+            } else {
+                "push"
+            }
+        ),
+        (_, Some(t)) => crate::secrets::check_ref(t)?,
+        _ => {}
+    }
+    Ok(())
 }
 
 /// `luoto repo auth`: the access question again for one of the env's repos, opening on what

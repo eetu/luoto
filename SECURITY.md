@@ -241,7 +241,7 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   env's user namespace. Nothing of a volume is unpacked on the host. Before it asks, import
   lists what the config opens: the secret refs it reads on this machine, the hosts each
   credential goes to, secrets put in the sandbox, `isolation`, `image`, `ports`, `[[allow]]`
-  rules, `[deps] run` and private git hosts. Until your yes, the folders it names are only
+  rules, `[deps] run`, private git hosts and the storage hosts their feeds may redirect to. Until your yes, the folders it names are only
   text, never looked up; it refuses your home folder or one that holds it, and nothing is
   copied in from them afterwards (the workspace came in the archive): they are where `pull`
   writes, which the list says. The `luoto.toml` accepted where it was exported is not

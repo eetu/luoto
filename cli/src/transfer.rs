@@ -910,6 +910,21 @@ fn summary(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) -> Vec<String>
                 ),
             );
         }
+        for s in &g.storage_hosts {
+            let reach = if g.private {
+                ", on its private addresses"
+            } else {
+                ""
+            };
+            line(
+                "git",
+                format!(
+                    "{}: its feeds' downloads may redirect to {}{reach}",
+                    display(&g.host),
+                    display(s)
+                ),
+            );
+        }
     }
     for (n, s) in &cfg.model_servers {
         let place = match crate::model_servers::Endpoint::parse(&s.url) {

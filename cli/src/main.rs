@@ -534,7 +534,6 @@ enum Cmd {
     ///
     /// `--follow` streams each attempt. `open` lets it reach any HTTP(S) host for a while,
     /// `keep` keeps what that reached.
-    #[command(args_conflicts_with_subcommands = true)]
     Egress {
         #[command(flatten)]
         e: GroupEnv,
@@ -1198,8 +1197,21 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
         Cmd::Egress {
             e,
             action: Some(action),
-            ..
+            denied,
+            unruled,
+            since,
+            follow,
+            raw,
+            all,
+            json,
         } => {
+            // The listing's own flags, before a subcommand, mean nothing to it.
+            if denied || unruled || since.is_some() || follow || raw || all || json {
+                anyhow::bail!(
+                    "`--denied`, `--unruled`, `--since`, `--follow`, `--raw`, `--all` and \
+                     `--json` are for `luoto egress` itself, not its subcommands"
+                );
+            }
             let name = env(e.env)?;
             match action {
                 EgressCmd::Open { window } => c::egress_open(&name, window.as_deref()),
@@ -1311,11 +1323,12 @@ mod tests {
             action(&["egress", "open"]),
             Some(EgressCmd::Open { window: None })
         ));
-        // A view flag or `-e` before a subcommand is refused with the view flags.
+        // `-e` goes before or after a subcommand, as in every group.
         assert!(parse(&["egress", "-e", "web", "--denied"]).is_ok());
         for args in [
             &["egress", "open", "-e", "web", "--for", "2h"][..],
             &["egress", "open", "--for", "2h", "-e", "web"],
+            &["egress", "-e", "web", "open", "--for", "2h"],
         ] {
             let Cmd::Egress { e, action, .. } = parse(args).unwrap().cmd else {
                 panic!("not egress");
@@ -1340,9 +1353,17 @@ mod tests {
             }
         ));
         assert!(action(&["egress", "--denied"]).is_none());
+        // A view flag before a subcommand parses; running it refuses it, before anything runs.
+        assert!(matches!(
+            parse(&["egress", "--denied", "open"]).unwrap().cmd,
+            Cmd::Egress {
+                denied: true,
+                action: Some(EgressCmd::Open { .. }),
+                ..
+            }
+        ));
         for bad in [
-            &["egress", "--denied", "open"][..],
-            &["egress", "--unruled", "--denied"],
+            &["egress", "--unruled", "--denied"][..],
             &["egress", "--unruled", "--follow"],
             &["egress", "--json", "--follow"],
             &["egress", "--json", "--raw"],

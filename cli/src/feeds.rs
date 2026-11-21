@@ -78,6 +78,19 @@ pub fn add(
             feed.service()
         );
     }
+    // Checked before anything is written, so a mistake leaves the env's file as it was.
+    let storage: Vec<String> = match &feed {
+        Feed::Forge { host, .. } => {
+            if let Some(ca) = ca {
+                crate::compile::git_ca(host, ca)?;
+            }
+            storage
+                .iter()
+                .map(|s| crate::compile::storage_host(host, s))
+                .collect::<Result<_>>()?
+        }
+        _ => Vec::new(),
+    };
     let mut f = EnvFile::load(&ctx.paths, env_name)?;
     let before = f.cfg.clone();
     let listed = feeds(&f.cfg).contains(&feed);
@@ -95,7 +108,7 @@ pub fn add(
             .github
             .0
             .iter()
-            .find(|g| !g.feeds.is_empty() && g.repos.is_empty() && g.read_repos.is_empty())
+            .find(|g| !g.feeds.is_empty())
             .and_then(|g| g.token.clone()),
         Feed::Forge { host, .. } => forge_cred(&f.cfg, host).and_then(|g| g.token.clone()),
     };
@@ -189,8 +202,13 @@ pub fn add(
             .map(|g| (g.ca.clone(), g.storage_hosts.clone())),
         _ => None,
     };
-    let restart = applied && ca_of(&before) != ca_of(&f.cfg);
-    let applied = Some(applied && !restart);
+    let applied = Some(if !applied {
+        Applies::AtUp
+    } else if ca_of(&before) != ca_of(&f.cfg) {
+        Applies::AtRestart
+    } else {
+        Applies::Now
+    });
     block!("{}", summary(env_name, &f.cfg, &feed, now, applied));
     Ok(ExitCode::SUCCESS)
 }
@@ -323,14 +341,25 @@ fn ask_ca(host: &str) -> Result<Option<String>> {
     Ok((!path.is_empty()).then(|| path.to_string()))
 }
 
-/// The closing summary of `luoto feed add`; `applied`, whether the running env took it now
-/// (`None`: nothing changed).
+/// When a written feed reaches the env.
+#[derive(Clone, Copy)]
+enum Applies {
+    /// The running env took it.
+    Now,
+    /// The env isn't running: its next `up`.
+    AtUp,
+    /// A new CA: the gate reads it as it starts, at the next `up`.
+    AtRestart,
+}
+
+/// The closing summary of `luoto feed add`; `applied`, when the env takes it (`None`: nothing
+/// changed).
 fn summary(
     env: &str,
     cfg: &EnvConfig,
     feed: &Feed,
     token: Option<&str>,
-    applied: Option<bool>,
+    applied: Option<Applies>,
 ) -> String {
     let mut rows = vec![(
         "token",
@@ -361,8 +390,9 @@ fn summary(
         }
     }
     match applied {
-        Some(true) => rows.push(("applied", "now".into())),
-        Some(false) => rows.push((
+        Some(Applies::Now) => rows.push(("applied", "now".into())),
+        Some(Applies::AtUp) => rows.push(("applies", format!("at `luoto up -e {env}`"))),
+        Some(Applies::AtRestart) => rows.push((
             "applies",
             format!("at `luoto up -e {env}` (its gate takes a new CA as it starts)"),
         )),
