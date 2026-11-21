@@ -401,13 +401,11 @@ async fn handle_inner(
             };
             return deny(ev, reason);
         }
-        // Java servers drop `;` parameters and resolve the `..` before them, and some decode
-        // an escaped slash: a path the rules read one way would reach another.
-        let lower = path.to_ascii_lowercase();
-        if path.contains(';') || lower.contains("%2f") || lower.contains("%5c") {
+        // A path the rules read one way would reach another (npm's `@scope%2fname` passes).
+        if luoto_shared::host::hides_a_path(&path) {
             let reason = DenyReason::Guard {
                 reason: format!(
-                    "paths with `;` or an escaped slash are not allowed to {}",
+                    "paths with `;` or an escaped slash (other than npm's `@scope%2fname`) are not allowed to {}",
                     target.host
                 ),
             };

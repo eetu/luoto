@@ -9,6 +9,8 @@
   reaches only at the URL the feed sent it to. `luoto egress` names the command for a feed's
   denials, and agents in the env ask for it.
   [Private package feeds](docs/guides/package-feeds.md).
+- A credential on an npm registry reaches scoped packages (`@types/node`): the gate refused
+  their names (`@scope%2fname`) as an escaped slash.
 
 ## 0.6.3 (unreleased)
 
