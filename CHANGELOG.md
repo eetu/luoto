@@ -10,118 +10,68 @@ release may break.
 ### Added
 
 - `luoto list --json` and `luoto requests --json` print what the tables show.
-- `luoto repo add` and `luoto repo auth` take `--access fetch|read|push` and `--token
-  <REF>`, and `luoto agent auth` takes `--credential`: without a terminal, the hints of `up`,
-  `repo auth` and `project needs` name these commands rather than config to write.
-- Private package feeds install in an env with your token, which the gate adds: Azure DevOps,
-  GitHub Packages, and self-hosted Gitea, Forgejo and GitLab. `luoto feed add <feed URL>` takes
-  the URL as your package manager's settings have it, tells the service from it and asks where
-  the token is kept, and uv, pip, npm, cargo, Maven, NuGet and RubyGems use the feed as the
-  project configures it. Downloads that redirect to storage (Azure Storage, GitHub's package
-  hosts, a self-hosted instance's own) reach only the URL the feed sent the env to. A
-  self-hosted instance on a private network is reached there, with its internal CA (`--ca`).
-  `luoto egress` names the command for a feed's denials, and agents in the env ask for it.
+- `luoto repo add` and `luoto repo auth` take `--access fetch|read|push` and `--token <REF>`,
+  and `luoto agent auth` takes `--credential`, for use without a terminal.
+- `luoto feed add <feed URL>`: an env installs from private package feeds (Azure DevOps, GitHub
+  Packages, self-hosted Gitea, Forgejo and GitLab) with a token that stays outside it.
   [Private package feeds](https://github.com/eetu/luoto/blob/main/docs/guides/package-feeds.md).
 
 ### Changed
 
-- **Commands and flags that read the same everywhere; the old names are gone:**
-  - `luoto allow` and `luoto approve` take `--for 1h` for how long, as `luoto egress open`
-    does, not `--ttl`. `luoto init --open` opens egress for an hour, `--open-for 2h` for as
-    long as given; `--open=2h` is gone.
-  - `luoto run` names its agent first: `luoto run claude --prompt …`, not `--agent`. Its
-    `--report FILE` is `--pull-report FILE`.
-  - `luoto egress --open`, the hosts open egress let through, is `--unruled`.
-  - `luoto requests --watch` is `--follow` (`-f`), as for `egress` and `logs`.
-  - `luoto project suggest --write --force` is `--overwrite`, as for `pull`.
-  - `luoto agent list` lists the env's agents and how each signs in; `--available` lists
-    every agent and provider luoto knows. `luoto agent remove` is only `luoto agent rm`.
-  - `luoto status --json` prints the status; `--policy-json` prints the compiled policy.
-  - `-e` comes after the command (`luoto status -e web`), and only commands that act on one
-    env take it. `luoto requests` lists every env's requests unless `-e` names one, also in
-    an env's folder.
-  - A duration names its unit (`30m`, `2h`, `1d`): a bare number is refused, except as
-    `idle_stop` in a config file, where it stays minutes. A rule's `--idle` takes `1d`.
-  - A question a command needs a yes to ends it with exit code 1 when the yes doesn't come
-    (a no, Esc, or no terminal to ask): nothing is done, and the message names the command
-    with `--yes`. So `luoto init` without a terminal creates nothing without `--yes`, and
-    `luoto prune --envs` exits with 1 after listing.
-- `--help` wraps at 80 columns, or the terminal's width.
-- `luoto egress --since` takes a duration or an RFC 3339 time and refuses anything else; on
-  Apple's `container`, a value it couldn't read showed every attempt.
-- `luoto export` exits with 75 when the env it stopped pulled its files and left some out,
-  as `luoto down` does.
-- Errors and hints read the same for the same thing: an env that isn't running, or a repo,
-  share, variable, agent or feed it doesn't have, each with the command that lists or fixes
-  it, `-e` included. `luoto agent add --credential` ends with the agent's summary.
+- **Breaking:** `--ttl` of `luoto allow` and `luoto approve` is `--for 1h`. `luoto init
+  --open=2h` is `--open-for 2h`; `--open` alone opens egress for an hour.
+- **Breaking:** `luoto run --agent claude` is `luoto run claude`, and its `--report FILE` is
+  `--pull-report FILE`.
+- **Breaking:** `luoto egress --open` is `--unruled`, `luoto requests --watch` is `--follow`
+  (`-f`), `luoto project suggest --write --force` is `--overwrite`, and `luoto agent remove`
+  is only `luoto agent rm`.
+- **Breaking:** `luoto status --json` prints the status; the compiled policy is `--policy-json`.
+- **Breaking:** `-e` comes after the command (`luoto status -e web`), and only commands that
+  act on one env take it. `luoto requests` lists every env's requests unless `-e` names one.
+- **Breaking:** a duration names its unit (`30m`, `2h`, `1d`); a bare number is refused,
+  except as `idle_stop` in a config file, where it stays minutes.
+- **Breaking:** a question that gets no yes (a no, Esc, no terminal) ends the command with
+  exit code 1 and nothing done, so `luoto init` without a terminal needs `--yes`.
+- `luoto agent list` lists the env's agents and how each signs in; `--available` lists every
+  agent and provider luoto knows.
+- `luoto egress --since` takes a duration or an RFC 3339 time and refuses anything else.
+- `luoto export` exits with 75 when the env it stopped pulled its files and left some out.
 
 ### Fixed
 
-- A credential on an npm registry reaches scoped packages (`@types/node`): the gate refused
-  their names (`@scope%2fname`, or `%40scope%2Fname` as Gitea links its tarballs) as an
-  escaped slash.
+- The gate refused scoped npm packages (`@types/node`) on a registry that gets a credential.
 
 ## [0.6.3] - Unreleased
 
 ### Added
 
-- An agent's changes can land in your folder when its env stops, with nobody at the terminal.
-  `luoto run --dangerously-pull` stops the env after the agent and writes its files; `luoto
-  pull --on-stop on` makes every stop of an env do that (`luoto down`, the idle stop, the UI's
-  stop, a run's `--down` or `--rm`). Only files the env changed and you didn't are written;
-  conflicts, deletions, executable files, what your tools evaluate by themselves (tool configs
-  that are code, a project's manifests such as `package.json` and `Cargo.toml`) and `.gitignore`
-  are held back for a reviewed `luoto pull`, and what git ignores stays in the env. The files
-  are read from the stopped env, whatever the folder's size. `luoto run --pull` is the reviewed
-  pull after a run. A run cut short (Ctrl-C, `--timeout`, a kill) pulls nothing until a pull was
-  reviewed. A run, and `luoto down`, exit with 75 when the pull left something out, `--report
-  FILE` writes what a run's did, and `luoto ui` shows the setting and the last pull on the env's
-  panel. A pull cut short is cleaned up by the next command, and an env that stopped unseen is
-  pulled in the background. [Headless
-  runs](https://github.com/eetu/luoto/blob/main/docs/guides/headless.md#its-changes-in-your-folder)
-  has the rules, [SECURITY.md](https://github.com/eetu/luoto/blob/main/SECURITY.md) what stays
-  at risk.
-- `luoto run --rm` removes the env when the run ends, as `luoto rm` does, so a one-off job
-  leaves nothing behind. An env holding work no remote has (the same check as `luoto rm`) is
-  kept and stopped instead, with what it holds; `--yes` removes it anyway, and a terminal is
-  asked. So is an env whose files its folder doesn't have: new or changed files, ones a pull
-  refuses or couldn't read, and `node_modules`-like folders, less what the folder's `.gitignore`
-  ignores. With a pull it removes the env once all its files are in your folder; changed files
-  and commits on the checked-out branch then don't keep it.
-- `luoto prune --envs` removes the stopped envs nobody has used for 30 days (`--older-than 7d`,
-  or `prune_after` in `config.toml`), optionally only those a pattern names (`--match 'job-*'`),
-  after listing them with their last use and size and one question. An env holding work that is
-  nowhere else is listed and kept unless `--with-work`: what `luoto rm` names, as luoto found it
-  when the env stopped, and the files its folder lacks. An env used since it was listed stays.
-  `--yes` skips the question; without a terminal and without it, nothing is removed. [Leftover
-  envs](https://github.com/eetu/luoto/blob/main/docs/guides/headless.md#leftover-envs) has the
-  rules.
-- `luoto list` shows when each env was last used (USED): its last start, the last time
-  something ran in it, or its stop. An env last used by an earlier luoto shows `unknown`.
+- `luoto run --dangerously-pull` and `luoto pull --on-stop on` write an env's changes into
+  your folder when it stops, unreviewed. Conflicts, deletions, executables and files your tools
+  run are held back for `luoto pull`. [Headless
+  runs](https://github.com/eetu/luoto/blob/main/docs/guides/headless.md#its-changes-in-your-folder).
+- `luoto run --pull` is the reviewed pull after a run. A run and `luoto down` exit with 75
+  when a pull left something out, and `--report FILE` writes what a run's pull did.
+- `luoto run --rm` removes the env when the run ends; one holding work that is nowhere else
+  is kept and stopped unless `--yes`.
+- `luoto prune --envs` removes stopped envs unused for 30 days (`--older-than 7d`,
+  `prune_after` in `config.toml`, `--match 'job-*'`); one holding work is kept unless
+  `--with-work`. [Leftover
+  envs](https://github.com/eetu/luoto/blob/main/docs/guides/headless.md#leftover-envs).
+- `luoto list` shows when each env was last used (USED).
 
 ### Changed
 
-- `luoto pull` knows what the env changed: a file you changed in your folder since the env's
-  copy is no longer listed for overwriting. Changed on both sides, it is a conflict and
-  yours is kept unless `--overwrite`; a file the env deleted is listed and kept. An env made
-  by an earlier luoto lists every difference as before, until one pull has left its folder
-  with every file the env has.
+- `luoto pull` leaves alone a file you changed since the env's copy. Changed on both sides
+  it is a conflict, yours kept unless `--overwrite`; a file the env deleted is kept.
 
 ### Fixed
 
-- On Apple's `container`, an env's size (`luoto list --size`, `luoto status --size`, the
-  UI, `luoto prune --envs`) is what removing it frees: its containers' disks no longer count
-  what they share with their image, which made an empty env show 1.6 GB.
-- An idle env stops after `idle_stop` again: luoto's own processes in the env (its network
-  link on Apple's `container`, its ssh-agent, the watcher's look at listening ports) counted
-  as work, so it never became idle. Its stop no longer holds up port forwards meanwhile.
-- `luoto pull` writes every file it can and names the ones it couldn't; it used to stop at
-  the first that failed. What it writes is synced to disk, an existing file keeps its
-  permissions (they became 0644 or 0755), and a file of yours named `<name>.luoto-tmp` is no
-  longer replaced.
-- `luoto pull` says when the env's files couldn't all be read; it took what came for all of
-  them.
-- `luoto run --down` and `--rm` stop or remove the env also when the agent's answer couldn't be
+- On Apple's `container`, an empty env showed 1.6 GB: its size counted what its containers
+  share with their image.
+- An env never stopped after `idle_stop`: luoto's own processes in it counted as work.
+- `luoto pull` stopped at the first file it couldn't write, reset a file's permissions to
+  0644 or 0755, and didn't say when the env's files couldn't all be read.
+- `luoto run --down` and `--rm` left the env running when the agent's answer couldn't be
   written.
 
 ### Security
@@ -133,836 +83,476 @@ release may break.
 
 ### Added
 
-- Tab completes folders and files where a command takes one: `luoto init`, `--repo`,
-  `luoto repo add`, `luoto share add`, `luoto import`, `luoto export`, `luoto run`'s files and
-  `luoto doctor --report`.
-- Where luoto.toml did change in your folder and in the env, `luoto up` and `luoto project
-  apply` ask which to go on with: the env's (the default, said to be committed there or
-  not), yours, or their differences first. Without a terminal the env's stays and the note
-  names `luoto project apply --from-folder`, which takes yours.
+- Tab completes folders and files where a command takes one.
+- When `luoto.toml` changed in your folder and in the env, `luoto up` and `luoto project
+  apply` ask which to go on with; `luoto project apply --from-folder` takes yours.
 - New guide: [your settings in every
-  env](https://github.com/eetu/luoto/blob/main/docs/guides/your-settings.md), the shell, git,
-  terminal workspace themes and agents' own settings from `~/.config/luoto/home/`, and the keys
-  luoto writes into agents' settings itself.
+  env](https://github.com/eetu/luoto/blob/main/docs/guides/your-settings.md).
 
 ### Fixed
 
-- A terminal workspace that needs a git repository, on an env whose `/workspace` is none (a
-  launchpad, a virtual workspace, a plain folder), says so before it starts, with the terminal
-  workspaces that open there; it used to fail inside the env. `luoto up` lists only the ones the
-  env can open.
-- A luoto.toml taken from your folder with a mistake in it can be fixed in the folder: the
-  next `luoto up` offers the fixed one. luoto took its own copy for a change made in the env
-  and kept reading it ("changed in your folder and in the env").
-- A terminal the env's image doesn't know works in `luoto shell`, `luoto agent run` and a
-  terminal workspace: a terminal workspace opened from one failed with "missing or unsuitable
-  terminal". luoto installs your machine's terminfo entry for it in the env, and falls back to
-  `xterm-256color` where it can't.
+- A terminal workspace that needs a git repository failed inside an env whose `/workspace`
+  is none; it says so before it starts.
+- A mistake in a `luoto.toml` taken from your folder can be fixed there: the next `luoto up`
+  offers the fixed one.
+- A terminal the env's image doesn't know failed with "missing or unsuitable terminal".
 
 ## [0.6.1] - 2026-11-18
 
 ### Added
 
-- Approving a preset request shows the hosts the preset opens, each with its access, in
-  `luoto requests`, `luoto approve` and the UI's request panel.
+- Approving a preset request shows the hosts the preset opens, each with its access.
 
 ### Changed
 
-- `luoto setup` on Docker says what that means: dev containers are plain containers on this
-  machine's kernel (the kernel of Docker's VM on macOS and Windows), unless gVisor is
-  registered with Docker and an env sets `oci_runtime = "runsc"`.
+- `luoto setup` on Docker says how an env is isolated there: a plain container, unless gVisor
+  is registered with Docker and the env sets `oci_runtime = "runsc"`.
 
 ### Fixed
 
-- What luoto and the sandbox's helper say about secrets and isolation matches what holds:
-  the credentials the gate adds stay outside the sandbox, while a secret you put inside
-  (`[sandbox_secrets]`, a login in the env) is there; gVisor is a kernel a kernel exploit has
-  to break first; without gVisor a container shares this machine's kernel on Linux, the VM's
-  elsewhere; and no text says setup installs gVisor.
-- The gate's reason for refusing GitHub's Actions API says only that: a push still starts
-  the workflows a repository has.
+- What luoto says about secrets and isolation matches what holds: a secret you put inside
+  (`[sandbox_secrets]`, a login in the env) is in the sandbox, and setup doesn't install gVisor.
 
 ## [0.6.0] - 2026-11-18
 
 ### Added
 
-- `luoto setup` opens with luoto's island, drawn once on a terminal with colors while setup
-  looks at this machine: what it finds is printed under the island as it comes, and any key
-  ends the drawing. The island is still without colors and on a terminal under 80 columns
-  or 21 rows, and absent where setup's output is piped. A first setup ends with the next
-  step: `luoto init` inside a project folder.
+- `luoto setup` opens with luoto's island on a terminal; any key ends it.
 - `luoto doctor` checks that containers reach the internet on Apple's `container` and in
-  luoto's VM: after a Mac changes networks Apple's VMs can lose their way out until
-  `container system stop` and `container system start`, which doctor then names. An image
-  build that fails there points at `luoto doctor`.
-- luoto has a page, https://eetu.github.io/luoto/, with the hello cast and install steps.
+  luoto's VM, and names the fix.
+- luoto has a page: https://eetu.github.io/luoto/.
 
 ### Removed
 
-- **`luoto setup` installs no runtime, and `--install` is gone.** Setup uses a runtime you
-  installed: Apple's `container`, podman or Docker, each shown with how it isolates an env.
-  With several it asks, in that order, starting at the current one; Docker is a choice like
-  the others (`--runtime docker`). With none ready it lists what luoto runs on, the oldest
-  version of each and its install page, and stops. `--yes` takes the current runtime, or the
-  first in the list, without asking. The UI's setup page shows the same and runs no install.
+- **Breaking:** `luoto setup` installs no runtime, and `--install` is gone. Install Apple's
+  `container`, podman or Docker yourself; with several, setup asks (`--runtime docker`), and
+  `--yes` takes the current one or the first.
 
 ### Fixed
 
-- `luoto init` no longer takes toolchains from samples (`examples/`, `fixtures/`, `testdata/`):
-  a launchpad example's `mise.toml` made `up` install terraform for a project without it.
+- `luoto init` took toolchains from samples (`examples/`, `fixtures/`, `testdata/`).
 
 ## [0.5.3] - 2026-11-17
 
 ### Added
 
-- `luoto agent run` and `luoto shell` list what the gate denied during the session when it
-  ends, as `luoto run` does: each host, how often, the requests it refused and why. The
-  summary stands apart from the session's last output.
+- `luoto agent run` and `luoto shell` end with what the gate denied during the session.
 
 ### Changed
 
-- `luoto egress`, `luoto list`, `luoto agent list` and the rules of `luoto status` fit 80
-  columns: columns are as wide as what they hold, a host's hint is under it (its command on
-  a line of its own when long), an env's presets are under it, and rules stand under the
-  preset or source that made them, their paths under each. So do the `luoto init` proposal
-  and a step's line (`installing …`).
-- `luoto agent run claude --yolo` starts without Claude Code's bypass mode notice, which
-  asks you to confirm that it runs in a sandbox with restricted internet access.
-- `luoto init`, `up` and `pull` show folders and files in your home as `~/…`, and the note
-  that ends `init` fits 80 columns.
-- Output is easier to scan on a terminal: what a step made or changed is bold, keys and
-  column headings are dim, the commands a line names are bold, the answer Enter picks stands
-  out in `[Y/n]`, and `luoto:` before an error is red, `warning:` yellow. Piped output and
-  `NO_COLOR` stay plain.
-- `luoto allow` ends with a summary that fits 80 columns: access, expiry, rule and the
-  command that revokes it. A rule's expiry is in local time in `allow`, `approve`, `status`
-  and the review of a `luoto.toml`, as open egress shows its own; `luoto logs` shows local
-  time too, and `sandbox status` in an env shows the env's zone when it has one.
+- CLI output fits 80 columns, shows folders in your home as `~/…` and times in local time,
+  and is styled on a terminal (plain when piped or under `NO_COLOR`).
+- `luoto agent run claude --yolo` starts without Claude Code's bypass mode notice.
 
 ### Fixed
 
-- Claude Code runs with `CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1`: its first
-  start in an env no longer asks for its plugin marketplace, which the gate denied
-  (`downloads.claude.ai`, SSH to `github.com`).
+- Claude Code's first start in an env asked for its plugin marketplace, which the gate denied.
 
 ### Security
 
-- **Apple's `container`:** a model server on this machine was reached through a DNS lookup of
-  `host.docker.internal`, which Apple's VMs don't define, so a resolver on your network could
-  answer with another machine, and the server's token and the agent's prompts went there over
-  plain HTTP. The gate now dials its own gateway (this machine) for it and never asks DNS; the
-  next `luoto up` recreates each gate. podman and Docker were not affected.
+- On Apple's `container`, a model server on this machine was found through DNS, so a resolver
+  on your network could send its token and the agent's prompts to another machine over plain
+  HTTP. The next `luoto up` recreates each gate. podman and Docker were not affected.
 
 ## [0.5.2] - 2026-11-17
 
 ### Added
 
-- **Virtual workspaces:** `luoto init --virtual --name <env>` makes an env with no folder of
-  its own, whose `/workspace` holds only its repos side by side (`--repo` now or `luoto repo
-  add` later), or nothing at all: a sandbox with nothing from your machine. `/workspace`
-  itself is never pulled, and has no `luoto.toml`.
-- **Terminal workspaces for agents:** `luoto open --with <name>` also opens a terminal
-  multiplexer or agent manager in the env (four to start with, listed by `luoto open --help`),
-  installed there with mise on first use and attached to over SSH; the agents it starts stay in
-  the sandbox, and the session outlives the terminal. A plain `luoto open` still picks an
-  editor.
+- `luoto init --virtual --name <env>` makes an env with no folder of its own: `/workspace`
+  holds only its repos, or nothing, and is never pulled.
+- `luoto open --with <name>` opens a terminal multiplexer or agent manager in the env (listed
+  by `luoto open --help`); its session outlives the terminal.
 
 ### Changed
 
-- **No repo inside a repo:** when the env's folder is a git repository, its first `luoto repo
-  add` (and `luoto init --repo` there) gives the `--virtual` command instead; `--inside` nests
-  it anyway. Launchpads and envs that nest repos already are unchanged.
+- When the env's folder is a git repository, its first `luoto repo add` (and `luoto init
+  --repo` there) is refused with the `--virtual` command; `--inside` nests it anyway.
 
 ### Fixed
 
-- **Repos:** a repo's folder can't be the env's or another repo's, or inside one; one copied
-  from a folder isn't set up over a `/workspace/<name>` the env already has; `luoto init` in a
-  repo's folder updates its env rather than make a second; two envs with the same folder ask
-  for `-e`.
-- **A restarted vault** reads as locked, with `luoto vault unlock`, rather than as a credential
-  not registered with it.
+- A repo's folder can't be the env's or another repo's, or inside one; `luoto init` in a
+  repo's folder updates its env; two envs with the same folder ask for `-e`.
+- A restarted vault reads as locked, with `luoto vault unlock`, not as a missing credential.
 
 ## [0.5.1] - 2026-11-16
 
 ### Added
 
-- **Sign-ins with a callback to `localhost`:** every port a server in the env listens on is
-  forwarded, also above 32767, where a login's callback lands (MCP servers', cloud CLIs'), so
-  the browser's redirect reaches the env. Those ports are only counted in `luoto status` and
-  the UI, at most 64 at once, and never luoto's UI ports. `auto_forward = false` still turns
-  forwarding off.
-- **Rules in the UI:** an env's rules view (beside egress) lists every rule by origin. "Add
-  rule" opens the rule form for any host, with "allow private address"; a rule of yours is
-  edited from its pencil, its menu or a double-click, keeping its expiry unless another is
-  picked, and saved in place.
+- Every port a server in the env listens on is forwarded, also above 32767, so a sign-in's
+  callback to `localhost` reaches it: at most 64 at once, off with `auto_forward = false`.
+- UI: an env's rules view lists every rule by origin, and adds and edits your own.
 
 ### Changed
 
-- **Hosts on your network or VPN:** making a rule, the host is resolved on this machine; one
-  on a private address gets "allow private address" switched on in the UI, which asks before
-  saving any rule that reaches private addresses, and `luoto allow` asks on a terminal (and
-  says so without one).
-- **Host panel:** attempts alike in outcome, method and path are one row with a count, newest
-  first, their paths in full; a row expands to the gate's message, and its menu copies the path
-  or puts it in the rule form. The panel widens with the window.
-- **`luoto down`** says when the env wasn't running.
-- **UI header:** the browser notifications bell shows only without desktop notifications, where
-  it does something.
+- A rule for a host on a private address: the UI switches "allow private address" on and
+  asks before saving, and `luoto allow` asks on a terminal.
+- UI host panel: attempts alike are one row with a count, which expands to the gate's message.
 
 ## [0.5.0] - 2026-11-16
 
 ### Fixed
 
-- **Apple's `container`: hosts behind a VPN.** macOS's NAT for VMs leaves only through the
-  Mac's primary interface, so a host your Mac reaches over a VPN timed out from an env. A host
-  allowed with `--private` is now reached from your Mac, whenever the VPN is up; nothing to
-  set. The next `luoto up` recreates each gate. A `pfctl` NAT rule added for this can go:
-  `sudo pfctl -a com.apple/luoto -F nat`.
-- **Private addresses:** a rule with `--private` beside an older one for the same host reaches
-  the private address (the first rule used to win). In the UI, a host whose name the gate
-  found resolving to a private address offers "allow private address" and says a rule
-  without it doesn't reach it; the host reads as blocked, naming the rule that lacks it,
-  until a rule allows one; rules that allow one say "private". A private address that times
-  out asks whether the network or VPN that reaches it is up on this machine.
+- On Apple's `container`, a host your Mac reaches over a VPN timed out from an env. One
+  allowed with `--private` is reached from your Mac; the next `luoto up` recreates each gate.
+  A `pfctl` NAT rule added for this can go: `sudo pfctl -a com.apple/luoto -F nat`.
+- A rule with `--private` beside an older rule for the same host reaches the private address,
+  and the UI offers "allow private address" for a host that resolves to one.
 
 ## [0.4.8] - 2026-11-16
 
 ### Fixed
 
-- **SSH:** connecting to an env (`luoto open`, an editor, `ssh luoto-<env>`) failed with
+- Connecting to an env over SSH (`luoto open`, an editor, `ssh luoto-<env>`) failed with
   "`luoto ssh-proxy` acts on no env; drop `-e`" since 0.4.5.
 
 ## [0.4.7] - 2026-11-16
 
 ### Fixed
 
-- **Apple's `container`:** creating the vault, a gate or a dev container no longer fails with
-  "host socket … already exists" after the container service stopped or the Mac restarted
-  with containers running; luoto removes a published socket nothing answers on.
-- **`luoto setup --build`:** refused before anything is set up when the binary wasn't built
-  from a checkout, and only such a binary suggests it.
+- On Apple's `container`, creating the vault, a gate or a dev container failed with "host
+  socket … already exists" after the container service stopped or the Mac restarted.
+- `luoto setup --build` is refused when the binary wasn't built from a checkout.
 
 ## [0.4.6] - 2026-11-15
 
 ### Changed
 
-- **Secret wizards:** pasting a secret comes first, and external secret stores (the OS
-  keychain, 1Password, OpenBao / Vault) are queried only when you pick their `(browse)` entry.
+- Secret questions: pasting a secret comes first, and secret stores (the OS keychain,
+  1Password, OpenBao / Vault) are queried only when you pick their `(browse)` entry.
 
 ### Fixed
 
-- **A deleted VM:** `luoto rm` removes an env whose VM was deleted by hand (its containers and
-  volumes went with the VM); commands that start the VM name `luoto setup`, which creates it
-  again.
+- `luoto rm` removes an env whose VM was deleted by hand.
 
 ### Security
 
-- **Secrets in memory:** the vault, `luoto` and the `ctl` path keep secrets and minted tokens
-  in buffers wiped when dropped, sized so none leaves a copy as it grows; the vault also wipes
-  on `SIGTERM`/`SIGINT`, so it stops at once. Copies inside the HTTP and JSON libraries are not
-  wiped.
-- **No swap for secrets:** on podman and Docker the vault and gates get 512 MB and no swap
-  (Docker Desktop and WSL2 swap by default); the next `luoto up` recreates them. `luoto doctor`
-  names swap where the containers run and whether the vault can still reach it.
-- **Push guard:** signed pushes are refused (git runs the commands inside their certificate),
-  each command must be exactly `old new ref`, and protected branches and tags match in any
-  case.
-- **Credentials:** on a credentialed host the gate also removes the client's own copy of every
-  header and query parameter that host's credentials go in, on any path, and token parameters
-  (`access_token`, `private_token`, `job_token`, `api_key`) in any spelling. GitHub's
-  `/graphql` gets the token on POST only, where its mutation guard reads.
-- **Model APIs:** Anthropic's managed agents, sessions and environments are denied; images,
-  documents and files given by URL to Anthropic, OpenAI and Gemini are server tools (refused
-  without `server_tools = true`); Gemini's denies and server tools cover every API version.
-- **Hosts:** a host spelled as a number (`3405803777`, `0x7f.1`) is the IPv4 address resolvers
-  read it as, so IP rules, denies and credentialed hosts match it; IPv6 forms (NAT64, 6to4) of
-  addresses the gate never dials are never dialed either.
-- **Gate:** a DNS message with more than one question is refused, methods over 32 bytes are
-  refused, `no_new_privs` covers every thread, and the state folder's ownership is set without
-  following links.
+- The vault and `luoto` wipe secrets and minted tokens from memory, and on podman and Docker
+  the vault and gates get no swap; the next `luoto up` recreates them.
+- Push guard: signed pushes are refused, and protected branches and tags match in any case.
+- On a credentialed host the gate removes the client's own copy of every header and query
+  parameter the credential goes in, and token parameters (`access_token`, `private_token`,
+  `job_token`, `api_key`). GitHub's `/graphql` gets the token on POST only.
+- Anthropic's managed agents, sessions and environments are denied, and files given by URL to
+  Anthropic, OpenAI and Gemini are refused without `server_tools = true`.
+- A host spelled as a number (`3405803777`, `0x7f.1`) matches rules, denies and credentialed
+  hosts as its IPv4 address; IPv6 forms (NAT64, 6to4) of addresses the gate never dials are
+  never dialed either. A DNS message with more than one question, and a method over 32
+  bytes, are refused.
 
 ## [0.4.5] - 2026-11-13
 
 ### Added
 
-- **Launchpad edited on this machine:** `up` notices that a launchpad folder's `luoto.toml`
-  changed since the env took its copy and offers to take it in; `luoto project apply` takes it
-  at once. Either way the change is shown and applied only after your yes.
-- **Agent status in the terminal:** Claude Code in an env reports working, blocked on you and
-  done as OSC 7501 (the Program Status Protocol), through hooks luoto adds beside your own;
-  Codex reports done. Terminals and agent managers that read it show it, others ignore it.
-- **Guides:** [changing an
-  env](https://github.com/eetu/luoto/blob/main/docs/guides/changing-an-env.md), task by task.
+- `up` notices that a launchpad folder's `luoto.toml` changed on this machine and offers to
+  take it in; `luoto project apply` takes it at once, after your yes.
+- Claude Code (working, blocked on you, done) and Codex (done) report their status to the
+  terminal as OSC 7501.
+- New guide: [changing an
+  env](https://github.com/eetu/luoto/blob/main/docs/guides/changing-an-env.md).
 
 ### Changed
 
-- **`-e`:** an error on a command that acts on no env.
-- **Clone failures:** listed last, after "is up", each with why and the command that fixes it.
-  A clone the remote refused with the env's credential says so (a token for another forge or
-  account, or one that expired) and names `luoto repo auth`.
-- **Repo access questions:** an overview first, then each repo numbered (2/4), Esc going back
-  one; 1Password items by name, not ID; a value that doesn't look like a token is questioned.
-- **Copyable commands:** a command in backticks is never broken across lines.
-- **CLI messages:** wrapped to 80 columns; hints name the env with `-e`.
-- **`luoto list`:** the command's name; `ls` stays as its alias.
-- **`luoto ui`:** sentence-case labels, each action in one place, right-click menus on
-  requests and credential rows, tables reachable from the keyboard.
+- `-e` is an error on a command that acts on no env. `luoto list` is the command's name;
+  `ls` stays as its alias.
+- Clone failures are listed last in `up`, each with why and the command that fixes it.
+- UI: right-click menus on requests and credential rows; tables reachable from the keyboard.
 
 ## [0.4.4] - 2026-11-12
 
 ### Added
 
-- **Apple's `container`:** on macOS 26 on Apple silicon, `luoto setup` offers it first
-  (`--runtime container`; `--install` runs `brew install container`). It runs every container
-  as a VM of its own, so the dev container's boundary is its VM rather than gVisor. It has no
-  network card: its one link goes to its gate through luoto's background process, never to
-  your Mac or your network.
-  `luoto ui`'s setup page offers the same choice; `luoto status`, `init` and the UI's env
-  panel say how the env is isolated there.
-- **`luoto var`:** lists, sets and removes an env's variables. `luoto var set NAME=value` writes
-  a plain value to `[env]`; `luoto var set NAME` asks where a secret is kept and writes its ref
-  to `[sandbox_secrets]` (`--ref` without a terminal); `luoto var rm NAME`. A running env takes
-  the change at once: new shells have it, and open bash, zsh and fish shells reload it at their
-  next prompt. Names luoto sets itself (proxy, CA bundle, `LUOTO_*`, the env's credential
-  placeholders) and the shell's own are refused. `luoto ui`'s env panel lists them, and names
-  what luoto sets itself. New guide: [environment
+- Apple's `container` is a runtime on macOS 26 on Apple silicon (`luoto setup --runtime
+  container`): every container is a VM of its own, and the dev container's only network link
+  goes to its gate.
+- `luoto var` lists, sets and removes an env's variables: `luoto var set NAME=value` for a
+  plain value, `luoto var set NAME` for a secret's ref, `luoto var rm NAME`. [Environment
   variables](https://github.com/eetu/luoto/blob/main/docs/guides/env-vars.md).
-- **`luoto share`:** folders of this machine the env reads at `/shares/<name>`, read-only:
-  recordings, datasets, data too large for a repo. `luoto share add <folder>`; `luoto up`
-  and `luoto share sync` bring what changed. The env reads clones, which take no space on
-  APFS, btrfs or XFS until a file changes (a folder on another disk is copied). luoto's
-  podman VM mounts luoto's shares folder read-only, added after a yes and one VM restart.
-  A folder inside your home folder (not home itself, a dot-folder or `~/Library`) or on a
-  disk, never a key folder; only the env's own file names one, and `luoto import` leaves an
-  archive's out. `luoto ui`'s env panel lists each share with what changed on this machine
-  since the last sync, and syncs them. Not on Windows yet.
-- **Variable requests:** code in the env asks for a variable with a plain value, which it may
-  suggest (`sandbox request --var NAME[=VALUE]`, MCP `sandbox_request_var`). `luoto approve
-  <id>` confirms the value, `luoto ui` shows it filled in to check, and `luoto var set` answers
-  it too. Secrets are never requested from inside: you add them with `luoto var set`.
-- **`luoto ui`'s vault view:** the vault is a view of its own, every env's credentials in one
-  table: what each is for, where its secret is kept (the ref, never the value), the hosts it
-  goes to, whether the vault holds it, and refs in memory no env uses. A credential shows
-  what else shares its secret and the command that changes it; unlock only while locked, and
-  right-click on the vault for unlock, reload and lock. An env's credentials section lists
-  the same, with an unlock while secrets are missing.
-- **1Password sign-in in place:** when `op` isn't signed in on the terminal (no app
-  integration, no `eval $(op signin)` in that shell), luoto offers `op signin` where it is,
-  mid-question, keeps the session in memory until it exits, and runs the command again.
-  Without a terminal, the error names both fixes; the app's CLI integration (Settings >
-  Developer) unlocks `op` in every terminal.
+- `luoto share add <folder>`: the env reads a folder of this machine read-only at
+  `/shares/<name>`; `luoto up` and `luoto share sync` bring what changed. Not on Windows yet.
+- Code in the env can ask for a variable with a plain value (`sandbox request --var
+  NAME[=VALUE]`, MCP `sandbox_request_var`), never for a secret.
+- UI: a vault view lists every env's credentials (what each is for, its ref, its hosts,
+  whether the vault holds it), with unlock, reload and lock.
+- When `op` isn't signed in on the terminal, luoto offers `op signin` in place.
 
 ### Changed
 
-- **macOS notifications** go through `terminal-notifier`, which the Homebrew formula now
-  installs, instead of Script Editor; macOS asks once to allow them. Without it, or until
-  allowed, they come through `osascript` as before. A notification says "has a request",
-  whatever the request is for.
+- macOS notifications come from a notifier the Homebrew formula installs, not Script Editor;
+  macOS asks once to allow them.
 
 ### Fixed
 
-- **Egress view:** a host a rule allows since it was blocked reads as allowed, its denials as
-  history ("blocked before rule r1"), instead of "partly" with the old denial's text.
-- **The background watcher follows upgrades:** a new luoto's watcher takes over at once,
-  also after a Homebrew upgrade and while envs run on Apple's `container`, where the old one
-  kept running until every env was down. Forwarded connections close and an env's network
-  pauses for a moment; its connections carry on.
+- Egress view: a host a rule allows since it was blocked reads as allowed, not as "partly".
+- After an upgrade the old background watcher kept running until every env was down (Apple's
+  `container`); the new one takes over at once.
 
 ### Security
 
-- **Vault:** each gate reaches the vault over a socket of its own env instead of a network
-  shared with the other envs' gates; a running env takes it at its next `up`.
+- Each gate reaches the vault over a socket of its own env, not a network shared with the
+  other envs' gates; a running env takes it at its next `up`.
 
 ## [0.4.3] - 2026-11-11
 
 ### Added
 
-- **Open egress:** `luoto egress open` lets an env reach any HTTP(S) host and port no rule
-  allows, as rule `open`, for an hour (`--for 2h`; `open = true` under `[egress]` in the env's
-  file for no end); `luoto egress close` ends it, and a running env takes either at once.
-  Hosts that get your credentials keep to their rules, muted hosts stay denied, and denies,
-  private addresses and the guards hold; TLS stays intercepted, so every request is logged.
-  `luoto egress --open` lists the hosts it reached, and `luoto egress keep` offers presets
-  that cover them, checked, else a rule per host (read, or write where a write went out),
-  unchecked: code in the env chose those hosts.
-  `luoto init --open[=2h]` starts a new env open. `up`, `status`, `sandbox status` and the
-  UI's env list say until when (its menu opens and closes it); `luoto run` lists the hosts
-  reached through it; the UI marks them `open` and offers its allow form as keep. Only the
-  env's own file opens it, not config.toml, a luoto.toml or a request; `luoto import` lists
-  it.
-- **Model servers:** Claude Code, Codex and OpenCode can use a server of yours with an
-  OpenAI- or Anthropic-compatible API (Ollama, LM Studio, MTPLX, llama.cpp, vLLM, LiteLLM, a
-  hosted one), on this machine, your network or the internet, beside their cloud provider:
-  `[model_servers.<name>]` with `url`, `api` and an optional `token`, and `model_server` under
-  `[agents.<agent>]` for the one it starts on. "A model server" in the credential questions
-  finds those answering on this machine's usual ports, lists their models and keeps the
-  context window a server gives (`context`, which Claude Code can't tell for a model it
-  doesn't know). The gate opens
-  only the server's port and model endpoints and adds its token; OpenCode switches in its
-  model picker, Codex per start (`codex --profile <server>`). A config that can't work is
-  refused at `up` and `luoto edit`.
-- **Team needs asked:** what a project's `[needs]` names and the env lacks is asked at the
-  first `up` after accepting it, as an agent's credential is: a provider's kind and where it
-  is kept, a custom credential's host and secret, an Azure subscription, where a sandbox
-  secret is kept, and access to the repos to push to. What the team knows goes in a table
-  named as the need, offered first: `[needs.custom.<name>] host`, `[needs.azure]
-  subscriptions`. `luoto project needs` asks again, opening on what the env has; without a
-  terminal, what to add is printed as before.
-- **Agent arguments:** `args` (every start through luoto) and `headless_args` (`luoto run`
-  only) under `[agents.<agent>]`, in the env, `config.toml` or a team's `luoto.toml`, where
-  the agent's command line takes options, and more for one run after `--` (`luoto run …
-  -- --bare`); `["--bare", "--tools", "Bash,Read,Edit"]` cuts
-  Claude Code's request from 54 KB to 4 KB for a model of yours (`--bare` reads no subscription
-  token: with an API key or a model server). A `luoto.toml` can't pass the flags that turn off
-  or loosen the agent's own prompts (`prompt_flags` in its file).
+- `luoto egress open` lets an env reach any HTTP(S) host no rule allows for an hour (`--for
+  2h`; `open = true` under `[egress]` for no end), and `luoto egress close` ends it. Hosts
+  that get your credentials keep to their rules, denies hold and every request is logged.
+- `luoto egress --open` lists the hosts open egress reached, `luoto egress keep` offers
+  presets or rules for them, and `luoto init --open[=2h]` starts a new env open.
+- Claude Code, Codex and OpenCode can use a model server of yours with an OpenAI- or
+  Anthropic-compatible API: `[model_servers.<name>]` (`url`, `api`, an optional `token`) and
+  `model_server` under `[agents.<agent>]`.
+- What a project's `[needs]` names and the env lacks is asked at the first `up` after
+  accepting it, and again by `luoto project needs`; what the team knows goes in
+  `[needs.custom.<name>]` and `[needs.azure]`.
+- `args` and `headless_args` under `[agents.<agent>]` add to an agent's command line, and
+  `luoto run … -- --bare` to one run's.
 
 ### Changed
 
-- **Progress everywhere:** `setup` (the VM's creation and start, gVisor, image pulls and
-  builds), `up` (vault, gate, dev container, setup of the env, toolchain checks), `down`,
-  `rm`, `reset-home`, `doctor`, `prune`, `pull`, `--size`, `egress`, `vault unlock`
-  and `reload`, `upgrade` and `uninstall` show the spinner; what is quick when all is well
-  shows nothing then, and names itself on the spinner's line once it takes a while. What
-  podman prints while it pulls, builds or starts the VM is kept off the terminal as
-  installers' is (`o`, `-v`, or its last lines on a failure). Questions and `op` sign-ins
-  pause it.
-- **Azure login:** an `az` login on this machine that has expired (a refresh token unused for
-  90 days) or wants you again (MFA, consent) is one line with its AADSTS reason and the fix,
-  `az login --tenant …`, then `luoto up`; secrets that failed the same way are named once,
-  and `az` in the env isn't logged in with what would only fail again.
-- **Subnets:** a release's envs take 10.213.1–127 and a source build's (`luoto-dev`)
-  10.213.128–254, with the user ID ranges that go with them, so an env imported from one into
-  the other never shares either. When another network holds an env's subnet, `up` names it
-  and the commands that move the env.
+- Every command shows a spinner for what takes a while, and keeps what tools print off the
+  terminal unless `o`, `-v` or a failure.
+- An `az` login on this machine that has expired is one line with its reason and the fix.
+- A release's envs take subnets 10.213.1–127 and a source build's 10.213.128–254; when
+  another network holds an env's subnet, `up` names it and the commands that move the env.
 
 ### Fixed
 
-- **Agent installs:** an installer piped from a download (`curl … | bash`) fails the install
-  when the download does, instead of the agent passing as installed with nothing there.
-  OpenCode installs again: its installer moved to raw.githubusercontent.com and asks the npm
-  registry for the latest version.
+- An agent whose installer failed to download passed as installed; OpenCode installs again.
 
 ### Security
 
-- **Private addresses stay with their rules:** a kept-alive connection the gate dialed for a
-  rule that allows private addresses (a self-hosted forge, a model server) carries no request
-  another rule or open egress allowed; such a request dials anew and is vetted.
-- **Credentials stay on their rules:** the GitHub, Azure DevOps and git tokens, and a read-only
-  `[credentials.custom]`, go only on the methods and paths their own rules allow. A wider rule
-  (`luoto allow '*' --write`, an approved request) no longer carries them further, to a merge
-  or a file or ref write past the push guard: those requests go without the token.
+- A kept-alive connection the gate dialed for a rule that allows private addresses carries
+  no request another rule or open egress allowed.
+- GitHub, Azure DevOps and git tokens, and a read-only `[credentials.custom]`, go only on the
+  methods and paths their own rules allow; a wider rule (`luoto allow '*' --write`, an
+  approved request) no longer carries them further.
 
 ## [0.4.2] - 2026-11-10
 
 ### Added
 
-- **1Password accounts:** an `op://` ref can name the account it is in
-  (`op://Private/claude/token?account=<account ID>`, from `op account list`), so refs from a
-  work and a personal account work side by side. With several accounts in the app, the wizard
-  asks which one holds a reference that didn't read, and which one to save a pasted secret in,
-  and writes its ID; luoto shows the account as its address and email. A sign-in address
-  works too, unless several accounts share it, as personal and family ones do.
-- **Browse 1Password:** "It's already in 1Password" finds a reference for you: account,
-  vault and item, filtered as you type, and the field from the item's kind (a Login's,
-  Password's or Database's `password`, an API Credential's `credential`, a Secure Note's
-  `notesPlain`), or one you type; Esc steps back. Browsing lists names only, never a value,
-  so an item's custom fields are typed by name; luoto reads only the field you pick. The
-  refs the wizard writes, browsed or saved, name the vault and item by ID, so a rename
-  doesn't break them.
-- **`luoto agent auth`:** asks again how an agent the env has signs in, each question
-  opening on what the env has, marked (current): "Keep the current one" first, a typed
-  reference starting from it. Esc at the first question leaves it unchanged. OpenCode picks
-  the provider first, so it can have a credential for several; an agent that only signs in
-  inside (Antigravity) has nothing to choose. Without a terminal it names the
-  `--credential` forms the agent takes (`oauth_token=<ref>`, `api_key=<ref>`,
-  `login_inside`). It writes only the provider's kind or `login_inside`, keeping
-  `server_tools` and `write`, and a running env takes it at once.
-- **`luoto repo auth <repo>`:** asks a repo's access again, opening on what the env has, its
-  token kept or replaced; it moves the repo between `repos` and `read_repos` of its
-  credential, keeping the credential's other settings, and a running env takes it and clones
-  a repo that waited. A new token replaces the credential's for every repo it lists, and the
-  question names them first.
+- 1Password: an `op://` ref can name its account (`?account=<account ID>`), and "It's already
+  in 1Password" browses account, vault and item by name and writes a ref by ID.
+- `luoto agent auth` asks again how an env's agent signs in; without a terminal it takes
+  `--credential` (`oauth_token=<ref>`, `api_key=<ref>`, `login_inside`).
+- `luoto repo auth <repo>` asks a repo's access again, its token kept or replaced.
 
 ### Changed
 
-- **Credential questions:** each kind is named with what sets it apart, the provider's usual
-  one first and (recommended), and the one you pick says where to get it; then one menu asks
-  where it is kept: pasted into your OS keychain or 1Password, already in 1Password, or
-  somewhere else (a reference). A value that doesn't start as its kind does (`sk-ant-oat`,
-  `sk-ant-api`, `sk-`, …) is asked for again, without being shown. Esc goes back a question;
-  at the first, Esc or "Later" writes nothing, and the next `up` or `agent run` asks again.
-  `login_inside` is written when you pick it, or without a terminal. A paste into 1Password
-  comes after its account and vault. Each menu names its keys and fits 80 columns. The
-  questions end with a summary: the credential (its reference) or none yet, and the `luoto
-  agent auth` command that changes it. `server_tools = true` alone is no credential: the
-  questions are asked. `agent add` asks only about the agent it adds, and prints the env's
-  closing block only when it started the env; `luoto init` leaves the questions to the env's
-  first `up`, so nothing is stored for an env you don't create.
-- **Repo access:** for a repo no credential covers, `up` asks what the env may do with it,
-  least privilege first: fetch it if it is public, read it, or read and push, with the token
-  scopes its forge names. Every answer ends with a summary and the `luoto repo auth` command
-  that changes it; "Later" clones nothing. A clone that fails shows git's errors and the
-  gate's reason, not all it printed.
-- **Progress:** installs, clones and copies print their line and, on a terminal, a dot
-  pulsing in the UI's orange with the time so far and the latest line the tool printed; `o`
-  shows the tool's whole output from there. What installers and git print goes to the install
-  log (`luoto logs installs`), and to the terminal after `o`, with `-v` (`--verbose`, any
-  command) or, its last lines, when one fails; it reaches the terminal escaped, as other text
-  from the env does. Prompts mark their choices in the same orange; `NO_COLOR` turns colors
-  off.
-- **Agents:** "ready" only for an agent that can sign in; one without a credential is
-  "installed", with the command that gives it one. `up` warns about `login_inside` only for a
-  provider whose credential the gate could add instead.
+- Credential questions name each kind with where to get it, then ask where it is kept; Esc
+  goes back and "Later" writes nothing. `luoto init` leaves them to the env's first `up`.
+- For a repo no credential covers, `up` asks what the env may do with it: fetch it if it is
+  public, read it, or read and push.
+- Installs, clones and copies show one line of progress; what they print goes to `luoto logs
+  installs`, and to the terminal after `o`, with `-v` or when one fails.
+- An agent without a credential is "installed", not "ready".
 
 ### Fixed
 
-- **Secret reference prompt:** the reference is read after you press enter, not inside the
-  prompt: an `op` error no longer garbles it, one that doesn't read says why on one line, and
-  the reference comes back to edit.
+- An `op` error garbled the secret reference prompt.
 
 ## [0.4.1] - 2026-11-10
 
 ### Added
 
-- **Git over SSH where port 22 is blocked:** `github_port = 443` in `[credentials.ssh]` sends
-  GitHub SSH remotes to `ssh.github.com:443`, its host keys pinned there too.
-- **`luoto rm`:** before asking, names each repo in the env (the workspace and its `repos`)
-  with files not committed, commits on no remote or stashes, for envs from a folder too.
-- **Runtimes a dependency needs:** `init` gives the env Java (Temurin 17) for pyspark,
-  apache-flink, JPype1 or tabula-py named in `requirements.txt`, `pyproject.toml`, `Pipfile`,
-  `uv.lock` or `poetry.lock`, unless a version file pins one.
-- **Disk growth:** once luoto's VM disk has grown 10 GB (or a tenth of it) since the last
-  hint, `up`, `down`, `luoto run` and the end of a shell or agent session say by how much,
-  name the env's biggest build folders (`target/`, `node_modules/`, …) and point to
-  `status --size` and `prune`. The watcher notifies when free space falls under 10 GB, and
-  again under 3 GB.
+- `github_port = 443` in `[credentials.ssh]` sends GitHub SSH remotes to `ssh.github.com:443`.
+- `luoto rm` names each repo with uncommitted files, unpushed commits or stashes before asking.
+- `luoto init` gives the env Java (Temurin 17) when a Python dependency needs a JVM.
+- Once luoto's VM disk has grown 10 GB, `up`, `down` and `luoto run` say so; a notification
+  comes under 10 GB free, and again under 3 GB.
 
 ### Changed
 
-- **GitHub release downloads** have their own preset, `github-releases`, on by default; the
-  `github` and `toolchains` presets no longer open them. Without it, they open only while luoto
-  installs (`terraform` and `opentofu` keep them for `init`). An env made before 0.4.1 lists
-  its presets: add `github-releases` (`luoto edit`) to keep release downloads open in it.
-- **Agent credentials:** before you choose one, each kind of credential says where to get it;
-  the Claude subscription token links Anthropic's guide (`claude setup-token`, a Pro, Max,
-  Team or Enterprise plan) and the API key the Claude Console.
-- **Path denials** suggest allowing that path (`--path`), not the whole host.
+- **Breaking:** GitHub release downloads have their own preset, `github-releases`, on by
+  default; `github` and `toolchains` no longer open them. An env made before 0.4.1 needs it
+  added (`luoto edit`) to keep them open.
+- Path denials suggest allowing that path (`--path`), not the whole host.
 
 ### Fixed
 
-- **1Password refs:** a token in a Secure Note works (`op://<vault>/<item>/notesPlain`): an
-  `op://` value loses a trailing line break, as a `file:` one does. When you give a reference,
-  the wizard names the field each item type keeps a token in, and refuses one whose value
-  holds more than the token.
+- A token in a 1Password Secure Note works (`op://<vault>/<item>/notesPlain`).
 
 ### Security
 
-- **Go modules:** the `go` preset reaches the module proxy and checksum database, which fetch
-  from whatever host a module path names, only for modules on GitHub, GitLab, Bitbucket,
-  golang.org, google.golang.org, cloud.google.com, k8s.io, sigs.k8s.io, go.etcd.io,
-  go.opentelemetry.io, go.uber.org and gopkg.in. Another host's are denied by path; allowing
-  one takes `luoto allow proxy.golang.org --path '/<host>/**'` and
-  `luoto allow sum.golang.org --path '/lookup/<host>/**'`.
+- The `go` preset reaches the module proxy and checksum database only for modules on
+  well-known hosts (GitHub, GitLab, Bitbucket, golang.org, k8s.io and the like). Another
+  host's take `luoto allow proxy.golang.org --path '/<host>/**'` and `luoto allow
+  sum.golang.org --path '/lookup/<host>/**'`.
 
 ## [0.4.0] - 2026-11-09
 
 ### Added
 
-- Cloud credentials that stay outside the sandbox (Azure, Hetzner, UpCloud, DigitalOcean,
-  Cloudflare), envs started from a remote or moved between machines, and disk use in sight.
-- **Azure credentials:** `[credentials.azure]` in an env's config gives it a managed identity:
-  the gate answers the instance metadata service (169.254.169.254) with placeholder tokens,
-  so `az login --identity`, terraform (`ARM_USE_MSI`) and the Azure SDKs work unchanged, and
-  puts the real token on Resource Manager for the listed `subscriptions`, the named
-  `key_vaults` and `storage_accounts`, and Microsoft Graph (`graph = true`, read-only).
-  `access = "read"` (GET, HEAD, OPTIONS) or `"write"`; the token goes only on those methods,
-  whatever other rule allows a request.
-- **Token sources:** your `az` login on this machine (renewed before it expires), or a service
-  principal (`client_id`, `client_secret`) whose secret the vault keeps and mints with. The
-  env's tenant comes from `tenant`, or the token.
-- **What write leaves shut:** role assignments and definitions, PIM requests and policies,
-  federated identity credentials, Lighthouse delegations, key vault access policies and
-  `elevateAccess` (unless `role_assignments = true`); template deployments, deployment
-  scripts and stacks, which act beyond the listed subscriptions (unless `deployments = true`).
-- **Cloud APIs:** `[credentials.hetzner]`, `upcloud`, `digitalocean` and `cloudflare` take a
-  `token` the gate adds for each cloud's CLI and terraform/OpenTofu provider, on reads unless
-  `write = true` ([guide](https://github.com/eetu/luoto/blob/main/docs/guides/cloud-apis.md)).
-- **Start from a remote:** `luoto init acme/web` (or any https or ssh URL) makes an env cloned
-  through the gate, with nothing on this machine. The repo's `luoto.toml` and the installs
-  its files pin each wait for a yes; `--yes` installs and leaves `luoto.toml` pending.
-  `luoto ls` shows where each env comes from.
-- **Moving envs:** `luoto export -e <env>` writes an env to one private file (config,
-  accepted `luoto.toml`, workspace, and home unless `--no-home`), owners kept; `luoto import
-  FILE [--name NAME]` makes it in another luoto or on another machine, with its own subnet, CA
-  and vault token, after listing the secret refs it will read. Every entry is checked, and
-  nothing is unpacked on this machine.
-- **Disk use:** `luoto status --size` shows what an env's workspace, home, toolchains and
-  containers take, `luoto ls --size` each env's total, `luoto doctor` the VM's disk and its
-  file on this machine; the UI shows both, and `up` warns under 10 GB free.
-- **`luoto prune`:** removes this luoto's superseded images that nothing uses, keeping the
-  other instance's, everything else in the VM and every volume, then trims the VM's disk so
-  the space returns to this machine.
+- `[credentials.azure]` gives an env a managed identity, so `az login --identity`, terraform
+  and the Azure SDKs work unchanged. The real token, from your `az` login or a service
+  principal, goes only to the listed `subscriptions`, `key_vaults`, `storage_accounts` and
+  Microsoft Graph (`graph = true`), with `access = "read"` or `"write"`.
+- Azure write access leaves role assignments (`role_assignments = true`) and template
+  deployments (`deployments = true`) shut.
+- `[credentials.hetzner]`, `upcloud`, `digitalocean` and `cloudflare` take a `token` the gate
+  adds, on reads unless `write = true`
+  ([guide](https://github.com/eetu/luoto/blob/main/docs/guides/cloud-apis.md)).
+- `luoto init acme/web` (or an https or ssh URL) makes an env cloned through the gate, with
+  nothing on this machine; the repo's `luoto.toml` and its installs each wait for a yes.
+- `luoto export -e <env>` writes an env to one file (`--no-home` leaves its home out), and
+  `luoto import FILE [--name NAME]` makes it in another luoto or on another machine.
+- Disk use: `luoto status --size`, `luoto ls --size`, `luoto doctor` and the UI show it, and
+  `luoto prune` removes this luoto's superseded images and trims the VM's disk.
 
 ### Changed
 
-- **Credentialed hosts:** a rule over a host that gets a credential (yours, an approved
-  request's, a `luoto.toml`'s) names that credential among the risks you accept.
-- **luoto.toml review:** names `image` (pulled outside the gate), `ports` and `run`.
-- **Vault:** a changed secret retires only the tokens minted from it; a mint is shared by
-  concurrent requests, bounded in time and size, and a failed one isn't retried for 30 s.
-- **Quieter installs:** Python packages' byte-compile warnings stay out of `up`'s output.
+- A rule over a host that gets a credential names that credential among the risks you accept.
+- The review of a `luoto.toml` names `image`, `ports` and `run`.
 
 ### Security
 
-- **Pull:** never writes into your home folder or one holding it; an env cloned from a remote
-  needs `--to <new folder>`.
+- `luoto pull` never writes into your home folder or one holding it; an env cloned from a
+  remote needs `--to <new folder>`.
 
 ## [0.3.1] - 2026-11-08
 
 ### Added
 
-- Your own deny and mute rules, notifications and port requests, gate limits, and commands for
-  every env at once.
-- **Deny and mute rules:** `[[deny]]` (in an env, `config.toml` or a project's `luoto.toml`)
-  refuses a host, its paths or methods whatever allows them. `[[mute]]` keeps denials you
-  leave denied, such as telemetry, out of `luoto egress`, the UI, notifications, run summaries
-  and allow offers; `egress --all` shows them. A `luoto.toml` can't mute.
-- **Notifications:** a desktop notification (macOS, Linux with `notify-send`) for each access
-  request and the first denial at each host; `notifications = false` in `config.toml` turns
-  them off; `luoto logs watcher` lists those shown. Without them (off, or on Windows), the
-  UI's bell gives browser notifications for requests.
-- **Port forwards listed:** `luoto status` and the UI's env panel show forwarded ports as
-  links, and ports taken on this machine with a `luoto forward` hint.
-- **`luoto run --timeout 30m`:** stops the agent and everything it started in the env, and
-  exits 124; Ctrl-C stops them the same way (exit 130). After every run, stderr lists the
-  hosts the gate denied, with counts, requests and reasons.
-- **`up --all`, `down --all`:** every env in the config dir. `up` asks nothing; an env that
-  fails leaves the rest to go, and the exit code says so.
-- **`luoto reset-home`:** discards an env's home (dotfiles, history, agents' logins,
-  toolchains); the workspace stays.
-- **`luoto logs`:** the gate's log, the watcher's, or the env's installs (up to the newest
-  1 MiB kept); `-f`, `-n`.
-- **Port requests:** `sandbox request db.example.com:5432` asks for an uninspected tunnel to
-  that host and port (never 80 or 443, no private addresses); approving it, in the CLI or the
-  UI, asks you to confirm the risk.
-- **Narrower approvals:** `luoto approve --read`, `--method` and `--path` grant less than a
-  request asked, never more; the UI's request panel offers read-only and paths. The sandbox
-  is told what it got.
-- **`luoto project suggest`:** prints a `luoto.toml` from an env's presets, agents, ports,
-  `[deps]`, remote repos, rules and denies, and names what it leaves out (credentials,
-  secrets, mutes, folders, expiring grants, rules a sandbox couldn't ask for); `--write` puts
-  it in the env's folder, replacing one only with `--force`.
-- **CA renewal:** `up` replaces an env CA with less than 60 days of its two years left, or
-  already expired; the gate signs with the new one at once and a running dev container
-  restarts to trust it. `luoto status` and `doctor` show the expiry when it is that close.
-  The vault's and dev container's logs are capped (1 MB, 10 MB; podman).
-- **`luoto doctor --report`:** writes doctor's checks, versions, the VM, each env's config
-  and state, the watcher's log and the gates' and vault's recent lifecycle and error events
-  to a file only you can read, with secret refs, tokens, your home folder, user names and
-  emails taken out.
-- **`luoto uninstall`:** removes luoto's envs, vault, images, keychain entries, config and
-  data after one question, and its VM only when the other instance (a release or a source
-  build) has nothing in it; the binary stays.
+- `[[deny]]` (in an env, `config.toml` or a `luoto.toml`) refuses a host, its paths or methods
+  whatever allows them. `[[mute]]` hides denials you leave denied; `luoto egress --all` shows
+  them.
+- Desktop notifications (macOS, Linux with `notify-send`) for each access request and the
+  first denial at each host; `notifications = false` in `config.toml` turns them off.
+- `luoto run --timeout 30m` stops the agent and exits 124 (Ctrl-C: 130). Every run ends with
+  the hosts the gate denied.
+- New commands: `luoto up --all` and `down --all`, `luoto reset-home` (discards an env's
+  home), `luoto logs` (the gate's, the watcher's, the env's installs), `luoto doctor --report`
+  (a redacted diagnostic file) and `luoto uninstall`.
+- `sandbox request db.example.com:5432` asks for an uninspected tunnel to that host and port,
+  and `luoto approve --read`, `--method` and `--path` grant less than a request asked.
+- `luoto project suggest` prints a `luoto.toml` from an env's config; `--write` puts it in
+  the env's folder (`--force` to replace one).
+- `luoto status` and the UI list forwarded ports, and ports taken on this machine.
+- `up` replaces an env CA with less than 60 days left; a running dev container restarts to
+  trust it.
 
 ### Changed
 
-- **Gate limits:** at most 1024 connections per env, refused beyond with an event. A
-  response must start within 10 minutes; a stream silent for 5 minutes, or a tunnel or
-  websocket for an hour, is closed; a rule's `idle` (`luoto allow --idle 2h`, up to 24h)
-  gives its host longer, for long polls such as `kubectl logs -f`. Events never queue
-  unbounded, and intercepted hosts' certificates are renewed daily (a gate up for 30 days
-  served expired ones). Podman caps the gate's log at 50 MB where it writes files; journald,
-  as in luoto's VM, and Docker keep their own settings.
+- Gate limits: 1024 connections per env; a response must start within 10 minutes, and a
+  stream silent for 5 minutes, or a tunnel or websocket for an hour, is closed. A rule's
+  `idle` (`luoto allow --idle 2h`, up to 24h) gives its host longer.
 
 ### Fixed
 
-- **System packages:** `[deps] system` installs in an env without the `github` preset, whose
-  missing grant for the base image's GitHub CLI source failed the package-list update.
-- **Tunnels for every client:** a tunnel rule also passes connections that skip the proxy
-  (`psql`, protocols whose server speaks first, TLS a client pins), where only clients using
-  `HTTPS_PROXY` got through.
-- **luoto.toml review:** an `up` that can't ask (the UI, `up --all`) leaves a changed
-  `luoto.toml` unapplied without recording a decline.
+- A gate up for 30 days served expired certificates.
+- `[deps] system` failed to install in an env without the `github` preset.
+- A tunnel rule passed only clients that use `HTTPS_PROXY`.
+- An `up` that can't ask (the UI, `up --all`) recorded a changed `luoto.toml` as declined.
 
 ## [0.3.0] - 2026-11-07
 
 ### Added
 
-- Related repositories in one env, git on any forge, and an `up` that sets up what an env lacks.
-- **Repos:** `--repo` on `luoto init`, `luoto repo add|rm|list` and `[workspace.repos.<name>]`
-  put repositories at `/workspace/<name>`: a host folder, copied in and pulled back to it, or a
-  remote (`owner/repo`, an https or ssh URL), cloned in the env through the gate on `up`.
-  luoto commands in a repo's folder act on its env. The UI lists an env's repos.
-- **Repos in `luoto.toml`:** `[repos.<name>] url = …` gives a team the same set of remotes (by
-  host name, not address); the env's own repo of a name replaces the file's. When `up` asks
-  for their credentials, Enter answers "later".
-- **Read-only repos:** `read_repos` in `[credentials.github]` and `[credentials.azure_devops]`
-  are fetched through the gate, never pushed to; a GitHub App mints a read-only token for
-  them. With a token, GraphQL reaches what the token does.
-- **A GitHub credential per owner:** `[[credentials.github]]`, once per account. Each repo's
-  requests get the credential that lists it, GraphQL the first one that may write;
-  `[credentials.github]` is the form for one. A token that reaches several owners is one
-  credential listing all their repos, and `up` offers a reference the config has before asking
-  for another.
-- **Git on any forge:** `[[credentials.git]]` gives a host (GitLab, Forgejo, Gitea, Bitbucket,
-  self-hosted) a token the gate adds to the listed repos' git requests as basic auth, with the
-  push guard, `read_repos`, a port, `private = true` for a private network and `ca` for an
-  internal CA. Without a token it lets public repos be fetched. `up` asks for one per host.
-- **`up` reconciles agents and credentials:** it installs the agents an env's config or its
-  `luoto.toml` lists when the env lacks them, so a team's `agents = ["claude"]` reaches
-  everyone; `init --agent`, `agent add` and `agent run` list the agent and leave the rest to
-  `up`. On a terminal, `up` first asks for what is missing: how an agent authenticates, and
-  an HTTPS credential for each GitHub owner and Azure DevOps organization whose repos none
-  covers (push or read only, kept in the keychain, 1Password or a reference). Repos answered
-  as public aren't asked about again; a removed credential is asked for anew. Without a
-  terminal `up` changes no config and prints what to add; `init --yes`, `agent add` and the
-  UI's new env let an agent without a credential log in inside. `luoto repo add` asks the same
-  before it clones.
-- **Packages and toolchains on request:** `sandbox request --package <name>` and
-  `--tool <tool>@<version>` (MCP: `sandbox_request_install`) ask you to keep software in the
-  env. `luoto approve` (or the UI) installs it and writes it into `[deps] system` or `[tools]`,
-  so a recreated container gets it again; the sandbox learns whether the install worked. A
-  tool from a mise backend anyone publishes to (`ubi:`, `npm:`, …) is marked unvetted.
-- **Agent credentials on the command line:** `--credential oauth_token=op://…` on
-  `luoto agent add` and `luoto init` writes the credential without the prompt; the reference
-  must resolve.
-- **Headless runs:** `luoto run --agent claude --prompt "…"` brings the env up asking nothing,
-  runs the agent's non-interactive mode and prints its answer (`--output FILE` writes it,
-  `--down` stops the env after), exiting with the agent's code; on a terminal its output is
-  escaped. Claude Code, Codex, OpenCode and Copilot CLI have one.
-- **Presets from cloned repos:** after `up` clones repos, it offers the presets and default
-  toolchains their files suggest, as `luoto init` does for a folder; it adds them only on your
-  yes, as `luoto init` on a running env does.
-- **`sandbox request --preset npm`** (MCP: `preset` in `sandbox_request_access`) asks for one of
-  luoto's presets; approving adds it to the env and opens its hosts at once.
-- **`luoto agent rm`** drops an agent from an env's config and its hosts from the policy.
-- **Rotated secrets:** `luoto vault reload` (or the UI's vault panel) reads the vault's
-  secrets again and puts the changed ones in use at once; `-e` limits it to one env's. When an
-  upstream refuses a credential (401), the background watcher reads it again itself if its
-  source needs no one (the keychain, a 1Password service account, `file:`, Vault), at most
-  every 10 minutes; for the 1Password app it notes `luoto vault reload` in its log.
-- **Azure DevOps pull requests:** for the repos in `[credentials.azure_devops] repos`, the gate
-  adds the PAT to their pull requests' REST paths (by repo name): open, comment, change title,
-  description, draft state or target. Completing one, auto-complete and votes are refused.
-- **`luoto requests --watch`** prints each new request as it comes, with the terminal's bell.
-- **Requests in the UI** can be ticked and approved or rejected together; one whose rule has
-  risks stays ticked, for review on its own.
-- **Agent model and effort:** `[agents.claude] model = "opus"`, `effort = "medium"` in an
-  env's config, its `luoto.toml`, or `config.toml` for every env that has the agent; `up`
-  writes them into the agent's settings as the default a session can change. `agents = [...]`
-  is the short form.
+- Repos: `--repo` on `luoto init`, `luoto repo add|rm|list` and `[workspace.repos.<name>]`
+  put repositories at `/workspace/<name>`: a host folder, copied in and pulled back, or a
+  remote, cloned in the env through the gate. `[repos.<name>] url = …` in a `luoto.toml`
+  gives a team the same remotes.
+- Git credentials: `[[credentials.github]]` once per account, `[[credentials.git]]` for any
+  other forge (GitLab, Forgejo, Gitea, Bitbucket, self-hosted; `private = true`, `ca`), and
+  `read_repos` for repos that are fetched, never pushed to.
+- `up` installs the agents an env's config or its `luoto.toml` lists, and on a terminal asks
+  for the agent and repo credentials that are missing. `--credential oauth_token=op://…` on
+  `luoto agent add` and `luoto init` writes an agent's without the prompt.
+- `luoto run --agent claude --prompt "…"` runs an agent headless and prints its answer
+  (`--output FILE`, `--down`), exiting with its code: Claude Code, Codex, OpenCode and Copilot
+  CLI.
+- `sandbox request --package <name>`, `--tool <tool>@<version>` and `--preset npm` (also over
+  MCP) ask for software or a preset; approving installs it and writes it to the env's config.
+- `luoto requests --watch` prints each new request as it comes; the UI approves or rejects
+  several together.
+- `luoto vault reload` reads the vault's secrets again (`-e` for one env's); the watcher
+  rereads a credential an upstream refused (401) when its source needs no one.
+- Azure DevOps pull requests: for `[credentials.azure_devops] repos` the env can open,
+  comment on and edit them; completing one and votes are refused.
+- `luoto agent rm` drops an agent from an env; `[agents.claude] model = "opus"`, `effort =
+  "medium"` set an agent's defaults.
+- After `up` clones repos, it offers the presets and toolchains their files suggest.
 
 ### Changed
 
-- **Pull:** each copied-in repo goes back to its own folder; cloned ones stay out unless named
-  with `--repo`. Risky files count in any folder within the pull, so a nested repository's
-  `.git`, `.envrc` or `.vscode` is held back like the top folder's.
-- **Detection** (`luoto init`, toolchain installs on `up`) reads the repositories in the
-  folder, which git in the folder doesn't list.
-- **Claude Code starts at its prompt:** luoto answers its first-start questions (onboarding,
-  trusting `/workspace`) in the env, as the sandbox is the boundary; an agent profile lists
-  such answers under `[[first_run]]`. The text style stays `theme` in your own settings.
-- **Copies follow `.gitignore`:** from a git repository (the folder, a repo, or one inside),
-  `up` copies what git doesn't ignore plus `.git`, so ignored secrets (`.env`, `*.tfvars`, state
-  files, `.kube/`) stay on your machine. Other folders copy all but heavy directories and
-  `.terraform`, which holds the host's provider binaries.
+- From a git repository, `up` copies what git doesn't ignore plus `.git`, so ignored secrets
+  (`.env`, `*.tfvars`) stay on your machine; other folders copy all but heavy directories and
+  `.terraform`.
+- `luoto pull` takes each copied-in repo back to its own folder, cloned ones only with
+  `--repo`, and holds back risky files in nested folders too.
+- Claude Code starts at its prompt: luoto answers its first-start questions in the env.
 
 ### Fixed
 
-- **The UI never waits on a terminal:** an `up` it starts asks nothing on the terminal running
-  `luoto ui`, where a changed `luoto.toml` could leave it waiting.
+- An `up` started from the UI could wait on the terminal running `luoto ui`.
 
 ### Security
 
-- **Credentials coming back:** on a credentialed host the gate refuses a response that carries
-  the credential it placed, in its headers or the start of its body; from a JSON body (an LFS
-  server's answer) it removes the fields that carry it.
-- **Pushes:** push options are refused; at a forge they can open merge requests or skip CI.
-- **Credentialed paths:** paths with `;` or an encoded `/` or `\`, and `TRACE`, are refused; a
-  repo's credential goes on its smart-HTTP and LFS paths only.
-- **Private addresses:** `luoto allow --private` and `private = true` never reach loopback,
-  cloud metadata or luoto's own networks.
-- **Explicit denies** (GitHub Actions, releases, …) match paths in any case.
-- **Loopback only:** luoto's SSH config sets `GatewayPorts no`, so an editor's port forwards
-  stay on localhost, and a published port's relay refuses the vault network.
+- On a credentialed host the gate refuses a response that carries the credential it placed,
+  paths with `;` or an encoded `/` or `\`, and `TRACE`; a repo's credential goes on its
+  smart-HTTP and LFS paths only.
+- Push options are refused: at a forge they can open merge requests or skip CI.
+- `luoto allow --private` and `private = true` never reach loopback, cloud metadata or
+  luoto's own networks, and an editor's port forwards stay on localhost.
+- Explicit denies (GitHub Actions, releases, …) match paths in any case.
 
 ## [0.2.2] - 2026-11-06
 
 ### Added
 
-- **Terraform and OpenTofu:** `luoto init` finds them by their version files, module files
-  (`main.tf`, `versions.tf`, their `.tofu` forms) and the lock file (whose providers' registry
-  tells the two apart), sets the version an exact `required_version` names, and adds the
-  `terraform` or `opentofu` preset for the provider and module registry. Terraform's update
-  check is off (`CHECKPOINT_DISABLE`).
-- **Presets set environment:** a preset's `env` reaches the env's shells, as an agent's does.
+- `luoto init` detects Terraform and OpenTofu, sets the version an exact `required_version`
+  names and adds the `terraform` or `opentofu` preset.
+- A preset's `env` reaches the env's shells.
 
 ### Changed
 
-- **Image pulls:** `up` and `init` pull every missing image themselves (after an upgrade, all
-  of luoto's), naming each and showing the runtime's progress, where a slow pull looked hung
-  and luoto's own images waited for `luoto setup`.
-- **Path rules:** a path ending in `/**` also covers the path it is under, so `/basedpyright/**`
-  (as the UI offers it) allows the package's metadata at `/basedpyright` as well as its files.
-  It widens the same way in deny rules and where credentials go.
+- `up` and `init` pull every missing image themselves, showing progress.
+- A path ending in `/**` also covers the path it is under (`/pkg/**` allows `/pkg`), in allow
+  and deny rules and where credentials go.
 
 ## [0.2.1] - 2026-11-05
 
 ### Changed
 
-- **Homebrew tap:** luoto is in `eetu/tap` now. `brew install eetu/tap/luoto` installs it and
-  trusts that formula only. For an install from `eetu/luoto`, `brew update` names the steps:
-  Homebrew moves a formula only into a tap you trust.
+- luoto's Homebrew tap is `eetu/tap`: `brew install eetu/tap/luoto`. For an install from
+  `eetu/luoto`, `brew update` names the steps.
 
 ## [0.2.0] - 2026-11-05
 
 ### Added
 
-- **`luoto-dev`:** a source build is its own instance in the same VM, with config in
-  `~/.config/luoto-dev`, `luoto-dev-<env>` containers, and its own vault, keychain service and
-  UI port (47879). `just link-dev` links `~/.local/bin/luoto-dev` to the checkout's debug
-  build. Env names can't be `dev` or start with `dev-`.
-- **Config format:** config files may carry `version` (1 when missing); luoto refuses a file
-  from a newer luoto.
+- `luoto-dev`: a source build is its own instance, with config in `~/.config/luoto-dev` and
+  its own containers, vault, keychain service and UI port (47879). Env names can't be `dev`
+  or start with `dev-`.
+- Config files may carry `version` (1 when missing); luoto refuses a file from a newer luoto.
 
 ### Changed
 
-- Fixes from a security review, model APIs kept from fetching for the sandbox, agents that work
-  without a credential, and a dev build that runs beside a release.
-- **Agents without a credential log in inside the env.** With none chosen ("later", no
-  terminal, or a new env from the UI), a provider that allows it gets `login_inside = true`, and
-  luoto says how to keep a credential outside instead.
-- **`init --agent`** asks for each new agent's credential before the env comes up; without a
-  terminal it prints the config snippet.
-- **Fewer runtime calls:** `up` inspects images once, writes `/run/luoto` in one go and skips
-  steps that changed nothing: 26 calls into the VM for an env that is already up. The UI polls
-  with one `ps` per tick.
-- **UI:** the overview says when the VM is stopped, rebuild starts it first, and the header
-  names the instance.
+- An agent with no credential chosen logs in inside the env (`login_inside = true`) where
+  its provider allows it; `init --agent` asks for each new agent's credential first.
+- `up` makes fewer calls into the VM: 26 for an env that is already up.
 
 ### Fixed
 
-- **A new gate restarts the dev container:** when `up` replaces an env's gate (a luoto
-  upgrade, new ports), a running dev container restarts with it; it couldn't reach the new
-  gate, so the self-test failed and stopped it. What runs in it stops.
-- **`sandbox check`** normalizes a request as the gate does (upper-case method).
-- **luoto.toml:** agents it lists stay out of your env file. One declined under 0.1.0 is
-  offered once more.
+- When `up` replaced an env's gate (a luoto upgrade, new ports), a running dev container
+  couldn't reach the new one and was stopped; it restarts with the gate.
+- Agents a `luoto.toml` lists stay out of your env file.
+- `sandbox check` reads a lower-case method as the gate does.
 
 ### Security
 
-- **Query credentials:** the gate's Gemini `key` reaches Google instead of the one the sandbox
-  sent, and a header the client lists in `Connection` can't drop an injected credential.
-- **Tunnels:** an open tunnel closes once no tunnel rule admits its host and port.
-- **`approve`** asks to accept the rule's risks, as `allow` does; `--force` (in the UI,
-  "approve anyway") skips the question.
-- **Self-test:** runs whenever `up` restarts a container, agent installs and project accepts
-  included, unless `--no-selftest`.
-- **Vault:** refuses an ssh-agent binding before reading its key.
-- **Model API server tools:** the gate refuses requests asking Anthropic, OpenAI or Gemini to
-  fetch a URL or call an MCP server for the sandbox (web fetch, the MCP connector, URL
-  context, remote MCP), and OpenAI's WebSocket API, unless `server_tools = true` under
+- The gate refuses requests asking Anthropic, OpenAI or Gemini to fetch a URL or call an MCP
+  server for the sandbox, and OpenAI's WebSocket API, unless `server_tools = true` under
   `[credentials.<provider>]`.
+- The gate's Gemini `key` replaces the one the sandbox sent, and a header the client lists in
+  `Connection` can't drop an injected credential.
+- An open tunnel closes once no tunnel rule admits its host and port.
+- `luoto approve` asks to accept the rule's risks, as `allow` does; `--force` skips the
+  question.
+- The self-test runs whenever `up` restarts a container, unless `--no-selftest`.
+- The vault refuses an ssh-agent binding before reading its key.
 
 ## [0.1.0] - 2026-11-04
 
