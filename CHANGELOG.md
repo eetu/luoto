@@ -71,8 +71,7 @@ release may break.
 - An env never stopped after `idle_stop`: luoto's own processes in it counted as work.
 - `luoto pull` stopped at the first file it couldn't write, reset a file's permissions to
   0644 or 0755, and didn't say when the env's files couldn't all be read.
-- `luoto run --down` and `--rm` left the env running when the agent's answer couldn't be
-  written.
+- `luoto run --down` left the env running when the agent's answer couldn't be written.
 
 ### Security
 
