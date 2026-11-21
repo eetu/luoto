@@ -96,10 +96,19 @@ struct Permit {
     until: Instant,
     /// The rule whose response named the URL, for the request's event.
     from: String,
+    /// The URL may be on a private address (`Redirect::allow_private`).
+    private: bool,
+}
+
+/// What a permit lets through: the rule that named the URL, and whether it may be private.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Granted {
+    pub from: String,
+    pub private: bool,
 }
 
 impl Permits {
-    pub fn grant(&self, url: Url, from: &str, now: Instant) {
+    pub fn grant(&self, url: Url, from: &str, private: bool, now: Instant) {
         let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
         open.retain(|_, p| p.until > now);
         if open.len() >= MAX && !open.contains_key(&url) {
@@ -116,19 +125,21 @@ impl Permits {
             Permit {
                 until: now + TTL,
                 from: from.to_string(),
+                private,
             },
         );
     }
 
-    /// The rule that named `url`, while its permit lasts, for GET and HEAD.
-    pub fn allows(&self, method: &str, url: &Url, now: Instant) -> Option<String> {
+    /// What named `url`, while its permit lasts, for GET and HEAD.
+    pub fn allows(&self, method: &str, url: &Url, now: Instant) -> Option<Granted> {
         if method != "GET" && method != "HEAD" {
             return None;
         }
         let open = self.open.lock().unwrap_or_else(|e| e.into_inner());
-        open.get(url)
-            .filter(|p| p.until > now)
-            .map(|p| p.from.clone())
+        open.get(url).filter(|p| p.until > now).map(|p| Granted {
+            from: p.from.clone(),
+            private: p.private,
+        })
     }
 
     pub fn clear(&self) {
@@ -183,13 +194,16 @@ mod tests {
         let permits = Permits::default();
         let now = Instant::now();
         let url = Url::redirect(LOCATION, STORAGE, no_plain).unwrap();
-        permits.grant(url, "azure-feeds", now);
+        permits.grant(url, "azure-feeds", false, now);
         let host = "abcvsblobprodweu1.blob.core.windows.net";
         // The client may escape the query its own way.
         let asked = Url::of(true, host, 443, "/b-1/F00.blob", "?sv=2019&sig=a+b%3D&se=x");
         assert_eq!(
-            permits.allows("GET", &asked, now).as_deref(),
-            Some("azure-feeds")
+            permits.allows("GET", &asked, now),
+            Some(Granted {
+                from: "azure-feeds".into(),
+                private: false
+            })
         );
         assert!(permits.allows("HEAD", &asked, now + TTL / 2).is_some());
         assert!(permits.allows("PUT", &asked, now).is_none());
@@ -209,12 +223,28 @@ mod tests {
     }
 
     #[test]
+    fn a_permit_reaches_a_private_address_only_where_its_redirect_said() {
+        let permits = Permits::default();
+        let now = Instant::now();
+        let store = |p: &str| Url::of(true, "minio.acme.internal", 443, p, "X-Amz-Signature=a");
+        permits.grant(store("/own"), "git-1-feeds", true, now);
+        permits.grant(store("/public"), "azure-feeds", false, now);
+        assert!(permits.allows("GET", &store("/own"), now).unwrap().private);
+        assert!(
+            !permits
+                .allows("GET", &store("/public"), now)
+                .unwrap()
+                .private
+        );
+    }
+
+    #[test]
     fn permits_are_bounded_dropping_the_first_to_expire() {
         let permits = Permits::default();
         let start = Instant::now();
         let url = |i: usize| Url::of(true, "s.blob.core.windows.net", 443, &format!("/{i}"), "");
         for i in 0..=MAX {
-            permits.grant(url(i), "r", start + Duration::from_millis(i as u64));
+            permits.grant(url(i), "r", false, start + Duration::from_millis(i as u64));
         }
         let now = start + Duration::from_millis(MAX as u64);
         assert!(permits.allows("GET", &url(0), now).is_none());

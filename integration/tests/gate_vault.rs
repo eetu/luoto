@@ -957,6 +957,7 @@ async fn a_feeds_redirect_to_storage_opens_that_url_alone_for_reads() {
             paths,
             ignore_case: true,
             to: vec!["*.blob.test".into()],
+            ..Default::default()
         }],
         ..Default::default()
     });

@@ -512,7 +512,7 @@ impl Open {
 /// `to` lets that exact URL through for GET and HEAD, for a while (the gate's redirect
 /// permits). Only credentials add one, for a service whose downloads redirect to signed
 /// storage URLs on hosts no list can name.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Redirect {
     pub host: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -522,6 +522,9 @@ pub struct Redirect {
     pub ignore_case: bool,
     /// Host patterns the redirect may name.
     pub to: Vec<String>,
+    /// The targets may be on private addresses (a self-hosted service's own storage).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_private: bool,
 }
 
 /// Name the gate answers itself in DNS (the gate, env services).
@@ -730,6 +733,16 @@ impl Policy {
             .filter(|r| r.paths.is_empty() || glob::matches_any(&r.paths, r.ignore_case, path))
             .flat_map(|r| r.to.iter().map(String::as_str))
             .collect()
+    }
+
+    /// Whether a redirect from `host` at `path` to `to` may reach a private address there.
+    pub fn redirect_private(&self, host: &str, path: &str, to: &str) -> bool {
+        self.redirects.iter().any(|r| {
+            r.allow_private
+                && host_matches(&r.host, host)
+                && (r.paths.is_empty() || glob::matches_any(&r.paths, r.ignore_case, path))
+                && r.to.iter().any(|t| host_matches(t, to))
+        })
     }
 
     /// Open egress, while it is open.

@@ -327,12 +327,12 @@ async fn handle_inner(
     let here = Url::of(target.tls, &target.host, target.port, &path, query);
     let permit = state.redirects.allows(&method, &here, Instant::now());
     let decision = match &permit {
-        Some(from) => match policy.explicitly_denied(&info) {
+        Some(granted) => match policy.explicitly_denied(&info) {
             Some(reason) => Decision::Deny(reason),
             None => Decision::Allow {
-                rule: format!("redirect from {from}"),
+                rule: format!("redirect from {}", granted.from),
                 max_body: None,
-                allow_private: false,
+                allow_private: granted.private,
                 idle: None,
             },
         },
@@ -560,7 +560,8 @@ async fn handle_inner(
         if let (false, Some(loc)) = (to.is_empty(), location.and_then(|l| l.to_str().ok())) {
             let plain = |host: &str| test_server(&state, host).is_some();
             if let Some(url) = Url::redirect(loc, &to, plain) {
-                state.redirects.grant(url, &rule, Instant::now());
+                let private = policy.redirect_private(&target.host, &path, &url.host);
+                state.redirects.grant(url, &rule, private, Instant::now());
             }
         }
     }
