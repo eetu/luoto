@@ -15,7 +15,7 @@ use luoto_shared::creds::{
 };
 use luoto_shared::policy::{
     Access, AccessLevel, AzureGuard, BodyDeny, CompiledRule, DenyRule, GitGuard, GithubGuard,
-    InternalName, Mode, Open, Policy, READ_METHODS, Rule, RuleOrigin, rule_error,
+    InternalName, Mode, Open, Policy, READ_METHODS, Redirect, Rule, RuleOrigin, rule_error,
 };
 use luoto_shared::{forges, presets, profiles};
 
@@ -99,6 +99,7 @@ struct Builder {
     tenant_from: Option<String>,
     /// Hosts on this machine that take credentials over plain HTTP (model servers).
     plain_http_credentials: Vec<String>,
+    redirects: Vec<Redirect>,
 }
 
 impl Builder {
@@ -182,10 +183,7 @@ pub fn compile(
         }
     }
     let (azure_devops, azure_repos) = match &cfg.credentials.azure_devops {
-        Some(c) => {
-            let (guard, repos) = compile_azure(&mut b, c)?;
-            (Some(guard), repos)
-        }
+        Some(c) => compile_azure(&mut b, c)?,
         None => (None, Vec::new()),
     };
     b.rewrites.extend(azure::rewrites(
@@ -288,6 +286,7 @@ pub fn compile(
         azure: azure_identity,
         open,
         plain_http_credentials: b.plain_http_credentials,
+        redirects: b.redirects,
     };
     // A tunnel passes bytes unread: one you or a repository wrote can't cover a host whose
     // credentials, forge guards or denies the gate applies (`luoto allow` refuses it too).
@@ -1533,20 +1532,27 @@ fn compile_azure_identity(b: &mut Builder, c: &AzureCred) -> Result<AzureIdentit
     Ok(identity)
 }
 
-/// Azure DevOps: the PAT added as basic auth on the repos' git paths, those paths allowed
-/// (case-insensitively, as Azure DevOps reads them) and the push guard. The guard, and the
-/// repos for the remote rewrites ([`azure::rewrites`]).
-fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Vec<azure::Repo>)> {
-    if c.repos.is_empty() && c.read_repos.is_empty() {
+/// Azure DevOps: its repos ([`compile_azure_git`]) and its feeds ([`compile_azure_feeds`]),
+/// with one PAT. The push guard when it has repos, and the repos for the remote rewrites
+/// ([`azure::rewrites`]).
+fn compile_azure(
+    b: &mut Builder,
+    c: &AzureDevopsCred,
+) -> Result<(Option<AzureGuard>, Vec<azure::Repo>)> {
+    if c.repos.is_empty() && c.read_repos.is_empty() && c.feeds.is_empty() {
         bail!(
-            "credentials.azure_devops: list the repos the env may use (`repos = [\"org/project/repo\"]`, or `read_repos` for fetch only)"
+            "credentials.azure_devops: list the repos the env may use (`repos = [\"org/project/repo\"]`, or `read_repos` for fetch only) or the feeds it installs from (`feeds = [\"org/project/feed\"]`)"
         );
     }
     let parse = |list: &[String]| -> Result<Vec<azure::Repo>> {
         list.iter().map(|r| azure::parse_repo(r)).collect()
     };
     let (writable, readable) = (parse(&c.repos)?, parse(&c.read_repos)?);
-    let repos: Vec<azure::Repo> = writable.iter().chain(&readable).cloned().collect();
+    let feeds = c
+        .feeds
+        .iter()
+        .map(|f| azure::parse_feed(f))
+        .collect::<Result<Vec<_>>>()?;
     b.bind(
         "azure_devops",
         BindingSpec::Static {
@@ -1554,6 +1560,78 @@ fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Ve
         },
         Origin::AzureDevops,
     );
+    compile_azure_feeds(b, &feeds);
+    if writable.is_empty() && readable.is_empty() {
+        return Ok((None, Vec::new()));
+    }
+    let guard = compile_azure_git(b, c, &writable, &readable);
+    Ok((Some(guard), writable.into_iter().chain(readable).collect()))
+}
+
+/// The organizations' feeds: the PAT as basic auth on their packaging paths, for reads, on
+/// both hosts; and their downloads' redirects to storage. By organization, as feeds' own
+/// links name the project and feed by ID.
+fn compile_azure_feeds(b: &mut Builder, feeds: &[azure::Feed]) {
+    let mut orgs: Vec<String> = feeds.iter().map(|f| f.org.to_ascii_lowercase()).collect();
+    orgs.sort();
+    orgs.dedup();
+    let mut sites: Vec<(String, Vec<String>)> = Vec::new();
+    let new_paths: Vec<String> = orgs
+        .iter()
+        .flat_map(|o| {
+            [
+                format!("/{o}/_packaging/**"),
+                format!("/{o}/*/_packaging/**"),
+            ]
+        })
+        .collect();
+    if !new_paths.is_empty() {
+        sites.push((azure::PKGS_HOST.to_string(), new_paths));
+    }
+    for o in &orgs {
+        let legacy = vec!["/_packaging/**".to_string(), "/*/_packaging/**".to_string()];
+        sites.push((azure::legacy_pkgs_host(o), legacy));
+    }
+    for (host, paths) in sites {
+        b.injections.push(Injection {
+            binding: "azure_devops".into(),
+            host: host.clone(),
+            paths: paths.clone(),
+            methods: methods(&["GET", "HEAD"]),
+            place: Placement::Basic {
+                username: String::new(),
+            },
+            ignore_case: true,
+        });
+        b.rule(
+            "azure-feeds".into(),
+            "azure_devops",
+            Rule {
+                host: host.clone(),
+                access: Access::Level(AccessLevel::Read),
+                paths: paths.clone(),
+                ignore_case: true,
+                ..Default::default()
+            },
+        );
+        b.redirects.push(Redirect {
+            host,
+            paths,
+            ignore_case: true,
+            to: vec![azure::FEED_STORAGE.into()],
+        });
+    }
+}
+
+/// The repos: the PAT added as basic auth on their git paths, those paths allowed
+/// (case-insensitively, as Azure DevOps reads them), pull requests over REST and the push
+/// guard.
+fn compile_azure_git(
+    b: &mut Builder,
+    c: &AzureDevopsCred,
+    writable: &[azure::Repo],
+    readable: &[azure::Repo],
+) -> AzureGuard {
     let paths: Vec<String> = writable
         .iter()
         .flat_map(|r| r.git_paths(true))
@@ -1587,7 +1665,7 @@ fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Ve
     let mut reads = Vec::new();
     let mut posts = Vec::new();
     let mut patches = Vec::new();
-    for r in &writable {
+    for r in writable {
         let base = r.api_base();
         reads.extend([
             base.clone(),
@@ -1677,12 +1755,11 @@ fn compile_azure(b: &mut Builder, c: &AzureDevopsCred) -> Result<(AzureGuard, Ve
         });
     }
     b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
-    let guard = AzureGuard {
+    AzureGuard {
         repos: writable.iter().map(azure::Repo::key).collect(),
         protected_branches: c.protected_branches.clone(),
         allow_tags: c.allow_tags,
-    };
-    Ok((guard, repos))
+    }
 }
 
 #[cfg(test)]
@@ -1838,6 +1915,77 @@ read_repos = ["fabrikam/Infra/lib"]
             &one.to_uppercase(),
             r#"{"autoCompleteSetBy":{"id":"x"}}"#
         ));
+    }
+
+    #[test]
+    fn azure_devops_feeds_get_the_token_on_their_organizations_packaging_for_installs() {
+        let text = r#"
+[credentials.azure_devops]
+token = "op://v/ado/pat"
+feeds = ["https://pkgs.dev.azure.com/acme/Web/_packaging/packages/pypi/simple/", "contoso/tools"]
+"#;
+        let c = compile("t", &cfg(text), GATE, &alias()).unwrap();
+        let p = &c.policy;
+        assert!(p.azure_devops.is_none(), "no repos, no push guard");
+        let allowed = |host: &str, method: &str, path: &str| {
+            matches!(decide(p, host, method, path), Decision::Allow { .. })
+        };
+        let pkgs = "pkgs.dev.azure.com";
+        // Index links name the project and feed by ID.
+        let by_id = "/acme/e4feb996-a367/_packaging/a8c2c84c-764c/pypi/download/six/1.17/six.whl";
+        for path in [
+            "/acme/Web/_packaging/packages/pypi/simple/six/",
+            "/ACME/web/_packaging/Packages/npm/registry/left-pad",
+            by_id,
+            "/acme/_packaging/org-feed/nuget/v3/index.json",
+            "/contoso/_packaging/tools/maven/v1/junit/junit/4.13.2/junit-4.13.2.jar",
+        ] {
+            assert!(allowed(pkgs, "GET", path), "{path}");
+            assert!(!p.injections_for("GET", pkgs, path).is_empty(), "{path}");
+            assert_eq!(p.redirect_targets("GET", pkgs, path), [azure::FEED_STORAGE]);
+        }
+        assert!(allowed(
+            "acme.pkgs.visualstudio.com",
+            "GET",
+            "/Web/_packaging/packages/pypi/simple/"
+        ));
+        for (host, method, path) in [
+            (pkgs, "PUT", "/acme/Web/_packaging/packages/npm/registry/x"),
+            (pkgs, "POST", "/acme/Web/_packaging/packages/pypi/upload/"),
+            (pkgs, "GET", "/other/Web/_packaging/packages/pypi/simple/"),
+            (pkgs, "GET", "/acme/Web/_apis/git/repositories"),
+            ("dev.azure.com", "GET", "/acme/Web/_git/site/info/refs"),
+            (
+                "other.pkgs.visualstudio.com",
+                "GET",
+                "/_packaging/x/pypi/simple/",
+            ),
+        ] {
+            assert!(!allowed(host, method, path), "{method} {host}{path}");
+        }
+        assert!(p.injections_for("PUT", pkgs, by_id).is_empty());
+        assert!(p.redirect_targets("POST", pkgs, by_id).is_empty());
+        assert!(
+            p.redirect_targets("GET", "dev.azure.com", "/acme/Web/_git/site")
+                .is_empty()
+        );
+        assert!(c.vault_refs().contains("op://v/ado/pat"));
+    }
+
+    #[test]
+    fn an_azure_devops_credential_lists_repos_or_feeds() {
+        let text = "[credentials.azure_devops]\ntoken = \"env:X\"\n";
+        let e = compile("t", &cfg(text), GATE, &alias())
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(e.contains("feeds"), "{e}");
+        let bad = format!("{text}feeds = [\"acme\"]\n");
+        let e = compile("t", &cfg(&bad), GATE, &alias())
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(e.contains("org/project/feed"), "{e}");
     }
 
     #[test]

@@ -325,7 +325,8 @@ pub struct SshCred {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AzureDevopsCred {
-    /// Ref to a PAT with Code (Read & write) in the repos' organization.
+    /// Ref to a PAT with Code (Read & write) in the repos' organization, Packaging (Read) in
+    /// the feeds'.
     pub token: String,
     /// `org/project/repo` (or a clone URL) the env may fetch and push.
     #[serde(default)]
@@ -333,6 +334,9 @@ pub struct AzureDevopsCred {
     /// Repos the env may only fetch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_repos: Vec<String>,
+    /// Package feeds the env installs from: `org/project/feed`, `org/feed` or a feed URL.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feeds: Vec<String>,
     #[serde(default = "default_protected")]
     pub protected_branches: Vec<String>,
     #[serde(default)]
@@ -1342,6 +1346,64 @@ impl EnvFile {
         self.save()
     }
 
+    /// Add `feeds` (`org/project/feed` or `org/feed`) to `[credentials.azure_devops]`,
+    /// created with `token` when missing; `token` replaces the table's when given.
+    pub fn add_azure_feeds(&mut self, token: Option<&str>, feeds: &[String]) -> Result<()> {
+        let path = self.path.display().to_string();
+        let creds = self.credentials_table()?;
+        if creds.get("azure_devops").is_none() {
+            let token = token.context("a new Azure DevOps credential needs its token")?;
+            let mut t = toml_edit::Table::new();
+            t["token"] = toml_edit::value(token);
+            creds.insert("azure_devops", toml_edit::Item::Table(t));
+        }
+        let table = creds
+            .get_mut("azure_devops")
+            .and_then(|i| i.as_table_mut())
+            .with_context(|| {
+                format!(
+                    "`credentials.azure_devops` in {path} is an inline table, which luoto doesn't \
+                     change"
+                )
+            })?;
+        if let Some(token) = token {
+            table["token"] = toml_edit::value(token);
+        }
+        push_unique(table, "feeds", feeds);
+        self.save()
+    }
+
+    /// Drop the feeds `same` tells from `[credentials.azure_devops]`, and the table when it
+    /// then lists no repo or feed. Whether one was listed.
+    pub fn remove_azure_feed(&mut self, same: &dyn Fn(&str) -> bool) -> Result<bool> {
+        let Some(creds) = self
+            .doc
+            .get_mut("credentials")
+            .and_then(|c| c.as_table_like_mut())
+        else {
+            return Ok(false);
+        };
+        let Some(t) = creds.get_mut("azure_devops").and_then(|i| i.as_table_mut()) else {
+            return Ok(false);
+        };
+        let Some(arr) = t.get_mut("feeds").and_then(|i| i.as_array_mut()) else {
+            return Ok(false);
+        };
+        let before = arr.len();
+        arr.retain(|v| !v.as_str().is_some_and(same));
+        if arr.len() == before {
+            return Ok(false);
+        }
+        if arr.is_empty() {
+            t.remove("feeds");
+        }
+        if lists_nothing(t) {
+            creds.remove("azure_devops");
+        }
+        self.save()?;
+        Ok(true)
+    }
+
     /// Move a repo within the `[credentials.<key>]` table (`github`, `azure_devops`, or `git`
     /// of `host`) that lists it, `same` telling its entries: into `repos` or `read_repos`, or
     /// out of both, and out of every other table of `key`. `token` replaces that table's. Its
@@ -1423,13 +1485,7 @@ impl EnvFile {
         if !found {
             return Ok(Relisted::No);
         }
-        let lists_none = |t: &toml_edit::Table| {
-            ["repos", "read_repos"].iter().all(|k| {
-                t.get(k)
-                    .and_then(|i| i.as_array())
-                    .is_none_or(|a| a.is_empty())
-            })
-        };
+        let lists_none = |t: &toml_edit::Table| lists_nothing(t);
         let mut emptied = false;
         match creds.get_mut(key) {
             Some(toml_edit::Item::Table(t)) if lists_none(t) => {
@@ -1838,6 +1894,15 @@ pub enum Relisted {
     Moved,
     /// It was the last repo of its credential, which is gone.
     Emptied,
+}
+
+/// A credential table that lists no repo and no feed, which none may be.
+fn lists_nothing(t: &toml_edit::Table) -> bool {
+    ["repos", "read_repos", "feeds"].iter().all(|k| {
+        t.get(k)
+            .and_then(|i| i.as_array())
+            .is_none_or(|a| a.is_empty())
+    })
 }
 
 fn push_unique(table: &mut toml_edit::Table, key: &str, values: &[String]) {
@@ -2412,6 +2477,41 @@ host = "telemetry.example"
         assert_eq!((ado.repos.len(), ado.read_repos.len()), (1, 1));
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("[[credentials.github]]") && saved.contains("# my env"));
+    }
+
+    #[test]
+    fn feeds_join_the_azure_devops_credential_and_leave_it_with_its_repos() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        std::fs::write(&path, SAMPLE).unwrap();
+        let mut f = EnvFile::parse(path.clone(), SAMPLE).unwrap();
+        assert!(
+            f.add_azure_feeds(None, &["acme/Web/packages".into()])
+                .is_err()
+        );
+        f.add_azure_feeds(Some("op://v/ado/pat"), &["acme/Web/packages".into()])
+            .unwrap();
+        f.add_azure_feeds(None, &["ACME/web/packages".into(), "acme/tools".into()])
+            .unwrap();
+        f.add_azure_repos(None, &["acme/Web/site".into()], true)
+            .unwrap();
+        let ado = f.cfg.credentials.azure_devops.as_ref().unwrap();
+        assert_eq!(ado.feeds, ["acme/Web/packages", "acme/tools"]);
+        assert_eq!(ado.token, "op://v/ado/pat");
+        // The last repo goes; the feeds keep the credential.
+        let same = |e: &str| e == "acme/Web/site";
+        assert!(matches!(
+            f.relist_repo("azure_devops", None, &same, ListAs::Nowhere, None)
+                .unwrap(),
+            Relisted::Moved
+        ));
+        assert!(f.remove_azure_feed(&|e| e == "acme/tools").unwrap());
+        assert!(!f.remove_azure_feed(&|e| e == "acme/tools").unwrap());
+        assert!(f.cfg.credentials.azure_devops.is_some());
+        assert!(f.remove_azure_feed(&|e| e == "acme/Web/packages").unwrap());
+        assert!(f.cfg.credentials.azure_devops.is_none());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("azure_devops") && saved.contains("# my env"));
     }
 
     #[test]

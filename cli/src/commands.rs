@@ -1552,6 +1552,12 @@ pub fn egress(
             // No rule opens these (the metadata service, the gate's own ranges): the message
             // says what does, if anything.
             s.last_message.clone().unwrap_or_default()
+        } else if s.denied > 0 && crate::azure::is_feed_host(&s.host) {
+            // A private feed: a rule alone gets its 401; the env's token opens it.
+            format!(
+                "{} → an Azure DevOps feed: luoto feed add -e {name} <feed URL>",
+                s.last_message.clone().unwrap_or_default()
+            )
         } else if s.denied > 0 && s.last_reason.as_deref() == Some("path_not_allowed") {
             // Other paths of the host are open (a relay may be open only for some): allowing
             // all of it would undo that.

@@ -24,6 +24,7 @@ mod disk;
 mod egress;
 mod env;
 mod events;
+mod feeds;
 mod format;
 #[cfg(unix)]
 mod hostdial;
@@ -355,6 +356,13 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<VarCmd>,
     },
+    /// Azure DevOps package feeds the env installs from.
+    ///
+    /// The gate adds the env's Azure DevOps token on the feeds' organization, for installs.
+    Feed {
+        #[command(subcommand)]
+        action: Option<FeedCmd>,
+    },
     /// Folders of this machine the env reads at /shares/<name>.
     ///
     /// Read-only: data too large for a repo (recordings, datasets).
@@ -608,6 +616,30 @@ enum RepoCmd {
     Auth {
         /// The repo's name in the workspace, or its path on the forge (`acme/api`).
         repo: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FeedCmd {
+    /// The feeds the env installs from.
+    #[command(visible_alias = "ls")]
+    List,
+    /// Install from a feed, with the env's Azure DevOps token.
+    Add {
+        /// The feed's URL as your package manager's settings have it, or `org/project/feed`
+        /// (`org/feed` for an organization's).
+        #[arg(value_name = "FEED")]
+        feed: String,
+        /// Where the PAT is kept (`op://…`, `keyring:…`, `env:NAME`), when the env has no Azure
+        /// DevOps credential yet; asked on a terminal.
+        #[arg(long, value_name = "REF")]
+        token: Option<String>,
+    },
+    /// Stop installing from a feed.
+    Rm {
+        /// The feed as `luoto feed` lists it, or its URL.
+        #[arg(value_name = "FEED")]
+        feed: String,
     },
 }
 
@@ -953,6 +985,11 @@ fn run(env_arg: Option<String>, cmd: Cmd) -> Result<ExitCode> {
             } => repos::add(&env()?, &source, name.as_deref(), branch.as_deref(), inside),
             RepoCmd::Rm { name } => repos::rm(&env()?, &name),
             RepoCmd::Auth { repo } => repos::auth(&env()?, &repo),
+        },
+        Cmd::Feed { action } => match action.unwrap_or(FeedCmd::List) {
+            FeedCmd::List => feeds::list(&env()?),
+            FeedCmd::Add { feed, token } => feeds::add(&env()?, &feed, token.as_deref()),
+            FeedCmd::Rm { feed } => feeds::rm(&env()?, &feed),
         },
         Cmd::Share { action } => match action.unwrap_or(ShareCmd::List) {
             ShareCmd::List => shares::list(&env()?),

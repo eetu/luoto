@@ -157,6 +157,109 @@ pub fn parse_repo(entry: &str) -> Result<Repo> {
     }
 }
 
+/// The host of Azure Artifacts' feeds; an organization's legacy one is
+/// [`legacy_pkgs_host`].
+pub const PKGS_HOST: &str = "pkgs.dev.azure.com";
+/// Where a feed's stored packages download from: signed URLs on Azure Storage, a host per
+/// blob.
+pub const FEED_STORAGE: &str = "*.blob.core.windows.net";
+
+pub fn legacy_pkgs_host(org: &str) -> String {
+    format!("{}.pkgs.visualstudio.com", org.to_ascii_lowercase())
+}
+
+/// Whether `host` serves Azure DevOps feeds.
+pub fn is_feed_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == PKGS_HOST || host.ends_with(".pkgs.visualstudio.com")
+}
+
+/// A package feed, each part as its URLs write it (percent-encoded); an organization feed
+/// has no project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Feed {
+    pub org: String,
+    pub project: Option<String>,
+    pub name: String,
+}
+
+impl Feed {
+    /// `org/project/feed` or `org/feed`, names as you see them: what `feeds` keeps.
+    pub fn entry(&self) -> String {
+        let mut parts = vec![decode(&self.org)];
+        parts.extend(self.project.as_deref().map(decode));
+        parts.push(decode(&self.name));
+        parts.join("/")
+    }
+}
+
+/// One `feeds` entry: `org/project/feed`, `org/feed`, or a URL of the feed as package
+/// managers' settings write it (`https://pkgs.dev.azure.com/org/project/_packaging/feed/…`,
+/// `https://org.pkgs.visualstudio.com/…`, an `.npmrc` key's `//pkgs.dev.azure.com/…`), a view
+/// (`feed@Release`) as its feed.
+pub fn parse_feed(entry: &str) -> Result<Feed> {
+    let bad = || {
+        anyhow::anyhow!(
+            "credentials.azure_devops: feeds are `org/project/feed`, `org/feed` or a feed URL \
+             (got `{entry}`)"
+        )
+    };
+    let part = |s: &str| {
+        let s = s.trim();
+        let s = s.split('@').next().unwrap_or(s);
+        (!s.is_empty() && !s.contains(['?', '#', '\\'])).then(|| encode(&decode(s)))
+    };
+    let e = entry.trim();
+    let url = e
+        .strip_prefix("https://")
+        .or_else(|| e.strip_prefix("http://"))
+        .or_else(|| e.strip_prefix("//"));
+    let (org, project, name) = match url {
+        Some(rest) => {
+            let (authority, path) = rest.split_once('/').ok_or_else(bad)?;
+            let host = authority.rsplit('@').next().unwrap_or(authority);
+            let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+            let seg: Vec<&str> = path.split('/').collect();
+            let at = seg
+                .iter()
+                .position(|s| *s == "_packaging")
+                .ok_or_else(bad)?;
+            let feed = seg.get(at + 1).ok_or_else(bad)?;
+            if host == PKGS_HOST {
+                match &seg[..at] {
+                    [org] => (org.to_string(), None, feed.to_string()),
+                    [org, project] => {
+                        (org.to_string(), Some(project.to_string()), feed.to_string())
+                    }
+                    _ => return Err(bad()),
+                }
+            } else {
+                let org = host
+                    .strip_suffix(".pkgs.visualstudio.com")
+                    .ok_or_else(bad)?;
+                match &seg[..at] {
+                    [] => (org.to_string(), None, feed.to_string()),
+                    [project] => (org.to_string(), Some(project.to_string()), feed.to_string()),
+                    _ => return Err(bad()),
+                }
+            }
+        }
+        None => match e.split('/').collect::<Vec<_>>().as_slice() {
+            [org, feed] => (org.to_string(), None, feed.to_string()),
+            [org, project, feed] => (org.to_string(), Some(project.to_string()), feed.to_string()),
+            _ => return Err(bad()),
+        },
+    };
+    Ok(Feed {
+        org: part(&org).ok_or_else(bad)?,
+        project: match project {
+            Some(p) => Some(part(&p).ok_or_else(bad)?),
+            None => None,
+        },
+        name: part(&name).ok_or_else(bad)?,
+    })
+}
+
 /// `url.<base>.insteadOf` pairs that send the organization's legacy and `org@` HTTPS URLs to
 /// `https://dev.azure.com/<org>/`.
 fn https_rewrites(org: &str) -> Vec<(String, String)> {
@@ -328,6 +431,60 @@ pub fn decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feeds_are_read_from_every_form_package_managers_write() {
+        let feed = |org: &str, project: Option<&str>, name: &str| Feed {
+            org: org.into(),
+            project: project.map(str::to_string),
+            name: name.into(),
+        };
+        for (entry, want) in [
+            ("acme/Web/packages", feed("acme", Some("Web"), "packages")),
+            ("acme/tools", feed("acme", None, "tools")),
+            (
+                "acme/Data Team/packages",
+                feed("acme", Some("Data%20Team"), "packages"),
+            ),
+            (
+                "https://pkgs.dev.azure.com/acme/Web/_packaging/packages/pypi/simple/",
+                feed("acme", Some("Web"), "packages"),
+            ),
+            (
+                "https://pkgs.dev.azure.com/acme/_packaging/tools@Release/nuget/v3/index.json",
+                feed("acme", None, "tools"),
+            ),
+            (
+                "//pkgs.dev.azure.com/acme/Web/_packaging/packages/npm/registry/:_password",
+                feed("acme", Some("Web"), "packages"),
+            ),
+            (
+                "https://build:secret@acme.pkgs.visualstudio.com/Web/_packaging/packages/maven/v1",
+                feed("acme", Some("Web"), "packages"),
+            ),
+            (
+                "https://acme.pkgs.visualstudio.com/_packaging/tools/npm/registry/",
+                feed("acme", None, "tools"),
+            ),
+        ] {
+            assert_eq!(parse_feed(entry).unwrap(), want, "{entry}");
+        }
+        assert_eq!(
+            parse_feed("acme/Data%20Team/packages").unwrap().entry(),
+            "acme/Data Team/packages"
+        );
+        for bad in [
+            "acme",
+            "a/b/c/d",
+            "https://dev.azure.com/acme/Web/_git/site",
+            "https://pkgs.dev.azure.com/acme/Web/packages",
+            "https://example.com/acme/_packaging/x/pypi/simple/",
+            "https://pkgs.dev.azure.com/a/b/c/_packaging/x/",
+            "acme//packages",
+        ] {
+            assert!(parse_feed(bad).is_err(), "{bad}");
+        }
+    }
 
     fn repo(org: &str, project: &str, name: &str) -> Repo {
         Repo {

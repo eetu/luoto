@@ -148,10 +148,17 @@ fn describe(
                 return unknown();
             };
             let repos: Vec<&String> = a.repos.iter().chain(&a.read_repos).collect();
-            (
-                format!("Azure DevOps token for {}", list(&repos)),
-                repo_auth(repos.first().copied()),
-            )
+            let feeds: Vec<&String> = a.feeds.iter().collect();
+            let what = match (repos.is_empty(), feeds.is_empty()) {
+                (false, true) => list(&repos),
+                (true, false) => format!("feed {}", list(&feeds)),
+                _ => format!("{} and feed {}", list(&repos), list(&feeds)),
+            };
+            let change = match repos.first() {
+                Some(r) => repo_auth(Some(r)),
+                None => Some(format!("luoto feed -e {env}")),
+            };
+            (format!("Azure DevOps token for {what}"), change)
         }
         Origin::Ssh => ("SSH key, signed with in the vault".into(), None),
         Origin::Azure(aud) => (format!("Azure identity ({aud})"), None),
