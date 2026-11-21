@@ -1975,14 +1975,22 @@ pub(crate) fn never_copied_find(skip: &[String]) -> Vec<String> {
 /// The paths [`never_copied_find`] printed, as relative paths: only plain ones that end in a
 /// `COPY_SKIP` name (the sandbox wrote the names, so a line may be anything).
 pub(crate) fn never_copied_lines(out: &str) -> Vec<String> {
+    // The env's paths are Linux paths: a backslash is part of a name there, never one plain
+    // name here, and what is shown is written with `/` on every host.
     out.lines()
+        .filter(|l| !l.contains('\\'))
         .filter_map(|l| safe_rel(Path::new(l)))
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| COPY_SKIP.contains(&n))
         })
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| {
+            p.iter()
+                .map(|c| c.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
         .take(MAX_NEVER_COPIED)
         .collect()
 }
