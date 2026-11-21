@@ -30,9 +30,10 @@ jobs:
           test "$version" = "$crate" || { echo "tag $version != Cargo.toml $crate"; exit 1; }
           # The release notes: CHANGELOG.md's section for the version (a prerelease uses its base's).
           base="${version%%-*}"
-          notes=$(awk -v v="$base" '$1 == "##" && $2 == v {on = 1; next} on && /^## / {exit} on' \
-            CHANGELOG.md)
-          test -n "$notes" || { echo "CHANGELOG.md has no ## $base section"; exit 1; }
+          # `## [X.Y.Z] - date` up to the next `## ` heading or the link references at the end.
+          notes=$(awk -v v="[$base]" '$1 == "##" && $2 == v {on = 1; next}
+            on && (/^## / || /^\[[^]]+\]: /) {exit} on' CHANGELOG.md)
+          test -n "$notes" || { echo "CHANGELOG.md has no ## [$base] section"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
           { echo "notes<<LUOTO_NOTES"; echo "$notes"; echo "LUOTO_NOTES"; } >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

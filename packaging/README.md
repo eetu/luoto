@@ -18,8 +18,9 @@ Maintainer-only. Release assets come from `.github/workflows/release.yaml`; `ren
 
 1. Work for a release collects on a branch named for it (`0.2.0`), whose pull request is
    squash-merged: main has one commit per release. On that branch, bump `version` in the root
-   `Cargo.toml` and date the version's heading in `CHANGELOG.md` (`## X.Y.Z (YYYY-MM-DD)`).
-   After the merge, `git tag vX.Y.Z` on main and `git push --tags`. The first job fails if the
+   `Cargo.toml`, and in `CHANGELOG.md` rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`,
+   add `[X.Y.Z]: https://github.com/eetu/luoto/compare/vPREV...vX.Y.Z` to the links at the end
+   and move `[Unreleased]`'s base to `vX.Y.Z`. After the merge, `git tag vX.Y.Z` on main and `git push --tags`. The first job fails if the
    tag and `Cargo.toml` disagree or `CHANGELOG.md` has no section for the version; that
    section becomes the release notes. A tag with a `-` suffix (`v0.2.0-beta.1`) becomes a
    GitHub prerelease, with its base version's notes, and isn't published to the tap or bucket.
