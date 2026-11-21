@@ -24,7 +24,7 @@ use crate::config::{
     AzureCred, AzureDevopsCred, CustomCred, EnvConfig, GitCred, GithubCred, ProviderValue, SshCred,
     extend_unique,
 };
-use crate::{azure, azure_identity, model_servers};
+use crate::{azure, azure_identity, model_servers, packages};
 
 /// What part of the config made a binding: how `credentials.rs` tells people what it is for
 /// and what changes it, never by reading the binding's name.
@@ -207,6 +207,9 @@ pub fn compile(
         .transpose()?;
     let (git, upstream_cas) = compile_git(&mut b, &cfg.credentials.git)?;
     for c in &cfg.credentials.git {
+        if c.repos.is_empty() && c.read_repos.is_empty() {
+            continue;
+        }
         let host = c.host.split(':').next().unwrap_or_default();
         if !over_ssh(host) {
             for from in [format!("git@{host}:"), format!("ssh://git@{host}/")] {
@@ -768,12 +771,49 @@ pub fn smart_http_paths(base: &str, write: bool) -> Vec<String> {
 /// repo, gets the first one that may write. One push guard covers them all, as strict as the
 /// strictest.
 fn compile_github(b: &mut Builder, creds: &[GithubCred]) -> Result<Option<GithubGuard>> {
-    if creds.is_empty() {
+    let mut owners: BTreeSet<String> = BTreeSet::new();
+    for (i, gh) in creds.iter().enumerate() {
+        if gh.feeds.is_empty() {
+            continue;
+        }
+        let Some(token) = &gh.token else {
+            bail!(
+                "credentials.github: feeds need a `token` (a classic token with \
+                 `read:packages`); an App reads no packages"
+            );
+        };
+        let feeds = gh
+            .feeds
+            .iter()
+            .map(|f| packages::github_entry(f))
+            .collect::<Result<Vec<_>>>()?;
+        for o in &feeds {
+            if !owners.insert(o.clone()) {
+                bail!("credentials.github: feeds of {o} are listed twice");
+            }
+        }
+        let name = github_binding(i);
+        b.bind(
+            name.clone(),
+            BindingSpec::Static {
+                secret_ref: token.clone(),
+            },
+            Origin::GitHub(i),
+        );
+        compile_github_feeds(b, &name, &feeds);
+    }
+    // A credential for feeds alone opens nothing of GitHub's own.
+    let has_repos = |c: &GithubCred| !c.repos.is_empty() || !c.read_repos.is_empty();
+    if !creds.iter().any(has_repos) {
         return Ok(None);
     }
     // GraphQL names no repo in its path, so it goes out with one credential: the first that
-    // may write, else the first; a read-only one mutates nothing.
-    let graphql = creds.iter().position(|c| !c.repos.is_empty()).unwrap_or(0);
+    // may write, else the first with repos; a read-only one mutates nothing.
+    let graphql = creds
+        .iter()
+        .position(|c| !c.repos.is_empty())
+        .or_else(|| creds.iter().position(has_repos))
+        .unwrap_or(0);
     let mut guard = GithubGuard {
         graphql_mutations: if creds[graphql].repos.is_empty() {
             Vec::new()
@@ -784,7 +824,11 @@ fn compile_github(b: &mut Builder, creds: &[GithubCred]) -> Result<Option<Github
         ..Default::default()
     };
     let mut tokens: BTreeSet<&str> = BTreeSet::new();
-    for t in creds.iter().filter_map(|c| c.token.as_deref()) {
+    for t in creds
+        .iter()
+        .filter(|c| has_repos(c))
+        .filter_map(|c| c.token.as_deref())
+    {
         if !tokens.insert(t) {
             b.warnings.push(format!(
                 "GitHub: two credentials use {}; one listing all their repos lets \
@@ -795,11 +839,10 @@ fn compile_github(b: &mut Builder, creds: &[GithubCred]) -> Result<Option<Github
     }
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     for (i, gh) in creds.iter().enumerate() {
-        let name = if i == 0 {
-            "github".to_string()
-        } else {
-            format!("github-{}", i + 1)
-        };
+        if !has_repos(gh) {
+            continue;
+        }
+        let name = github_binding(i);
         let write = compile_github_one(b, gh, &name, i, i == graphql)?;
         for (o, r) in gh
             .repos
@@ -876,6 +919,15 @@ fn compile_github(b: &mut Builder, creds: &[GithubCred]) -> Result<Option<Github
         .insert("GITHUB_TOKEN".into(), GH_PLACEHOLDER.into());
     b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     Ok(Some(guard))
+}
+
+/// The binding of the n-th GitHub credential (from 0).
+fn github_binding(i: usize) -> String {
+    if i == 0 {
+        "github".to_string()
+    } else {
+        format!("github-{}", i + 1)
+    }
 }
 
 /// One GitHub credential as binding `name`: its `repos` read and written (pushes, pull
@@ -1224,14 +1276,20 @@ fn compile_git(
         if !hosts.insert(host.clone()) {
             bail!("credentials.git: {host} is listed twice; one credential per host");
         }
-        if c.repos.is_empty() && c.read_repos.is_empty() {
+        if c.repos.is_empty() && c.read_repos.is_empty() && c.feeds.is_empty() {
             bail!(
                 "credentials.git ({host}): list the repos the env may push to (`repos`) or only \
-                 fetch (`read_repos`)"
+                 fetch (`read_repos`), or the feeds it installs from (`feeds`)"
             );
         }
         if !c.repos.is_empty() && c.token.is_none() {
             bail!("credentials.git ({host}): pushing to `repos` takes a `token`");
+        }
+        if !c.feeds.is_empty() && c.token.is_none() {
+            bail!("credentials.git ({host}): installing from `feeds` takes a `token`");
+        }
+        if !c.storage_hosts.is_empty() && c.feeds.is_empty() {
+            bail!("credentials.git ({host}): `storage_hosts` are where `feeds` download from");
         }
         let parse = |list: &[String]| -> Result<Vec<String>> {
             list.iter()
@@ -1278,30 +1336,35 @@ fn compile_git(
                 Origin::Git(i),
             );
             // Forges read repository paths in any case.
-            b.injections.push(Injection {
-                binding: id.clone(),
-                host: host.clone(),
-                paths: paths.clone(),
-                methods: methods(&["GET", "POST"]),
-                place: Placement::Basic {
-                    username: c.username.clone(),
-                },
-                ignore_case: true,
-            });
+            if !paths.is_empty() {
+                b.injections.push(Injection {
+                    binding: id.clone(),
+                    host: host.clone(),
+                    paths: paths.clone(),
+                    methods: methods(&["GET", "POST"]),
+                    place: Placement::Basic {
+                        username: c.username.clone(),
+                    },
+                    ignore_case: true,
+                });
+            }
         }
-        b.rule(
-            id,
-            "git",
-            Rule {
-                host: host.clone(),
-                port,
-                access: Access::Methods(vec!["GET".into(), "POST".into()]),
-                paths,
-                ignore_case: true,
-                allow_private: c.private,
-                ..Default::default()
-            },
-        );
+        if !paths.is_empty() {
+            b.rule(
+                id.clone(),
+                "git",
+                Rule {
+                    host: host.clone(),
+                    port,
+                    access: Access::Methods(vec!["GET".into(), "POST".into()]),
+                    paths,
+                    ignore_case: true,
+                    allow_private: c.private,
+                    ..Default::default()
+                },
+            );
+        }
+        compile_forge_feeds(b, c, &id, &host, port)?;
         if !repos.is_empty() {
             guards.push(GitGuard {
                 host: host.clone(),
@@ -1337,11 +1400,87 @@ fn compile_git(
                     path.display()
                 );
             }
+            // The instance's own storage is its CA's too.
+            for s in &c.storage_hosts {
+                cas.insert(s.to_ascii_lowercase(), certs.clone());
+            }
             cas.insert(host.clone(), certs);
         }
         b.dev_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     }
     Ok((guards, cas))
+}
+
+/// A `[[credentials.git]]`'s feeds (Gitea, Forgejo, GitLab), with its binding `id`: the token
+/// on the paths the feeds' packages and downloads are under, for reads (private addresses for
+/// a host on a private network), and their downloads' redirects to the exact hosts of
+/// `storage_hosts`, the instance's own storage.
+fn compile_forge_feeds(
+    b: &mut Builder,
+    c: &GitCred,
+    id: &str,
+    host: &str,
+    port: Option<u16>,
+) -> Result<()> {
+    if c.feeds.is_empty() {
+        return Ok(());
+    }
+    let mut paths: Vec<String> = Vec::new();
+    for f in &c.feeds {
+        let scope =
+            packages::forge_entry(f).with_context(|| format!("credentials.git ({host})"))?;
+        extend_unique(&mut paths, scope.paths());
+    }
+    let mut to: Vec<String> = Vec::new();
+    for r in &c.storage_hosts {
+        let ok = !r.contains(['*', '/', ':'])
+            && luoto_shared::host::normalize_host(r).is_ok_and(|h| h == r.to_ascii_lowercase());
+        if !ok {
+            bail!(
+                "credentials.git ({host}): storage_hosts are exact host names (`minio.acme.internal`), \
+                 not `{}`",
+                crate::text::display(r)
+            );
+        }
+        to.push(r.to_ascii_lowercase());
+    }
+    // Bearer is what every package endpoint of both takes: GitLab's npm refuses basic auth,
+    // Gitea's every endpoint takes either.
+    b.injections.push(Injection {
+        binding: id.to_string(),
+        host: host.to_string(),
+        paths: paths.clone(),
+        methods: methods(&["GET", "HEAD"]),
+        place: Placement::Header {
+            name: "authorization".into(),
+            format: "Bearer {secret}".into(),
+        },
+        ignore_case: true,
+    });
+    b.rule(
+        format!("{id}-feeds"),
+        "git",
+        Rule {
+            host: host.to_string(),
+            port,
+            access: Access::Level(AccessLevel::Read),
+            paths: paths.clone(),
+            ignore_case: true,
+            allow_private: c.private,
+            ..Default::default()
+        },
+    );
+    if !to.is_empty() {
+        b.redirects.push(Redirect {
+            host: host.to_string(),
+            paths,
+            ignore_case: true,
+            to,
+            allow_private: c.private,
+        });
+    }
+    feed_placeholders(b, host);
+    Ok(())
 }
 
 /// Resource Manager paths, at every scope (the root, management groups, subscriptions,
@@ -1577,6 +1716,78 @@ fn compile_azure(
     Ok((Some(guard), writable.into_iter().chain(readable).collect()))
 }
 
+/// Placeholders for clients of a feed on `host` that send nothing without a login of their
+/// own, which the gate replaces: uv with `authenticate = "always"` (a netrc login), cargo for
+/// a registry that requires auth (a token from a provider, given whatever registry asks).
+fn feed_placeholders(b: &mut Builder, host: &str) {
+    let name = host.split(':').next().unwrap_or(host);
+    let line = format!("machine {name} login luoto password {FEED_PLACEHOLDER}\n");
+    if !b.netrc.contains(&line) {
+        b.netrc.push_str(&line);
+    }
+    b.dev_env.insert("NETRC".into(), NETRC_PATH.into());
+    b.dev_env.insert(
+        "CARGO_CREDENTIAL_ALIAS_LUOTO".into(),
+        format!("cargo:token-from-stdout echo {FEED_PLACEHOLDER}"),
+    );
+    b.dev_env.insert(
+        "CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS".into(),
+        "cargo:token luoto".into(),
+    );
+}
+
+/// GitHub Packages of `owners`, with binding `name` (a token: an App reads no packages):
+/// the token on the owners' paths of every registry, for reads, and each registry's
+/// downloads' redirect to its storage host.
+fn compile_github_feeds(b: &mut Builder, name: &str, owners: &[String]) {
+    for (host, storage) in packages::GITHUB_REGISTRIES {
+        let paths: Vec<String> = owners
+            .iter()
+            .flat_map(|o| {
+                if host == "npm.pkg.github.com" {
+                    vec![
+                        format!("/@{o}%2f*"),
+                        format!("/@{o}/**"),
+                        format!("/download/@{o}/**"),
+                    ]
+                } else {
+                    vec![format!("/{o}/**")]
+                }
+            })
+            .collect();
+        b.injections.push(Injection {
+            binding: name.to_string(),
+            host: host.to_string(),
+            paths: paths.clone(),
+            methods: methods(&["GET", "HEAD"]),
+            place: Placement::Header {
+                name: "authorization".into(),
+                format: "Bearer {secret}".into(),
+            },
+            ignore_case: true,
+        });
+        b.rule(
+            "github-feeds".into(),
+            "github",
+            Rule {
+                host: host.to_string(),
+                access: Access::Level(AccessLevel::Read),
+                paths: paths.clone(),
+                ignore_case: true,
+                ..Default::default()
+            },
+        );
+        b.redirects.push(Redirect {
+            host: host.to_string(),
+            paths,
+            ignore_case: true,
+            to: vec![storage.to_string()],
+            ..Default::default()
+        });
+        feed_placeholders(b, host);
+    }
+}
+
 /// The organizations' feeds: the PAT as basic auth on their packaging paths, for reads, on
 /// both hosts; and their downloads' redirects to storage. By organization, as feeds' own
 /// links name the project and feed by ID.
@@ -1601,26 +1812,9 @@ fn compile_azure_feeds(b: &mut Builder, feeds: &[azure::Feed]) {
         let legacy = vec!["/_packaging/**".to_string(), "/*/_packaging/**".to_string()];
         sites.push((azure::legacy_pkgs_host(o), legacy));
     }
-    if sites.is_empty() {
-        return;
-    }
-    // Clients that send nothing without a login of their own get placeholders, which the gate
-    // replaces: uv with `authenticate = "always"` (a netrc login), cargo for a registry that
-    // requires auth (a token from a provider, given whatever registry asks).
     for (host, _) in &sites {
-        b.netrc.push_str(&format!(
-            "machine {host} login luoto password {FEED_PLACEHOLDER}\n"
-        ));
+        feed_placeholders(b, host);
     }
-    b.dev_env.insert("NETRC".into(), NETRC_PATH.into());
-    b.dev_env.insert(
-        "CARGO_CREDENTIAL_ALIAS_LUOTO".into(),
-        format!("cargo:token-from-stdout echo {FEED_PLACEHOLDER}"),
-    );
-    b.dev_env.insert(
-        "CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS".into(),
-        "cargo:token luoto".into(),
-    );
     for (host, paths) in sites {
         b.injections.push(Injection {
             binding: "azure_devops".into(),
@@ -1648,6 +1842,7 @@ fn compile_azure_feeds(b: &mut Builder, feeds: &[azure::Feed]) {
             paths,
             ignore_case: true,
             to: vec![azure::FEED_STORAGE.into()],
+            ..Default::default()
         });
     }
 }
@@ -2015,6 +2210,140 @@ feeds = ["https://pkgs.dev.azure.com/acme/Web/_packaging/packages/pypi/simple/",
         );
         let none = compile("t", &cfg(""), GATE, &alias()).unwrap();
         assert!(none.netrc.is_empty() && !none.dev_env.contains_key("NETRC"));
+    }
+
+    #[test]
+    fn github_feeds_get_a_token_on_their_owners_packages_and_nothing_of_github() {
+        let text = r#"
+[[credentials.github]]
+token = "env:GH_PKG"
+feeds = ["acme", "@Tools"]
+"#;
+        let c = compile("t", &cfg(text), GATE, &alias()).unwrap();
+        let p = &c.policy;
+        assert!(p.github.is_none(), "no repos, no push guard");
+        let allowed = |host: &str, method: &str, path: &str| {
+            matches!(decide(p, host, method, path), Decision::Allow { .. })
+        };
+        for (host, path, storage) in [
+            (
+                "npm.pkg.github.com",
+                "/@acme%2fui",
+                "pkg-npm.githubusercontent.com",
+            ),
+            (
+                "npm.pkg.github.com",
+                "/download/@tools/cli/1.0.0/abc",
+                "pkg-npm.githubusercontent.com",
+            ),
+            (
+                "maven.pkg.github.com",
+                "/Acme/web/com/acme/ui/1.0/ui-1.0.jar",
+                "github-registry-files.githubusercontent.com",
+            ),
+            (
+                "nuget.pkg.github.com",
+                "/acme/download/acme.ui/1.0.0/acme.ui.1.0.0.nupkg",
+                "nugetregistryv2prod.blob.core.windows.net",
+            ),
+            (
+                "rubygems.pkg.github.com",
+                "/tools/gems/x-1.0.gem",
+                "rubygemsregistryv2prod.blob.core.windows.net",
+            ),
+        ] {
+            assert!(allowed(host, "GET", path), "{host}{path}");
+            let inj = p.injections_for("GET", host, path);
+            assert_eq!(inj.len(), 1, "{host}{path}");
+            assert_eq!(inj[0].binding, "github");
+            assert_eq!(p.redirect_targets("GET", host, path), [storage]);
+        }
+        for (host, method, path) in [
+            ("npm.pkg.github.com", "GET", "/@other%2fui"),
+            ("npm.pkg.github.com", "PUT", "/@acme%2fui"),
+            ("maven.pkg.github.com", "GET", "/other/web/x.jar"),
+            ("api.github.com", "GET", "/repos/acme/web"),
+            ("github.com", "GET", "/acme/web.git/info/refs"),
+        ] {
+            assert!(!allowed(host, method, path), "{method} {host}{path}");
+        }
+        assert!(!c.dev_env.contains_key("GH_TOKEN"), "no GitHub CLI login");
+        let app = "[[credentials.github]]\napp_id = \"1\"\ninstallation_id = 2\n\
+                   private_key = \"env:K\"\nfeeds = [\"acme\"]\n";
+        let Err(e) = compile("t", &cfg(app), GATE, &alias()) else {
+            panic!("an App with feeds compiled");
+        };
+        assert!(e.to_string().contains("token"), "{e}");
+    }
+
+    #[test]
+    fn a_forge_feed_gets_the_token_on_its_packages_on_a_private_network() {
+        let text = r#"
+[[credentials.git]]
+host = "git.acme.internal:3443"
+token = "env:FORGE"
+private = true
+feeds = ["/api/packages/acme", "/api/v4/groups/7"]
+storage_hosts = ["minio.acme.internal"]
+"#;
+        let c = compile("t", &cfg(text), GATE, &alias()).unwrap();
+        let p = &c.policy;
+        let host = "git.acme.internal";
+        let allowed = |method: &str, path: &str| {
+            matches!(
+                p.decide(
+                    &RequestInfo {
+                        host,
+                        port: 3443,
+                        method,
+                        path,
+                        websocket: false,
+                        content_length: None,
+                    },
+                    Utc::now()
+                ),
+                Decision::Allow {
+                    allow_private: true,
+                    ..
+                }
+            )
+        };
+        for path in [
+            "/api/packages/acme/pypi/simple/hello/",
+            "/api/packages/Acme/npm/%40acme%2Fhello/-/1.0.0/hello-1.0.0.tgz",
+            "/api/v4/groups/7/-/packages/npm/@acme%2fhello",
+            "/api/v4/projects/12/packages/pypi/files/abc/hello.whl",
+        ] {
+            assert!(allowed("GET", path), "{path}");
+            assert!(!p.injections_for("GET", host, path).is_empty(), "{path}");
+            assert_eq!(
+                p.redirect_targets("GET", host, path),
+                ["minio.acme.internal"]
+            );
+            assert!(p.redirect_private(host, path, "minio.acme.internal"));
+        }
+        for (method, path) in [
+            ("GET", "/api/packages/other/pypi/simple/"),
+            ("PUT", "/api/packages/acme/npm/x"),
+            ("GET", "/acme/web.git/info/refs"),
+            ("GET", "/api/v4/projects/12/repository/files"),
+        ] {
+            assert!(!allowed(method, path), "{method} {path}");
+        }
+        assert!(
+            !c.git_config.contains("git.acme.internal"),
+            "no repos, its SSH remotes stay as they are"
+        );
+        for bad in [
+            "storage_hosts = [\"*.acme.internal\"]\nfeeds = [\"/api/packages/acme\"]",
+            "feeds = [\"/api/v4/projects/acme%2Fweb\"]",
+            "storage_hosts = [\"minio.acme.internal\"]\nread_repos = [\"acme/web\"]",
+        ] {
+            let text = format!(
+                "[[credentials.git]]\nhost = \"git.acme.internal\"\ntoken = \"env:F\"\n{bad}\n"
+            );
+            assert!(compile("t", &cfg(&text), GATE, &alias()).is_err(), "{bad}");
+        }
     }
 
     #[test]

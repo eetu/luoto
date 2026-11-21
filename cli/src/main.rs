@@ -36,6 +36,7 @@ mod model_servers;
 mod names;
 mod needs;
 mod notify;
+mod packages;
 mod paths;
 mod personal;
 mod ports;
@@ -412,9 +413,10 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<VarCmd>,
     },
-    /// List, add or remove the Azure DevOps package feeds the env installs from.
+    /// List, add or remove the private package feeds the env installs from.
     ///
-    /// The gate adds the env's Azure DevOps token on the feeds' organization, for installs.
+    /// Azure DevOps, GitHub Packages, Gitea, Forgejo and GitLab: the gate adds the feed's token
+    /// on its packages, for installs.
     Feed {
         #[command(flatten)]
         e: GroupEnv,
@@ -720,16 +722,23 @@ enum FeedCmd {
     /// List the feeds the env installs from.
     #[command(visible_alias = "ls")]
     List,
-    /// Install from a feed, with the env's Azure DevOps token.
+    /// Install from a feed, with its service's token.
     Add {
-        /// The feed's URL as your package manager's settings have it, or `org/project/feed`
-        /// (`org/feed` for an organization's).
+        /// The feed's URL as your package manager's settings have it (an index or registry
+        /// URL, or an `.npmrc` line); `org/project/feed` for Azure DevOps.
         #[arg(value_name = "FEED")]
         feed: String,
-        /// Where the PAT is kept (`op://…`, `keyring:…`, `env:NAME`), when the env has no Azure
-        /// DevOps credential yet; asked on a terminal.
+        /// Where the token is kept (`op://…`, `keyring:…`, `env:NAME`), when the env has none
+        /// for the feed's service yet; asked on a terminal. Replaces the one it has.
         #[arg(long, value_name = "REF")]
         token: Option<String>,
+        /// The CA certificate (a PEM file) a self-hosted forge's certificate is signed by.
+        #[arg(long, value_name = "FILE")]
+        ca: Option<String>,
+        /// The exact host a self-hosted forge's downloads redirect to, its object storage
+        /// (repeatable).
+        #[arg(long, value_name = "HOST")]
+        storage_host: Vec<String>,
     },
     /// Stop installing from a feed.
     Rm {
@@ -1100,7 +1109,12 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
             let name = env(e.env)?;
             match action.unwrap_or(FeedCmd::List) {
                 FeedCmd::List => feeds::list(&name),
-                FeedCmd::Add { feed, token } => feeds::add(&name, &feed, token.as_deref()),
+                FeedCmd::Add {
+                    feed,
+                    token,
+                    ca,
+                    storage_host,
+                } => feeds::add(&name, &feed, token.as_deref(), ca.as_deref(), &storage_host),
                 FeedCmd::Rm { feed } => feeds::rm(&name, &feed),
             }
         }

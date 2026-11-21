@@ -127,21 +127,35 @@ fn describe(
                 return unknown();
             };
             let repos: Vec<&String> = gh.repos.iter().chain(&gh.read_repos).collect();
+            let feeds: Vec<&String> = gh.feeds.iter().collect();
             let kind = if gh.app_id.is_some() { "App" } else { "token" };
-            (
-                format!("GitHub {kind} for {}", list(&repos)),
-                repo_auth(repos.first().copied()),
-            )
+            let what = match (repos.is_empty(), feeds.is_empty()) {
+                (true, false) => format!("the packages of {}", list(&feeds)),
+                (false, false) => format!("{} and the packages of {}", list(&repos), list(&feeds)),
+                _ => list(&repos),
+            };
+            let change = match repos.first() {
+                Some(r) => repo_auth(Some(r)),
+                None => Some(format!("luoto feed -e {env}")),
+            };
+            (format!("GitHub {kind} for {what}"), change)
         }
         Origin::Git(i) => {
             let Some(g) = creds.git.get(*i) else {
                 return unknown();
             };
             let repos: Vec<&String> = g.repos.iter().chain(&g.read_repos).collect();
-            (
-                format!("git token for {} ({})", g.host, list(&repos)),
-                repo_auth(repos.first().copied()),
-            )
+            let feeds: Vec<&String> = g.feeds.iter().collect();
+            let what = match (repos.is_empty(), feeds.is_empty()) {
+                (true, false) => format!("feed {}", list(&feeds)),
+                (false, false) => format!("{} and feed {}", list(&repos), list(&feeds)),
+                _ => list(&repos),
+            };
+            let change = match repos.first() {
+                Some(r) => repo_auth(Some(r)),
+                None => Some(format!("luoto feed -e {env}")),
+            };
+            (format!("git token for {} ({what})", g.host), change)
         }
         Origin::AzureDevops => {
             let Some(a) = &creds.azure_devops else {

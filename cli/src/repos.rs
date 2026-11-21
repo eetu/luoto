@@ -1235,7 +1235,7 @@ pub fn declined(ctx: &Ctx, env: &str) -> BTreeSet<String> {
 
 /// Whether `host` (or `host:port`) resolves only to private addresses here: a self-hosted
 /// forge on a private network, which the gate reaches only when its credential says so.
-fn private_host(host: &str) -> bool {
+pub(crate) fn private_host(host: &str) -> bool {
     use std::net::ToSocketAddrs;
     let (name, port) = match host.rsplit_once(':') {
         Some((n, p)) => (n, p.parse().unwrap_or(443)),

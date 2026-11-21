@@ -294,6 +294,10 @@ pub struct GithubCred {
     pub allow_tags: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_base: Option<String>,
+    /// Owners whose GitHub Packages (npm, Maven, NuGet, RubyGems) the env installs from, with
+    /// `token` (a classic token with `read:packages`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feeds: Vec<String>,
 }
 
 fn default_protected() -> Vec<String> {
@@ -420,6 +424,14 @@ pub struct GitCred {
     /// for a host with an internal CA.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca: Option<String>,
+    /// The host's package feeds the env installs from, as the paths their packages are under
+    /// (`/api/packages/<owner>` on Gitea and Forgejo, `/api/v4/projects/<ID>` on GitLab).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feeds: Vec<String>,
+    /// Exact hosts the feeds' downloads redirect to (the instance's object storage), which
+    /// the env then reaches only at the URL a feed sent it to; `ca` covers them too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub storage_hosts: Vec<String>,
 }
 
 fn default_git_user() -> String {
@@ -1399,6 +1411,208 @@ impl EnvFile {
         }
         if lists_nothing(t) {
             creds.remove("azure_devops");
+        }
+        self.save()?;
+        Ok(true)
+    }
+
+    /// Add `owners` to the GitHub credential that holds feeds alone (a classic token, which a
+    /// repo's fine-grained token or App isn't), or else to a new one with `token`; `token`
+    /// replaces its token when given.
+    pub fn add_github_feeds(&mut self, token: Option<&str>, owners: &[String]) -> Result<()> {
+        let path = self.path.display().to_string();
+        let feeds_only = |t: &toml_edit::Table| {
+            t.get("feeds").is_some()
+                && ["repos", "read_repos"].iter().all(|k| {
+                    t.get(k)
+                        .and_then(|i| i.as_array())
+                        .is_none_or(|a| a.is_empty())
+                })
+        };
+        let new = |token: Option<&str>| -> Result<toml_edit::Table> {
+            let token = token.context("a new GitHub credential for feeds needs its token")?;
+            let mut t = toml_edit::Table::new();
+            t["token"] = toml_edit::value(token);
+            Ok(t)
+        };
+        let creds = self.credentials_table()?;
+        let table: &mut toml_edit::Table = match creds.get_mut("github") {
+            None => {
+                creds.insert("github", toml_edit::Item::Table(new(token)?));
+                creds
+                    .get_mut("github")
+                    .and_then(|i| i.as_table_mut())
+                    .context("credentials.github")?
+            }
+            Some(toml_edit::Item::Table(t)) if feeds_only(t) => t,
+            Some(toml_edit::Item::Table(t)) => {
+                let mut list = toml_edit::ArrayOfTables::new();
+                list.push(t.clone());
+                list.push(new(token)?);
+                *creds.get_mut("github").context("credentials.github")? =
+                    toml_edit::Item::ArrayOfTables(list);
+                creds
+                    .get_mut("github")
+                    .and_then(|i| i.as_array_of_tables_mut())
+                    .and_then(|a| a.iter_mut().last())
+                    .context("credentials.github")?
+            }
+            Some(toml_edit::Item::ArrayOfTables(list)) => {
+                let found = list.iter().position(feeds_only);
+                let at = match found {
+                    Some(i) => i,
+                    None => {
+                        list.push(new(token)?);
+                        list.len() - 1
+                    }
+                };
+                list.get_mut(at).context("credentials.github")?
+            }
+            Some(_) => bail!(
+                "`credentials.github` in {path} is an inline table, which luoto doesn't change"
+            ),
+        };
+        if let Some(token) = token {
+            table["token"] = toml_edit::value(token);
+        }
+        push_unique(table, "feeds", owners);
+        self.save()
+    }
+
+    /// Add `scopes` (feed paths) to the `[[credentials.git]]` of `new.host`, or add `new` with
+    /// them; `new.token` replaces the found one's token when given.
+    pub fn add_git_feeds(&mut self, new: &GitCred, scopes: &[String]) -> Result<()> {
+        let path = self.path.display().to_string();
+        let creds = self.credentials_table()?;
+        if creds.get("git").is_none() {
+            creds.insert(
+                "git",
+                toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()),
+            );
+        }
+        let list = creds
+            .get_mut("git")
+            .and_then(|i| i.as_array_of_tables_mut())
+            .with_context(|| {
+                format!("`credentials.git` in {path} is not [[credentials.git]] tables")
+            })?;
+        let found = list.iter().position(|t| {
+            t.get("host")
+                .and_then(|h| h.as_str())
+                .is_some_and(|h| h.eq_ignore_ascii_case(&new.host))
+        });
+        let at = match found {
+            Some(i) => i,
+            None => {
+                let mut t = toml_edit::Table::new();
+                t["host"] = toml_edit::value(new.host.as_str());
+                t["username"] = toml_edit::value(new.username.as_str());
+                if new.private {
+                    t["private"] = toml_edit::value(true);
+                }
+                if let Some(ca) = &new.ca {
+                    t["ca"] = toml_edit::value(ca.as_str());
+                }
+                list.push(t);
+                list.len() - 1
+            }
+        };
+        let table = list.get_mut(at).context("credentials.git")?;
+        if let Some(token) = &new.token {
+            table["token"] = toml_edit::value(token.as_str());
+        }
+        push_unique(table, "feeds", scopes);
+        if !new.storage_hosts.is_empty() {
+            push_unique(table, "storage_hosts", &new.storage_hosts);
+        }
+        self.save()
+    }
+
+    /// Set the `ca` of the `[[credentials.git]]` of `host`.
+    pub fn set_git_ca(&mut self, host: &str, ca: &str) -> Result<()> {
+        let list = self
+            .credentials_table()?
+            .get_mut("git")
+            .and_then(|i| i.as_array_of_tables_mut())
+            .context("credentials.git")?;
+        let table = list
+            .iter_mut()
+            .find(|t| {
+                t.get("host")
+                    .and_then(|h| h.as_str())
+                    .is_some_and(|h| h.eq_ignore_ascii_case(host))
+            })
+            .with_context(|| format!("no [[credentials.git]] for {host}"))?;
+        table["ca"] = toml_edit::value(ca);
+        self.save()
+    }
+
+    /// Drop the feeds `same` tells from the GitHub credentials, or (`host`) from the
+    /// `[[credentials.git]]` of that host, and a table that then lists nothing. Whether one
+    /// was listed.
+    pub fn remove_feed(&mut self, host: Option<&str>, same: &dyn Fn(&str) -> bool) -> Result<bool> {
+        let key = if host.is_some() { "git" } else { "github" };
+        let Some(creds) = self
+            .doc
+            .get_mut("credentials")
+            .and_then(|c| c.as_table_like_mut())
+        else {
+            return Ok(false);
+        };
+        let mine = |t: &toml_edit::Table| {
+            host.is_none_or(|h| {
+                t.get("host")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|v| v.eq_ignore_ascii_case(h))
+            })
+        };
+        let drop_from = |t: &mut toml_edit::Table| -> bool {
+            let Some(arr) = t.get_mut("feeds").and_then(|i| i.as_array_mut()) else {
+                return false;
+            };
+            let before = arr.len();
+            arr.retain(|v| !v.as_str().is_some_and(same));
+            let removed = arr.len() != before;
+            if arr.is_empty() {
+                t.remove("feeds");
+            }
+            removed
+        };
+        let mut removed = false;
+        let mut gone = false;
+        match creds.get_mut(key) {
+            Some(toml_edit::Item::Table(t)) if mine(t) => {
+                removed = drop_from(t);
+                gone = removed && lists_nothing(t);
+            }
+            Some(toml_edit::Item::ArrayOfTables(list)) => {
+                for t in list.iter_mut().filter(|t| mine(t)) {
+                    removed |= drop_from(t);
+                }
+                let keep: Vec<toml_edit::Table> = list
+                    .iter()
+                    .filter(|t| !(removed && lists_nothing(t)))
+                    .cloned()
+                    .collect();
+                if keep.len() != list.len() {
+                    if keep.is_empty() {
+                        gone = true;
+                    } else {
+                        let mut l = toml_edit::ArrayOfTables::new();
+                        for t in keep {
+                            l.push(t);
+                        }
+                        *list = l;
+                    }
+                }
+            }
+            _ => {}
+        }
+        if !removed {
+            return Ok(false);
+        }
+        if gone {
+            creds.remove(key);
         }
         self.save()?;
         Ok(true)
@@ -2512,6 +2726,55 @@ host = "telemetry.example"
         assert!(f.cfg.credentials.azure_devops.is_none());
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(!saved.contains("azure_devops") && saved.contains("# my env"));
+    }
+
+    #[test]
+    fn github_feeds_get_a_credential_of_their_own_and_forge_feeds_their_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.toml");
+        std::fs::write(&path, SAMPLE).unwrap();
+        let mut f = EnvFile::parse(path.clone(), SAMPLE).unwrap();
+        f.add_github_repos("acme", Some("op://v/gh/fine"), &["acme/web".into()], false)
+            .unwrap();
+        assert!(f.add_github_feeds(None, &["acme".into()]).is_err());
+        f.add_github_feeds(Some("op://v/gh/classic"), &["acme".into()])
+            .unwrap();
+        f.add_github_feeds(None, &["tools".into()]).unwrap();
+        // The sample's App, acme's repos' fine-grained token, and the feeds' classic one.
+        let gh = &f.cfg.credentials.github.0;
+        assert_eq!(gh.len(), 3, "the repos' token isn't the feeds'");
+        assert_eq!(gh[1].token.as_deref(), Some("op://v/gh/fine"));
+        assert!(gh[1].feeds.is_empty());
+        assert_eq!(gh[2].token.as_deref(), Some("op://v/gh/classic"));
+        assert_eq!(gh[2].feeds, ["acme", "tools"]);
+        assert!(f.remove_feed(None, &|e| e == "acme").unwrap());
+        assert!(f.remove_feed(None, &|e| e == "tools").unwrap());
+        assert_eq!(f.cfg.credentials.github.0.len(), 2);
+        assert!(!f.remove_feed(None, &|e| e == "tools").unwrap());
+
+        let forge = GitCred {
+            host: "git.acme.internal:3443".into(),
+            token: Some("env:FORGE".into()),
+            username: "oauth2".into(),
+            private: true,
+            ..Default::default()
+        };
+        f.add_git_feeds(&forge, &["/api/packages/acme".into()])
+            .unwrap();
+        f.set_git_ca("git.acme.internal:3443", "~/certs/ca.pem")
+            .unwrap();
+        let git = &f.cfg.credentials.git[0];
+        assert_eq!(git.feeds, ["/api/packages/acme"]);
+        assert!(git.private);
+        assert_eq!(git.ca.as_deref(), Some("~/certs/ca.pem"));
+        assert!(
+            f.remove_feed(Some("GIT.acme.internal:3443"), &|e| e
+                == "/api/packages/acme")
+                .unwrap()
+        );
+        assert!(f.cfg.credentials.git.is_empty());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# my env"));
     }
 
     #[test]
