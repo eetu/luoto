@@ -9,19 +9,31 @@ release may break.
 
 ### Added
 
-- `luoto list --json` and `luoto requests --json` print what the tables show.
-- `luoto repo add` and `luoto repo auth` take `--access fetch|read|push` and `--token <REF>`,
-  and `luoto agent auth` takes `--credential`, for use without a terminal.
+- `luoto run --dangerously-pull` and `luoto pull --on-stop on` write an env's changes into
+  your folder when it stops, unreviewed. Conflicts, deletions, executables and files your tools
+  run are held back for `luoto pull`. [Headless
+  runs](https://github.com/eetu/luoto/blob/main/docs/guides/headless.md#its-changes-in-your-folder).
+- `luoto run --pull` is the reviewed pull after a run. A run, `luoto down` and `luoto export`
+  exit with 75 when a pull left something out; `--pull-report FILE` writes what a run's did.
+- `luoto run --rm` removes the env when the run ends; one holding work that is nowhere else
+  is kept and stopped unless `--yes`.
+- `luoto prune --envs` removes stopped envs unused for 30 days (`--older-than 7d`,
+  `prune_after` in `config.toml`, `--match 'job-*'`); one holding work is kept unless
+  `--with-work`. [Leftover
+  envs](https://github.com/eetu/luoto/blob/main/docs/guides/headless.md#leftover-envs).
 - `luoto feed add <feed URL>`: an env installs from private package feeds (Azure DevOps, GitHub
   Packages, self-hosted Gitea, Forgejo and GitLab) with a token that stays outside it.
   [Private package feeds](https://github.com/eetu/luoto/blob/main/docs/guides/package-feeds.md).
+- `luoto list` shows when each env was last used (USED).
+- `luoto list --json` and `luoto requests --json` print what the tables show.
+- `luoto repo add` and `luoto repo auth` take `--access fetch|read|push` and `--token <REF>`,
+  and `luoto agent auth` takes `--credential`, for use without a terminal.
 
 ### Changed
 
 - **Breaking:** `--ttl` of `luoto allow` and `luoto approve` is `--for 1h`. `luoto init
   --open=2h` is `--open-for 2h`; `--open` alone opens egress for an hour.
-- **Breaking:** `luoto run --agent claude` is `luoto run claude`, and its `--report FILE` is
-  `--pull-report FILE`.
+- **Breaking:** `luoto run --agent claude` is `luoto run claude`.
 - **Breaking:** `luoto egress --open` is `--unruled`, `luoto requests --watch` is `--follow`
   (`-f`), `luoto project suggest --write --force` is `--overwrite`, and `luoto agent remove`
   is only `luoto agent rm`.
@@ -32,40 +44,15 @@ release may break.
   except as `idle_stop` in a config file, where it stays minutes. A rule's `--idle` takes `1d`.
 - **Breaking:** a question that gets no yes (a no, Esc, no terminal) ends the command with
   exit code 1 and nothing done, so `luoto init` without a terminal needs `--yes`.
+- `luoto pull` leaves alone a file you changed since the env's copy. Changed on both sides
+  it is a conflict, yours kept unless `--overwrite`; a file the env deleted is kept.
 - `luoto agent list` lists the env's agents and how each signs in; `--available` lists every
   agent and provider luoto knows.
 - `luoto egress --since` takes a duration or an RFC 3339 time and refuses anything else.
-- `luoto export` exits with 75 when the env it stopped pulled its files and left some out.
 
 ### Fixed
 
 - The gate refused scoped npm packages (`@types/node`) on a registry that gets a credential.
-
-## [0.6.3] - Unreleased
-
-### Added
-
-- `luoto run --dangerously-pull` and `luoto pull --on-stop on` write an env's changes into
-  your folder when it stops, unreviewed. Conflicts, deletions, executables and files your tools
-  run are held back for `luoto pull`. [Headless
-  runs](https://github.com/eetu/luoto/blob/main/docs/guides/headless.md#its-changes-in-your-folder).
-- `luoto run --pull` is the reviewed pull after a run. A run and `luoto down` exit with 75
-  when a pull left something out, and `--report FILE` writes what a run's pull did.
-- `luoto run --rm` removes the env when the run ends; one holding work that is nowhere else
-  is kept and stopped unless `--yes`.
-- `luoto prune --envs` removes stopped envs unused for 30 days (`--older-than 7d`,
-  `prune_after` in `config.toml`, `--match 'job-*'`); one holding work is kept unless
-  `--with-work`. [Leftover
-  envs](https://github.com/eetu/luoto/blob/main/docs/guides/headless.md#leftover-envs).
-- `luoto list` shows when each env was last used (USED).
-
-### Changed
-
-- `luoto pull` leaves alone a file you changed since the env's copy. Changed on both sides
-  it is a conflict, yours kept unless `--overwrite`; a file the env deleted is kept.
-
-### Fixed
-
 - On Apple's `container`, an empty env showed 1.6 GB: its size counted what its containers
   share with their image.
 - An env never stopped after `idle_stop`: luoto's own processes in it counted as work.
@@ -559,8 +546,7 @@ release may break.
 
 - First release.
 
-[Unreleased]: https://github.com/eetu/luoto/compare/v0.6.3...HEAD
-[0.6.3]: https://github.com/eetu/luoto/compare/v0.6.2...v0.6.3
+[Unreleased]: https://github.com/eetu/luoto/compare/v0.6.2...HEAD
 [0.6.2]: https://github.com/eetu/luoto/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/eetu/luoto/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/eetu/luoto/compare/v0.5.3...v0.6.0

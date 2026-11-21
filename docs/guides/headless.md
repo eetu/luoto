@@ -195,7 +195,7 @@ $ luoto prune --envs --match 'job-*' --older-than 7d
 - **In a script.** `--yes` skips the question. Without a terminal and without `--yes` the
   envs are only listed, with the command that removes them, and the exit code is 1. An env
   that can't be removed leaves the rest to go, and the exit code is 1.
-- **Envs from before 0.6.3** have no record of their last use: they show `unknown`, and
+- **Envs from before 0.7.0** have no record of their last use: they show `unknown`, and
   their age counts from when luoto last wrote their config or state.
 
 `luoto prune` without `--envs` removes luoto's superseded images and no env.
