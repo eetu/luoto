@@ -87,12 +87,18 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
 - The SSH key is a vault binding (`SshAgent`) that never leaves the vault, not even to the
   gate. The agent signs only logins to sessions a pinned host key bound
   (`shared/src/forges.rs`, plus `host_keys`; `vault/src/agent.rs`).
-- Azure DevOps feeds (`[credentials.azure_devops] feeds`, `luoto feed` in `feeds.rs`,
-  `azure::parse_feed`): the PAT on the feeds' organizations' packaging paths, GET and HEAD
-  only, by organization (a feed's links name its files by ID). Their stored packages
-  redirect to signed Azure Storage URLs, which pass only as the gate's redirect permits
+- Package feeds (`luoto feed` in `feeds.rs`; `packages.rs` tells the service from a URL, by
+  host for hosted ones and by path for self-hosted): `feeds` on the service's credential,
+  `[credentials.azure_devops]` (`azure::parse_feed`; the PAT on the organizations' packaging
+  paths, as a feed's links name its files by ID), `[[credentials.github]]` (owners, a
+  classic token, on the four package registries) and `[[credentials.git]]` (Gitea, Forgejo,
+  GitLab feed paths, Bearer; a group's or instance's GitLab endpoint also reaches
+  `/api/v4/projects/*/packages/**`, where its files link). GET and HEAD only. Stored packages
+  redirect to signed storage URLs, which pass only as the gate's redirect permits
   (`Policy.redirects`, `gate/src/redirects.rs`): the exact URL a response named, for reads,
-  ten minutes, without the client's auth. Only `compile` adds a redirect, never a rule.
+  ten minutes, without the client's auth, on a private address only where the redirect says
+  (a self-hosted credential's `private` and its `storage_hosts`). Only `compile` adds a
+  redirect, never a rule.
   Clients that send nothing without a login get placeholders the gate replaces: a netrc
   (`Compiled::netrc`, `/run/luoto/netrc`) and a cargo credential provider.
 - Azure (`[credentials.azure]`, not Azure DevOps' `azure.rs`): audiences, their hosts and

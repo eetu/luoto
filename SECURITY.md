@@ -110,6 +110,14 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   host per file, so no rule names those hosts: the gate lets through only the exact URL a
   feed's redirect named, for GET and HEAD, for ten minutes, without the client's own
   authorization or cookies. The sandbox never chooses that URL.
+- **Other package feeds.** Each goes on its feed's paths, with GET and HEAD only. A GitHub
+  Packages token (a classic one, as the registries take no other) on the listed owners' paths
+  of the npm, Maven, NuGet and RubyGems registries; such a token reaches more at GitHub than
+  packages, which the gate's paths keep from the env. A Gitea or Forgejo token on the owner's
+  packages; a GitLab token on the project's, and for a group's or the instance's endpoints on
+  every project's packages, as their files link to each project's path. Downloads redirect to
+  storage only as above: GitHub's to one fixed host per registry, a self-hosted instance's to
+  the exact hosts its credential's `storage_hosts` name, on its private network when it is.
 - **Other forges** (`[[credentials.git]]`). The token goes only on the granted repositories'
   smart-HTTP and LFS paths, pushes pass the same guard, and push options (which can open merge
   requests or skip CI) are refused. The forge's API is not reachable with it; the token's

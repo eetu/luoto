@@ -79,6 +79,8 @@ username = "oauth2"           # sent with the token: GitLab takes oauth2; Forgej
 repos = ["group/api"]         # pushes, under the same guard; `read_repos` to fetch only
 # private = true              # a self-hosted one on a private network
 # ca = "~/certs/corp-ca.pem"  # the internal CA its certificate is signed by
+# feeds = ["/api/v4/projects/12"]   # package feeds installed from (Gitea: /api/packages/<owner>)
+# storage_hosts = ["minio.example.com"]  # exact hosts its feeds' downloads redirect to
 
 [credentials.ssh]             # git over SSH: the vault keeps the key and signs logins
 key = "op://Private/github-ssh/private key?ssh-format=openssh"
@@ -204,6 +206,10 @@ A `[[credentials.git]]` works with any forge, as git speaks the same protocol to
 adds the token to the listed repos' git requests only and guards pushes as on GitHub. It
 covers git, not the forge's API (merge requests), which a `[credentials.custom]` can reach.
 Without a token it lists public repos to fetch. Its host's SSH remotes go over HTTPS with it.
+Its `feeds` are a Gitea, Forgejo or GitLab instance's package feeds, installed from with its
+token; a GitHub credential's `feeds` are owners whose GitHub Packages the env installs from,
+with a classic token of its own, as those registries take no fine-grained one
+([guide](guides/package-feeds.md)).
 
 An SSH credential lets git use SSH remotes as they are, to `hosts` on port 22 only;
 `github_port = 443` sends GitHub's to `ssh.github.com:443` instead, for networks that block 22.

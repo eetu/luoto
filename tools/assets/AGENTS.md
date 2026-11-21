@@ -108,12 +108,12 @@ the merge request.
   another host takes two requests, its modules and its checksums:
   `sandbox request proxy.golang.org --path '/<host>/**' --reason "<why>" --wait`, then
   `sandbox request sum.golang.org --path '/lookup/<host>/**' --reason "<why>" --wait`.
-- A private Azure DevOps feed (`pkgs.dev.azure.com`, `<org>.pkgs.visualstudio.com`) that
-  answers 401 or 403 needs the user's token, which the gate adds. Don't request its host, put
-  a token in the project's settings or try a keyring or `az` login. Ask the user to run
-  `luoto feed add -e $LUOTO_ENV <feed URL>` on their machine, with the URL from the project's
-  settings (`pip.conf`, its uv index, `.npmrc`, `nuget.config`); a running env takes it at
-  once.
+- A private package feed that answers 401 or 403 (Azure DevOps, GitHub Packages such as
+  `npm.pkg.github.com`, a company's Gitea, Forgejo or GitLab) needs the user's token, which
+  the gate adds. Don't request its host, put a token in the project's settings or try a
+  keyring or login. Ask the user to run `luoto feed add -e $LUOTO_ENV <feed URL>` on their
+  machine, with the URL from the project's settings (`pip.conf`, its uv index, `.npmrc`,
+  `nuget.config`, a Maven or cargo registry); a running env takes it at once.
 - CLI tools installed for the user (`npm i -g`, `pipx install`) land in `~/.local/bin` and
   persist. A system package of your own (`sudo apt-get install …`) vanishes when the container
   is recreated. For one the project needs, or a toolchain it doesn't pin, ask the user to keep
