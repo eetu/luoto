@@ -7,6 +7,8 @@ release may break.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-21
+
 ### Added
 
 - `luoto run --dangerously-pull` and `luoto pull --on-stop on` write an env's changes into
@@ -546,7 +548,8 @@ release may break.
 
 - First release.
 
-[Unreleased]: https://github.com/eetu/luoto/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/eetu/luoto/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/eetu/luoto/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/eetu/luoto/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/eetu/luoto/compare/v0.5.3...v0.6.0
