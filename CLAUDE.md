@@ -3,9 +3,8 @@
 Dev sandboxes that contain supply-chain attacks: tools run in a container whose only egress is
 a per-env policy gate; a per-VM vault holds secrets outside the sandbox. CLI + local web UI.
 User-facing docs: README.md (the overview and getting started), docs/ (the reference and
-guides). Threat model: SECURITY.md. A user-visible change gets an entry under CHANGELOG.md's
-`## [Unreleased]` (the release notes), in its group (Added, Changed, Removed, Fixed, Security);
-ROADMAP.md holds only what isn't done.
+guides). Threat model: SECURITY.md. A user-visible change gets a CHANGELOG.md entry
+([Changelog](#changelog)); ROADMAP.md holds only what isn't done.
 main is protected: it changes only by squash-merged pull request, from a branch named for the
 release (`packaging/README.md`). CI runs on pull requests (path-filtered) and weekly on main.
 
@@ -286,6 +285,23 @@ What the CLI asks and prints follows one grammar, whatever the feature:
   `just lint`, `just format`, `just shots` (README screenshots; needs a runtime).
 - After changing gate/vault/tools code, rebuild images and `luoto up <env>` to pick them up;
   dev containers keep running (`luoto up --recreate` recreates them, volumes kept).
+
+## Changelog
+
+CHANGELOG.md is the release notes for people who use luoto, in Keep a Changelog 1.1.0 (the
+`coding-style:changelog` skill has the full rules):
+
+- An entry is a change someone outside could notice: a command, flag, setting, default,
+  output, a bug they could hit in a released version, a security fix. Refactors, tests, CI,
+  and how or why something was built stay out.
+- It goes under `## [Unreleased]`, in its group (Added, Changed, Deprecated, Removed, Fixed,
+  Security). One line where it fits, two at most: the final behaviour; Changed says old → new,
+  Fixed names the symptom. An absolute link to a guide carries the detail.
+- `## [Unreleased]` is one release: a fix to something new in it edits that entry.
+- A breaking change leads its group with `**Breaking:**` and the new name; patch releases only
+  add and fix. No third-party tool names but providers'.
+- Releasing renames `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and adds its compare link
+  (`packaging/README.md`); the release workflow extracts that section.
 
 ## Out of scope
 
