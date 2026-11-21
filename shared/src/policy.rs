@@ -111,8 +111,8 @@ pub struct Rule {
 /// The longest `idle` a rule may set.
 pub const MAX_IDLE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
-/// A rule's `idle`: a whole number of seconds, minutes or hours (`90s`, `30m`, `2h`), above
-/// zero and at most [`MAX_IDLE`].
+/// A rule's `idle`: a whole number of seconds, minutes, hours or days (`90s`, `30m`, `2h`,
+/// `1d`), above zero and at most [`MAX_IDLE`].
 pub fn parse_idle(s: &str) -> Result<std::time::Duration, String> {
     let s = s.trim();
     let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
@@ -124,7 +124,8 @@ pub fn parse_idle(s: &str) -> Result<std::time::Duration, String> {
         "s" => Some(n),
         "m" => n.checked_mul(60),
         "h" => n.checked_mul(3600),
-        _ => return Err(format!("idle `{s}`: use s, m or h")),
+        "d" => n.checked_mul(86400),
+        _ => return Err(format!("idle `{s}`: use s, m, h or d")),
     };
     match secs.map(std::time::Duration::from_secs) {
         Some(d) if !d.is_zero() && d <= MAX_IDLE => Ok(d),
@@ -507,6 +508,25 @@ impl Open {
     }
 }
 
+/// Where responses from `host`'s `paths` may send the client: a redirect to a URL on one of
+/// `to` lets that exact URL through for GET and HEAD, for a while (the gate's redirect
+/// permits). Only credentials add one, for a service whose downloads redirect to signed
+/// storage URLs on hosts no list can name.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Redirect {
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// Match `paths` without regard to ASCII case (see `Rule::ignore_case`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_case: bool,
+    /// Host patterns the redirect may name.
+    pub to: Vec<String>,
+    /// The targets may be on private addresses (a self-hosted service's own storage).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_private: bool,
+}
+
 /// Name the gate answers itself in DNS (the gate, env services).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct InternalName {
@@ -542,6 +562,8 @@ pub struct Policy {
     /// plain HTTP too, as a request to them never leaves it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plain_http_credentials: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redirects: Vec<Redirect>,
 }
 
 #[derive(Debug, Clone)]
@@ -670,17 +692,8 @@ impl Policy {
     }
 
     pub fn decide(&self, req: &RequestInfo<'_>, now: DateTime<Utc>) -> Decision {
-        for d in &self.denies {
-            let method_hit = d.methods.is_empty()
-                || d.methods.iter().any(|m| m.eq_ignore_ascii_case(req.method));
-            // In any case: an explicit deny on a host that routes paths without case must not
-            // be stepped around with capitals.
-            let path_hit = glob::matches_any(&d.paths, true, req.path);
-            if host_matches(&d.host, req.host) && method_hit && path_hit {
-                return Decision::Deny(DenyReason::Explicit {
-                    reason: d.reason.clone(),
-                });
-            }
+        if let Some(reason) = self.explicitly_denied(req) {
+            return Decision::Deny(reason);
         }
         match self.by_rules(req, now) {
             Decision::Deny(_) if self.opens(req, now) => Decision::Allow {
@@ -691,6 +704,45 @@ impl Policy {
             },
             d => d,
         }
+    }
+
+    /// The explicit deny that refuses `req`, which beats every allow.
+    pub fn explicitly_denied(&self, req: &RequestInfo<'_>) -> Option<DenyReason> {
+        self.denies.iter().find_map(|d| {
+            let method_hit = d.methods.is_empty()
+                || d.methods.iter().any(|m| m.eq_ignore_ascii_case(req.method));
+            // In any case: an explicit deny on a host that routes paths without case must not
+            // be stepped around with capitals.
+            let path_hit = glob::matches_any(&d.paths, true, req.path);
+            (host_matches(&d.host, req.host) && method_hit && path_hit).then(|| {
+                DenyReason::Explicit {
+                    reason: d.reason.clone(),
+                }
+            })
+        })
+    }
+
+    /// The host patterns a GET or HEAD response from `host` at `path` may redirect to.
+    pub fn redirect_targets(&self, method: &str, host: &str, path: &str) -> Vec<&str> {
+        if method != "GET" && method != "HEAD" {
+            return Vec::new();
+        }
+        self.redirects
+            .iter()
+            .filter(|r| host_matches(&r.host, host))
+            .filter(|r| r.paths.is_empty() || glob::matches_any(&r.paths, r.ignore_case, path))
+            .flat_map(|r| r.to.iter().map(String::as_str))
+            .collect()
+    }
+
+    /// Whether a redirect from `host` at `path` to `to` may reach a private address there.
+    pub fn redirect_private(&self, host: &str, path: &str, to: &str) -> bool {
+        self.redirects.iter().any(|r| {
+            r.allow_private
+                && host_matches(&r.host, host)
+                && (r.paths.is_empty() || glob::matches_any(&r.paths, r.ignore_case, path))
+                && r.to.iter().any(|t| host_matches(t, to))
+        })
     }
 
     /// Open egress, while it is open.
@@ -1113,10 +1165,11 @@ mod tests {
         assert_eq!(parse_idle("90s"), Ok(std::time::Duration::from_secs(90)));
         assert_eq!(parse_idle("30m"), Ok(std::time::Duration::from_secs(1800)));
         assert_eq!(parse_idle("24h"), Ok(MAX_IDLE));
+        assert_eq!(parse_idle("1d"), Ok(MAX_IDLE));
         for bad in [
             "0m",
             "25h",
-            "1d",
+            "2d",
             "soon",
             "",
             "-5m",

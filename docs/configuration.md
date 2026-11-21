@@ -22,6 +22,7 @@ node = "lts"
 [workspace]
 dir = "/Users/me/dev/web"     # the project folder, copied in on the first `up`
 # url = "acme/web"            # instead of `dir`: a remote cloned into the env (`branch = "dev"`)
+# dangerously_pull_on_stop = true   # every stop pulls into the folder, unreviewed
 
 [[allow]]
 host = "docs.rs"
@@ -49,10 +50,11 @@ read_repos = ["owner/lib"]    # fetched and read only (an App mints a read-only 
 permissions = { contents = "write", pull_requests = "write" }
 protected_branches = ["main"]
 
-[credentials.azure_devops]    # Azure DevOps git over HTTPS
-token = "op://Dev/ado/pat"    # a PAT with Code (Read & write)
+[credentials.azure_devops]    # Azure DevOps git over HTTPS, and its package feeds
+token = "op://Dev/ado/pat"    # a PAT with Code (Read & write), Packaging (Read) for feeds
 repos = ["fabrikam/Apps/web"]    # `org/project/repo`, or the clone URL
 # read_repos = ["fabrikam/Apps/lib"]   # fetched only
+# feeds = ["fabrikam/Apps/packages"]   # installed from; `luoto feed add` writes these
 protected_branches = ["main"]
 
 [credentials.azure]           # Azure: az, terraform and the SDKs see a managed identity
@@ -77,6 +79,8 @@ username = "oauth2"           # sent with the token: GitLab takes oauth2; Forgej
 repos = ["group/api"]         # pushes, under the same guard; `read_repos` to fetch only
 # private = true              # a self-hosted one on a private network
 # ca = "~/certs/corp-ca.pem"  # the internal CA its certificate is signed by
+# feeds = ["/api/v4/projects/12"]   # package feeds installed from (Gitea: /api/packages/<owner>)
+# storage_hosts = ["minio.example.com"]  # exact hosts its feeds' downloads redirect to
 
 [credentials.ssh]             # git over SSH: the vault keeps the key and signs logins
 key = "op://Private/github-ssh/private key?ssh-format=openssh"
@@ -120,9 +124,14 @@ hosts = ["dl.k8s.io"]         # extra hosts readable only while installs run
 `config.toml` takes `[tools]`, `[deps]`, `[[deny]]`, `[[mute]]`, `idle_stop` and `auto_forward`
 too, for every env, and `[agents.<name>]` options (`model`, `effort`, `args`, `headless_args`)
 for every env that has that agent; an env's own, and its `luoto.toml`'s, come on top.
-Credentials go only in each env's own file. `notifications = false` there turns desktop
+Credentials go only in each env's own file, and so does `dangerously_pull_on_stop`
+(`luoto pull --on-stop on|off` writes it; [headless runs](guides/headless.md#its-changes-in-your-folder)
+say what it writes and holds back, a project's manifests among the latter): `config.toml` and
+a `luoto.toml` refuse it, and an env without a folder on this machine can't have it. `notifications = false` there turns desktop
 [notifications](#notifications) off. `runtime = "container"` there (`luoto setup` offers it)
-runs envs on Apple's `container` ([install.md](install.md)).
+runs envs on Apple's `container` ([install.md](install.md)). `prune_after = "7d"` there
+(default `30d`) is how long a stopped env goes unused before `luoto prune --envs` removes it
+([leftover envs](guides/headless.md#leftover-envs)).
 
 A `[[deny]]` beats every allow: a preset's, a rule's, an approved request's. It applies to the
 HTTP(S) the gate reads: a tunnel rule can't cover a denied host, and SSH to
@@ -177,6 +186,8 @@ working as they are: SSH ones (`git@ssh.dev.azure.com:v3/…`, or a host alias f
 API by the repository's name (`…/_apis/git/repositories/<repo>/pullrequests`): opened,
 commented on, their title, description, draft state and target changed; completing them, and
 votes, stay with you. `az repos pr` addresses repos by ID, which the gate doesn't match.
+Its `feeds` (`luoto feed add`) are installed from with the same token, on every feed of their
+organizations, for reads ([guide](guides/package-feeds.md)).
 
 An Azure credential gives the env a managed identity: the gate answers the instance metadata
 service (`169.254.169.254`) itself, so `az` (logged in by `up`), terraform's azurerm
@@ -195,6 +206,10 @@ A `[[credentials.git]]` works with any forge, as git speaks the same protocol to
 adds the token to the listed repos' git requests only and guards pushes as on GitHub. It
 covers git, not the forge's API (merge requests), which a `[credentials.custom]` can reach.
 Without a token it lists public repos to fetch. Its host's SSH remotes go over HTTPS with it.
+Its `feeds` are a Gitea, Forgejo or GitLab instance's package feeds, installed from with its
+token; a GitHub credential's `feeds` are owners whose GitHub Packages the env installs from,
+with a classic token of its own, as those registries take no fine-grained one
+([guide](guides/package-feeds.md)).
 
 An SSH credential lets git use SSH remotes as they are, to `hosts` on port 22 only;
 `github_port = 443` sends GitHub's to `ssh.github.com:443` instead, for networks that block 22.
@@ -322,6 +337,8 @@ language servers would run project code outside the sandbox.
 ## Notifications
 
 The background watcher shows a desktop notification for each new access request and the first
-denial at each host, and when the disk that holds envs runs low. macOS asks once to allow
+denial at each host, when the disk that holds envs runs low, and when an idle env's stop, or
+the stop of one luoto didn't see stop, pulled its files (`dangerously_pull_on_stop`: how
+many, into which folder, how many were held back). macOS asks once to allow
 them; Linux needs `notify-send`. Where they are off (`notifications = false` in
 `config.toml`) or missing, the bell in `luoto ui` gives browser notifications for requests.

@@ -21,10 +21,55 @@ use crate::runtime::exec;
 use crate::state::EnvState;
 use crate::text::sh_quote;
 use crate::wizard::{Answer, Mode};
-use crate::{events, model_servers, names, secrets, sync};
+use crate::{autopull, events, model_servers, names, secrets, sync};
 use sha2::{Digest, Sha256};
 
-pub fn list() -> Result<ExitCode> {
+/// `luoto agent list`: the env's agents (its luoto.toml's included) and how each signs in.
+pub fn list(env_name: &str) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    let cfg = env::layered(&ctx, env_name)?;
+    if cfg.agents.is_empty() {
+        out!(
+            "env `{env_name}` has no agents (`luoto agent add -e {env_name} <agent>`; \
+             `luoto agent list --available` lists them)"
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    let width = crate::text::columns();
+    let wide = cfg.agents.names().map(String::len).max().unwrap_or(0);
+    for name in cfg.agents.names() {
+        let Some(a) = profiles::agent(name) else {
+            continue;
+        };
+        let how = match (current(&cfg, &a), starts_on(&cfg, &a)) {
+            _ if a.providers.is_empty() => "needs no credential".to_string(),
+            (_, Some((server, _))) => format!("starts on model server `{server}`"),
+            (
+                Some(Auth::Kind {
+                    kind,
+                    reference,
+                    provider,
+                }),
+                None,
+            ) => {
+                let label = profiles::provider(&provider)
+                    .and_then(|p| p.auth.get(&kind).map(|k| k.label.clone()))
+                    .unwrap_or(kind);
+                format!("{label} = {}", secrets::shown_ref(&reference))
+            }
+            (Some(Auth::LoginInside { .. }), None) => "logs in inside the env".to_string(),
+            (None, None) => format!("no credential (`luoto agent auth -e {env_name} {name}`)"),
+        };
+        out_text!(
+            "{}",
+            crate::text::hang(&format!("  {name:<wide$}  "), &how, width)
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `luoto agent list --available`: every agent and model provider luoto knows.
+pub fn available() -> Result<ExitCode> {
     let width = crate::text::columns();
     // A name, then what it is, wrapped under itself.
     let row = |name: &str, wide: usize, what: String| {
@@ -44,7 +89,7 @@ pub fn list() -> Result<ExitCode> {
             format!("{} (providers: {})", a.description, a.providers.join(", ")),
         );
     }
-    head!("\nproviders (configure under [credentials.<provider>]):");
+    head!("\nproviders (an agent's credential: `luoto agent auth`):");
     let w = wide(&mut profiles::provider_names());
     for n in profiles::provider_names() {
         let p = profiles::provider(n).context("provider profile")?;
@@ -60,7 +105,7 @@ pub fn list() -> Result<ExitCode> {
 
 fn profile(agent: &str) -> Result<profiles::Agent> {
     profiles::agent(agent)
-        .with_context(|| format!("unknown agent `{agent}` (see `luoto agent list`)"))
+        .with_context(|| format!("unknown agent `{agent}` (`luoto agent list --available`)"))
 }
 
 /// Whether the agent's command is on the dev user's login PATH.
@@ -537,12 +582,12 @@ fn scripted(a: &profiles::Agent) -> Vec<String> {
 
 /// `luoto agent add … --credential` with each of [`scripted`]'s values: the first in the
 /// command, the others after it.
-fn scripted_command(env_name: &str, name: &str, a: &profiles::Agent) -> String {
+fn scripted_command(env_name: &str, name: &str, a: &profiles::Agent, sub: &str) -> String {
     let forms = scripted(a);
     let Some((first, rest)) = forms.split_first() else {
         return String::new();
     };
-    let mut out = format!("`luoto agent add -e {env_name} {name} --credential {first}`");
+    let mut out = format!("`luoto agent {sub} -e {env_name} {name} --credential {first}`");
     if !rest.is_empty() {
         let rest: Vec<String> = rest.iter().map(|r| format!("`{r}`")).collect();
         out.push_str(&format!(" (or {})", rest.join(", ")));
@@ -555,7 +600,7 @@ fn scripted_command(env_name: &str, name: &str, a: &profiles::Agent) -> String {
 fn credential_help(env_name: &str, name: &str, a: &profiles::Agent) -> String {
     let provider = a.providers.first().and_then(|p| profiles::provider(p));
     let mut how = format!("`luoto agent auth -e {env_name} {name}` on a terminal");
-    let scripted = scripted_command(env_name, name, a);
+    let scripted = scripted_command(env_name, name, a, "auth");
     if !scripted.is_empty() {
         how.push_str(&format!(", or {scripted}"));
     }
@@ -780,6 +825,7 @@ pub fn set_credentials(
         .flat_map(|a| a.providers)
         .filter_map(|p| Some((p.clone(), profiles::provider(&p)?)))
         .collect();
+    let mut written = BTreeSet::new();
     for spec in specs {
         let (key, reference) = match spec.split_once('=') {
             Some((k, r)) => (k.trim(), Some(r.trim())),
@@ -831,7 +877,16 @@ pub fn set_credentials(
             None => ProviderValue::Flag(true),
         };
         EnvFile::load(&ctx.paths, env_name)?.set_provider_kind(provider, kind, &value)?;
-        out!("[credentials.{provider}] {kind} written to env `{env_name}`");
+        written.insert(provider.clone());
+    }
+    // Each agent the credentials were for ends with its summary, as after the questions.
+    let cfg = EnvFile::load(&ctx.paths, env_name)?.cfg;
+    for name in agents {
+        if let Some(a) = profiles::agent(name)
+            && a.providers.iter().any(|p| written.contains(p))
+        {
+            settle(env_name, name, &a, &cfg);
+        }
     }
     Ok(())
 }
@@ -859,7 +914,7 @@ pub fn add(env_name: &str, agent: &str, credential: Option<&str>) -> Result<Exit
         )?;
     }
     for other in lacking.iter().filter(|n| *n != agent) {
-        println!("still without a credential: {other} (luoto agent auth -e {env_name} {other})");
+        out!("still without a credential: {other} (`luoto agent auth -e {env_name} {other}`)");
         mark_settled(env_name, other);
     }
     // A running env stays as it was but for the agent: no closing block about the env.
@@ -878,7 +933,7 @@ pub fn add(env_name: &str, agent: &str, credential: Option<&str>) -> Result<Exit
 /// `luoto agent auth`: the credential questions again for an agent the env has, each opening
 /// on what its config says. The answer replaces only how the agent authenticates, and a
 /// running env takes it at once.
-pub fn auth(env_name: &str, agent: &str) -> Result<ExitCode> {
+pub fn auth(env_name: &str, agent: &str, credential: Option<&str>) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let a = profile(agent)?;
     if !env::layered(&ctx, env_name)?.agents.contains(agent) {
@@ -901,10 +956,15 @@ pub fn auth(env_name: &str, agent: &str) -> Result<ExitCode> {
         );
         return Ok(ExitCode::SUCCESS);
     }
+    if let Some(c) = credential {
+        set_credentials(&ctx, env_name, &[agent.to_string()], &[c.to_string()])?;
+        sync::reapply(&ctx, env_name)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     if !crate::prompt::interactive() {
         bail!(
-            "agent auth needs a terminal; without one, {}",
-            scripted_command(env_name, agent, &a)
+            "`luoto agent auth` asks on a terminal; without one: {}",
+            scripted_command(env_name, agent, &a, "auth")
         );
     }
     if ask(&ctx, env_name, agent, &a, Mode::Change)? {
@@ -975,7 +1035,7 @@ const CLOCK_SLACK: TimeDelta = TimeDelta::minutes(10);
 
 /// `--timeout`: a duration as rules take it (30m, 2h), above zero.
 fn parse_timeout(s: &str) -> Result<Duration> {
-    crate::rules::parse_ttl(s)?
+    crate::rules::parse_duration(s)?
         .to_std()
         .ok()
         .filter(|d| !d.is_zero())
@@ -1026,9 +1086,10 @@ pub fn headless(
     args: &[String],
     output: Option<&str>,
     timeout: Option<&str>,
-    down: bool,
+    finish: Finish,
 ) -> Result<ExitCode> {
     use std::process::Stdio;
+    let Finish { end, pull } = finish;
     let ctx = Ctx::load()?;
     let a = profile(agent)?;
     if a.headless.is_empty() {
@@ -1044,6 +1105,27 @@ pub fn headless(
     if output.is_some() {
         std::fs::write(&out_file, b"")
             .with_context(|| format!("can't write {}", out_file.display()))?;
+    }
+    // The run ends in an unattended pull when asked, or when its env pulls at every stop and
+    // the run stops it.
+    let unattended = pull.unattended || (end != End::Leave && autopull::on(&ctx.paths, env_name));
+    if (pull.unattended || pull.reviewed)
+        && !EnvFile::load(&ctx.paths, env_name).is_ok_and(|f| f.cfg.workspace.has_folder())
+    {
+        bail!(
+            "env `{env_name}` has no folder on this machine to pull into: its work leaves by \
+             git push"
+        );
+    }
+    let report_file = pull.report.as_deref().map(crate::workspace::expand);
+    if let Some(f) = &report_file {
+        if !unattended {
+            bail!(
+                "`--report` is an unattended pull's: add `--dangerously-pull`, or `--down` or \
+                 `--rm` for an env set to pull when it stops (`luoto pull --on-stop on`)"
+            );
+        }
+        std::fs::write(f, b"").with_context(|| format!("can't write {}", f.display()))?;
     }
     list_agent(&ctx, env_name, agent)?;
     let progress = Stdio::from(std::io::stderr());
@@ -1093,7 +1175,23 @@ pub fn headless(
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let interrupts = count_interrupts();
-    let mut child = cmd.spawn()?;
+    // Said before the agent starts: a run cut short, even by a kill, then leaves it said
+    // that its files are half done, and one that ends leaves its pull owed.
+    let pulls = unattended || autopull::on(&ctx.paths, env_name);
+    if pulls {
+        let rm = matches!(end, End::Remove { .. });
+        autopull::expect(&ctx.paths, env_name, unattended, rm)?;
+    }
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            // No agent ran: nothing of this run is half done.
+            if pulls {
+                autopull::ended(&ctx.paths, env_name);
+            }
+            return Err(e.into());
+        }
+    };
     let started = Instant::now();
     let errs = child
         .stderr
@@ -1182,22 +1280,362 @@ pub fn headless(
         }
         Err(e) => crate::progress::warn(&format!("no summary of the gate's denials ({e:#})")),
     }
-    relayed?;
     crate::disk::hint_growth(&ctx, env_name);
-    if down {
-        match env::down(&ctx, env_name) {
-            Ok(_) => err!("env `{env_name}` stopped"),
-            Err(e) => crate::progress::warn(&format!("env `{env_name}` not stopped ({e:#})")),
+    // What ends the run never changes its exit code: a problem here is a warning. An answer
+    // that could be written nowhere fails the run only after its env is seen to.
+    let mut pulled = None;
+    match after(stopped, pull.reviewed, pulls) {
+        After::Kept(why) => {
+            // Half-done files land nowhere unreviewed: not now, nor when the env stops.
+            if pulls {
+                autopull::hold(&ctx.paths, env_name);
+            }
+            if unattended {
+                pulled = Some(autopull::Report {
+                    env: env_name.to_string(),
+                    at: Some(chrono::Utc::now()),
+                    why: "run".into(),
+                    held: true,
+                    ..Default::default()
+                });
+            }
+            keep_cut(&ctx, env_name, end, why);
+        }
+        After::Ended { reviewed } => {
+            if pulls {
+                autopull::ended(&ctx.paths, env_name);
+            }
+            if reviewed {
+                reviewed_pull(env_name);
+            }
+            if unattended {
+                pulled = Some(pull_and_end(&ctx, env_name, end));
+            } else {
+                match end {
+                    End::Leave => crate::used::touch(&ctx.paths, env_name),
+                    End::Down => stop_env(&ctx, env_name),
+                    End::Remove { yes } => remove_after(&ctx, env_name, yes),
+                }
+            }
         }
     }
+    if let (Some(file), Some(report)) = (&report_file, &pulled) {
+        let written = serde_json::to_vec_pretty(report)
+            .map_err(io::Error::other)
+            .and_then(|b| std::fs::write(file, b));
+        if let Err(e) = written {
+            crate::progress::warn(&format!("{} not written ({e})", file.display()));
+        }
+    }
+    relayed?;
     match stopped {
         Some(Stop::Timeout) => return Ok(ExitCode::from(TIMED_OUT)),
         Some(Stop::Interrupt) => return Ok(ExitCode::from(INTERRUPTED)),
         Some(Stop::Output) | None => {}
     }
-    Ok(ExitCode::from(
-        status.code().unwrap_or(1).clamp(0, 255) as u8
-    ))
+    let code = status.code().unwrap_or(1).clamp(0, 255) as u8;
+    Ok(ExitCode::from(exit_code(
+        code,
+        pulled.as_ref().is_some_and(autopull::Report::incomplete),
+    )))
+}
+
+/// The run's exit code: the agent's, but [`autopull::INCOMPLETE`] when it succeeded and the
+/// unattended pull after it left something out, so a job doesn't take the folder for done.
+fn exit_code(agent: u8, pull_incomplete: bool) -> u8 {
+    if agent == 0 && pull_incomplete {
+        autopull::INCOMPLETE
+    } else {
+        agent
+    }
+}
+
+/// What `luoto run` does once the agent has ended.
+pub struct Finish {
+    pub end: End,
+    pub pull: RunPull,
+}
+
+/// The pulls `luoto run` was asked for after the agent.
+#[derive(Clone, Debug, Default)]
+pub struct RunPull {
+    /// `--pull`: the reviewed one, asked on a terminal.
+    pub reviewed: bool,
+    /// `--dangerously-pull`: written with nobody reviewing, once the env has stopped.
+    pub unattended: bool,
+    /// `--report`: where the unattended pull's report goes, as JSON.
+    pub report: Option<String>,
+}
+
+/// What follows the agent.
+#[derive(Debug, PartialEq, Eq)]
+enum After {
+    /// luoto stopped the agent (Ctrl-C, `--timeout`, an answer that couldn't be written)
+    /// with a pull to come, then or at the env's stop: nothing is pulled and the env is
+    /// kept. Why, for the note.
+    Kept(&'static str),
+    /// The reviewed pull if asked for, the unattended one if the run or its env has one,
+    /// then what ends the run (`--down`, `--rm`).
+    Ended { reviewed: bool },
+}
+
+/// `pulls`: the run's files are pulled unattended, at its end or when its env stops.
+fn after(stopped: Option<Stop>, reviewed: bool, pulls: bool) -> After {
+    let why = match stopped {
+        Some(Stop::Interrupt) => "interrupted",
+        Some(Stop::Timeout) => "stopped at its --timeout",
+        Some(Stop::Output) => "stopped with its answer unwritten",
+        None => return After::Ended { reviewed },
+    };
+    if reviewed || pulls {
+        After::Kept(why)
+    } else {
+        After::Ended { reviewed }
+    }
+}
+
+/// A run cut short whose files were to be pulled: the env is kept, stopped if the run was to
+/// stop or remove it, and nothing is written.
+fn keep_cut(ctx: &Ctx, env: &str, end: End, why: &str) {
+    if end == End::Leave {
+        crate::progress::note(&format!(
+            "{why}: nothing pulled from `{env}`. `luoto pull -e {env}` reviews what the agent \
+             left"
+        ));
+        return;
+    }
+    if let Err(e) = env::down(ctx, env) {
+        crate::progress::warn(&format!("env `{env}` not stopped ({e:#})"));
+    }
+    crate::progress::note(&format!(
+        "{why}: nothing pulled, and env `{env}` is kept, stopped. `luoto up -e {env}` and \
+         `luoto pull -e {env}` review what the agent left"
+    ));
+}
+
+/// `--pull`: `luoto pull` for the env as a child, its list and question on stderr (stdout is
+/// the agent's answer). Without a terminal to ask on, nothing is written.
+fn reviewed_pull(env: &str) {
+    use std::process::Stdio;
+    if !crate::prompt::interactive() || !io::stderr().is_terminal() {
+        crate::progress::note(&format!(
+            "`--pull` asks on a terminal: nothing written. `luoto pull -e {env}` reviews the \
+             env's files; `luoto run … --dangerously-pull` writes them unreviewed"
+        ));
+        return;
+    }
+    let ran = std::env::current_exe().and_then(|exe| {
+        std::process::Command::new(exe)
+            .args(["pull", "-e", env])
+            .stdout(Stdio::from(io::stderr()))
+            .status()
+    });
+    match ran {
+        Ok(s) if s.success() => {}
+        Ok(_) => crate::progress::warn(&format!(
+            "not everything was pulled; `luoto pull -e {env}` again"
+        )),
+        Err(e) => crate::progress::warn(&format!("`luoto pull -e {env}` didn't start ({e})")),
+    }
+}
+
+/// The end of a run that pulls unattended: what git holds is read while the env runs (for
+/// `--rm`), the env stops, its files are pulled from its volume, and `--rm` removes it only
+/// if they all landed. The pull's report.
+fn pull_and_end(ctx: &Ctx, env: &str, end: End) -> autopull::Report {
+    let git = matches!(end, End::Remove { .. }).then(|| crate::commands::unpushed(ctx, env));
+    let work = git.as_ref().map(crate::used::Work::of);
+    let report = match autopull::stop_with(ctx, env, autopull::Why::Run, true, work) {
+        Ok(stopped) => {
+            err!("env `{env}` stopped");
+            stopped.report.unwrap_or_default()
+        }
+        Err(e) => autopull::Report {
+            env: env.to_string(),
+            error: Some(crate::text::lines(&format!("{e:#}"))),
+            ..Default::default()
+        },
+    };
+    report.print(&mut io::stderr(), crate::style::err(), 30);
+    if let (End::Remove { yes }, Some(git)) = (end, git) {
+        let ws = env::layered(ctx, env).map(|c| c.workspace).ok();
+        // A repo copied in from a folder has its files there now, if they all landed.
+        let pulled =
+            |path: &str| ws.as_ref().is_some_and(|ws| ws.folder_of(path)) && !report.incomplete();
+        let mut in_files_only = false;
+        let lost: Vec<String> = match &git {
+            Ok(found) => found
+                .iter()
+                .filter(|w| {
+                    in_files_only |= pulled(&w.path) && w.commits > w.elsewhere;
+                    w.only_here(pulled(&w.path))
+                })
+                .map(|w| format!("  {w}"))
+                .collect(),
+            Err(e) => vec![format!(
+                "  its repos couldn't be checked: {}",
+                crate::text::lines(&format!("{e:#}"))
+            )],
+        };
+        let files = match report.removable() {
+            true => Vec::new(),
+            false => vec!["  not all of its files are in your folder (above)".to_string()],
+        };
+        if in_files_only && lost.is_empty() && files.is_empty() {
+            err!("the env's commits go with it: your folder has their files, not the commits");
+        }
+        finish_removal(ctx, env, yes, &lost, &files, None);
+    }
+    report
+}
+
+/// What `luoto run` does with the env once the agent has ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum End {
+    /// It keeps running.
+    Leave,
+    /// `--down`.
+    Down,
+    /// `--rm`: removed as `luoto rm` removes it; `yes` also with work no remote has.
+    Remove { yes: bool },
+}
+
+impl End {
+    pub fn of(down: bool, rm: bool, yes: bool) -> End {
+        match (rm, down) {
+            (true, _) => End::Remove { yes },
+            (false, true) => End::Down,
+            (false, false) => End::Leave,
+        }
+    }
+}
+
+fn stop_env(ctx: &Ctx, env: &str) {
+    match env::down(ctx, env) {
+        Ok(_) => err!("env `{env}` stopped"),
+        Err(e) => crate::progress::warn(&format!("env `{env}` not stopped ({e:#})")),
+    }
+}
+
+/// What `--rm` does with an env whose work was looked at.
+#[derive(Debug, PartialEq, Eq)]
+enum Removal {
+    Remove,
+    /// On a terminal: the list, then the question, whose answer Enter gives is to keep it.
+    Ask,
+    /// Without a terminal nothing is lost unasked: the env stays, stopped.
+    Keep,
+}
+
+/// `only_here`: the env holds work no remote has or files its folder lacks, or couldn't be
+/// asked.
+fn removal(only_here: bool, yes: bool, terminal: bool) -> Removal {
+    match (only_here, yes, terminal) {
+        (false, ..) | (_, true, _) => Removal::Remove,
+        (true, false, true) => Removal::Ask,
+        (true, false, false) => Removal::Keep,
+    }
+}
+
+/// What is said of an env `--rm` left: what it holds, and the commands that remove it;
+/// `files` when its folder lacks some, with the command that brings them.
+fn kept_note(env: &str, asked: bool, files: bool) -> String {
+    if asked {
+        return format!("env `{env}` kept, stopped (`luoto rm -e {env}` removes it)");
+    }
+    let pull = if files {
+        format!(" `luoto up -e {env}` and `luoto pull -e {env}` bring its files to your folder;")
+    } else {
+        String::new()
+    };
+    format!(
+        "env `{env}` kept, stopped: it holds work that is nowhere else.{pull} `luoto rm -e {env} \
+         --yes` removes it; `luoto run … --rm --yes` removes an env whatever its run leaves"
+    )
+}
+
+/// `--rm`: remove the env the run was in, unless it holds work no remote has and nobody said
+/// to lose it. On stderr: stdout is the agent's answer.
+fn remove_after(ctx: &Ctx, env: &str, yes: bool) {
+    let found = crate::commands::unpushed(ctx, env);
+    let lost: Vec<String> = match &found {
+        Ok(found) => found.iter().map(|w| format!("  {w}")).collect(),
+        Err(e) => vec![format!(
+            "  its repos couldn't be checked: {}",
+            crate::text::lines(&format!("{e:#}"))
+        )],
+    };
+    // Files only the env has: a folder that isn't a git repository has no other check.
+    let files: Vec<String> = match crate::commands::unpulled(ctx, env) {
+        Ok(found) => found.iter().map(|u| format!("  {u}")).collect(),
+        Err(e) => vec![format!(
+            "  its files couldn't be compared with yours: {}",
+            crate::text::lines(&format!("{e:#}"))
+        )],
+    };
+    let work = crate::used::Work::of(&found);
+    finish_removal(ctx, env, yes, &lost, &files, Some(work));
+}
+
+/// `--rm`'s end: `lost` (work no remote has) and `files` (what the env's folder lacks) are
+/// listed, and the env is removed unless they keep it. `work`: what its repos were just
+/// found to hold, for an env that still runs.
+fn finish_removal(
+    ctx: &Ctx,
+    env: &str,
+    yes: bool,
+    lost: &[String],
+    files: &[String],
+    work: Option<crate::used::Work>,
+) {
+    let terminal = crate::prompt::interactive() && std::io::stderr().is_terminal();
+    let step = removal(!lost.is_empty() || !files.is_empty(), yes, terminal);
+    let gone = if step == Removal::Remove {
+        ", removed with it"
+    } else {
+        ""
+    };
+    if !lost.is_empty() {
+        err!("Work in `{env}` that no remote has{gone}:");
+        for line in lost {
+            eprintln!("{line}");
+        }
+    }
+    if !files.is_empty() {
+        err!("In `{env}` and not in your folder{gone}:");
+        for line in files {
+            eprintln!("{line}");
+        }
+    }
+    let remove = match step {
+        Removal::Remove => true,
+        Removal::Keep => false,
+        Removal::Ask => {
+            let question = format!("Remove env `{env}` anyway? [y/N]");
+            let line = crate::progress::pause(|| {
+                eprint!("{}", crate::style::err().question(&question));
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+                line
+            });
+            matches!(line.trim(), "y" | "Y" | "yes")
+        }
+    };
+    if !remove {
+        // The note says it is stopped: once.
+        if let Err(e) = env::down_with(ctx, env, work) {
+            crate::progress::warn(&format!("env `{env}` not stopped ({e:#})"));
+        }
+        err_text!(
+            "{}",
+            kept_note(env, step == Removal::Ask, !files.is_empty())
+        );
+        return;
+    }
+    match crate::commands::remove_env(ctx, env) {
+        Ok(()) => err!("env `{env}` removed"),
+        Err(e) => crate::progress::warn(&format!("env `{env}` not removed ({e:#})")),
+    }
 }
 
 /// Send `signal` to the processes of the run `mark` names in the env's dev container. As the
@@ -1288,18 +1726,20 @@ pub fn rm(env_name: &str, agent: &str) -> Result<ExitCode> {
     if !f.cfg.agents.contains(agent) {
         if env::layered(&ctx, env_name)?.agents.contains(agent) {
             bail!(
-                "{agent} comes from the team's luoto.toml; `luoto project ignore` stops applying \
-                 that file"
+                "{agent} comes from the team's luoto.toml; `luoto project ignore -e \
+                 {env_name}` stops applying that file"
             );
         }
-        bail!("env `{env_name}` has no agent `{agent}`");
+        bail!(
+            "env `{env_name}` has no agent `{agent}` (`luoto agent list -e {env_name}` lists \
+             its agents)"
+        );
     }
     f.remove_agent(agent)?;
     sync::reapply(&ctx, env_name)?;
     out!(
-        "removed {} from env `{env_name}`; its files stay in the env's home (`{}` in \
-         ~/.local/bin), and its [credentials] stay in the config",
-        a.description,
+        "removed agent `{agent}` from env `{env_name}`; its files stay in the env's home \
+         (`{}` in ~/.local/bin), and its credential in the env's config",
         a.command
     );
     Ok(ExitCode::SUCCESS)
@@ -1370,6 +1810,73 @@ fn headless_argv(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rm_after_a_run_loses_no_unpushed_work_unasked() {
+        // Nothing unpushed: removed, whoever runs it.
+        assert_eq!(removal(false, false, false), Removal::Remove);
+        assert_eq!(removal(false, false, true), Removal::Remove);
+        // Unpushed work: `--yes` removes it, a terminal is asked, a scheduled run keeps it.
+        assert_eq!(removal(true, true, false), Removal::Remove);
+        assert_eq!(removal(true, true, true), Removal::Remove);
+        assert_eq!(removal(true, false, true), Removal::Ask);
+        assert_eq!(removal(true, false, false), Removal::Keep);
+    }
+
+    #[test]
+    fn an_env_rm_kept_names_the_commands_that_remove_it() {
+        assert_eq!(
+            kept_note("job", false, false),
+            "env `job` kept, stopped: it holds work that is nowhere else. `luoto rm -e job \
+             --yes` removes it; `luoto run … --rm --yes` removes an env whatever its run leaves"
+        );
+        assert!(
+            kept_note("job", false, true)
+                .contains("`luoto up -e job` and `luoto pull -e job` bring its files")
+        );
+        assert_eq!(
+            kept_note("job", true, true),
+            "env `job` kept, stopped (`luoto rm -e job` removes it)"
+        );
+    }
+
+    #[test]
+    fn a_run_pulls_after_the_agent_unless_luoto_stopped_it() {
+        // (why luoto stopped the agent, --pull, an unattended pull then or at the env's stop)
+        let ended = |reviewed| After::Ended { reviewed };
+        assert_eq!(after(None, false, false), ended(false));
+        assert_eq!(after(None, true, false), ended(true));
+        assert_eq!(after(None, false, true), ended(false));
+        // Cut short, whatever cut it: half-done files don't land, and the env is kept.
+        for stop in [Stop::Interrupt, Stop::Timeout, Stop::Output] {
+            assert!(matches!(after(Some(stop), true, false), After::Kept(_)));
+            assert!(matches!(after(Some(stop), false, true), After::Kept(_)));
+            // With no pull to come the run ends as it was told to.
+            assert_eq!(after(Some(stop), false, false), ended(false));
+        }
+        assert_eq!(
+            after(Some(Stop::Timeout), false, true),
+            After::Kept("stopped at its --timeout")
+        );
+    }
+
+    #[test]
+    fn a_pull_that_left_something_out_shows_in_a_successful_runs_exit_code() {
+        assert_eq!(exit_code(0, false), 0);
+        assert_eq!(exit_code(0, true), 75);
+        // The agent's own failure stays the code.
+        assert_eq!(exit_code(2, true), 2);
+        assert!(![0, 1, TIMED_OUT, INTERRUPTED].contains(&autopull::INCOMPLETE));
+    }
+
+    #[test]
+    fn rm_ends_a_run_before_down_does() {
+        assert_eq!(End::of(false, false, false), End::Leave);
+        assert_eq!(End::of(true, false, false), End::Down);
+        assert_eq!(End::of(false, true, false), End::Remove { yes: false });
+        // `--rm` stops the env as part of removing it: `--down` beside it adds nothing.
+        assert_eq!(End::of(true, true, true), End::Remove { yes: true });
+    }
 
     fn cfg(text: &str) -> EnvConfig {
         toml::from_str(text).unwrap()
@@ -1571,8 +2078,8 @@ model_server = "box"
         );
         assert_eq!(scripted(&agent("agy")), ["login_inside"]);
         assert_eq!(
-            scripted_command("web", "claude", &agent("claude")),
-            "`luoto agent add -e web claude --credential oauth_token=<ref>` (or `api_key=<ref>`, \
+            scripted_command("web", "claude", &agent("claude"), "auth"),
+            "`luoto agent auth -e web claude --credential oauth_token=<ref>` (or `api_key=<ref>`, \
              `login_inside`)"
         );
         let open = scripted(&agent("opencode"));

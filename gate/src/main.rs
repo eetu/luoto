@@ -21,6 +21,7 @@ mod imds;
 mod limits;
 mod mitm;
 mod proxy;
+mod redirects;
 mod relay;
 mod requests;
 mod respond;

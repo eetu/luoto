@@ -74,6 +74,8 @@ What only the old machine has stays there:
   workspace came in the file, so nothing is copied in from them: they are where `luoto pull`
   writes. Where that folder doesn't exist, the env still works, but `luoto pull` needs `--to`
   until `luoto edit` points `dir` at a folder there. An env cloned from a remote has none.
+  Pull-on-stop (`dangerously_pull_on_stop`) is left out, as the folders it writes are
+  another machine's to offer: `luoto pull --on-stop on` there, after one reviewed pull.
 
 ## What moves
 

@@ -141,7 +141,7 @@ impl Listening {
         );
         let mut child = rt
             .command()
-            .args(exec(dev).sh(&script))
+            .args(exec(dev).env(crate::idle::PROBE).sh(&script))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())

@@ -103,6 +103,21 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   A pushed branch or an opened pull request runs the pipelines that trigger on it, with code
   the sandbox wrote, outside the sandbox: keep their secrets behind approvals and branch
   checks.
+- **Azure DevOps feeds.** The PAT goes on the feeds' organizations' packaging paths, with GET
+  and HEAD only: installs, never a publish. Every feed of those organizations gets it, as a
+  feed's own links name its files by project and feed ID; a PAT with only Packaging (Read)
+  keeps it to what it reads. A stored package downloads from a signed Azure Storage URL on a
+  host per file, so no rule names those hosts: the gate lets through only the exact URL a
+  feed's redirect named, for GET and HEAD, for ten minutes, without the client's own
+  authorization or cookies. The sandbox never chooses that URL.
+- **Other package feeds.** Each goes on its feed's paths, with GET and HEAD only. A GitHub
+  Packages token (a classic one, as the registries take no other) on the listed owners' paths
+  of the npm, Maven, NuGet and RubyGems registries; such a token reaches more at GitHub than
+  packages, which the gate's paths keep from the env. A Gitea or Forgejo token on the owner's
+  packages; a GitLab token on the project's, and for a group's or the instance's endpoints on
+  every project's packages, as their files link to each project's path. Downloads redirect to
+  storage only as above: GitHub's to one fixed host per registry, a self-hosted instance's to
+  the exact hosts its credential's `storage_hosts` name, on its private network when it is.
 - **Other forges** (`[[credentials.git]]`). The token goes only on the granted repositories'
   smart-HTTP and LFS paths, pushes pass the same guard, and push options (which can open merge
   requests or skip CI) are refused. The forge's API is not reachable with it; the token's
@@ -143,16 +158,56 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Filesystem.** The sandbox sees only its env's folder and the folders of the repos you add
   to it (a repository's `luoto.toml` names remotes only). It gets a copy, without what git
   ignores in a repository, and never writes to the host; work leaves through git pushes or a
-  reviewed `pull`. `pull` reviews changes, holds back risky files in any folder within the pull
+  `pull`, reviewed unless you say otherwise (Unattended pulls, below). luoto keeps a
+  fingerprint of each file it copied in, so a pull offers what the env changed: a file you
+  changed too is a conflict, kept unless `--overwrite`, and nothing is deleted. `pull` reviews
+  changes, holds back risky files in any folder within the pull
   (compared case-insensitively, as macOS and Windows name them), refuses `.git` under any
   spelling, names that collide by case, and paths and symlinks that leave the folder. What
-  it holds back is what tools run by themselves; the rest is still code the sandbox wrote,
+  it holds back is what acts without you running it: git metadata, `.gitattributes` and
+  `.gitmodules`, direnv and dotenv files (`.envrc`, `.env`, `.env.*`), editor and IDE
+  folders, coding agents' settings, MCP servers and instructions (`.claude`, `.cursor`,
+  `.mcp.json`, `AGENTS.md`, `CLAUDE.md`), hook managers, package managers' and build tools'
+  own config and wrappers (`.npmrc`, `.yarnrc.yml`, `bunfig.toml`, `.cargo/config.toml`,
+  mise, `gradlew`, `mvnw`), CI workflows (`.github/workflows`), `luoto.toml` (an env made
+  from the folder with `luoto init --yes` takes its settings), files that become
+  executable and symlinks. The rest is still code the sandbox wrote,
   and building or running it on your machine runs it outside the sandbox: read the diff
-  first. A pulled `.gitignore` decides what later copies leave out, so review its changes. `pull`
+  first. A pulled `.gitignore` decides what later copies leave out, so review its changes. A
+  file that can't be written is named and the rest are written, each through a temporary
+  file of luoto's own beside it, keeping the permissions of the file it replaces. `pull`
   never writes into your home folder or a folder that holds it. With podman on macOS and
   Windows, envs run only in luoto's own VM, which mounts none of your folders but luoto's
   shares folder, read-only (`luoto doctor` checks), so an escape reaches what you shared, not
   your home directory.
+- **Unattended pulls** (`luoto pull --on-stop on`, `luoto run --dangerously-pull`). Off unless
+  you turn it on, per env: only the env's own file sets `dangerously_pull_on_stop` (not
+  `config.toml`, not a `luoto.toml`, and `luoto import` leaves an archive's out). The env's
+  files are then written into its folder with nobody reviewing them, when it stops. They are
+  read from the stopped env's volume by a container with no network and a read-only mount, so
+  code in the env can neither stall the read nor change a file after it was judged. The read
+  is bounded in time, and holds no file: each is fingerprinted as it comes, and the ones to
+  write are read again and taken only if they match the fingerprint they were judged by.
+  Written: files the env changed and you didn't, by the fingerprints above. Never written: a
+  conflict, a deletion, what `pull` holds back or refuses, what your repository ignores (by
+  its own rules build output, which keeps no env from being removed either), and what is held
+  back only here: executable files, tool configs that are code (`*.config.js` and its kin,
+  `build.rs`, `conftest.py`, `sitecustomize.py`, Gradle build scripts, `Gemfile`,
+  `*.gemspec`, `flake.nix`, `shell.nix`, `.pnp.cjs`, `.yarn/releases`, `nodemon.json`), the
+  manifests editors, language servers and installs evaluate unasked (`package.json`,
+  `Cargo.toml`, `pyproject.toml`, `setup.py`, `setup.cfg`, `pytest.ini`, `tox.ini`, `go.mod`,
+  `go.work`, `Makefile` and `*.mk`, `CMakeLists.txt` and `*.cmake`, `pom.xml`, `*.sbt`,
+  `mix.exs`, `Package.swift`, `build.zig`, MSBuild's `*.csproj`, `*.props` and `*.targets`,
+  `.eslintrc*`, `.prettierrc*`), `.gitignore` in any folder (it decides what the next copy
+  into an env takes of yours), the folder your repository's `core.hooksPath` names, and
+  folders laid out as a git repository. Over 5000 files, 256 MB or 64 MB in one file to
+  write, with too little disk left, or with over a million files to read, nothing is written;
+  a folder mid-merge or mid-rebase waits. Each file is checked again for a change of yours
+  just before it is replaced. What is planned is journaled before the first write, so a pull
+  cut short is cleaned up by the next command, and an env that stopped unseen is pulled in
+  the background; a removal that was to follow (`--rm`) is never resumed. After a run cut
+  short (Ctrl-C, `--timeout`, a kill, a stop under the agent) nothing is pulled until you
+  have reviewed a pull.
 - **Shared folders** (`luoto share`). A folder you share is cloned into luoto's shares
   folder and the env's clones are mounted read-only at `/shares`, readable by any code
   there; nothing flows back, and a change in the folder arrives only with a sync. Only its
@@ -186,7 +241,7 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   env's user namespace. Nothing of a volume is unpacked on the host. Before it asks, import
   lists what the config opens: the secret refs it reads on this machine, the hosts each
   credential goes to, secrets put in the sandbox, `isolation`, `image`, `ports`, `[[allow]]`
-  rules, `[deps] run` and private git hosts. Until your yes, the folders it names are only
+  rules, `[deps] run`, private git hosts and the storage hosts their feeds may redirect to. Until your yes, the folders it names are only
   text, never looked up; it refuses your home folder or one that holds it, and nothing is
   copied in from them afterwards (the workspace came in the archive): they are where `pull`
   writes, which the list says. The `luoto.toml` accepted where it was exported is not
@@ -241,7 +296,7 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   HTTP(S) host and download what it likes. What still holds: secrets stay in the vault and go
   only where their rules allow, private addresses and services on your machine stay
   unreachable, raw TCP and SSH still need tunnel rules, and UDP still goes nowhere.
-  `luoto egress --open` shows where requests went; keep the window short.
+  `luoto egress --unruled` shows where requests went; keep the window short.
 - **Model APIs.** Prompts to an allowed model API can carry data, and the API key can be
   spent by anything in the sandbox. Anthropic's, OpenAI's and Gemini's file and batch
   endpoints are denied, as are Anthropic's managed agents, sessions and environments (code
@@ -313,7 +368,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Notifications.** A desktop notification shows the host and reason of a request, and a
   denied host, as the sandbox wrote them: control and format characters become spaces, the
   text is capped, and it reaches the notifier as an argument, never as script. Denials notify
-  at most twice a minute per env. The UI's browser notifications carry no sandbox text.
+  at most twice a minute per env. An unattended pull's notification carries counts and your
+  folder's path, never a file's name. The UI's browser notifications carry no sandbox text.
 - **IDE attachment.** VS Code's host-side client talks to the server in the container; UI
   extensions run on the host. Keep host-side extensions minimal.
 - **SSH logins relayed out.** The vault checks that a session is bound to a pinned host key,
@@ -321,6 +377,15 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   session someone else opened to that host from anywhere and hand back the signed login, so
   that party logs in with the key too. The key's reach at the forge is the limit: prefer a
   deploy key.
+- **Unattended pulls.** With `dangerously_pull_on_stop` or `--dangerously-pull`, files the
+  sandbox wrote land in your folder without a person choosing when. Whatever watches the
+  folder then runs them outside the sandbox: a dev server reloading, a test watcher, a
+  language server, a build on save, your next `cargo test`. What is held back narrows that to
+  ordinary source files and lock files; it doesn't remove it, since source is what those tools
+  run, and a changed lock file is other code at your next install. The
+  three-way rule keeps your own edits, but a file only the env changed is replaced without
+  your having read it. Use it for folders nothing watches, and read the diff before you run
+  or commit what landed.
 - **Risky pulls.** `luoto pull --include-risky` writes the sandbox's symlinks. Each target is
   checked to stay in the folder as written, but it can lead through another link (one on the
   host, or one the same pull writes) that points elsewhere.

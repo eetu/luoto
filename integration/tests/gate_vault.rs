@@ -16,7 +16,7 @@ use luoto_shared::azure_identity::{Audience, AzureIdentity};
 use luoto_shared::creds::{BindingSpec, Injection, Placement};
 use luoto_shared::ctl::{GateCtl, VaultCtl};
 use luoto_shared::policy::{
-    Access, AccessLevel, BodyDeny, CompiledRule, GithubGuard, Mode, Policy, Rule,
+    Access, AccessLevel, BodyDeny, CompiledRule, GithubGuard, Mode, Policy, Redirect, Rule,
 };
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
 use rustls::crypto::CryptoProvider;
@@ -877,6 +877,125 @@ async fn credentials_come_over_the_links_the_host_joins_to_the_vault() {
         "{}",
         r.body
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn a_feeds_redirect_to_storage_opens_that_url_alone_for_reads() {
+    let feed = MockServer::start().await;
+    let download = "/acme/_packaging/f/pypi/download/x.whl";
+    Mock::given(method("GET"))
+        .and(path(download))
+        .and(header("authorization", "Basic OnJlYWwtc2VjcmV0"))
+        .respond_with(
+            ResponseTemplate::new(303)
+                .insert_header("location", "http://s1.blob.test/b-1/X.blob?sig=a%2Bb&se=1"),
+        )
+        .mount(&feed)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/acme/_packaging/f/elsewhere"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "http://evil.test/x"))
+        .mount(&feed)
+        .await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&feed)
+        .await;
+    // Storage refuses a request that carries another authorization than its signed URL.
+    let storage = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/b-1/X.blob"))
+        .and(header_exists("authorization"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&storage)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/b-1/X.blob"))
+        .and(query_param("sig", "a+b"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("blob"))
+        .mount(&storage)
+        .await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_string("reached"))
+        .mount(&storage)
+        .await;
+    let env = Env::start(&[
+        ("feed.test", *feed.address()),
+        ("s1.blob.test", *storage.address()),
+        ("evil.test", *storage.address()),
+    ]);
+    env.credentials(
+        &[(
+            "azure_devops",
+            BindingSpec::Static {
+                secret_ref: "env:X".into(),
+            },
+        )],
+        &[("env:X", "real-secret")],
+    );
+    let paths = vec!["/acme/_packaging/**".to_string()];
+    env.apply(Policy {
+        rules: vec![rule(
+            "azure-feeds",
+            "feed.test",
+            Access::Level(AccessLevel::Read),
+            &["/acme/_packaging/**"],
+        )],
+        injections: vec![Injection {
+            binding: "azure_devops".into(),
+            host: "feed.test".into(),
+            paths: paths.clone(),
+            methods: vec!["GET".into(), "HEAD".into()],
+            place: Placement::Basic {
+                username: String::new(),
+            },
+            ignore_case: true,
+        }],
+        redirects: vec![Redirect {
+            host: "feed.test".into(),
+            paths,
+            ignore_case: true,
+            to: vec!["*.blob.test".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let blob = "http://s1.blob.test/b-1/X.blob?sig=a%2Bb&se=1";
+    let refused = |r: &Reply| r.status == 403 && !r.body.contains("reached");
+    assert!(refused(&env.get(blob)), "storage before any redirect");
+
+    let r = env.get(&format!("http://feed.test{download}"));
+    assert_eq!(r.status, 303, "{}", r.head);
+    // The URL the feed named passes, without the sandbox's own authorization or cookies.
+    let r = env.request(
+        "GET",
+        blob,
+        &[("authorization", "Bearer attacker"), ("cookie", "c=1")],
+        b"",
+    );
+    assert_eq!((r.status, r.body.as_str()), (200, "blob"), "{}", r.head);
+    let r = env.get(blob);
+    assert_eq!(r.status, 200, "a ranged retry");
+    for other in [
+        "http://s1.blob.test/b-1/Y.blob?sig=a%2Bb&se=1",
+        "http://s1.blob.test/b-1/X.blob?sig=other&se=1",
+        "http://s1.blob.test/b-1/X.blob",
+    ] {
+        assert!(refused(&env.get(other)), "{other}");
+    }
+    assert!(refused(&env.request("PUT", blob, &[], b"x")), "only reads");
+
+    // A redirect off the feed's targets opens nothing.
+    let r = env.get("http://feed.test/acme/_packaging/f/elsewhere");
+    assert_eq!(r.status, 302, "{}", r.head);
+    assert!(refused(&env.get("http://evil.test/x")));
+    // A policy applied drops what redirects opened.
+    env.apply(Policy {
+        rules: vec![read("other", "other.test")],
+        ..Default::default()
+    });
+    assert!(refused(&env.get(blob)));
 }
 
 /// `api.test` readable, with the `t.key` credential on `/secret` (a header), `/qsecret` (the

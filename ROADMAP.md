@@ -50,7 +50,8 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   credentials and repos, removing it, and the questions `init` and installs ask (prompts and
   progress the UI streams).
 - **Azure DevOps:** the `az` CLI (it addresses repos by ID) and Git LFS (served from blob
-  storage).
+  storage); feeds with an Entra token from your `az` login instead of a PAT, for organizations
+  that allow none, and publishing to a feed.
 - **Shares on Windows,** where luoto's podman VM mounts no shares folder yet.
 - **Shares with SELinux** (Fedora): native podman on Linux without gVisor needs the clones
   relabelled to read them.

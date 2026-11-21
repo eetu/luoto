@@ -48,7 +48,7 @@ pub fn uninstall(yes: bool) -> Result<ExitCode> {
     }
     println!("{}", plan.describe(&paths, &binary));
     if !yes && !confirm("Remove all this?") {
-        bail!("nothing removed (`luoto uninstall --yes` skips the question)");
+        return Err(crate::prompt::declined("removed", "luoto uninstall --yes"));
     }
     let failed = plan.carry_out(&paths);
     if failed == 0 {
@@ -237,7 +237,7 @@ impl Plan {
             Ok(done) => crate::progress::say(|| println!("  {what:<11} {done}")),
             Err(e) => {
                 failed += 1;
-                crate::progress::say(|| println!("  {what:<11} FAILED: {e:#}"));
+                crate::progress::say(|| println!("  {what:<11} failed: {e:#}"));
             }
         };
         println!();

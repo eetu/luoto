@@ -28,7 +28,7 @@ use crate::text::display;
 use crate::{ca, disk, names, project, repos, workspace};
 
 /// Where the volume is mounted in the container that reads or writes it.
-const MOUNT: &str = "/v";
+pub(crate) const MOUNT: &str = "/v";
 /// Left in the env's state folder while an import runs: one cut short is cleared by the next.
 const PARTIAL: &str = "import.partial";
 /// The most of tar's own messages kept.
@@ -68,7 +68,7 @@ fn caps(write: bool) -> &'static [&'static str] {
 /// in a container of its own, whose output isn't logged: it is the volume's contents.
 /// Apple's `container` logs a container's output to a file on this machine, but not an
 /// `exec`'s, so there one helper per volume runs and each command is `exec`ed in it.
-struct VolumeBox<'a> {
+pub(crate) struct VolumeBox<'a> {
     rt: &'a Runtime,
     image: String,
     vol: String,
@@ -79,7 +79,13 @@ struct VolumeBox<'a> {
 }
 
 impl<'a> VolumeBox<'a> {
-    fn open(ctx: &'a Ctx, env: &str, what: &str, id_map: Option<u32>, write: bool) -> Result<Self> {
+    pub(crate) fn open(
+        ctx: &'a Ctx,
+        env: &str,
+        what: &str,
+        id_map: Option<u32>,
+        write: bool,
+    ) -> Result<Self> {
         let mut b = VolumeBox {
             rt: &ctx.rt,
             image: ctx.image("tools"),
@@ -126,12 +132,62 @@ impl<'a> VolumeBox<'a> {
     }
 }
 
+impl VolumeBox<'_> {
+    /// [`args`](Self::args) for a command whose client may be ended before it is (a read with
+    /// a deadline): where each command runs in a container of its own, that one is named
+    /// `name`, so [`forget`](Self::forget) can end it too.
+    pub(crate) fn args_named(&self, name: &str, cmd: Vec<String>) -> Vec<String> {
+        let mut a = self.args(false, cmd);
+        if self.helper.is_none() {
+            a.splice(1..1, ["--name".to_string(), name.to_string()]);
+        }
+        a
+    }
+
+    /// [`args_named`](Self::args_named) for a command that reads its input.
+    pub(crate) fn args_input_named(&self, name: &str, cmd: Vec<String>) -> Vec<String> {
+        let mut a = self.args(true, cmd);
+        if self.helper.is_none() {
+            let mut flags = vec!["--name".to_string(), name.to_string()];
+            // A container that writes the volume reads its input already.
+            if !self.write {
+                flags.push("-i".into());
+            }
+            a.splice(1..1, flags);
+        }
+        a
+    }
+
+    /// Remove the container [`args_named`](Self::args_named) named, if its command still runs.
+    pub(crate) fn forget(&self, name: &str) {
+        if self.helper.is_none() {
+            let _ = self.rt.remove_container(name);
+        }
+    }
+}
+
 impl Drop for VolumeBox<'_> {
     fn drop(&mut self) {
         if let Some(h) = &self.helper {
             let _ = self.rt.remove_container(h);
         }
     }
+}
+
+/// Drop from an imported config what only the machine it runs on says: which of its folders
+/// an env reads (`[shares]`), and whether an env's files land in a folder with nobody
+/// reviewing them (`dangerously_pull_on_stop`).
+fn keep_this_machines_own(cfg: &mut EnvFile) {
+    cfg.doc.remove("shares");
+    cfg.cfg.shares.clear();
+    if let Some(ws) = cfg
+        .doc
+        .get_mut("workspace")
+        .and_then(|w| w.as_table_like_mut())
+    {
+        ws.remove("dangerously_pull_on_stop");
+    }
+    cfg.cfg.workspace.dangerously_pull_on_stop = false;
 }
 
 /// Apple's helper for env's volume `what`: a `.` no env or container name of luoto's has
@@ -406,16 +462,25 @@ pub fn export(env: &str, file: Option<&str>, no_home: bool, yes: bool) -> Result
          and vault token (import makes new ones), and what `up` rebuilds."
     );
     let states = ctx.rt.states()?;
+    // A pull-on-stop env's pull when it stops for the export, if it left something out.
+    let mut incomplete = false;
     if states.running(&names::dev(env)) || states.running(&names::gate(env)) {
         out!(
             "\n`{env}` is running, and its files would change under the copy: it stops for the \
              export (`luoto up -e {env}` starts it again)."
         );
         if !yes && !confirm(&format!("Stop `{env}` and export it?")) {
-            bail!("nothing exported (`luoto down -e {env}` first, or `--yes` stops it)");
+            return Err(crate::prompt::declined(
+                "exported",
+                &format!("luoto export -e {env} --yes"),
+            ));
         }
-        env::down(&ctx, env)?;
+        let stopped = crate::autopull::stop(&ctx, env, crate::autopull::Why::Down, false)?;
         out!("env `{env}` stopped");
+        if let Some(r) = &stopped.report {
+            r.print(&mut std::io::stdout(), crate::style::out(), 30);
+            incomplete = r.incomplete();
+        }
     }
     env::ensure_image(&ctx, &ctx.image("tools"))?;
 
@@ -462,6 +527,9 @@ pub fn export(env: &str, file: Option<&str>, no_home: bool, yes: bool) -> Result
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default()
     );
+    if incomplete {
+        return Ok(ExitCode::from(crate::autopull::INCOMPLETE));
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -758,6 +826,14 @@ fn summary(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) -> Vec<String>
             _ => {}
         }
     }
+    if ws.dangerously_pull_on_stop {
+        line(
+            "pull",
+            "at every stop, unreviewed, where it came from: left out (`luoto pull --on-stop on` \
+             here)"
+                .into(),
+        );
+    }
     // Folders of the machine it came from: never shared here (`import` drops them).
     if !cfg.shares.is_empty() {
         line(
@@ -831,6 +907,21 @@ fn summary(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) -> Vec<String>
                     "{}: trusts the CA in {} (read at `up`)",
                     display(&g.host),
                     display(ca)
+                ),
+            );
+        }
+        for s in &g.storage_hosts {
+            let reach = if g.private {
+                ", on its private addresses"
+            } else {
+                ""
+            };
+            line(
+                "git",
+                format!(
+                    "{}: its feeds' downloads may redirect to {}{reach}",
+                    display(&g.host),
+                    display(s)
                 ),
             );
         }
@@ -1017,11 +1108,12 @@ pub fn import(file: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
     repos::check_folders_text(&cfg.cfg.workspace).context("its config")?;
     block!("{}", summary(&path, &head, &name, &cfg.cfg).join("\n"));
     if !yes && !confirm(&format!("Import it as `{name}`?")) {
-        bail!("nothing imported (`--yes` imports without asking)");
+        return Err(crate::prompt::declined(
+            "imported",
+            &format!("luoto import {} --name {name} --yes", path.display()),
+        ));
     }
-    // Which folders of a machine an env reads is that machine's own.
-    cfg.doc.remove("shares");
-    cfg.cfg.shares.clear();
+    keep_this_machines_own(&mut cfg);
     env::ensure_vm(&ctx)?;
     clear_leftovers(&ctx, &name)?;
     if let Ok(Some(s)) = disk::space(&ctx.rt)
@@ -1076,7 +1168,7 @@ pub fn import(file: &str, name: Option<&str>, yes: bool) -> Result<ExitCode> {
         names::addrs(octet).subnet
     );
     for n in notes(&ctx, &name, &head, &cfg.cfg) {
-        println!("note: {n}");
+        crate::progress::note(&n);
     }
     out!("`luoto up -e {name}` starts it, and asks for what it needs here");
     Ok(ExitCode::SUCCESS)
@@ -1176,6 +1268,40 @@ mod tests {
         let mut a = volume_container(rt, image, vol, id_map, write);
         a.extend(tar_cmd(write));
         a
+    }
+
+    #[test]
+    fn an_import_drops_what_only_the_machine_it_runs_on_says() {
+        let text = "[workspace]\ndir = \"/srv/web\"\ndangerously_pull_on_stop = true\n\n\
+                    [shares]\ndata = \"/Volumes/data\"\n";
+        let mut cfg = EnvFile::parse("web.toml".into(), text).unwrap();
+        assert!(cfg.cfg.workspace.dangerously_pull_on_stop);
+        keep_this_machines_own(&mut cfg);
+        assert!(!cfg.cfg.workspace.dangerously_pull_on_stop && cfg.cfg.shares.is_empty());
+        assert_eq!(cfg.doc.to_string(), "[workspace]\ndir = \"/srv/web\"\n");
+    }
+
+    #[test]
+    fn a_read_with_a_deadline_runs_in_a_container_that_can_be_ended() {
+        let r = rt(Flavor::Podman);
+        let made = |helper: Option<&str>| VolumeBox {
+            rt: &r,
+            image: "img".into(),
+            vol: "luoto-web-work".into(),
+            id_map: None,
+            write: false,
+            helper: helper.map(str::to_string),
+        };
+        let a = made(None).args_named("luoto-web.pull", vec!["tar".into()]);
+        assert_eq!(a[..4], ["run", "--name", "luoto-web.pull", "--rm"]);
+        assert!(a.contains(&"luoto-web-work:/v:ro".to_string()));
+        assert!(a.windows(2).any(|w| w == ["--network", "none"]));
+        // Apple's helper is one container, removed when the box goes: its commands are execs.
+        let apple = made(Some("luoto-web.work.move"));
+        let a = apple.args_named("luoto-web.pull", vec!["tar".into()]);
+        assert!(!a.contains(&"--name".to_string()), "{a:?}");
+        // No runtime here to remove a helper from.
+        std::mem::forget(apple);
     }
 
     #[test]

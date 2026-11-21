@@ -406,6 +406,37 @@ pub fn canonical_path(raw: &str) -> Result<String, &'static str> {
     Ok(out)
 }
 
+/// Whether a canonical `path` could reach another path on a server that reads it differently:
+/// a `;` (Java servers drop parameters and resolve the `..` before them) or an escaped slash
+/// (some decode it). npm's scoped package name, one segment `@scope%2fname` (its `@` escaped
+/// too, as some registries link tarballs) of plain name characters, is the one escaped slash
+/// let through: decoded, it only adds a level below the segment that was matched.
+pub fn hides_a_path(path: &str) -> bool {
+    let npm_scope = |s: &str| {
+        let lower = s.to_ascii_lowercase();
+        let Some((scope, name)) = lower
+            .strip_prefix('@')
+            .or_else(|| lower.strip_prefix("%40"))
+            .and_then(|r| r.split_once("%2f"))
+        else {
+            return false;
+        };
+        let plain = |p: &str| {
+            !p.is_empty()
+                && p != "."
+                && p != ".."
+                && p.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
+        };
+        plain(scope) && plain(name)
+    };
+    path.contains(';')
+        || path.split('/').any(|s| {
+            let lower = s.to_ascii_lowercase();
+            (lower.contains("%2f") || lower.contains("%5c")) && !npm_scope(s)
+        })
+}
+
 /// A glob for a denied `path` and its neighbours (`/a/b/c` → `/a/b/**`), offered in a command
 /// people paste. The sandbox wrote the path, so it decides how wide a glob would be: one is
 /// offered only under two segments at least (`/lookup/x` stays itself, never `/lookup/**`), and
@@ -478,6 +509,32 @@ mod tests {
         assert_eq!(c("/a/%7Euser").unwrap(), "/a/~user");
         // Reserved escapes stay as they are: npm's scoped packages need `%2f`.
         assert_eq!(c("/@scope%2fpkg").unwrap(), "/@scope%2fpkg");
+        // …and only that form of an escaped slash passes where credentials go.
+        for ok in [
+            "/org/_packaging/f/npm/registry/@types%2fnode",
+            "/@scope%2Fpkg",
+            "/@github%2fcombobox-nav",
+            "/api/packages/acme/npm/%40acme%2Fhello/-/1.0.0/hello-1.0.0.tgz",
+            "/a/b",
+        ] {
+            assert!(!hides_a_path(ok), "{ok}");
+        }
+        for hidden in [
+            "/a;b",
+            "/a%2fb",
+            "/@scope%2f..",
+            "/@..%2fpkg",
+            "/@%2fpkg",
+            "/@scope%2f",
+            "/@a%2fb%2fc",
+            "/@a%2fb%25",
+            "/%40..%2fpkg",
+            "/%2540a%2fb",
+            "/x/@a%2f%2e%2e",
+            "/a%5cb",
+        ] {
+            assert!(hides_a_path(hidden), "{hidden}");
+        }
         assert_eq!(c("*").unwrap(), "*");
         for bad in [
             "/v1//files",

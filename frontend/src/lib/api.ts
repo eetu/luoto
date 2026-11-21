@@ -6,6 +6,7 @@ import type {
   Approved,
   CreatedEnv,
   Decision,
+  Downed,
   EnvDetail,
   EnvDisk,
   HostSummary,
@@ -147,8 +148,9 @@ export const api = {
     request<Rule, NewRule>("PUT", `${env(name)}/rules/${encodeURIComponent(id)}`, { rule, force }),
   deleteRule: (name: string, id: string) =>
     request<number>("DELETE", `${env(name)}/rules/${encodeURIComponent(id)}`),
-  action: (name: string, action: "up" | "down" | "rebuild" | "open" | "close") =>
+  action: (name: string, action: "up" | "rebuild" | "open" | "close") =>
     request<unknown>("POST", `${env(name)}/${action}`, {}),
+  down: (name: string) => request<Downed>("POST", `${env(name)}/down`, {}),
   selftest: (name: string) => request<SelftestReport>("POST", `${env(name)}/selftest`, {}),
   pullPlan: (name: string) => request<PullPlans>("GET", `${env(name)}/pull`),
   pull: (name: string, digest: string, includeRisky: boolean) =>

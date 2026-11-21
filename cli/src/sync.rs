@@ -300,8 +300,12 @@ const ENV_SUM: &str = "env.sum";
 fn runtime_env_sum(compiled: &Compiled) -> String {
     let mut h = Sha256::new();
     h.update(format!(
-        "{:?}{:?}{:?}{:?}",
-        compiled.dev_env, compiled.sandbox_refs, compiled.git_config, compiled.known_hosts
+        "{:?}{:?}{:?}{:?}{:?}",
+        compiled.dev_env,
+        compiled.sandbox_refs,
+        compiled.git_config,
+        compiled.known_hosts,
+        compiled.netrc
     ));
     hex::encode(h.finalize())
 }
@@ -364,6 +368,7 @@ pub fn write_runtime_env(ctx: &Ctx, env: &str, compiled: &Compiled) -> Result<()
     let tar = Zeroizing::new(runtime_tar(&[
         ("gitconfig", compiled.git_config.as_bytes()),
         ("ssh_known_hosts", compiled.known_hosts.as_bytes()),
+        ("netrc", compiled.netrc.as_bytes()),
         ("env.fish", fish.as_bytes()),
         ("env.sh", script.as_bytes()),
         (VARS_SUM, shells.as_bytes()),

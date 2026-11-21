@@ -133,17 +133,19 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | to review, apply or ignore the team's `luoto.toml`, or draft one from your env                       | `luoto project`<br>`luoto project apply`<br>`luoto project ignore`<br>`luoto project suggest`                                      |
 | your editor, or a shell                                                                              | `luoto open`<br>`luoto open --with code`<br>`luoto shell`                                                                          |
 | to see what the sandbox tried to reach                                                               | `luoto egress --since 10m`<br>`luoto egress --denied`<br>`luoto egress --follow`                                                   |
-| to find what a project needs: any HTTP(S) host for a while (default 1h), then keep what it reached   | `luoto egress open --for 2h`<br>`luoto egress --open`<br>`luoto egress keep`<br>`luoto egress close`                               |
-| to allow a host (read-only unless `--write`)                                                         | `luoto allow docs.rs --ttl 1h`<br>`luoto allow api.example.com --write --path '/v1/**'`<br>`luoto allow grpc.example.com --tunnel` |
+| to find what a project needs: any HTTP(S) host for a while (default 1h), then keep what it reached   | `luoto egress open --for 2h`<br>`luoto egress --unruled`<br>`luoto egress keep`<br>`luoto egress close`                               |
+| to allow a host (read-only unless `--write`)                                                         | `luoto allow docs.rs --for 1h`<br>`luoto allow api.example.com --write --path '/v1/**'`<br>`luoto allow grpc.example.com --tunnel` |
 | to see or remove rules                                                                               | `luoto status`<br>`luoto revoke <id-or-host>`                                                                                      |
-| to answer access requests from inside                                                                | `luoto requests` (`--watch` waits)<br>`luoto approve 3 --ttl 1h`<br>`luoto approve 3 --read --path '/v1/**'`<br>`luoto reject 3`   |
+| to answer access requests from inside                                                                | `luoto requests` (`--follow` waits)<br>`luoto approve 3 --for 1h`<br>`luoto approve 3 --read --path '/v1/**'`<br>`luoto reject 3`   |
 | an agent (installed on first run)                                                                    | `luoto agent run claude --yolo`<br>`luoto agent list`                                                                              |
 | another credential for an agent, or a login inside instead                                           | `luoto agent auth claude`                                                                                                          |
 | what the env may do with a repo: fetch it if public, read it, or push                                | `luoto repo auth acme/api`                                                                                                         |
 | environment variables: a plain value, or a secret the code reads                                     | `luoto var set RUST_LOG=debug`<br>`luoto var set DATABASE_URL`<br>`luoto var`                                                      |
+| a private package feed (Azure DevOps, GitHub Packages, Gitea, Forgejo, GitLab)                       | `luoto feed add <feed URL>`<br>`luoto feed`                                                                                        |
 | a folder of this machine the env reads, read-only (recordings, datasets)                             | `luoto share add ~/Recordings`<br>`luoto share sync`                                                                               |
 | a dev server in your browser                                                                         | run it: its port is forwarded to localhost here (`luoto status` lists it)<br>`luoto forward 8080:5173` (to another local port)     |
 | your work out: push from the env (with a GitHub, Azure DevOps or SSH credential), or copy files back | `git push`<br>`luoto pull`                                                                                                         |
+| an agent's changes in your folder when its env stops, with nobody reviewing them                     | `luoto pull --on-stop on`<br>`luoto run --dangerously-pull`                                                                        |
 | image or config changes applied (volumes are kept)                                                   | `luoto up --recreate`                                                                                                              |
 | a fresh home: dotfiles, shell history, agents' logins and state, toolchains (the workspace stays)    | `luoto reset-home`                                                                                                                 |
 | to stop an env, or delete it with its volumes and config (your folder stays)                         | `luoto down` (`--all`: every env)<br>`luoto rm`                                                                                    |
@@ -154,6 +156,7 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | what installs and clones print as they come, instead of a spinner                                    | `o` while one runs<br>`-v` on any command (`luoto up -v`)                                                                          |
 | what each env takes on disk, and how full the disk that holds them is                                | `luoto status --size`<br>`luoto list --size`<br>`luoto doctor`                                                                     |
 | the space luoto's superseded images take, back on this machine (volumes stay)                        | `luoto prune`                                                                                                                      |
+| the stopped envs nobody has used for 30 days, removed (one holding work stays)                       | `luoto prune --envs` (`--older-than 7d`, `--match 'job-*'`)                                                                        |
 | to check isolation, or a bug report with secrets and what identifies you taken out                   | `luoto doctor`<br>`luoto doctor --report`                                                                                          |
 | to remove luoto: envs, vault, images, keychain entries, config and data (the binary stays)           | `luoto uninstall`                                                                                                                  |
 
@@ -177,14 +180,14 @@ of its providers under `[credentials.<provider>]`, or a model server of yours; t
 to every request and the sandbox sees only a placeholder. `luoto agent auth <agent>` changes
 it, its questions opening on what the env has. [docs/agents.md](docs/agents.md#credentials)
 covers where to get one, how the prompt keeps it, and logins inside the sandbox, with the
-hosts and verification status of each agent. `luoto agent list` shows agents and providers.
+hosts and verification status of each agent. `luoto agent list --available` shows agents and providers.
 Model, effort, your own agent settings and commits without AI attribution:
 [docs/guides/agent-settings.md](docs/guides/agent-settings.md). Claude Code, Codex and OpenCode
 can also use a model server of yours, on this machine (Ollama, LM Studio, MTPLX, …), your
 network or the internet, beside the cloud:
 [docs/guides/model-servers.md](docs/guides/model-servers.md).
 
-Without a terminal, `luoto run --agent claude --prompt "…"` runs one prompt and prints the
+Without a terminal, `luoto run claude --prompt "…"` runs one prompt and prints the
 agent's answer, for a cron job or a CI step:
 [docs/guides/headless.md](docs/guides/headless.md).
 

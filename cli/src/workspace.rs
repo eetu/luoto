@@ -5,11 +5,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::base::{self, Base, Host, Print, Verdict};
 use crate::config::{self, EnvFile, Workspace};
 use crate::env::{Ctx, UID};
 use crate::names;
@@ -248,8 +250,19 @@ pub fn risky(rel: &str) -> Option<&'static str> {
     if rel.split('/').any(short_name) {
         return Some("a Windows short name, which can stand for a file host tools act on");
     }
+    if rel == ".env" || (!rel.contains('/') && rel.starts_with(".env.")) {
+        return Some("dotenv file: tools and dev servers started here load it");
+    }
     match rel.as_str() {
-        ".envrc" | ".env.local" => return Some("direnv/dotenv loads it when you enter the folder"),
+        ".envrc" => return Some("direnv loads it when you enter the folder"),
+        "agents.md" | "claude.md" => {
+            return Some("instructions a coding agent on the host follows");
+        }
+        ".mcp.json" => return Some("MCP servers a coding agent on the host starts"),
+        "bunfig.toml" => return Some("bun preloads the scripts it names"),
+        "luoto.toml" => {
+            return Some("luoto applies its settings to an env made from this folder");
+        }
         ".gitattributes" | ".gitmodules" => return Some("git filters and submodule URLs"),
         ".mise.toml" | "mise.toml" | ".tool-versions" | ".mise.local.toml" | "mise.local.toml"
         | ".config/mise.toml" | "mise/config.toml" => {
@@ -276,6 +289,9 @@ pub fn risky(rel: &str) -> Option<&'static str> {
         (".config", "mise") | (".mise", _) => return Some("mise runs hooks and tasks from it"),
         ("gradle", "wrapper") | (".mvn", _) => {
             return Some("build wrapper and extensions your IDE runs on import");
+        }
+        (".github", "workflows") => {
+            return Some("CI runs it with the repository's secrets once pushed");
         }
         _ => {}
     }
@@ -533,9 +549,17 @@ fn walk(
     Ok(())
 }
 
+/// What a copy into the env sent.
+pub struct Pushed {
+    pub count: usize,
+    /// A fingerprint of each file and link sent, `.git` aside: the base later pulls compare
+    /// with (`base.rs`).
+    pub files: BTreeMap<String, Print>,
+}
+
 /// Copy a host directory into the env's workspace, or into its folder `sub` (a repo's name),
 /// created if needed (host → sandbox is the trusted direction): what [`copy_list`] takes.
-pub fn push(ctx: &Ctx, env: &str, src: &Path, sub: Option<&str>) -> Result<usize> {
+pub fn push(ctx: &Ctx, env: &str, src: &Path, sub: Option<&str>) -> Result<Pushed> {
     let list = copy_list(src)?;
     let dev = names::dev(env);
     let e = exec(&dev).stdin().user(UID);
@@ -560,26 +584,9 @@ pub fn push(ctx: &Ctx, env: &str, src: &Path, sub: Option<&str>) -> Result<usize
         .spawn()
         .context("start tar in the env")?;
     let stdin = child.stdin.take().context("stdin")?;
-    let sent = (|| -> Result<usize> {
-        let mut builder = tar::Builder::new(stdin);
-        builder.follow_symlinks(false);
-        let mut count = 0;
-        for (rel, dir) in &list {
-            let path = src.join(rel);
-            if *dir {
-                builder.append_dir(rel, &path)?;
-            } else {
-                builder
-                    .append_path_with_name(&path, rel)
-                    .with_context(|| format!("read {}", path.display()))?;
-                count += 1;
-            }
-        }
-        builder.into_inner()?.flush()?;
-        Ok(count)
-    })();
-    let count = match sent {
-        Ok(n) => n,
+    let sent = send(stdin, src, &list);
+    let pushed = match sent {
+        Ok(p) => p,
         Err(e) => {
             // An archive cut short must not be taken as whole: the copy stops here.
             let _ = child.kill();
@@ -594,17 +601,96 @@ pub fn push(ctx: &Ctx, env: &str, src: &Path, sub: Option<&str>) -> Result<usize
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(count)
+    Ok(pushed)
+}
+
+/// Keep what a copy of `src` into the env sent as the base of that folder's pulls
+/// (`base.rs`). Without it a pull still works, reviewed; an unattended one doesn't.
+pub fn keep_base(
+    ctx: &Ctx,
+    env: &str,
+    repo: Option<&str>,
+    src: &Path,
+    files: BTreeMap<String, Print>,
+) {
+    let base = Base {
+        files,
+        head: base::head_of(src),
+    };
+    if let Err(e) = base.save(&ctx.paths, env, repo) {
+        crate::progress::warn(&format!(
+            "what was copied isn't recorded ({e:#}): pulls of `{env}` need your review"
+        ));
+    }
+}
+
+/// Write `list` (of `src`) to `to` as a tar, fingerprinting each file from the bytes written.
+fn send(to: impl Write, src: &Path, list: &[(PathBuf, bool)]) -> Result<Pushed> {
+    let mut builder = tar::Builder::new(to);
+    builder.follow_symlinks(false);
+    let mut pushed = Pushed {
+        count: 0,
+        files: BTreeMap::new(),
+    };
+    for (rel, dir) in list {
+        let path = src.join(rel);
+        if *dir {
+            builder.append_dir(rel, &path)?;
+            continue;
+        }
+        let meta =
+            std::fs::symlink_metadata(&path).with_context(|| format!("read {}", path.display()))?;
+        let key = rel.to_string_lossy().replace('\\', "/");
+        // The repository itself is no file a pull compares.
+        let based = !rel.components().any(|c| c.as_os_str() == ".git");
+        if meta.is_file() {
+            let mut header = tar::Header::new_gnu();
+            header.set_metadata(&meta);
+            let file =
+                std::fs::File::open(&path).with_context(|| format!("read {}", path.display()))?;
+            let mut data = base::Hashing::new(file.take(meta.len()));
+            builder
+                .append_data(&mut header, rel, &mut data)
+                .with_context(|| format!("read {}", path.display()))?;
+            if data.read != meta.len() {
+                bail!("{} changed while it was copied", path.display());
+            }
+            if based {
+                let print = Print::of_file(data.finish(), base::executable(&meta));
+                pushed.files.insert(key, print);
+            }
+        } else {
+            builder
+                .append_path_with_name(&path, rel)
+                .with_context(|| format!("read {}", path.display()))?;
+            if based
+                && meta.is_symlink()
+                && let Ok(target) = std::fs::read_link(&path)
+            {
+                pushed.files.insert(key, Print::of_link(&target));
+            }
+        }
+        pushed.count += 1;
+    }
+    builder.into_inner()?.flush()?;
+    Ok(pushed)
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PlanEntry {
     pub path: String,
-    /// `new` or `changed`.
+    /// `new`, `changed`, or `conflict`: changed in the env and in the folder since the env's
+    /// copy (or a file the folder has and the copy never did).
     pub change: String,
     pub size: u64,
     pub executable: bool,
     pub risky: Option<String>,
+}
+
+impl PlanEntry {
+    pub fn conflict(&self) -> bool {
+        self.change == "conflict"
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -614,17 +700,74 @@ pub struct PullPlan {
     pub repo: Option<String>,
     pub entries: Vec<PlanEntry>,
     pub unchanged: usize,
+    /// Files the env left as it got them while the folder's changed: they stay as they are.
+    pub yours: usize,
+    /// Files the env deleted and the folder has: kept, a pull deletes nothing.
+    pub deleted: Vec<String>,
     /// Entries refused outright (unsafe paths, links leaving the folder, special files).
     pub refused: Vec<(String, String)>,
+    /// What tar said when reading the env's files failed: some may be missing from the plan.
+    pub unread: Option<String>,
+    /// Whether the env's copy has a base (`base.rs`): without one, every difference is listed
+    /// as the env's change.
+    pub based: bool,
+    /// The folder's git HEAD when the env's copy was made or last pulled, and now, when it
+    /// moved (short).
+    pub head_moved: Option<(String, String)>,
     /// Hash over what would be written; applying re-checks it so a sandbox can't swap files
     /// between your review and the write.
     pub digest: String,
     #[serde(skip)]
-    data: BTreeMap<String, Content>,
+    pub(crate) data: BTreeMap<String, Content>,
+    /// The fingerprint of each of the env's files that is in `entries` or equals the folder's.
+    #[serde(skip)]
+    pub(crate) prints: BTreeMap<String, Print>,
+    /// The paths whose file equals the folder's.
+    #[serde(skip)]
+    same: Vec<String>,
+    /// Base paths neither the env nor the folder has any more.
+    #[serde(skip)]
+    gone: Vec<String>,
+    /// What the folder held at each entry's path when the plan was made.
+    #[serde(skip)]
+    stamps: BTreeMap<String, Stamp>,
+    #[serde(skip)]
+    hosts: BTreeMap<String, Host>,
+    /// Every file and link the env has, and its folders: for what is judged by a folder's
+    /// layout.
+    #[serde(skip)]
+    pub(crate) present: BTreeSet<String>,
+    #[serde(skip)]
+    pub(crate) folders: BTreeSet<String>,
+}
+
+/// What stands at a path of the folder, as cheaply as it can be asked again just before the
+/// path is replaced: an editor's save in between shows as another size or time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Stamp {
+    Absent,
+    Is {
+        len: u64,
+        modified: Option<std::time::SystemTime>,
+        link: bool,
+    },
+}
+
+impl Stamp {
+    pub(crate) fn of(path: &Path) -> Stamp {
+        match std::fs::symlink_metadata(path) {
+            Ok(m) => Stamp::Is {
+                len: m.len(),
+                modified: m.modified().ok(),
+                link: m.file_type().is_symlink(),
+            },
+            Err(_) => Stamp::Absent,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
-enum Content {
+pub(crate) enum Content {
     File { bytes: Vec<u8>, executable: bool },
     Link(PathBuf),
 }
@@ -677,6 +820,9 @@ pub struct PullTarget {
     pub dest: PathBuf,
     /// Repos left out of the workspace's pull: each is a target of its own, if any.
     pub skip: Vec<String>,
+    /// `dest` is the folder the env's copy was made from, so its base applies; not with
+    /// `--to`, or for a cloned repo.
+    pub home: bool,
 }
 
 /// Where `pull` writes: the workspace to the env's folder, less its repos, and each repo
@@ -709,6 +855,7 @@ pub fn pull_targets(
                 crate::text::display(name)
             )
         })?;
+        let home = to.is_none() && r.dir.is_some();
         let dest = match (to, &r.dir) {
             (Some(t), _) => t,
             (None, Some(d)) => checked(canonical(d)?)?,
@@ -722,6 +869,7 @@ pub fn pull_targets(
             repo: Some(name.to_string()),
             dest,
             skip: Vec::new(),
+            home,
         }]);
     }
     // A workspace of repos has nothing of its own to bring back: /workspace only holds them.
@@ -739,6 +887,7 @@ pub fn pull_targets(
                 .filter(|n| present.contains(*n))
                 .cloned()
                 .collect(),
+            home: to.is_none() && ws.dir.is_some(),
         });
     }
     let own = ws
@@ -765,6 +914,7 @@ pub fn pull_targets(
             repo: Some(name.clone()),
             dest,
             skip: Vec::new(),
+            home: to.is_none(),
         });
     }
     Ok(out)
@@ -775,20 +925,10 @@ pub fn plan_pull(ctx: &Ctx, env: &str, target: &PullTarget, include_git: bool) -
         Some(name) => format!("/workspace/{name}"),
         None => "/workspace".to_string(),
     };
-    let mut args = exec(&names::dev(env))
+    let args = exec(&names::dev(env))
         .user(UID)
-        .argv(["tar", "-c", "-f", "-"]);
-    for d in COPY_SKIP {
-        args.push(format!("--exclude={d}"));
-    }
-    if !include_git {
-        args.push("--exclude=.git".into());
-    }
-    for name in &target.skip {
-        args.push(format!("--exclude=./{name}"));
-    }
-    args.extend(["-C".into(), src.clone(), ".".into()]);
-    let mut child = ctx
+        .argv(tar_args(&src, &target.skip, include_git));
+    let child = ctx
         .rt
         .command()
         .args(&args)
@@ -797,212 +937,875 @@ pub fn plan_pull(ctx: &Ctx, env: &str, target: &PullTarget, include_git: bool) -
         .stderr(Stdio::piped())
         .spawn()
         .context("start tar in the env")?;
-    let mut raw = Vec::new();
-    child
-        .stdout
-        .take()
-        .context("stdout")?
-        .take(MAX_PULL_BYTES + 1)
-        .read_to_end(&mut raw)?;
-    let out = child.wait_with_output()?;
-    if raw.len() as u64 > MAX_PULL_BYTES {
-        bail!("{src} is larger than 2 GiB; pull a narrower set or push to a git remote");
-    }
-    if !out.status.success() && raw.is_empty() {
-        bail!(
-            "reading {src} in the env failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let mut plan = build_plan(&raw, &target.dest, &target.skip)?;
+    let read = read_tar(child, MAX_PULL_BYTES, None).map_err(|e| match e {
+        TarError::TooLarge => {
+            anyhow::anyhow!(
+                "{src} is larger than 2 GiB; pull a narrower set or push to a git remote"
+            )
+        }
+        e => anyhow::anyhow!("reading {src} in the env failed: {e}"),
+    })?;
+    let base = target.base(&ctx.paths, env);
+    let mut plan = build_plan(&read, &target.dest, &target.skip, base.as_ref())
+        .with_context(|| format!("reading {src} in the env"))?;
     plan.repo = target.repo.clone();
     Ok(plan)
 }
 
-/// The plan for a tar of the env's files, less the top-level folders in `skip` (left out in
-/// the env too, where its tar can).
-fn build_plan(raw: &[u8], dest: &Path, skip: &[String]) -> Result<PullPlan> {
-    let mut archive = tar::Archive::new(raw);
-    let mut entries = Vec::new();
-    let mut refused = Vec::new();
-    let mut data = BTreeMap::new();
-    let mut unchanged = 0;
-    let mut hasher = Sha256::new();
+impl PullTarget {
+    /// The base of the env's copy of this folder, when `dest` is that folder and one is kept.
+    pub fn base(&self, paths: &Paths, env: &str) -> Option<Base> {
+        self.home
+            .then(|| Base::load(paths, env, self.repo.as_deref()))
+            .flatten()
+    }
+}
+
+/// Runs its arguments in the folder `$0`, which must be one: a link there (the sandbox can
+/// put one in place of a repo) would lead the read elsewhere.
+const ROOTED: &str = r#"[ -d "$0" ] && [ ! -L "$0" ] || { echo "$0 is not a folder" >&2; exit 2; }
+cd "$0" && exec "$@""#;
+
+/// `cmd` run in the folder `root`, refused when `root` is a link or no folder.
+pub(crate) fn rooted(root: &str, cmd: Vec<String>) -> Vec<String> {
+    let mut a: Vec<String> = ["sh", "-c", ROOTED, root].map(String::from).into();
+    a.extend(cmd);
+    a
+}
+
+/// The command that writes the files under `src` to its output as a tar: without what no
+/// copy takes (`COPY_SKIP`, at any depth), `.git` unless `include_git`, and the top-level
+/// folders `skip`.
+pub(crate) fn tar_args(src: &str, skip: &[String], include_git: bool) -> Vec<String> {
+    let mut args: Vec<String> = ["tar", "-c", "-f", "-"].map(String::from).into();
+    for d in COPY_SKIP {
+        args.push(format!("--exclude={d}"));
+    }
+    if !include_git {
+        args.push("--exclude=.git".into());
+    }
+    for name in skip {
+        args.push(format!("--exclude=./{name}"));
+    }
+    args.push(".".into());
+    rooted(src, args)
+}
+
+/// The command that writes the files of `src` named on its input, one a line, as a tar.
+pub(crate) fn tar_listed_args(src: &str) -> Vec<String> {
+    let tar = ["tar", "-c", "-f", "-", "-T", "-"].map(String::from);
+    rooted(src, tar.into())
+}
+
+/// What a tar of the env's files gave.
+pub(crate) struct TarRead {
+    pub raw: Vec<u8>,
+    /// What tar said when it failed: the archive is then what it wrote before it did, and
+    /// files may be missing from it.
+    pub failed: Option<String>,
+}
+
+/// Why a tar of the env's files gave nothing to use.
+#[derive(Debug)]
+pub(crate) enum TarError {
+    /// More than the cap.
+    TooLarge,
+    /// No end within the limit.
+    Late(Duration),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for TarError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TarError::TooLarge => write!(f, "it is larger than the most a pull reads"),
+            TarError::Late(d) => write!(f, "no end within {} s", d.as_secs()),
+            TarError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// The most of tar's own messages kept.
+const MAX_TAR_STDERR: u64 = 16 << 10;
+
+/// Read what `child` (a tar of the env's files) writes: at most `cap` bytes, within `limit`.
+/// The sandbox wrote the files and, in a running env, the tar: how much comes and for how
+/// long is its choice, so both are bounded, and the child is killed past either.
+pub(crate) fn read_tar(
+    mut child: std::process::Child,
+    cap: u64,
+    limit: Option<Duration>,
+) -> std::result::Result<TarRead, TarError> {
+    let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(TarError::Io(std::io::Error::other("no output to read")));
+    };
+    let over = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let past = over.clone();
+    let reader = std::thread::spawn(move || {
+        let mut raw = Vec::new();
+        let read = out.take(cap + 1).read_to_end(&mut raw);
+        if raw.len() as u64 > cap {
+            past.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        read.map(|_| raw)
+    });
+    let errs = std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let mut err = err;
+        let _ = (&mut err).take(MAX_TAR_STDERR).read_to_end(&mut kept);
+        // The rest is read and dropped, so tar never blocks on it.
+        let _ = std::io::copy(&mut err, &mut std::io::sink());
+        String::from_utf8_lossy(&kept).trim().to_string()
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {}
+            Err(e) => return Err(TarError::Io(e)),
+        }
+        let late = limit.filter(|l| started.elapsed() >= *l);
+        // Past the cap the reader has closed its end; a tar that goes on regardless is ended.
+        let over = over.load(std::sync::atomic::Ordering::SeqCst);
+        if late.is_some() || over {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(match late {
+                Some(l) => TarError::Late(l),
+                None => TarError::TooLarge,
+            });
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let raw = match reader.join() {
+        Ok(Ok(raw)) => raw,
+        Ok(Err(e)) => return Err(TarError::Io(e)),
+        Err(_) => return Err(TarError::Io(std::io::Error::other("reading failed"))),
+    };
+    if raw.len() as u64 > cap {
+        return Err(TarError::TooLarge);
+    }
+    let said = errs.join().unwrap_or_default();
+    let failed = (!status.success()).then(|| {
+        if said.is_empty() {
+            format!("tar ended with {status}")
+        } else {
+            crate::text::lines(&said)
+        }
+    });
+    Ok(TarRead { raw, failed })
+}
+
+/// Run `scan` on what `child` (a tar of a stopped env's files) writes, as it comes, so
+/// nothing of it is held but what `scan` keeps. Within `limit`: past it the child is ended
+/// and nothing is used (its output ends with it: the child is a runtime's client, which
+/// holds it alone). With `scan`'s result, what tar said if it failed (what was read is then
+/// only what it wrote before it did).
+pub(crate) fn scan_tar<T>(
+    mut child: std::process::Child,
+    limit: Duration,
+    scan: impl FnOnce(&mut dyn Read) -> T,
+) -> std::result::Result<(T, Option<String>), TarError> {
+    let (Some(mut out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(TarError::Io(std::io::Error::other("no output to read")));
+    };
+    let errs = std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let mut err = err;
+        let _ = (&mut err).take(MAX_TAR_STDERR).read_to_end(&mut kept);
+        let _ = std::io::copy(&mut err, &mut std::io::sink());
+        String::from_utf8_lossy(&kept).trim().to_string()
+    });
+    let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+    let late = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done, ended) = std::sync::mpsc::channel::<()>();
+    let watchdog = {
+        let (child, late) = (child.clone(), late.clone());
+        std::thread::spawn(move || {
+            if ended.recv_timeout(limit) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                late.store(true, std::sync::atomic::Ordering::SeqCst);
+                // Its output ends with it, and the scan with that.
+                let _ = child.lock().unwrap_or_else(|e| e.into_inner()).kill();
+            }
+        })
+    };
+    let scanned = scan(&mut out);
+    // A scan that stopped before the end leaves tar writing to nobody: it is ended.
+    drop(out);
+    let started = Instant::now();
+    let mut ended_here = false;
+    let status = loop {
+        let mut c = child.lock().unwrap_or_else(|e| e.into_inner());
+        match c.try_wait() {
+            Ok(Some(s)) => break Ok(s),
+            Ok(None) if started.elapsed() >= Duration::from_secs(5) => {
+                ended_here = true;
+                let _ = c.kill();
+                break c.wait();
+            }
+            Ok(None) => {}
+            Err(e) => break Err(e),
+        }
+        drop(c);
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let _ = done.send(());
+    let _ = watchdog.join();
+    if late.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(TarError::Late(limit));
+    }
+    // What a tar that was ended said is not waited for: something it started may hold its
+    // output open for as long as it likes.
+    let said = match ended_here {
+        true => String::new(),
+        false => errs.join().unwrap_or_default(),
+    };
+    let status = status.map_err(TarError::Io)?;
+    let failed = (!status.success()).then(|| {
+        if said.is_empty() {
+            format!("tar ended with {status}")
+        } else {
+            crate::text::lines(&said)
+        }
+    });
+    Ok((scanned, failed))
+}
+
+/// What a plan keeps of the env's new and changed files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Keep {
+    /// Their bytes, to write them.
+    Bytes,
+    /// Their fingerprints: what is written is read again (`PullPlan::fill`), so a folder of
+    /// any size is judged without being held.
+    Prints,
+}
+
+/// A plan as far as the archive went.
+pub(crate) struct Scanned {
+    plan: PullPlan,
+    hasher: Sha256,
+    /// Why the archive stopped before its end, if it did.
+    cut: Option<String>,
+    /// It holds more entries than were to be read: the rest wasn't.
+    pub over: bool,
+}
+
+/// What the archive holds at a path a pull takes.
+enum Got {
+    File {
+        print: Print,
+        size: u64,
+        executable: bool,
+        bytes: Option<Vec<u8>>,
+    },
+    Link(PathBuf),
+}
+
+/// Read one file of the archive: its fingerprint, and its bytes with `Keep::Bytes`. None
+/// when the archive ends inside it.
+fn read_file<R: Read>(e: &mut tar::Entry<R>, keep: Keep) -> Option<Got> {
+    let executable = e.header().mode().unwrap_or(0) & 0o111 != 0;
+    let size = e.size();
+    if keep == Keep::Bytes {
+        let mut bytes = Vec::new();
+        let whole = e.read_to_end(&mut bytes).is_ok() && bytes.len() as u64 == size;
+        return whole.then(|| Got::File {
+            print: Print::of_bytes(&bytes, executable),
+            size,
+            executable,
+            bytes: Some(bytes),
+        });
+    }
+    let mut hashed = base::Hashing::new(e);
+    let whole = std::io::copy(&mut hashed, &mut std::io::sink()).is_ok() && hashed.read == size;
+    whole.then(|| Got::File {
+        print: Print::of_file(hashed.finish(), executable),
+        size,
+        executable,
+        bytes: None,
+    })
+}
+
+/// The plan for a tar of the env's files read from `src`, less the top-level folders in
+/// `skip` (left out in the env too, where its tar can): each file judged against the
+/// folder's and, with a `base`, against what the env's copy started from (`base::judge`). At
+/// most `max` entries are read. [`Scanned::finish`] makes the plan of it.
+pub(crate) fn scan_plan(
+    src: impl Read,
+    dest: &Path,
+    skip: &[String],
+    base: Option<&Base>,
+    keep: Keep,
+    max: usize,
+) -> Scanned {
+    let mut archive = tar::Archive::new(src);
+    let mut s = Scanned {
+        plan: PullPlan {
+            dir: dest.display().to_string(),
+            repo: None,
+            entries: Vec::new(),
+            unchanged: 0,
+            yours: 0,
+            deleted: Vec::new(),
+            refused: Vec::new(),
+            unread: None,
+            based: base.is_some(),
+            head_moved: None,
+            digest: String::new(),
+            data: BTreeMap::new(),
+            prints: BTreeMap::new(),
+            same: Vec::new(),
+            gone: Vec::new(),
+            stamps: BTreeMap::new(),
+            hosts: BTreeMap::new(),
+            present: BTreeSet::new(),
+            folders: BTreeSet::new(),
+        },
+        hasher: Sha256::new(),
+        cut: None,
+        over: false,
+    };
+    let plan = &mut s.plan;
     // Folded paths already in the plan: on a case-insensitive host two of them are one file.
     let mut seen = std::collections::HashSet::new();
-    for e in archive.entries()? {
-        let mut e = e?;
-        let raw_path = e.path()?.to_path_buf();
+    let listed = match archive.entries() {
+        Ok(l) => l,
+        Err(e) => {
+            s.cut = Some(e.to_string());
+            return s;
+        }
+    };
+    for (read, e) in listed.enumerate() {
+        if read >= max {
+            s.over = true;
+            break;
+        }
+        let mut e = match e {
+            Ok(e) => e,
+            Err(e) => {
+                s.cut = Some(e.to_string());
+                break;
+            }
+        };
+        let raw_path = match e.path() {
+            Ok(p) => p.to_path_buf(),
+            Err(e) => {
+                s.cut = Some(e.to_string());
+                break;
+            }
+        };
         let shown = raw_path
             .to_string_lossy()
             .trim_start_matches("./")
             .to_string();
         let kind = e.header().entry_type();
-        if kind.is_dir() {
-            continue;
-        }
         let Some(rel) = safe_rel(&raw_path) else {
-            refused.push((shown, "unsafe path".into()));
+            if !kind.is_dir() {
+                plan.refused.push((shown, "unsafe path".into()));
+            }
             continue;
         };
         let rel_s = rel.to_string_lossy().replace('\\', "/");
-        let top = rel_s.split('/').next().unwrap_or_default();
-        if skip.iter().any(|n| fold(n) == fold(top)) {
+        if skipped(skip, &rel_s) {
             continue;
         }
+        if kind.is_dir() {
+            plan.folders.insert(rel_s);
+            continue;
+        }
+        plan.present.insert(rel_s.clone());
         if rel_s.split('/').any(disguised_git) {
-            refused.push((rel_s, "names .git under another spelling".into()));
+            plan.refused
+                .push((rel_s, "names .git under another spelling".into()));
             continue;
         }
         if !seen.insert(fold_path(&rel_s)) {
-            refused.push((
+            plan.refused.push((
                 rel_s,
                 "differs from another file only by case or invisible characters".into(),
             ));
             continue;
         }
         let host = dest.join(&rel);
-        let content = if kind.is_file() {
-            let mut bytes = Vec::new();
-            e.read_to_end(&mut bytes)?;
-            let executable = e.header().mode().unwrap_or(0) & 0o111 != 0;
-            Content::File { bytes, executable }
+        let got = if kind.is_file() {
+            let Some(got) = read_file(&mut e, keep) else {
+                // Not whole: it is no file the env is known to have.
+                plan.present.remove(&rel_s);
+                s.cut = Some(format!(
+                    "the archive ends inside {}",
+                    crate::text::display(&rel_s)
+                ));
+                break;
+            };
+            got
         } else if kind.is_symlink() {
-            let Some(target) = e.link_name()?.map(|t| t.to_path_buf()) else {
-                continue;
+            let target = match e.link_name() {
+                Ok(Some(t)) => t.to_path_buf(),
+                Ok(None) => continue,
+                Err(e) => {
+                    s.cut = Some(e.to_string());
+                    break;
+                }
             };
             if !link_stays_inside(&rel, &target) {
-                refused.push((
+                plan.refused.push((
                     rel_s,
                     format!("symlink to {} leaves the folder", target.display()),
                 ));
                 continue;
             }
-            Content::Link(target)
+            Got::Link(target)
         } else {
-            refused.push((rel_s, "special file".into()));
+            plan.refused.push((rel_s, "special file".into()));
             continue;
         };
-        let (same, size, executable) = match &content {
-            Content::File { bytes, executable } => (
-                std::fs::symlink_metadata(&host).is_ok_and(|m| m.is_file())
-                    && std::fs::read(&host).is_ok_and(|h| &h == bytes),
-                bytes.len() as u64,
-                *executable,
-            ),
-            Content::Link(t) => (std::fs::read_link(&host).is_ok_and(|h| &h == t), 0, false),
+        let (print, size, executable) = match &got {
+            Got::File {
+                print,
+                size,
+                executable,
+                ..
+            } => (print.clone(), *size, *executable),
+            Got::Link(t) => (Print::of_link(t), 0, false),
         };
-        if same {
-            unchanged += 1;
-            continue;
-        }
-        let change = if host.symlink_metadata().is_ok() {
-            "changed"
-        } else {
-            "new"
+        let stamp = Stamp::of(&host);
+        let there = Host::at(&host);
+        // The repository's own files (`--include-git`) have no base: they are offered whole.
+        let in_git = rel_s.split('/').any(|c| c == ".git");
+        let verdict = match base.filter(|_| !in_git) {
+            Some(b) => base::judge(&print, b.files.get(&rel_s), &there),
+            None => base::judge_unbased(&print, &there),
         };
-        hasher.update(rel_s.as_bytes());
-        match &content {
-            Content::File { bytes, executable } => {
-                hasher.update(Sha256::digest(bytes));
-                hasher.update([u8::from(*executable)]);
+        let change = match verdict {
+            Verdict::Same => {
+                plan.unchanged += 1;
+                plan.same.push(rel_s.clone());
+                plan.prints.insert(rel_s, print);
+                continue;
             }
-            Content::Link(t) => hasher.update(t.to_string_lossy().as_bytes()),
+            Verdict::Yours => {
+                plan.yours += 1;
+                continue;
+            }
+            Verdict::Conflict => "conflict",
+            Verdict::Write if there == Host::Absent => "new",
+            Verdict::Write => "changed",
+        };
+        s.hasher.update(rel_s.as_bytes());
+        match &got {
+            Got::File { print, .. } => {
+                s.hasher.update(print.hash);
+                s.hasher.update([u8::from(executable)]);
+            }
+            Got::Link(t) => s.hasher.update(t.to_string_lossy().as_bytes()),
         }
-        let newly_exec = executable && !std::fs::metadata(&host).is_ok_and(|m| is_executable(&m));
+        let newly_exec =
+            executable && !std::fs::metadata(&host).is_ok_and(|m| base::executable(&m));
         let risky = risky_nested(&rel_s)
             .map(str::to_string)
             .or_else(|| newly_exec.then(|| "becomes executable".to_string()))
-            .or_else(|| matches!(content, Content::Link(_)).then(|| "symlink".to_string()));
-        entries.push(PlanEntry {
+            .or_else(|| matches!(got, Got::Link(_)).then(|| "symlink".to_string()));
+        plan.entries.push(PlanEntry {
             path: rel_s.clone(),
             change: change.into(),
             size,
             executable,
             risky,
         });
-        data.insert(rel_s, content);
-    }
-    Ok(PullPlan {
-        dir: dest.display().to_string(),
-        repo: None,
-        entries,
-        unchanged,
-        refused,
-        digest: hex::encode(&hasher.finalize()[..16]),
-        data,
-    })
-}
-
-#[cfg(unix)]
-fn is_executable(m: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    m.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(not(unix))]
-fn is_executable(_m: &std::fs::Metadata) -> bool {
-    false
-}
-
-/// Write a reviewed plan. Risky entries are skipped unless `include_risky`.
-pub fn apply_pull(plan: &PullPlan, include_risky: bool) -> Result<(usize, usize)> {
-    let dest = PathBuf::from(&plan.dir);
-    let mut written = 0;
-    let mut skipped = 0;
-    for e in &plan.entries {
-        if e.risky.is_some() && !include_risky {
-            skipped += 1;
-            continue;
+        plan.stamps.insert(rel_s.clone(), stamp);
+        plan.hosts.insert(rel_s.clone(), there);
+        plan.prints.insert(rel_s.clone(), print);
+        match got {
+            Got::File {
+                bytes: Some(bytes),
+                executable,
+                ..
+            } => {
+                plan.data.insert(rel_s, Content::File { bytes, executable });
+            }
+            Got::File { bytes: None, .. } => {}
+            Got::Link(t) => {
+                plan.data.insert(rel_s, Content::Link(t));
+            }
         }
-        let Some(content) = plan.data.get(&e.path) else {
-            continue;
-        };
-        let target = dest.join(&e.path);
-        ensure_parents_inside(&dest, &target)?;
+    }
+    s
+}
+
+/// Whether `rel_s` is under one of the top-level folders `skip`.
+fn skipped(skip: &[String], rel_s: &str) -> bool {
+    let top = rel_s.split('/').next().unwrap_or_default();
+    skip.iter().any(|n| fold(n) == fold(top))
+}
+
+impl Scanned {
+    /// The plan, once the tar has ended: `failed` is what it said if it failed, and the plan
+    /// then holds what came before (`unread`). An archive cut short by itself is an error.
+    pub(crate) fn finish(
+        self,
+        dest: &Path,
+        skip: &[String],
+        base: Option<&Base>,
+        failed: Option<String>,
+    ) -> Result<PullPlan> {
+        let Scanned {
+            mut plan,
+            hasher,
+            cut,
+            ..
+        } = self;
+        if let (Some(cut), None) = (cut, &failed) {
+            bail!("{cut}");
+        }
+        plan.unread = failed;
+        // What the copy had and the env no longer does: only a listing read whole can say.
+        if let (Some(b), None) = (base, &plan.unread) {
+            for rel in b.files.keys().filter(|r| !skipped(skip, r)) {
+                if plan.present.contains(rel) {
+                    continue;
+                }
+                if std::fs::symlink_metadata(dest.join(rel)).is_err() {
+                    plan.gone.push(rel.clone());
+                } else {
+                    plan.deleted.push(rel.clone());
+                }
+            }
+            let now = base::head_of(dest);
+            if let (Some(then), Some(now)) = (&b.head, &now)
+                && then != now
+            {
+                let short = |h: &str| h.chars().take(8).collect::<String>();
+                plan.head_moved = Some((short(then), short(now)));
+            }
+        }
+        plan.digest = hex::encode(&hasher.finalize()[..16]);
+        Ok(plan)
+    }
+}
+
+/// The plan for a tar of the env's files held whole (`read`); see [`scan_plan`]. A tar that
+/// failed is read as far as it goes, and the plan says so (`unread`).
+pub(crate) fn build_plan(
+    read: &TarRead,
+    dest: &Path,
+    skip: &[String],
+    base: Option<&Base>,
+) -> Result<PullPlan> {
+    scan_plan(
+        read.raw.as_slice(),
+        dest,
+        skip,
+        base,
+        Keep::Bytes,
+        usize::MAX,
+    )
+    .finish(dest, skip, base, read.failed.clone())
+}
+
+impl PullPlan {
+    /// Take from `src` (a tar of the env's files at `wanted`) the bytes of this plan's
+    /// entries there: only a file that is still the one the plan judged. The paths that
+    /// didn't come so, and why.
+    pub(crate) fn fill(
+        &mut self,
+        src: impl Read,
+        wanted: &BTreeSet<String>,
+    ) -> Vec<(String, String)> {
+        let sizes: BTreeMap<&str, u64> = self
+            .entries
+            .iter()
+            .filter(|e| wanted.contains(&e.path))
+            .map(|e| (e.path.as_str(), e.size))
+            .collect();
+        let mut archive = tar::Archive::new(src);
+        for e in archive.entries().into_iter().flatten() {
+            let Ok(mut e) = e else { break };
+            let Some(rel) = e.path().ok().and_then(|p| safe_rel(&p)) else {
+                continue;
+            };
+            let rel_s = rel.to_string_lossy().replace('\\', "/");
+            let judged = self.prints.get(&rel_s).zip(sizes.get(rel_s.as_str()));
+            let Some((print, size)) = judged else {
+                continue;
+            };
+            if !e.header().entry_type().is_file() || e.size() != *size {
+                continue;
+            }
+            if let Some(Got::File {
+                print: now,
+                executable,
+                bytes: Some(bytes),
+                ..
+            }) = read_file(&mut e, Keep::Bytes)
+                && now == *print
+            {
+                self.data.insert(rel_s, Content::File { bytes, executable });
+            }
+        }
+        wanted
+            .iter()
+            .filter(|rel| !self.data.contains_key(*rel))
+            .map(|rel| {
+                (
+                    rel.clone(),
+                    "it couldn't be read from the env again".to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Whether a pull that wrote `written` of this plan's entries left the folder with every
+    /// file the env has. A copy with no base gets one only then: nothing about where it
+    /// started is left to guess.
+    pub fn whole(&self, written: usize) -> bool {
+        self.unread.is_none() && written == self.entries.len()
+    }
+
+    /// The file or link the folder held at entry `rel` when the plan was made; None for
+    /// nothing, or something else.
+    pub(crate) fn was(&self, rel: &str) -> Option<Print> {
+        match self.hosts.get(rel) {
+            Some(Host::Is(p)) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
+    /// The base once `written` (paths of this plan) are in the folder: what `old` held, with
+    /// every file now known to be the same on both sides.
+    pub fn rebased(&self, old: Option<&Base>, written: &[String]) -> Base {
+        let mut files = old.map(|b| b.files.clone()).unwrap_or_default();
+        for rel in self.same.iter().chain(written) {
+            if rel.split('/').any(|c| c == ".git") {
+                continue;
+            }
+            if let Some(p) = self.prints.get(rel) {
+                files.insert(rel.clone(), p.clone());
+            }
+        }
+        for rel in &self.gone {
+            files.remove(rel);
+        }
+        Base {
+            files,
+            head: base::head_of(Path::new(&self.dir)),
+        }
+    }
+}
+
+/// Which of a plan's entries a pull writes beyond the plain ones.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Take {
+    /// Files host tools act on (`--include-risky`).
+    pub risky: bool,
+    /// Files changed in the folder too, replaced by the env's (`--overwrite`).
+    pub conflicts: bool,
+}
+
+impl Take {
+    pub fn takes(&self, e: &PlanEntry) -> bool {
+        (self.conflicts || !e.conflict()) && (self.risky || e.risky.is_none())
+    }
+}
+
+/// What applying a plan did.
+#[derive(Debug, Default)]
+pub struct Applied {
+    pub written: Vec<String>,
+    /// Risky entries left out.
+    pub skipped: usize,
+    /// Entries changed in the folder too, left out.
+    pub conflicts: usize,
+    /// Entries that couldn't be written, and why; the rest were.
+    pub failed: Vec<(String, String)>,
+    /// Why what was written may not survive a power cut: the sync to disk failed.
+    pub unsynced: Option<String>,
+}
+
+/// Write a reviewed plan: its plain entries, and what `take` adds. An entry that can't be
+/// written is reported and the rest go on; what was written is synced to disk.
+pub fn apply_pull(plan: &PullPlan, take: Take) -> Applied {
+    let mut done = Applied::default();
+    let mut picked = Vec::new();
+    for e in &plan.entries {
+        if take.takes(e) {
+            picked.push((e.path.clone(), temp_name()));
+        } else if e.conflict() && !take.conflicts {
+            done.conflicts += 1;
+        } else {
+            done.skipped += 1;
+        }
+    }
+    let wrote = plan.write(&picked);
+    done.written = wrote.written;
+    done.failed = wrote.failed;
+    done.unsynced = wrote.unsynced;
+    done
+}
+
+impl PullPlan {
+    /// Write the entries at `picked` (each with the temporary name it is written through) and
+    /// sync them to disk.
+    pub(crate) fn write(&self, picked: &[(String, String)]) -> Applied {
+        let dest = PathBuf::from(&self.dir);
+        let mut done = Applied::default();
+        for (rel, tmp) in picked {
+            let (Some(content), Some(stamp)) = (self.data.get(rel), self.stamps.get(rel)) else {
+                done.failed
+                    .push((rel.clone(), "it wasn't read from the env".to_string()));
+                continue;
+            };
+            match write_entry(&dest, rel, content, tmp, stamp) {
+                Ok(()) => done.written.push(rel.clone()),
+                Err(err) => done.failed.push((rel.clone(), format!("{err:#}"))),
+            }
+        }
+        done.unsynced = sync_written(&dest, &done.written)
+            .err()
+            .map(|e| e.to_string());
+        done
+    }
+}
+
+/// A name for a file being written, beside the one it becomes: random, so it is nobody's file.
+pub(crate) fn temp_name() -> String {
+    format!(".luoto-{}.tmp", hex::encode(rand::random::<[u8; 8]>()))
+}
+
+/// The permission bits of a pulled file: those of the file it replaces, executable as the
+/// env's is, or 0644/0755 for a new one.
+#[cfg(unix)]
+fn mode_for(existing: Option<u32>, executable: bool) -> u32 {
+    match existing.map(|m| m & 0o777) {
+        None if executable => 0o755,
+        None => 0o644,
+        // Whoever reads it runs it.
+        Some(m) if executable => m | ((m & 0o444) >> 2),
+        Some(m) => m & !0o111,
+    }
+}
+
+/// Write `content` at `rel` under `dest`: into `tmp` beside it first (never through a file
+/// already there), flushed, then renamed over it, so the file is the old or the new one;
+/// only if what stands there is still what the plan saw (`was`). A write that fails leaves no
+/// temp file.
+pub(crate) fn write_entry(
+    dest: &Path,
+    rel: &str,
+    content: &Content,
+    tmp: &str,
+    was: &Stamp,
+) -> Result<()> {
+    let target = dest.join(rel);
+    ensure_parents_inside(dest, &target)?;
+    let parent = target.parent().context("no parent")?;
+    let tmp = parent.join(tmp);
+    let old = std::fs::symlink_metadata(&target).ok();
+    if old.as_ref().is_some_and(|m| m.is_dir()) {
+        bail!("a folder is there");
+    }
+    let made = (|| -> Result<()> {
         match content {
             Content::File { bytes, executable } => {
-                let tmp = target.with_extension("luoto-tmp");
-                if std::fs::symlink_metadata(&tmp).is_ok() {
-                    std::fs::remove_file(&tmp)?;
-                }
-                // create_new: never write through something already at the temp path.
-                std::fs::OpenOptions::new()
+                let mut f = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
-                    .open(&tmp)
-                    .and_then(|mut f| std::io::Write::write_all(&mut f, bytes))
-                    .with_context(|| format!("write {}", target.display()))?;
+                    .open(&tmp)?;
+                f.write_all(bytes)?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let mode = if *executable { 0o755 } else { 0o644 };
-                    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+                    let was = old
+                        .as_ref()
+                        .filter(|m| m.is_file())
+                        .map(|m| m.permissions().mode());
+                    f.set_permissions(std::fs::Permissions::from_mode(mode_for(was, *executable)))?;
                 }
                 #[cfg(not(unix))]
                 let _ = executable;
-                if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
-                    std::fs::remove_file(&target)?;
-                }
-                std::fs::rename(&tmp, &target)?;
+                flush(&f)?;
             }
             Content::Link(t) => {
-                if std::fs::symlink_metadata(&target).is_ok() {
-                    std::fs::remove_file(&target)?;
-                }
                 #[cfg(unix)]
-                std::os::unix::fs::symlink(t, &target)?;
+                std::os::unix::fs::symlink(t, &tmp)?;
                 #[cfg(not(unix))]
                 {
                     let _ = t;
-                    skipped += 1;
-                    continue;
+                    bail!("a symlink, which luoto doesn't write on this system");
                 }
             }
         }
-        written += 1;
+        // Asked last, so the time in which a save here could be lost is as short as it gets.
+        if Stamp::of(&target) != *was {
+            bail!("it changed here while the pull ran");
+        }
+        // Over a link too: rename replaces the link itself.
+        std::fs::rename(&tmp, &target)?;
+        Ok(())
+    })();
+    if made.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    Ok((written, skipped))
+    made.with_context(|| format!("couldn't write {}", target.display()))
+}
+
+/// Hand `f`'s data to the disk. Plain `fsync`: on macOS `sync_all` also waits for the disk to
+/// empty its cache, which [`sync_written`] asks once for a whole pull.
+pub(crate) fn flush(f: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the descriptor is `f`'s, open for the length of the call.
+        if unsafe { libc::fsync(f.as_raw_fd()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    f.sync_all()
+}
+
+/// Make the files written at `rels` under `dest` last through a power cut: each one's folder
+/// is flushed (the rename is the folder's change; the files were flushed as written), then
+/// the disk is asked once to write out its cache.
+pub(crate) fn sync_written(dest: &Path, rels: &[String]) -> std::io::Result<()> {
+    if rels.is_empty() {
+        return Ok(());
+    }
+    // Windows opens no folder as a file; its renames are journaled by NTFS.
+    if cfg!(unix) {
+        let folders: BTreeSet<PathBuf> = rels
+            .iter()
+            .filter_map(|r| dest.join(r).parent().map(Path::to_path_buf))
+            .collect();
+        for d in &folders {
+            flush(&std::fs::File::open(d)?)?;
+        }
+        std::fs::File::open(dest)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// Whether `target` is a plain path under `root` whose folders, as far as they exist, are
+/// folders and no links: one a pull could have written.
+pub(crate) fn plain_inside(root: &Path, target: &Path) -> bool {
+    let Ok(rel) = target.strip_prefix(root) else {
+        return false;
+    };
+    if safe_rel(rel).is_none() {
+        return false;
+    }
+    let mut cur = root.to_path_buf();
+    let parts: Vec<_> = rel.components().collect();
+    for c in &parts[..parts.len().saturating_sub(1)] {
+        cur.push(c);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {}
+            Ok(_) => return false,
+            Err(_) => return true,
+        }
+    }
+    true
 }
 
 /// Create the parents of `target` inside `root`, refusing to walk through a symlink (which
@@ -1033,27 +1836,42 @@ fn ensure_parents_inside(root: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// What a plan writes, what it skips as risky and what it refuses, for a terminal: what
-/// it comes to and each heading in bold, what happens to a file dim before its path.
+/// What a plan writes, what it holds back (risky, or changed in the folder too) and what it
+/// refuses, for a terminal: what it comes to and each heading in bold, what happens to a file
+/// dim before its path.
 pub fn describe(
     plan: &PullPlan,
     w: &mut impl Write,
     style: crate::style::Style,
 ) -> std::io::Result<()> {
-    let risky: Vec<&PlanEntry> = plan.entries.iter().filter(|e| e.risky.is_some()).collect();
+    let conflicts: Vec<&PlanEntry> = plan.entries.iter().filter(|e| e.conflict()).collect();
+    let risky: Vec<&PlanEntry> = plan
+        .entries
+        .iter()
+        .filter(|e| e.risky.is_some() && !e.conflict())
+        .collect();
+    let plain: Vec<&PlanEntry> = plan
+        .entries
+        .iter()
+        .filter(|e| e.risky.is_none() && !e.conflict())
+        .collect();
     let total = format!(
-        "{} new or changed file(s), {} unchanged → {}",
+        "{} new or changed file(s), {} unchanged{} → {}",
         plan.entries.len(),
         plan.unchanged,
+        match plan.yours {
+            0 => String::new(),
+            n => format!(", {n} changed only here"),
+        },
         crate::ssh::tilde(Path::new(&plan.dir))
     );
     writeln!(w, "{}", style.head(&total))?;
-    let change = |c: &str| style.dim(&format!("  {c:<7}"));
-    for e in plan.entries.iter().filter(|e| e.risky.is_none()).take(30) {
+    let change = |c: &str| style.dim(&format!("  {c:<8}"));
+    for e in plain.iter().take(30) {
         writeln!(w, "{} {}", change(&e.change), crate::text::display(&e.path))?;
     }
-    if plan.entries.len() - risky.len() > 30 {
-        writeln!(w, "  … and {} more", plan.entries.len() - risky.len() - 30)?;
+    if plain.len() > 30 {
+        writeln!(w, "  … and {} more", plain.len() - 30)?;
     }
     if !risky.is_empty() {
         writeln!(
@@ -1071,6 +1889,35 @@ pub fn describe(
             )?;
         }
     }
+    if !conflicts.is_empty() {
+        writeln!(
+            w,
+            "{}",
+            style.head("changed here and in the env (yours kept unless --overwrite):")
+        )?;
+        for e in conflicts.iter().take(30) {
+            let why = e.risky.as_deref().map(|r| format!(" — risky: {r}"));
+            writeln!(
+                w,
+                "{} {}{}",
+                change(&e.change),
+                crate::text::display(&e.path),
+                why.unwrap_or_default()
+            )?;
+        }
+        if conflicts.len() > 30 {
+            writeln!(w, "  … and {} more", conflicts.len() - 30)?;
+        }
+    }
+    if !plan.deleted.is_empty() {
+        writeln!(w, "{}", style.head("deleted in the env, kept here:"))?;
+        for p in plan.deleted.iter().take(30) {
+            writeln!(w, "{} {}", change("deleted"), crate::text::display(p))?;
+        }
+        if plan.deleted.len() > 30 {
+            writeln!(w, "  … and {} more", plan.deleted.len() - 30)?;
+        }
+    }
     for (p, why) in &plan.refused {
         writeln!(
             w,
@@ -1080,7 +1927,224 @@ pub fn describe(
             crate::text::display(why)
         )?;
     }
+    if let Some((then, now)) = &plan.head_moved {
+        writeln!(
+            w,
+            "your folder's HEAD moved since the env's copy ({then} → {now}): what you changed \
+             since stays yours"
+        )?;
+    }
+    if let Some(why) = &plan.unread {
+        writeln!(
+            w,
+            "{}",
+            style.head("not all of the env's files could be read; what is listed is what came:")
+        )?;
+        for l in why.lines().take(5) {
+            writeln!(w, "  {l}")?;
+        }
+    }
     Ok(())
+}
+
+/// The most never-copied names listed for one folder.
+const MAX_NEVER_COPIED: usize = 1000;
+/// How long, and how much, the env's `find` for them may take: the sandbox wrote the tree.
+const NEVER_COPIED_LIMIT: Duration = Duration::from_secs(30);
+const NEVER_COPIED_CAP: usize = 256 << 10;
+
+/// The `find` that prints each entry under `.` named as `COPY_SKIP` names one, at any
+/// depth and whatever it is (tar's `--exclude` leaves out files of those names too), without
+/// looking inside one, in `.git` or in the top-level folders `skip`.
+pub(crate) fn never_copied_find(skip: &[String]) -> Vec<String> {
+    let mut a: Vec<String> = ["find", ".", "(", "-name", ".git"].map(String::from).into();
+    for name in skip {
+        a.extend(["-o".into(), "-path".into(), format!("./{name}")]);
+    }
+    a.extend([")", "-prune", "-o", "("].map(String::from));
+    for (i, name) in COPY_SKIP.iter().enumerate() {
+        if i > 0 {
+            a.push("-o".into());
+        }
+        a.extend(["-name".into(), (*name).into()]);
+    }
+    a.extend([")", "-prune", "-print"].map(String::from));
+    a
+}
+
+/// The paths [`never_copied_find`] printed, as relative paths: only plain ones that end in a
+/// `COPY_SKIP` name (the sandbox wrote the names, so a line may be anything).
+pub(crate) fn never_copied_lines(out: &str) -> Vec<String> {
+    // The env's paths are Linux paths: a backslash is part of a name there, never one plain
+    // name here, and what is shown is written with `/` on every host.
+    out.lines()
+        .filter(|l| !l.contains('\\'))
+        .filter_map(|l| safe_rel(Path::new(l)))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| COPY_SKIP.contains(&n))
+        })
+        .map(|p| {
+            p.iter()
+                .map(|c| c.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .take(MAX_NEVER_COPIED)
+        .collect()
+}
+
+/// What the running env holds under `target` that no copy or pull ever takes (`COPY_SKIP`).
+pub fn never_copied(ctx: &Ctx, env: &str, target: &PullTarget) -> Result<Vec<String>> {
+    let src = match &target.repo {
+        Some(name) => format!("/workspace/{name}"),
+        None => "/workspace".to_string(),
+    };
+    let argv = rooted(&src, never_copied_find(&target.skip));
+    let out = ctx.rt.run_limited(
+        exec(&names::dev(env)).user(UID).argv(argv),
+        NEVER_COPIED_LIMIT,
+        NEVER_COPIED_CAP,
+    )?;
+    Ok(never_copied_lines(&out))
+}
+
+/// Which of `rels` the git repository whose root is `dest` ignores, as a file or as a folder
+/// (a rule such as `target/` names only folders, and the folder may not exist here): none
+/// when `dest` is no repository's root (a folder inside a bigger work tree is not judged by
+/// that tree's rules, as in [`collect`]) or git can't say.
+pub fn host_ignored(dest: &Path, rels: &[String]) -> BTreeSet<String> {
+    if rels.is_empty() || !dest.join(".git").exists() {
+        return BTreeSet::new();
+    }
+    let child = std::process::Command::new("git")
+        .args(["-c", "core.fsmonitor=false", "-C"])
+        .arg(dest)
+        .args(["check-ignore", "-z", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else {
+        return BTreeSet::new();
+    };
+    let input: Vec<u8> = rels
+        .iter()
+        .flat_map(|r| [r.clone(), format!("{r}/")])
+        .flat_map(|r| r.into_bytes().into_iter().chain(std::iter::once(0)))
+        .collect();
+    let stdin = child.stdin.take();
+    let writer = std::thread::spawn(move || {
+        if let Some(mut stdin) = stdin {
+            let _ = stdin.write_all(&input);
+        }
+    });
+    let out = child.wait_with_output();
+    let _ = writer.join();
+    let Ok(out) = out else {
+        return BTreeSet::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .map(|p| p.strip_suffix('/').unwrap_or(p))
+        .filter(|p| rels.iter().any(|r| r == p))
+        .map(str::to_string)
+        .collect()
+}
+
+/// What an env holds for one of its folders that the folder doesn't have. What the folder's
+/// repository ignores is no part of it: by the folder's own rules that is build output, which
+/// no copy takes in and no unattended pull brings back.
+#[derive(Debug, Default, PartialEq)]
+pub struct Unpulled {
+    pub dir: String,
+    /// Files new or changed in the env, the risky ones among them.
+    pub changed: usize,
+    pub refused: usize,
+    /// Not all of the env's files could be read.
+    pub unread: bool,
+    /// What no pull takes (`COPY_SKIP`).
+    pub never_copied: Vec<String>,
+    /// New or changed files the folder's repository ignores: not counted above.
+    pub ignored: usize,
+}
+
+impl Unpulled {
+    /// From a pull of `target` planned and not written, and what no pull takes (`found`).
+    pub fn of(plan: &PullPlan, target: &PullTarget, found: Vec<String>) -> Unpulled {
+        let mut asked: Vec<String> = plan.entries.iter().map(|e| e.path.clone()).collect();
+        asked.extend(found.iter().cloned());
+        let ignored = host_ignored(&target.dest, &asked);
+        let left = plan
+            .entries
+            .iter()
+            .filter(|e| ignored.contains(&e.path))
+            .count();
+        Unpulled {
+            dir: plan.dir.clone(),
+            changed: plan.entries.len() - left,
+            refused: plan.refused.len(),
+            unread: plan.unread.is_some(),
+            never_copied: found.into_iter().filter(|p| !ignored.contains(p)).collect(),
+            ignored: left,
+        }
+    }
+
+    pub fn any(&self) -> bool {
+        self.changed + self.refused + self.never_copied.len() > 0 || self.unread
+    }
+}
+
+impl std::fmt::Display for Unpulled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut parts = Vec::new();
+        match self.changed {
+            0 => {}
+            1 => parts.push("1 file new or changed".to_string()),
+            n => parts.push(format!("{n} files new or changed")),
+        }
+        if self.refused > 0 {
+            parts.push(format!("{} refused", self.refused));
+        }
+        if self.unread {
+            parts.push("not all of it could be read".into());
+        }
+        if !self.never_copied.is_empty() {
+            let named: Vec<String> = self
+                .never_copied
+                .iter()
+                .take(3)
+                .map(|p| crate::text::display(p))
+                .collect();
+            let more = self.never_copied.len().saturating_sub(named.len());
+            parts.push(format!(
+                "{} never copied ({}{})",
+                self.never_copied.len(),
+                named.join(", "),
+                if more > 0 { ", …" } else { "" }
+            ));
+        }
+        if self.ignored > 0 {
+            parts.push(format!(
+                "{} your .gitignore ignores not counted",
+                self.ignored
+            ));
+        }
+        write!(
+            f,
+            "{}: {}",
+            crate::ssh::tilde(Path::new(&self.dir)),
+            parts.join(", ")
+        )
+    }
+}
+
+/// What the running env holds for `target` that its folder doesn't.
+pub fn unpulled(ctx: &Ctx, env: &str, target: &PullTarget) -> Result<Unpulled> {
+    let plan = plan_pull(ctx, env, target, false)?;
+    let found = never_copied(ctx, env, target)?;
+    Ok(Unpulled::of(&plan, target, found))
 }
 
 /// Every folder a pull writes, and one digest over them that applying checks.
@@ -1096,38 +2160,619 @@ pub fn pull_plans(ctx: &Ctx, name: &str) -> Result<PullPlans> {
         .iter()
         .map(|t| plan_pull(ctx, name, t, false))
         .collect::<Result<Vec<_>>>()?;
-    let digest = plans
+    let digest = plans_digest(&plans);
+    Ok(PullPlans { plans, digest })
+}
+
+fn plans_digest(plans: &[PullPlan]) -> String {
+    plans
         .iter()
         .map(|p| p.digest.as_str())
         .collect::<Vec<_>>()
-        .join(":");
-    Ok(PullPlans { plans, digest })
+        .join(":")
 }
 
 #[derive(serde::Serialize)]
 pub struct Pulled {
     pub written: usize,
     pub skipped: usize,
+    /// Files changed in the folder too, left as they are.
+    pub conflicts: usize,
+    /// Files that couldn't be written, and why.
+    pub failed: Vec<(String, String)>,
+}
+
+/// Bring the base of `target`'s folder up to date after `plan` was applied (`written`): from
+/// now on a pull knows those files are the same on both sides.
+pub fn settle(ctx: &Ctx, env: &str, target: &PullTarget, plan: &PullPlan, written: &[String]) {
+    if !target.home {
+        return;
+    }
+    let old = target.base(&ctx.paths, env);
+    if old.is_none() && !plan.whole(written.len()) {
+        return;
+    }
+    let new = plan.rebased(old.as_ref(), written);
+    if old.as_ref() == Some(&new) {
+        return;
+    }
+    if let Err(e) = new.save(&ctx.paths, env, target.repo.as_deref()) {
+        crate::progress::warn(&format!(
+            "what was pulled isn't recorded ({e:#}): the next pull lists it again"
+        ));
+    }
 }
 
 /// Pull every folder, if what it would write is still what `digest` reviewed.
 pub fn apply_pulls(ctx: &Ctx, name: &str, digest: &str, include_risky: bool) -> Result<Pulled> {
-    let all = pull_plans(ctx, name)?;
-    if all.digest != digest {
+    let _lock = crate::autopull::lock(&ctx.paths, name)?;
+    let targets = crate::commands::pull_targets(ctx, name, None, None)?;
+    let plans = targets
+        .iter()
+        .map(|t| plan_pull(ctx, name, t, false))
+        .collect::<Result<Vec<_>>>()?;
+    if plans_digest(&plans) != digest {
         bail!("the env's files changed since you reviewed them; review again");
     }
-    let (mut written, mut skipped) = (0, 0);
-    for plan in &all.plans {
-        let (w, s) = apply_pull(plan, include_risky)?;
-        written += w;
-        skipped += s;
+    let mut pulled = Pulled {
+        written: 0,
+        skipped: 0,
+        conflicts: 0,
+        failed: Vec::new(),
+    };
+    let take = Take {
+        risky: include_risky,
+        conflicts: false,
+    };
+    for (target, plan) in targets.iter().zip(&plans) {
+        let done = apply_pull(plan, take);
+        settle(ctx, name, target, plan, &done.written);
+        pulled.written += done.written.len();
+        pulled.skipped += done.skipped;
+        pulled.conflicts += done.conflicts;
+        pulled.failed.extend(done.failed);
+        if let Some(why) = done.unsynced {
+            pulled
+                .failed
+                .push((plan.dir.clone(), format!("not synced to disk: {why}")));
+        }
     }
-    Ok(Pulled { written, skipped })
+    crate::autopull::reviewed(&ctx.paths, name);
+    Ok(pulled)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plan_of(raw: &[u8], dest: &Path, skip: &[String]) -> PullPlan {
+        let read = TarRead {
+            raw: raw.to_vec(),
+            failed: None,
+        };
+        build_plan(&read, dest, skip, None).unwrap()
+    }
+
+    fn plan_based(raw: &[u8], dest: &Path, base: &Base) -> PullPlan {
+        let read = TarRead {
+            raw: raw.to_vec(),
+            failed: None,
+        };
+        build_plan(&read, dest, &[], Some(base)).unwrap()
+    }
+
+    const PLAIN: Take = Take {
+        risky: false,
+        conflicts: false,
+    };
+    const RISKY: Take = Take {
+        risky: true,
+        conflicts: false,
+    };
+
+    /// The base a copy of `files` into an env leaves.
+    fn base_of(files: &[(&str, &[u8])]) -> Base {
+        Base {
+            files: files
+                .iter()
+                .map(|(p, b)| (p.to_string(), Print::of_bytes(b, false)))
+                .collect(),
+            head: None,
+        }
+    }
+
+    #[test]
+    fn a_pull_writes_what_the_env_changed_and_leaves_what_you_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let write = |p: &str, text: &str| std::fs::write(d.join(p), text).unwrap();
+        // The copy started from these.
+        let base = base_of(&[
+            ("same.txt", b"s"),
+            ("env.txt", b"1"),
+            ("yours.txt", b"1"),
+            ("both.txt", b"1"),
+            ("agree.txt", b"1"),
+            ("env-deleted.txt", b"1"),
+            ("both-deleted.txt", b"1"),
+            ("you-deleted.txt", b"1"),
+            ("env-changed-you-deleted.txt", b"1"),
+        ]);
+        // The folder now.
+        write("same.txt", "s");
+        write("env.txt", "1");
+        write("yours.txt", "mine");
+        write("both.txt", "mine");
+        write("agree.txt", "2");
+        write("env-deleted.txt", "1");
+        write("taken.txt", "mine");
+        // The env now.
+        let raw = tar_of(&[
+            ("./same.txt", b"s"),
+            ("./env.txt", b"2"),
+            ("./yours.txt", b"1"),
+            ("./both.txt", b"theirs"),
+            ("./agree.txt", b"2"),
+            ("./you-deleted.txt", b"1"),
+            ("./env-changed-you-deleted.txt", b"2"),
+            ("./new.txt", b"n"),
+            ("./taken.txt", b"theirs"),
+        ]);
+        let plan = plan_based(&raw, d, &base);
+        let change = |p: &str| {
+            plan.entries
+                .iter()
+                .find(|e| e.path == p)
+                .map(|e| e.change.as_str())
+        };
+        assert_eq!(change("env.txt"), Some("changed"));
+        assert_eq!(change("new.txt"), Some("new"));
+        // Changed on both sides, or a file of yours the copy never had: yours stays.
+        assert_eq!(change("both.txt"), Some("conflict"));
+        assert_eq!(change("taken.txt"), Some("conflict"));
+        assert_eq!(change("env-changed-you-deleted.txt"), Some("conflict"));
+        // What only you changed or deleted is not the env's to bring back.
+        assert_eq!(change("yours.txt"), None);
+        assert_eq!(change("you-deleted.txt"), None);
+        assert_eq!(
+            (plan.unchanged, plan.yours),
+            (2, 2),
+            "same and agree; yours and deleted"
+        );
+        assert_eq!(plan.deleted, ["env-deleted.txt"]);
+        assert!(plan.based);
+
+        let done = apply_pull(&plan, PLAIN);
+        assert_eq!(done.written, ["env.txt", "new.txt"]);
+        assert_eq!((done.conflicts, done.skipped), (3, 0));
+        let read = |p: &str| std::fs::read_to_string(d.join(p)).unwrap();
+        assert_eq!(
+            (read("env.txt"), read("both.txt")),
+            ("2".into(), "mine".into())
+        );
+        assert_eq!(read("yours.txt"), "mine");
+        assert!(d.join("env-deleted.txt").exists(), "a pull deletes nothing");
+        assert!(!d.join("you-deleted.txt").exists());
+
+        // The base now knows what is the same on both sides, and nothing more.
+        let next = plan.rebased(Some(&base), &done.written);
+        let print = |p: &str| next.files.get(p).cloned();
+        assert_eq!(print("env.txt"), Some(Print::of_bytes(b"2", false)));
+        assert_eq!(print("new.txt"), Some(Print::of_bytes(b"n", false)));
+        assert_eq!(print("agree.txt"), Some(Print::of_bytes(b"2", false)));
+        assert_eq!(print("both.txt"), Some(Print::of_bytes(b"1", false)));
+        assert_eq!(print("taken.txt"), None);
+        assert_eq!(print("both-deleted.txt"), None, "gone on both sides");
+        assert!(print("env-deleted.txt").is_some());
+        let again = plan_based(&raw, d, &next);
+        let left: Vec<&str> = again.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            left,
+            ["both.txt", "env-changed-you-deleted.txt", "taken.txt"]
+        );
+        // `--overwrite` takes the env's.
+        let all = apply_pull(
+            &again,
+            Take {
+                risky: false,
+                conflicts: true,
+            },
+        );
+        assert_eq!(all.written.len(), 3);
+        assert_eq!(read("both.txt"), "theirs");
+
+        let mut said = Vec::new();
+        describe(&plan, &mut said, crate::style::Style::PLAIN).unwrap();
+        let said = String::from_utf8(said).unwrap();
+        assert!(said.contains("5 new or changed file(s), 2 unchanged, 2 changed only here"));
+        assert!(said.contains("changed here and in the env (yours kept unless --overwrite):"));
+        assert!(said.contains("  conflict both.txt"));
+        assert!(said.contains("deleted in the env, kept here:\n  deleted  env-deleted.txt"));
+    }
+
+    #[test]
+    fn a_file_saved_while_the_pull_runs_is_not_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::write(d.join("a.txt"), "1").unwrap();
+        let base = base_of(&[("a.txt", b"1")]);
+        let raw = tar_of(&[("./a.txt", b"2"), ("./b.txt", b"new")]);
+        let plan = plan_based(&raw, d, &base);
+        // Your editor saves a.txt, and something makes b.txt, after the plan was made.
+        std::fs::write(d.join("a.txt"), "mine, longer").unwrap();
+        std::fs::write(d.join("b.txt"), "mine").unwrap();
+        let done = apply_pull(&plan, PLAIN);
+        assert!(done.written.is_empty());
+        assert_eq!(done.failed.len(), 2);
+        assert!(done.failed[0].1.contains("changed here while the pull ran"));
+        assert_eq!(
+            std::fs::read_to_string(d.join("a.txt")).unwrap(),
+            "mine, longer"
+        );
+        assert_eq!(std::fs::read_to_string(d.join("b.txt")).unwrap(), "mine");
+        assert!(temp_files(d).is_empty());
+    }
+
+    #[test]
+    fn a_copy_with_no_base_offers_every_difference_and_gets_one_only_from_a_whole_pull() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::write(d.join("a.txt"), "mine").unwrap();
+        std::fs::write(d.join("same.txt"), "s").unwrap();
+        let raw = tar_of(&[
+            ("./a.txt", b"env"),
+            ("./same.txt", b"s"),
+            ("./.envrc", b"x"),
+        ]);
+        let plan = plan_of(&raw, d, &[]);
+        assert!(!plan.based);
+        let changes: Vec<&str> = plan.entries.iter().map(|e| e.change.as_str()).collect();
+        assert_eq!(changes, ["changed", "new"], "as before luoto kept a base");
+        // The risky one was left out: what the copy started from is still a guess.
+        let partly = apply_pull(&plan, PLAIN);
+        assert!(!plan.whole(partly.written.len()));
+        let rest = plan_of(&raw, d, &[]);
+        let all = apply_pull(&rest, RISKY);
+        assert_eq!(all.written, [".envrc"]);
+        assert!(rest.whole(all.written.len()));
+        // After that the folder has every file the env has.
+        let last = plan_of(&raw, d, &[]);
+        assert!(last.entries.is_empty() && last.whole(0));
+        let base = last.rebased(None, &[]);
+        assert_eq!(base.files.len(), 3);
+    }
+
+    #[test]
+    fn a_copy_fingerprints_the_bytes_it_sends() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join(".git")).unwrap();
+        std::fs::write(d.join("src/a.rs"), b"fn a() {}").unwrap();
+        std::fs::write(d.join(".git/HEAD"), b"ref: refs/heads/main").unwrap();
+        std::fs::write(d.join("empty"), b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(d.join("run.sh"), b"#!/bin/sh").unwrap();
+            std::fs::set_permissions(d.join("run.sh"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            std::os::unix::fs::symlink("src/a.rs", d.join("l")).unwrap();
+        }
+        let list = vec![
+            (PathBuf::from("src"), true),
+            (PathBuf::from("src/a.rs"), false),
+            (PathBuf::from(".git"), true),
+            (PathBuf::from(".git/HEAD"), false),
+            (PathBuf::from("empty"), false),
+            #[cfg(unix)]
+            (PathBuf::from("run.sh"), false),
+            #[cfg(unix)]
+            (PathBuf::from("l"), false),
+        ];
+        let mut tar = Vec::new();
+        let pushed = send(&mut tar, d, &list).unwrap();
+        assert_eq!(pushed.count, list.len() - 2);
+        assert_eq!(
+            pushed.files.get("src/a.rs"),
+            Some(&Print::of_bytes(b"fn a() {}", false))
+        );
+        assert_eq!(
+            pushed.files.get("empty"),
+            Some(&Print::of_bytes(b"", false))
+        );
+        assert!(
+            !pushed.files.contains_key(".git/HEAD"),
+            "the repository is no pulled file"
+        );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                pushed.files.get("run.sh"),
+                Some(&Print::of_bytes(b"#!/bin/sh", true))
+            );
+            assert_eq!(
+                pushed.files.get("l"),
+                Some(&Print::of_link(Path::new("src/a.rs")))
+            );
+        }
+        // What was sent is what the env's tar unpacks, and a pull of it unchanged finds
+        // nothing to do against that base.
+        let base = Base {
+            files: pushed.files,
+            head: None,
+        };
+        let plan = plan_based(&tar, d, &base);
+        assert!(plan.entries.is_empty(), "{:?}", plan.entries);
+        assert!(plan.deleted.is_empty() && plan.yours == 0);
+    }
+
+    #[test]
+    fn the_envs_files_are_read_without_what_no_pull_takes() {
+        let args = tar_args("/workspace", &["api".into()], false);
+        assert_eq!(args[..4], ["sh", "-c", ROOTED, "/workspace"]);
+        let tar = args[4..].join(" ");
+        assert!(tar.starts_with("tar -c -f - --exclude=node_modules --exclude=target"));
+        assert!(tar.ends_with("--exclude=.git --exclude=./api ."));
+        assert!(!tar_args("/v/api", &[], true).contains(&"--exclude=.git".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_journaled_path_is_used_again_only_if_a_pull_could_have_written_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.join("src")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), d.join("link")).unwrap();
+        assert!(plain_inside(d, &d.join("src/a.rs")));
+        assert!(plain_inside(d, &d.join("new/deep/a.rs")));
+        assert!(!plain_inside(d, &d.join("link/a.rs")));
+        assert!(!plain_inside(d, &d.join("../x")));
+        assert!(!plain_inside(d, outside.path()));
+        assert!(!plain_inside(d, d));
+    }
+
+    /// The files luoto left in `dir` while writing.
+    fn temp_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.starts_with(".luoto-"))
+            .collect()
+    }
+
+    #[test]
+    fn a_tar_that_failed_is_read_as_far_as_it_goes_and_the_plan_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut raw = tar_of(&[("./a.txt", b"a"), ("./b.txt", &[b'b'; 4096])]);
+        // Cut inside b.txt, as a tar killed or failing mid-file leaves it.
+        raw.truncate(512 + 512 + 512 + 100);
+        let cut = TarRead {
+            raw: raw.clone(),
+            failed: Some("tar: ./c.txt: Permission denied".into()),
+        };
+        let plan = build_plan(&cut, dir.path(), &[], None).unwrap();
+        let paths: Vec<&str> = plan.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["a.txt"], "the half-read file is not in the plan");
+        assert!(
+            plan.unread
+                .as_deref()
+                .unwrap()
+                .contains("Permission denied")
+        );
+        let mut said = Vec::new();
+        describe(&plan, &mut said, crate::style::Style::PLAIN).unwrap();
+        assert!(
+            String::from_utf8(said)
+                .unwrap()
+                .contains("not all of the env's files")
+        );
+        // The same bytes from a tar that reported success are an error, not a plan.
+        let whole = TarRead { raw, failed: None };
+        assert!(build_plan(&whole, dir.path(), &[], None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tar_is_read_within_its_cap_and_its_failure_is_kept() {
+        let sh = |script: &str| {
+            std::process::Command::new("sh")
+                .args(["-c", script])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let ok = read_tar(sh("printf abc"), 10, None).unwrap();
+        assert_eq!((ok.raw.as_slice(), ok.failed), (&b"abc"[..], None));
+        let failed = read_tar(sh("printf abc; echo 'tar: boom' >&2; exit 2"), 10, None).unwrap();
+        assert_eq!(
+            failed.raw, b"abc",
+            "output before a failure is no whole archive"
+        );
+        assert_eq!(failed.failed.as_deref(), Some("tar: boom"));
+        let big = read_tar(sh("yes | head -c 100000; sleep 30"), 10, None);
+        assert!(matches!(big, Err(TarError::TooLarge)));
+        let slow = read_tar(sh("sleep 30"), 10, Some(Duration::from_millis(100)));
+        assert!(matches!(slow, Err(TarError::Late(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pull_writes_through_names_of_its_own_and_keeps_a_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let mode = |p: &str| std::fs::metadata(d.join(p)).unwrap().permissions().mode() & 0o777;
+        // A file of yours by the old temp name, a private file, and a folder where a file goes.
+        std::fs::write(d.join("notes.luoto-tmp"), b"mine").unwrap();
+        std::fs::write(d.join("key.pem"), b"old").unwrap();
+        std::fs::set_permissions(d.join("key.pem"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        std::fs::create_dir(d.join("blocked")).unwrap();
+        let raw = tarball(
+            &[
+                ("./notes", b"n", 0o644),
+                ("./key.pem", b"new", 0o644),
+                ("./blocked", b"x", 0o644),
+                ("./new.sh", b"#!/bin/sh", 0o755),
+                ("./sub/plain.txt", b"p", 0o600),
+            ],
+            &[],
+        );
+        let done = apply_pull(&plan_of(&raw, d, &[]), RISKY);
+        assert_eq!(done.failed.len(), 1, "{:?}", done.failed);
+        assert_eq!(done.failed[0].0, "blocked");
+        assert_eq!(done.written.len(), 4);
+        assert_eq!(std::fs::read(d.join("notes.luoto-tmp")).unwrap(), b"mine");
+        assert_eq!(std::fs::read(d.join("key.pem")).unwrap(), b"new");
+        assert_eq!(mode("key.pem"), 0o600, "the mode it had");
+        assert_eq!(mode("new.sh"), 0o755);
+        assert_eq!(
+            mode("sub/plain.txt"),
+            0o644,
+            "a new file gets 0644, whatever the env's"
+        );
+        // Nothing of the writing is left, in a folder that took a file or one that refused.
+        assert!(temp_files(d).is_empty() && temp_files(&d.join("sub")).is_empty());
+        assert!(d.join("blocked").is_dir());
+
+        assert_eq!(mode_for(None, false), 0o644);
+        assert_eq!(mode_for(Some(0o100600), true), 0o700);
+        assert_eq!(mode_for(Some(0o640), true), 0o750);
+        assert_eq!(mode_for(Some(0o755), false), 0o644);
+        assert_eq!(mode_for(Some(0o4755), true), 0o755, "no setuid bit is kept");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pulled_link_replaces_what_was_there_in_one_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::write(d.join("a"), b"a").unwrap();
+        std::fs::write(d.join("l"), b"a file").unwrap();
+        let raw = tarball(&[], &[("./l", "a")]);
+        let done = apply_pull(&plan_of(&raw, d, &[]), RISKY);
+        assert_eq!(done.written, ["l"]);
+        assert_eq!(std::fs::read_link(d.join("l")).unwrap(), Path::new("a"));
+        assert!(temp_files(d).is_empty());
+    }
+
+    #[test]
+    fn files_agents_and_ci_act_on_are_risky() {
+        for p in [
+            ".env",
+            ".env.local",
+            ".env.production",
+            ".ENV",
+            "bunfig.toml",
+            ".mcp.json",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "agents.MD",
+            ".github/workflows/ci.yml",
+            ".github/workflows/sub/deploy.yaml",
+        ] {
+            assert!(risky(p).is_some(), "{p}");
+        }
+        for p in [
+            "web/.env",
+            "api/.env.test",
+            "packages/app/AGENTS.md",
+            "docs/CLAUDE.md",
+            "tools/.mcp.json",
+            "sub/.github/workflows/ci.yml",
+        ] {
+            assert!(risky_nested(p).is_some(), "{p}");
+        }
+        for p in [
+            "src/env.rs",
+            ".environment",
+            "docs/agents.md.txt",
+            ".github/dependabot.yml",
+            ".github/ISSUE_TEMPLATE/bug.md",
+            "src/.env.d/readme",
+        ] {
+            assert!(risky_nested(p).is_none(), "{p}");
+        }
+    }
+
+    #[test]
+    fn what_no_pull_takes_is_found_at_any_depth_and_only_by_those_names() {
+        let args = never_copied_find(&["api".into()]).join(" ");
+        assert!(
+            args.starts_with("find . ( -name .git -o -path ./api ) -prune -o ( -name node_modules")
+        );
+        assert!(args.ends_with("-name .terraform ) -prune -print"));
+        let found = never_copied_lines(
+            "./node_modules\n./web/src/target\n./notes.md\n../../target\n/etc/target\n\
+             ./a\\target\n./deep/a/b/.venv\n",
+        );
+        assert_eq!(found, ["node_modules", "web/src/target", "deep/a/b/.venv"]);
+    }
+
+    #[test]
+    fn the_folders_repository_says_what_it_ignores() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let rels = ["node_modules".to_string(), "src/target".to_string()];
+        assert!(host_ignored(d, &rels).is_empty(), "no repository, no say");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .arg(d)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(d.join(".gitignore"), "node_modules/\n").unwrap();
+        assert_eq!(
+            host_ignored(d, &rels),
+            BTreeSet::from(["node_modules".to_string()])
+        );
+        // A folder inside a work tree is not judged by the tree's rules.
+        std::fs::create_dir(d.join("sub")).unwrap();
+        assert!(host_ignored(&d.join("sub"), &rels).is_empty());
+    }
+
+    #[test]
+    fn what_only_the_env_has_is_said_per_folder() {
+        let u = Unpulled {
+            dir: "/srv/work/api".into(),
+            changed: 3,
+            refused: 1,
+            unread: true,
+            never_copied: vec![
+                "target".into(),
+                "a/target".into(),
+                "b/target".into(),
+                "c/.venv".into(),
+            ],
+            ignored: 2,
+        };
+        assert!(u.any());
+        assert_eq!(
+            u.to_string(),
+            "/srv/work/api: 3 files new or changed, 1 refused, not all of it could be read, 4 \
+             never copied (target, a/target, b/target, …), 2 your .gitignore ignores not counted"
+        );
+        // What the folder's repository ignores is by itself nothing an env holds.
+        let built = Unpulled {
+            ignored: 40,
+            ..Default::default()
+        };
+        assert!(!built.any());
+        assert!(!Unpulled::default().any());
+        let one = Unpulled {
+            dir: "/srv/x".into(),
+            changed: 1,
+            ..Default::default()
+        };
+        assert_eq!(one.to_string(), "/srv/x: 1 file new or changed");
+    }
 
     fn tar_of(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut b = tar::Builder::new(Vec::new());
@@ -1152,7 +2797,7 @@ mod tests {
             ("readme.MD", b"b"),
             (".VSCODE/tasks.json", b"{}"),
         ]);
-        let plan = build_plan(&raw, dir.path(), &[]).unwrap();
+        let plan = plan_of(&raw, dir.path(), &[]);
         let refused: Vec<&str> = plan.refused.iter().map(|(p, _)| p.as_str()).collect();
         assert!(refused.contains(&".GIT/config"));
         assert!(refused.contains(&".g\u{200c}it/HEAD"));
@@ -1238,7 +2883,7 @@ mod tests {
                 ("./abs", "/etc/passwd"),
             ],
         );
-        let plan = build_plan(&raw, dir.path(), &[]).unwrap();
+        let plan = plan_of(&raw, dir.path(), &[]);
         assert_eq!(plan.unchanged, 1);
         let get = |p: &str| plan.entries.iter().find(|e| e.path == p);
         assert!(get("src/main.rs").unwrap().risky.is_none());
@@ -1251,8 +2896,9 @@ mod tests {
         assert!(get("ok-link").is_some());
         assert_eq!(plan.refused.len(), 2);
 
-        let (written, skipped) = apply_pull(&plan, false).unwrap();
-        assert_eq!((written, skipped), (1, 4));
+        let done = apply_pull(&plan, PLAIN);
+        assert_eq!((done.written.len(), done.skipped), (1, 4));
+        assert!(done.failed.is_empty() && done.unsynced.is_none());
         assert!(dir.path().join("src/main.rs").exists());
         assert!(!dir.path().join(".envrc").exists());
     }
@@ -1270,10 +2916,10 @@ mod tests {
             ],
             &[("./l", "..\\..\\.zshrc")],
         );
-        let plan = build_plan(&raw, &dir, &[]).unwrap();
+        let plan = plan_of(&raw, &dir, &[]);
         assert!(plan.entries.is_empty(), "{:?}", plan.entries);
         assert_eq!(plan.refused.len(), 3);
-        apply_pull(&plan, true).unwrap();
+        apply_pull(&plan, RISKY);
         assert!(!root.path().join("a/.zshrc").exists());
         assert!(!dir.join(".git").exists());
     }
@@ -1295,9 +2941,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), dir.path().join("src")).unwrap();
-        let raw = tarball(&[("./src/x.rs", b"x", 0o644)], &[]);
-        let plan = build_plan(&raw, dir.path(), &[]).unwrap();
-        assert!(apply_pull(&plan, false).is_err());
+        let raw = tarball(
+            &[("./src/x.rs", b"x", 0o644), ("./ok.rs", b"ok", 0o644)],
+            &[],
+        );
+        let plan = plan_of(&raw, dir.path(), &[]);
+        // The one that can't be written is named, and the rest are written.
+        let done = apply_pull(&plan, PLAIN);
+        assert_eq!(done.written, ["ok.rs"]);
+        assert_eq!(done.failed.len(), 1);
+        assert_eq!(done.failed[0].0, "src/x.rs");
+        assert!(done.failed[0].1.contains("symlink"), "{:?}", done.failed);
         assert!(!outside.path().join("x.rs").exists());
     }
 
@@ -1325,7 +2979,7 @@ mod tests {
             ("./API/x", b"x"),
             ("./web/.envrc", b"x"),
         ]);
-        let plan = build_plan(&raw, dir.path(), &["api".into()]).unwrap();
+        let plan = plan_of(&raw, dir.path(), &["api".into()]);
         let paths: Vec<&str> = plan.entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, ["notes.md", "web/.envrc"]);
         assert!(plan.entries[1].risky.is_some());
@@ -1632,5 +3286,231 @@ mod tests {
         let list = copy_list(outer.path()).unwrap();
         let has = |p: &str| list.iter().any(|(rel, _)| rel == Path::new(p));
         assert!(has("notes.md") && has("repo/a.txt") && !has("repo/secret.env"));
+    }
+
+    #[test]
+    fn a_folder_is_judged_as_it_comes_and_only_what_is_written_is_read_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::write(d.join("a.txt"), "1").unwrap();
+        std::fs::write(d.join("same.txt"), "s").unwrap();
+        let base = base_of(&[("a.txt", b"1"), ("same.txt", b"s")]);
+        let raw = tar_of(&[
+            ("./a.txt", b"2"),
+            ("./same.txt", b"s"),
+            ("./new.txt", b"nn"),
+            ("./big.bin", &[7u8; 4096]),
+        ]);
+        let held = plan_based(&raw, d, &base);
+        let scan = |max| scan_plan(raw.as_slice(), d, &[], Some(&base), Keep::Prints, max);
+        // A folder with more entries than are read is not judged at all.
+        assert!(!scan(4).over);
+        let cut = scan(3);
+        assert!(cut.over && cut.plan.entries.len() == 2);
+        let mut plan = scan(usize::MAX).finish(d, &[], Some(&base), None).unwrap();
+        // Judged the same, with no file's bytes kept.
+        assert!(plan.data.is_empty());
+        assert_eq!(plan.digest, held.digest);
+        assert_eq!(plan.prints, held.prints);
+        let sizes: Vec<(&str, u64)> = plan
+            .entries
+            .iter()
+            .map(|e| (e.path.as_str(), e.size))
+            .collect();
+        assert_eq!(sizes, [("a.txt", 1), ("new.txt", 2), ("big.bin", 4096)]);
+        // What was never read is not written, and said so.
+        let both = [
+            ("a.txt".to_string(), temp_name()),
+            ("new.txt".to_string(), temp_name()),
+        ];
+        let done = plan.write(&both);
+        assert!(done.written.is_empty());
+        assert_eq!(done.failed.len(), 2);
+        assert_eq!(std::fs::read(d.join("a.txt")).unwrap(), b"1");
+        // The second read brings the files asked for, each only if it is still the file
+        // that was judged: `new.txt` holds other bytes of the same length by now.
+        let again = tar_of(&[
+            ("a.txt", b"2"),
+            ("new.txt", b"xx"),
+            ("big.bin", &[7u8; 4096]),
+            ("same.txt", b"s"),
+        ]);
+        let wanted: BTreeSet<String> = ["a.txt", "new.txt"].map(String::from).into();
+        let missing = plan.fill(again.as_slice(), &wanted);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].0, "new.txt");
+        assert_eq!(
+            plan.data.keys().collect::<Vec<_>>(),
+            ["a.txt"],
+            "nothing that wasn't asked for is kept"
+        );
+        let done = plan.write(&both);
+        assert_eq!(done.written, ["a.txt"]);
+        assert_eq!(std::fs::read(d.join("a.txt")).unwrap(), b"2");
+        assert!(!d.join("new.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tar_is_judged_as_it_is_written_within_its_time() {
+        let sh = |script: &str| {
+            std::process::Command::new("sh")
+                .args(["-c", script])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let all = |out: &mut dyn Read| {
+            let mut v = Vec::new();
+            let _ = out.read_to_end(&mut v);
+            v
+        };
+        let minute = Duration::from_secs(60);
+        let (read, failed) = scan_tar(sh("printf abc"), minute, all).unwrap();
+        assert_eq!((read.as_slice(), failed), (&b"abc"[..], None));
+        let (read, failed) =
+            scan_tar(sh("printf abc; echo 'tar: boom' >&2; exit 2"), minute, all).unwrap();
+        assert_eq!(
+            (read.as_slice(), failed.as_deref()),
+            (&b"abc"[..], Some("tar: boom"))
+        );
+        // More than any buffer holds passes through, none of it kept.
+        let count = |out: &mut dyn Read| std::io::copy(out, &mut std::io::sink()).unwrap();
+        let (n, failed) = scan_tar(sh("head -c 20000000 /dev/zero"), minute, count).unwrap();
+        assert_eq!((n, failed), (20_000_000, None));
+        // A scan that stops early ends the tar, whatever that left running; one that never
+        // ends is ended.
+        let started = Instant::now();
+        let first = |out: &mut dyn Read| {
+            let mut b = [0u8; 1];
+            out.read(&mut b).unwrap()
+        };
+        let (n, _) = scan_tar(sh("yes; sleep 30"), minute, first).unwrap();
+        assert_eq!(n, 1);
+        let slow = scan_tar(sh("exec sleep 30"), Duration::from_millis(100), all);
+        assert!(matches!(slow, Err(TarError::Late(_))));
+        assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_envs_files_are_read_only_from_a_real_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::create_dir_all(d.join("repo/src")).unwrap();
+        std::fs::write(d.join("repo/src/a.rs"), "a").unwrap();
+        std::fs::write(d.join("repo/b.txt"), "b").unwrap();
+        std::fs::create_dir_all(d.join("repo/node_modules/x")).unwrap();
+        std::fs::write(d.join("repo/node_modules/x/i.js"), "x").unwrap();
+        std::os::unix::fs::symlink(d.join("repo"), d.join("link")).unwrap();
+        let run = |args: Vec<String>, input: &str| {
+            let mut child = std::process::Command::new(&args[0])
+                .args(&args[1..])
+                // macOS's tar otherwise adds a file of attributes beside each file.
+                .env("COPYFILE_DISABLE", "1")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+            child.wait_with_output().unwrap()
+        };
+        let names = |raw: &[u8]| -> BTreeSet<String> {
+            let mut a = tar::Archive::new(raw);
+            a.entries()
+                .unwrap()
+                .map(|e| e.unwrap())
+                .filter(|e| e.header().entry_type().is_file())
+                .map(|e| e.path().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        let root = |name: &str| d.join(name).display().to_string();
+        let out = run(tar_args(&root("repo"), &[], false), "");
+        assert!(out.status.success());
+        assert_eq!(
+            names(&out.stdout),
+            ["./b.txt", "./src/a.rs"].map(String::from).into()
+        );
+        // A link where the folder was (the sandbox can put one there), or nothing: refused.
+        for gone in ["link", "none"] {
+            let out = run(tar_args(&root(gone), &[], false), "");
+            assert_eq!(out.status.code(), Some(2), "{gone}");
+            assert!(out.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&out.stderr).contains("is not a folder"));
+            let out = run(rooted(&root(gone), never_copied_find(&[])), "");
+            assert_eq!(out.status.code(), Some(2), "{gone}");
+        }
+        let out = run(rooted(&root("repo"), never_copied_find(&[])), "");
+        assert_eq!(
+            never_copied_lines(&String::from_utf8_lossy(&out.stdout)),
+            ["node_modules"]
+        );
+        // The second read takes the names on its input, and only those.
+        let out = run(tar_listed_args(&root("repo")), "src/a.rs\n");
+        assert!(out.status.success());
+        assert_eq!(names(&out.stdout), ["src/a.rs".to_string()].into());
+        let out = run(tar_listed_args(&root("link")), "src/a.rs\n");
+        assert_eq!(out.status.code(), Some(2));
+    }
+
+    #[test]
+    fn what_the_folders_repository_ignores_is_no_work_an_env_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(d)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        std::fs::write(d.join(".gitignore"), "dist/\n*.log\nnode_modules/\n").unwrap();
+        let target = PullTarget {
+            repo: None,
+            dest: d.to_path_buf(),
+            skip: Vec::new(),
+            home: true,
+        };
+        let built = tar_of(&[
+            ("./.gitignore", b"dist/\n*.log\nnode_modules/\n"),
+            ("./dist/app.js", b"built"),
+            ("./debug.log", b"log"),
+        ]);
+        let plan = plan_of(&built, d, &[]);
+        let u = Unpulled::of(&plan, &target, vec!["node_modules".into()]);
+        assert!(!u.any(), "{u:?}");
+        assert_eq!((u.changed, u.ignored), (0, 2));
+        // Beside work of the env's, what is ignored is counted apart.
+        let worked = tar_of(&[
+            ("./dist/app.js", b"built"),
+            ("./src/new.rs", b"fn f() {}"),
+            ("./target/debug/x", b"bin"),
+        ]);
+        let plan = plan_of(&worked, d, &[]);
+        let u = Unpulled::of(&plan, &target, vec!["target".into()]);
+        assert!(u.any());
+        assert_eq!((u.changed, u.ignored), (2, 1));
+        assert_eq!(u.never_copied, ["target"]);
+        // A folder that is no repository has no rules: everything is its env's work.
+        let plain = tempfile::tempdir().unwrap();
+        let target = PullTarget {
+            dest: plain.path().to_path_buf(),
+            ..target
+        };
+        let plan = plan_of(&built, plain.path(), &[]);
+        assert_eq!(Unpulled::of(&plan, &target, Vec::new()).changed, 3);
     }
 }

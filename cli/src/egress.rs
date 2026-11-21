@@ -20,9 +20,9 @@ use crate::sync;
 /// How long egress opens for unless told.
 pub const WINDOW: &str = "1h";
 
-/// A window (`--for`, `init --open=`): a duration as rules take one (30m, 2h, 1d), above zero.
+/// A window (`--for`, `init --open-for`): a duration as rules take one (30m, 2h, 1d), above zero.
 pub fn parse_window(s: &str) -> Result<TimeDelta> {
-    let d = crate::rules::parse_ttl(s)?;
+    let d = crate::rules::parse_duration(s)?;
     if d <= TimeDelta::zero() {
         bail!("`{s}`: give a duration above zero, such as 30m or 2h");
     }

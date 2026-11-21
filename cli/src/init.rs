@@ -27,10 +27,10 @@ pub struct InitOpts {
     #[arg(long)]
     pub name: Option<String>,
     /// No folder of its own: a virtual workspace, whose /workspace holds only the env's repos
-    /// side by side (`--repo` now, or `luoto repo add` later). Needs --name.
+    /// side by side (`--repo` now, or `luoto repo add` later). Needs `--name`.
     #[arg(long = "virtual", requires = "name", conflicts_with_all = ["dir", "branch"])]
     pub virtual_ws: bool,
-    /// With --repo for a folder that is a git repository: put the repos inside it anyway
+    /// With `--repo` for a folder that is a git repository: put the repos inside it anyway
     /// (kept out of its `git status`) rather than make a virtual workspace.
     #[arg(long, requires = "repos", conflicts_with = "virtual_ws")]
     pub inside: bool,
@@ -42,21 +42,21 @@ pub struct InitOpts {
     pub image: Option<String>,
     /// Egress presets (repeatable), replacing the defaults and the detected ones:
     /// debian, github, github-releases, toolchains, npm, pypi, crates, go, maven, vscode, …
-    #[arg(long = "preset", add = ArgValueCandidates::new(complete::presets))]
+    #[arg(long = "preset", value_name = "PRESET", add = ArgValueCandidates::new(complete::presets))]
     pub presets: Vec<String>,
     /// Default toolchain (repeatable), e.g. `--tool node=24`; the project's own version
     /// files still win.
     #[arg(long = "tool", value_name = "TOOL=VERSION")]
     pub tools: Vec<String>,
     /// Coding agents to set up (repeatable): claude, opencode, codex, copilot, agy.
-    #[arg(long = "agent", add = ArgValueCandidates::new(complete::agents))]
+    #[arg(long = "agent", value_name = "AGENT", add = ArgValueCandidates::new(complete::agents))]
     pub agents: Vec<String>,
     /// An agent's credential without the prompt (repeatable): `KIND=REF`
     /// (`oauth_token=op://…`), `PROVIDER.KIND=REF`, or `login_inside`.
     #[arg(long = "credential", value_name = "KIND=REF")]
     pub credentials: Vec<String>,
     /// Dev-server ports to publish on 127.0.0.1 (repeatable).
-    #[arg(long = "port")]
+    #[arg(long = "port", value_name = "PORT")]
     pub ports: Vec<u16>,
     /// A repository beside the folder, at `/workspace/<name>` (repeatable): a host folder,
     /// copied in, or a remote (`owner/repo` on GitHub, an https or ssh URL), cloned in the env.
@@ -67,26 +67,35 @@ pub struct InitOpts {
     /// with builds about 1.6× faster.
     #[arg(long, value_enum)]
     pub isolation: Option<config::Isolation>,
-    /// Let the env reach any HTTP(S) host for a while (`--open=2h`; default 1h) to see what
-    /// it needs; `luoto egress keep` keeps that, `luoto egress close` ends it sooner.
-    #[arg(
-        long,
-        value_name = "DURATION",
-        num_args = 0..=1,
-        require_equals = true,
-        default_missing_value = crate::egress::WINDOW
-    )]
-    pub open: Option<String>,
+    /// Let the env reach any HTTP(S) host for an hour to see what it needs; `luoto egress
+    /// keep` keeps that, `luoto egress close` ends it sooner.
+    #[arg(long, conflicts_with = "open_for")]
+    pub open: bool,
+    /// As `--open`, for this long (30m, 2h, 1d).
+    #[arg(long, value_name = "DURATION")]
+    pub open_for: Option<String>,
     /// Only write the config.
     #[arg(long)]
     pub no_up: bool,
-    /// Create without asking; accepts the folder's luoto.toml (`--no-project` ignores it). A
-    /// remote's clone installs what it pins, and its luoto.toml waits for `luoto project apply`.
+    /// Create without asking (without a terminal, nothing is created without it); accepts
+    /// the folder's luoto.toml (`--no-project` ignores it). A remote's clone installs what it
+    /// pins, and its luoto.toml waits for `luoto project apply`.
     #[arg(long, short)]
     pub yes: bool,
     /// Ignore the folder's luoto.toml.
     #[arg(long)]
     pub no_project: bool,
+}
+
+impl InitOpts {
+    /// How long egress is to be open, as given: `--open`'s hour or `--open-for`'s.
+    pub fn open_window(&self) -> Option<&str> {
+        match (&self.open_for, self.open) {
+            (Some(w), _) => Some(w),
+            (None, true) => Some(crate::egress::WINDOW),
+            (None, false) => None,
+        }
+    }
 }
 
 /// What `luoto init`'s argument names.
@@ -332,12 +341,11 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
         apple: crate::setup::configured(&global) == Some(crate::runtime::Flavor::Apple),
         new_folder,
         open: o
-            .open
-            .as_deref()
+            .open_window()
             .map(|w| {
                 crate::egress::parse_window(w)
                     .map(|_| w.trim().to_string())
-                    .context("--open")
+                    .context("--open-for")
             })
             .transpose()?,
     };
@@ -764,14 +772,22 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
         println!();
     }
     print_proposal(&p, &o.credentials, interactive);
+    // This command line with `--yes`: what creates it without the question.
+    let scripted = || {
+        let args: Vec<String> = std::env::args()
+            .skip(1)
+            .map(|a| crate::text::sh_quote(&crate::text::display(&a)))
+            .collect();
+        format!("luoto {} --yes", args.join(" "))
+    };
+    if !interactive && !o.yes {
+        return Err(crate::prompt::declined("created", &scripted()));
+    }
     if interactive {
         loop {
             match ask("\nCreate it? [Y/n/c = customize]", 'y') {
                 'y' => break,
-                'n' => {
-                    println!("nothing created");
-                    return Ok(ExitCode::SUCCESS);
-                }
+                'n' => return Err(crate::prompt::declined("created", &scripted())),
                 'c' => {
                     crate::wizard::customize(&mut p)?;
                     check(&p)?;
@@ -820,7 +836,8 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
     // The luoto.toml accepted by now: the folder's, or the clone's if `up` asked about it.
     if let Some((_, pc)) = project::accepted(&ctx, &name) {
         let cfg = EnvFile::load(&ctx.paths, &name)?.cfg;
-        let missing = crate::needs::snippets(&pc.needs, &cfg, &crate::repos::declined(&ctx, &name));
+        let missing =
+            crate::needs::snippets(&name, &pc.needs, &cfg, &crate::repos::declined(&ctx, &name));
         if crate::prompt::interactive() {
             if !missing.is_empty() {
                 out!(
@@ -848,8 +865,8 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
 /// own copy while it runs (work happens there), else the folder; an env cloned from a remote
 /// (`dir` is `None`) has only the copy, so it is started first.
 fn redetect(ctx: &Ctx, name: &str, dir: Option<&Path>, o: &InitOpts) -> Result<ExitCode> {
-    if let Some(w) = &o.open {
-        let until = crate::egress::until(crate::egress::parse_window(w).context("--open")?);
+    if let Some(w) = o.open_window() {
+        let until = crate::egress::until(crate::egress::parse_window(w).context("--open-for")?);
         crate::egress::open(ctx, name, until)?;
         out!(
             "egress of `{name}` is open {}",

@@ -3,8 +3,8 @@
 Dev sandboxes that contain supply-chain attacks: tools run in a container whose only egress is
 a per-env policy gate; a per-VM vault holds secrets outside the sandbox. CLI + local web UI.
 User-facing docs: README.md (the overview and getting started), docs/ (the reference and
-guides). Threat model: SECURITY.md. A user-visible change gets an entry in
-CHANGELOG.md's top section (the release notes); ROADMAP.md holds only what isn't done.
+guides). Threat model: SECURITY.md. A user-visible change gets a CHANGELOG.md entry
+([Changelog](#changelog)); ROADMAP.md holds only what isn't done.
 main is protected: it changes only by squash-merged pull request, from a branch named for the
 release (`packaging/README.md`). CI runs on pull requests (path-filtered) and weekly on main.
 
@@ -58,6 +58,17 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   push/pull (tar over exec, so no VM file sharing needed). Anything that brings
   sandbox-written files to the host goes through its `risky_nested()` and path/symlink checks;
   `pull` never writes into the home folder or one that holds it.
+- `base.rs` keeps a fingerprint per file of each folder copied into an env (written from the
+  bytes sent, brought up to date by every pull, in the env's state); every pull judges a file
+  by it (`base::judge`: the env's change is written, yours is kept, both is a conflict,
+  nothing is deleted). `autopull.rs` owns the pull nobody reviews
+  (`[workspace] dangerously_pull_on_stop`, only the env's own file; `luoto run
+  --dangerously-pull`) and `autopull::stop`, the one way an env stops (CLI, UI, watcher): it
+  reads the stopped env's volume through a tools container, never the running env, holds back
+  `risky` and `autopull::unattended`, journals before it writes, and keeps its records in
+  `<data>/pulls/<env>` (outside the env's state). The watcher stops such an env through a
+  child luoto, and `autopull::recover` (every command's first step) finishes a pull cut short;
+  a removal is never resumed.
 - `repos.rs` owns an env's repos at `/workspace/<name>`: a host folder copied in, or a remote
   cloned in the env (through the gate, as the dev user) on `up`; seeded names live in the env's
   state. A `luoto.toml` names remotes only, never host folders.
@@ -75,6 +86,20 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
 - The SSH key is a vault binding (`SshAgent`) that never leaves the vault, not even to the
   gate. The agent signs only logins to sessions a pinned host key bound
   (`shared/src/forges.rs`, plus `host_keys`; `vault/src/agent.rs`).
+- Package feeds (`luoto feed` in `feeds.rs`; `packages.rs` tells the service from a URL, by
+  host for hosted ones and by path for self-hosted): `feeds` on the service's credential,
+  `[credentials.azure_devops]` (`azure::parse_feed`; the PAT on the organizations' packaging
+  paths, as a feed's links name its files by ID), `[[credentials.github]]` (owners, a
+  classic token, on the four package registries) and `[[credentials.git]]` (Gitea, Forgejo,
+  GitLab feed paths, Bearer; a group's or instance's GitLab endpoint also reaches
+  `/api/v4/projects/*/packages/**`, where its files link). GET and HEAD only. Stored packages
+  redirect to signed storage URLs, which pass only as the gate's redirect permits
+  (`Policy.redirects`, `gate/src/redirects.rs`): the exact URL a response named, for reads,
+  ten minutes, without the client's auth, on a private address only where the redirect says
+  (a self-hosted credential's `private` and its `storage_hosts`). Only `compile` adds a
+  redirect, never a rule.
+  Clients that send nothing without a login get placeholders the gate replaces: a netrc
+  (`Compiled::netrc`, `/run/luoto/netrc`) and a cargo credential provider.
 - Azure (`[credentials.azure]`, not Azure DevOps' `azure.rs`): audiences, their hosts and
   name rules in `shared/src/azure_identity.rs`; one binding per audience. The gate answers IMDS
   itself (`gate/src/imds.rs`) with placeholders (real header, the claims tools read, unusable
@@ -155,6 +180,12 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   unnamed one by podman's names history, or the build stages' `luoto.build` label), never one
   a container uses or either instance runs, never a volume. Sizes walk every volume: never on
   the UI's polls.
+- `used.rs` keeps, in an env's state folder, when it was last used (`up`, the watcher's
+  idle look finding something running, a stop) and what its repos held as it stopped
+  (`env::down` asks `repos::unpushed` while the dev container still runs). `prune.rs`
+  (`luoto prune --envs`) removes stopped envs by that age through `commands::remove_env`;
+  it never starts an env to look, so one with no record of its stop holds work, and a
+  folder's files are compared from the stopped volume (`autopull::unpulled_stopped`).
 - `watch.rs` is the one background process per config dir; port forwarding (`ports.rs`) goes
   through `exec … sandbox relay`, never a network path; on Apple it keeps the tun links and
   the gates' vault links. Its desktop notifications
@@ -188,7 +219,8 @@ What the CLI asks and prints follows one grammar, whatever the feature:
   (nothing written) or, when changing a setting, "unchanged". A weaker choice (login inside,
   a write grant) is written only when picked, never because of Esc, a bare Enter or a missing
   terminal, unless that no-terminal default is documented. A menu with one option is no
-  question.
+  question. A yes a command needs that doesn't come (a no, Esc, no terminal) ends it with
+  `prompt::declined`: exit 1, and the command line with `--yes`.
 - **Nothing is stored before what it is for is confirmed:** a pasted secret reaches the
   keychain or 1Password only for an env that exists or is being changed.
 - **A step that writes config ends with one summary:** the thing, what it is set to (a ref
@@ -197,9 +229,15 @@ What the CLI asks and prints follows one grammar, whatever the feature:
 - **Say a thing once.** A warning repeated on every `up` is one the user can act on. "Ready"
   means it works; an agent without a credential is "installed". A command asks only about what
   it names.
+- **Commands and flags:** `-e` is on each command that acts on one env (`EnvArg`, or
+  `GroupEnv` for a group's commands), never global; a duration is `--for`, `--timeout`,
+  `--idle` or `--since` with a unit (`rules::parse_duration`); following output is
+  `-f/--follow`; replacing a file is `--overwrite`; `--json` prints what the text shows.
 - **Errors and hints** give the cause in one line and the command that fixes it, in
-  backticks. Without a terminal nothing blocks: the message gives the scripted form with the
-  real choices (`--credential oauth_token=<ref>`).
+  backticks, with `-e`. Without a terminal nothing blocks: the message gives the scripted
+  form with the real choices (`--credential oauth_token=<ref>`, `--access push --token
+  <REF>`). An env that isn't running is "env `x` is not running", then the command; a name the
+  env lacks names the command that lists them.
 - **Output** fits 80 columns. Text from the sandbox or a remote goes through `text::display` /
   `text::Relay`; what a command prints, through `progress::tool` (in the env) or
   `progress::host` (on this machine): on the terminal after `o`, with `-v`, or its last lines
@@ -242,10 +280,28 @@ What the CLI asks and prints follows one grammar, whatever the feature:
 - `just types` regenerates the UI's API types (`frontend/src/lib/generated/api.ts`) from the
   Rust types `ui/api.rs` sends and takes (`cli/tests/api_types.rs`); `cargo test` fails while
   the committed file differs, and `yarn typecheck` checks the UI and the e2e fixtures against it.
-- `just test` (unit), `just it` (integration), `just test-ui` (Playwright), `just lint`,
-  `just format`, `just shots` (README screenshots; needs a runtime).
+- `just test` (unit), `just it` (integration), `just e2e` (pull-on-stop against a runtime:
+  one env made and removed in the `luoto-dev` instance), `just test-ui` (Playwright),
+  `just lint`, `just format`, `just shots` (README screenshots; needs a runtime).
 - After changing gate/vault/tools code, rebuild images and `luoto up <env>` to pick them up;
   dev containers keep running (`luoto up --recreate` recreates them, volumes kept).
+
+## Changelog
+
+CHANGELOG.md is the release notes for people who use luoto, in Keep a Changelog 1.1.0 (the
+`coding-style:changelog` skill has the full rules):
+
+- An entry is a change someone outside could notice: a command, flag, setting, default,
+  output, a bug they could hit in a released version, a security fix. Refactors, tests, CI,
+  and how or why something was built stay out.
+- It goes under `## [Unreleased]`, in its group (Added, Changed, Deprecated, Removed, Fixed,
+  Security). One line where it fits, two at most: the final behaviour; Changed says old → new,
+  Fixed names the symptom. An absolute link to a guide carries the detail.
+- `## [Unreleased]` is one release: a fix to something new in it edits that entry.
+- A breaking change leads its group with `**Breaking:**` and the new name; patch releases only
+  add and fix. No third-party tool names but providers'.
+- Releasing renames `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and adds its compare link
+  (`packaging/README.md`); the release workflow extracts that section.
 
 ## Out of scope
 

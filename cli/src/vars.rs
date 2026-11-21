@@ -299,8 +299,8 @@ pub fn list(env: &str) -> Result<ExitCode> {
     let vars = of(&cfg);
     if vars.is_empty() {
         out!(
-            "env `{env}` has no variables (`luoto var set NAME=value`, or `luoto var set NAME` \
-             for a secret)"
+            "env `{env}` has no variables (`luoto var set -e {env} NAME=value`, or `luoto var set \
+             -e {env} NAME` for a secret)"
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -325,13 +325,13 @@ pub fn set_cmd(env: &str, var: &str, reference: Option<&str>) -> Result<ExitCode
     };
     check_free(&ctx, env, name)?;
     let value = match (plain, reference) {
-        (Some(_), Some(_)) => bail!("`{name}=…` sets a plain value and --ref a secret: give one"),
+        (Some(_), Some(_)) => bail!("`{name}=…` sets a plain value and `--ref` a secret: give one"),
         (Some(v), None) => Value::Plain(v.to_string()),
         (None, Some(r)) => Value::Secret(r.to_string()),
         (None, None) if !crate::prompt::interactive() => bail!(
-            "no terminal to ask where `{name}` is kept: `luoto var set {name} --ref <ref>` \
-             (op://, keyring:, vault://, env: or file:), or `luoto var set {name}=<value>` for \
-             a plain value"
+            "no terminal to ask where `{name}` is kept: `luoto var set -e {env} {name} --ref \
+             <REF>` (op://, keyring:, vault://, env: or file:), or `luoto var set -e {env} \
+             {name}=<value>` for a plain value"
         ),
         (None, None) => {
             let own = EnvFile::load(&ctx.paths, env)?.cfg;
@@ -353,11 +353,11 @@ pub fn rm_cmd(env: &str, name: &str) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     if !EnvFile::load(&ctx.paths, env)?.remove_var(name)? {
         bail!(
-            "env `{env}` has no variable `{}` (`luoto var list`)",
+            "env `{env}` has no variable `{}` (`luoto var list -e {env}` lists its variables)",
             display(name)
         );
     }
-    out!("removed `{name}` from env `{env}`");
+    out!("removed variable `{name}` from env `{env}`");
     finish(&ctx, env, name, true);
     Ok(ExitCode::SUCCESS)
 }

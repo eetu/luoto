@@ -78,8 +78,8 @@ pub fn project(
         }
         project::State::Unread => {
             out!(
-                "`{name}` is stopped and its luoto.toml is only in the env: `luoto up -e {name}` \
-                 reads it"
+                "env `{name}` is not running, and its luoto.toml is only in the env: `luoto up \
+                 -e {name}` reads it"
             );
             if !st.accepted.is_empty() {
                 println!("the accepted settings apply:");
@@ -94,9 +94,9 @@ pub fn project(
     let pending = st.pending();
     if !accept {
         if pending {
-            println!("apply:  luoto project apply -e {name}");
+            out!("apply:  `luoto project apply -e {name}`");
             if st.state != project::State::Declined {
-                println!("ignore: luoto project ignore -e {name}");
+                out!("ignore: `luoto project ignore -e {name}`");
             }
         }
         return Ok(ExitCode::SUCCESS);
@@ -105,8 +105,10 @@ pub fn project(
         return Ok(ExitCode::SUCCESS);
     };
     if !yes && !confirm("Apply these settings to this env?") {
-        println!("nothing changed (non-interactive: add --yes)");
-        return Ok(ExitCode::FAILURE);
+        return Err(crate::prompt::declined(
+            "applied",
+            &format!("luoto project apply -e {name} --yes"),
+        ));
     }
     let running = project::apply(&ctx, name, &text)?;
     if running {
@@ -125,9 +127,9 @@ pub fn project(
 }
 
 /// Print a luoto.toml from the env's settings, or write it to the env's folder, or into the
-/// running env for an env cloned from a remote (replacing one there only with `force`, after
-/// showing what changes).
-pub fn project_suggest(name: &str, write: bool, force: bool) -> Result<ExitCode> {
+/// running env for an env cloned from a remote (replacing one there only with `overwrite`,
+/// after showing what changes).
+pub fn project_suggest(name: &str, write: bool, overwrite: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let cfg = EnvFile::load(&ctx.paths, name)?.cfg;
     let accepted = project::accepted(&ctx, name).map(|(_, p)| p);
@@ -186,9 +188,11 @@ pub fn project_suggest(name: &str, write: bool, force: bool) -> Result<ExitCode>
                 crate::text::lines(&format!("{e:#}"))
             ),
         }
-        if !force {
-            println!("not written: --force replaces it (its comments too)");
-            return Ok(ExitCode::FAILURE);
+        if !overwrite {
+            bail!(
+                "{path} not written: `luoto project suggest -e {name} --write --overwrite` \
+                 replaces it (its comments too)"
+            );
         }
     }
     match &dir {
@@ -213,14 +217,30 @@ pub fn pull_targets(
     workspace::pull_targets(&ws, to, repo, &present)
 }
 
-pub fn pull(
-    name: &str,
-    to: Option<&str>,
-    repo: Option<&str>,
-    include_risky: bool,
-    include_git: bool,
-    yes: bool,
-) -> Result<ExitCode> {
+/// What `luoto pull` was asked for.
+#[derive(Default)]
+pub struct PullOpts<'a> {
+    pub to: Option<&'a str>,
+    pub repo: Option<&'a str>,
+    pub include_risky: bool,
+    pub include_git: bool,
+    pub overwrite: bool,
+    pub yes: bool,
+}
+
+pub fn pull(name: &str, o: PullOpts) -> Result<ExitCode> {
+    let PullOpts {
+        to,
+        repo,
+        include_risky,
+        include_git,
+        overwrite,
+        yes,
+    } = o;
+    let take = workspace::Take {
+        risky: include_risky,
+        conflicts: overwrite,
+    };
     let ctx = Ctx::load()?;
     let ws = EnvFile::load(&ctx.paths, name)?.cfg.workspace;
     if let (None, Some(url)) = (&ws.dir, &ws.url)
@@ -233,6 +253,7 @@ pub fn pull(
         );
     }
     crate::connect::ensure_running(&ctx, name)?;
+    let _lock = crate::autopull::lock(&ctx.paths, name)?;
     let to = match to {
         Some(t) => {
             std::fs::create_dir_all(workspace::expand(t))?;
@@ -272,9 +293,9 @@ pub fn pull(
             left.join(", ")
         );
     }
-    for t in targets {
+    for t in &targets {
         let plan = crate::progress::wait("comparing the env's files with yours", || {
-            workspace::plan_pull(&ctx, name, &t, include_git)
+            workspace::plan_pull(&ctx, name, t, include_git)
         })?;
         if let Some(r) = &plan.repo {
             head!("\nrepo {r}:");
@@ -282,19 +303,35 @@ pub fn pull(
         workspace::describe(&plan, &mut std::io::stdout(), crate::style::out())?;
         plans.push(plan);
     }
-    let changed = |p: &workspace::PullPlan| {
-        p.entries
-            .iter()
-            .filter(|e| include_risky || e.risky.is_none())
-            .count()
+    let changed = |p: &workspace::PullPlan| p.entries.iter().filter(|e| take.takes(e)).count();
+    // What is the same on both sides is known from here on, written or not.
+    let settle = |written: &[Vec<String>]| {
+        for ((t, plan), w) in targets.iter().zip(&plans).zip(written) {
+            workspace::settle(&ctx, name, t, plan, w);
+        }
     };
+    let none = vec![Vec::new(); plans.len()];
     if plans.iter().all(|p| p.entries.is_empty()) {
         println!("nothing to pull");
+        settle(&none);
+        crate::autopull::reviewed(&ctx.paths, name);
         return Ok(ExitCode::SUCCESS);
     }
     let writable: usize = plans.iter().map(changed).sum();
     if writable == 0 {
-        println!("only risky files changed; re-run with --include-risky after reviewing them");
+        println!("nothing written:");
+        let all = || plans.iter().flat_map(|p| &p.entries);
+        let conflicts = all().filter(|e| e.conflict()).count();
+        let risky = all().filter(|e| !e.conflict()).count();
+        if risky > 0 {
+            out!("  {risky} risky: `--include-risky` after reviewing them");
+        }
+        if conflicts > 0 {
+            out!("  {conflicts} changed here too: `--overwrite` takes the env's");
+        }
+        settle(&none);
+        // Looked at, which is what a run cut short waits for.
+        crate::autopull::reviewed(&ctx.paths, name);
         return Ok(ExitCode::SUCCESS);
     }
     let dirs: Vec<String> = plans
@@ -308,22 +345,142 @@ pub fn pull(
             dirs.join(", ")
         ))
     {
-        bail!("nothing written (use --yes to skip the prompt)");
+        return Err(crate::prompt::declined(
+            "written",
+            &format!("luoto pull -e {name} --yes"),
+        ));
     }
-    let (mut written, mut skipped) = (0, 0);
+    let (mut skipped, mut conflicts) = (0, 0);
+    let mut written = Vec::new();
+    let mut failed = Vec::new();
     for plan in &plans {
-        let (w, s) = workspace::apply_pull(plan, include_risky)?;
-        written += w;
-        skipped += s;
-    }
-    head!(
-        "wrote {written} file(s){}",
-        if skipped > 0 {
-            format!("; skipped {skipped} risky (review, then --include-risky)")
-        } else {
-            String::new()
+        let done = crate::progress::wait("writing", || workspace::apply_pull(plan, take));
+        skipped += done.skipped;
+        conflicts += done.conflicts;
+        failed.extend(done.failed);
+        if let Some(why) = done.unsynced {
+            crate::progress::warn(&format!(
+                "{} not synced to disk ({why}): a power cut now could lose what was written",
+                plan.dir
+            ));
         }
+        written.push(done.written);
+    }
+    settle(&written);
+    crate::autopull::reviewed(&ctx.paths, name);
+    head!(
+        "wrote {} file(s)",
+        written.iter().map(Vec::len).sum::<usize>()
     );
+    if skipped > 0 {
+        out!("skipped {skipped} risky (review them, then `luoto pull -e {name} --include-risky`)");
+    }
+    if conflicts > 0 {
+        out!(
+            "kept {conflicts} of yours changed here too (`luoto pull -e {name} --overwrite` \
+             takes the env's)"
+        );
+    }
+    if failed.is_empty() {
+        return Ok(ExitCode::SUCCESS);
+    }
+    err!("{} file(s) not written:", failed.len());
+    for (path, why) in failed.iter().take(30) {
+        eprintln!(
+            "  {} — {}",
+            crate::text::display(path),
+            crate::text::display(why)
+        );
+    }
+    if failed.len() > 30 {
+        eprintln!("  … and {} more", failed.len() - 30);
+    }
+    Ok(ExitCode::FAILURE)
+}
+
+/// `luoto pull --on-stop on|off`: whether every stop of the env first pulls its files into
+/// its folders, with nobody reviewing them. Then the summary.
+pub fn pull_on_stop(name: &str, on: bool) -> Result<ExitCode> {
+    let ctx = Ctx::load()?;
+    let mut f = EnvFile::load(&ctx.paths, name)?;
+    let pull = format!("luoto pull -e {name}");
+    if !on {
+        let was = f.cfg.workspace.dangerously_pull_on_stop;
+        if was {
+            f.set_pull_on_stop(false)?;
+            crate::autopull::turned_off(&ctx.paths, name);
+        }
+        let title = format!(
+            "env `{name}` {} when it stops",
+            if was {
+                "no longer pulls"
+            } else {
+                "doesn't pull"
+            }
+        );
+        let rows = [
+            ("pull", format!("{pull} (reviewed)")),
+            ("turn on", format!("luoto pull --on-stop on -e {name}")),
+        ];
+        block!("{}", crate::prompt::summary(&title, &rows));
+        return Ok(ExitCode::SUCCESS);
+    }
+    let ws = &f.cfg.workspace;
+    if !ws.has_folder() {
+        bail!(
+            "env `{name}` has no folder on this machine to pull into ({}): its work leaves by \
+             git push, or `luoto pull --to <folder>`",
+            match &ws.url {
+                Some(url) => format!("it is cloned from {}", crate::text::display(url)),
+                None => "a virtual workspace whose repos are all clones".to_string(),
+            }
+        );
+    }
+    let mut folders: Vec<String> = ws.dir.iter().cloned().collect();
+    folders.extend(ws.repos.values().filter_map(|r| r.dir.clone()));
+    let present = seeded_repos(&ctx, name);
+    // A copy with no record of what it started from waits for one reviewed pull.
+    let unbased = EnvState::load(&ctx.paths, name).ok().flatten().is_some()
+        && workspace::pull_targets(ws, None, None, &present)
+            .unwrap_or_default()
+            .iter()
+            .any(|t| t.home && t.base(&ctx.paths, name).is_none());
+    f.set_pull_on_stop(true)?;
+    if ctx.rt.is_running(&names::dev(name)) {
+        crate::autopull::started(&ctx.paths, name);
+    }
+    let folders: Vec<String> = folders
+        .iter()
+        .map(|d| crate::ssh::tilde(&workspace::expand(d)))
+        .collect();
+    let mut rows = vec![
+        ("into", folders.join(", ")),
+        (
+            "when",
+            "`luoto down`, the idle stop, the UI's stop, a run's --down/--rm".to_string(),
+        ),
+        (
+            "writes",
+            "what the env changed and you didn't, with nobody reviewing it".to_string(),
+        ),
+        (
+            "held back",
+            "what tools here run by themselves, and files you changed too".to_string(),
+        ),
+        ("review", pull.clone()),
+        ("turn off", format!("luoto pull --on-stop off -e {name}")),
+    ];
+    if unbased {
+        rows.insert(
+            1,
+            (
+                "first",
+                "a reviewed pull that leaves nothing: its copy has no base yet".to_string(),
+            ),
+        );
+    }
+    let title = format!("env `{name}` pulls into your folder whenever it stops");
+    block!("{}", crate::prompt::summary(&title, &rows));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -353,7 +510,10 @@ fn each_env(envs: &[String], mut f: impl FnMut(&str) -> Result<()>) -> Vec<Strin
     let mut failed = Vec::new();
     for name in envs {
         if let Err(e) = f(name) {
-            err!("luoto: `{name}`: {}", crate::text::lines(&format!("{e:#}")));
+            crate::progress::error(&format!(
+                "`{name}`: {}",
+                crate::text::lines(&format!("{e:#}"))
+            ));
             failed.push(name.clone());
         }
     }
@@ -365,11 +525,12 @@ fn each_env_result(verb: &str, total: usize, failed: &[String]) -> ExitCode {
     if failed.is_empty() {
         return ExitCode::SUCCESS;
     }
-    eprintln!(
-        "\nluoto: {verb} failed for {} of {total} env(s): {}",
+    eprintln!();
+    crate::progress::error(&format!(
+        "{verb} failed for {} of {total} env(s): {}",
         failed.len(),
         failed.join(", ")
-    );
+    ));
     ExitCode::FAILURE
 }
 
@@ -408,31 +569,64 @@ pub fn down_all() -> Result<ExitCode> {
         println!("no env is running");
         return Ok(ExitCode::SUCCESS);
     }
+    let mut incomplete = false;
     let failed = each_env(&running, |name| {
-        env::down(&ctx, name)?;
+        let stopped = crate::autopull::stop(&ctx, name, crate::autopull::Why::Down, false)?;
         out!("env `{name}` stopped");
+        if let Some(r) = &stopped.report {
+            r.print(&mut std::io::stdout(), crate::style::out(), 30);
+            incomplete |= r.incomplete();
+        }
         Ok(())
     });
     crate::watch::spawn(&ctx);
+    if failed.is_empty() && incomplete {
+        return Ok(ExitCode::from(crate::autopull::INCOMPLETE));
+    }
     Ok(each_env_result("down", running.len(), &failed))
 }
 
-pub fn down(name: &str) -> Result<ExitCode> {
+/// `luoto down`'s exit code: [`autopull::INCOMPLETE`] when the stop pulled and something the
+/// env holds didn't land, so a job doesn't take the folder for done.
+fn down_code(stopped: &crate::autopull::Stopped) -> ExitCode {
+    match &stopped.report {
+        Some(r) if r.incomplete() => ExitCode::from(crate::autopull::INCOMPLETE),
+        _ => ExitCode::SUCCESS,
+    }
+}
+
+/// `luoto down`: stop the env, its files pulled into its folder first when its own file
+/// says so (`autopull::stop`). `idle` is the watcher's stop, whose output is its log.
+pub fn down(name: &str, idle: bool) -> Result<ExitCode> {
+    use crate::autopull::{self, Why};
     let ctx = Ctx::load()?;
-    if machine::stopped(&ctx.rt) {
+    // A pull still owed to its folder is done from its volume, VM started for it.
+    let owed = autopull::on(&ctx.paths, name) && autopull::Pending::load(&ctx.paths, name).owed();
+    if machine::stopped(&ctx.rt) && !owed {
         out!("env `{name}` is not running (luoto's VM is stopped)");
         return Ok(ExitCode::SUCCESS);
     }
+    if idle {
+        let stopped = autopull::stop(&ctx, name, Why::Idle, false)?;
+        if let Some(r) = &stopped.report {
+            r.print(&mut std::io::stdout(), crate::style::out(), 10);
+        }
+        return Ok(down_code(&stopped));
+    }
     // While its dev container still runs, to name its build folders.
     disk::hint_growth(&ctx, name);
-    if env::down(&ctx, name)? {
+    let stopped = autopull::stop(&ctx, name, Why::Down, false)?;
+    if stopped.was_running {
         out!("env `{name}` stopped");
     } else {
         out!("env `{name}` was not running");
     }
+    if let Some(r) = &stopped.report {
+        r.print(&mut std::io::stdout(), crate::style::out(), 30);
+    }
     // The VM stays up for a quick `up`; the watcher stops it after `idle_stop` without envs.
     crate::watch::spawn(&ctx);
-    Ok(ExitCode::SUCCESS)
+    Ok(down_code(&stopped))
 }
 
 pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
@@ -467,12 +661,7 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
              work unless pushed, goes with it"
         );
     }
-    // A state that won't load must not keep an env from being removed.
-    let repos = EnvState::load(&ctx.paths, name)
-        .ok()
-        .flatten()
-        .map(|s| s.repos)
-        .unwrap_or_default();
+    let repos = seeded_repos(&ctx, name);
     if ctx.rt.is_running(&names::dev(name)) {
         match crate::repos::unpushed(&ctx, name, &repos) {
             Ok(found) if found.is_empty() => {}
@@ -489,8 +678,8 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
         }
     } else if url.is_some() || !repos.is_empty() {
         out!(
-            "`{name}` is stopped: after `luoto up -e {name}`, `luoto rm` names the repos with work \
-             no remote has"
+            "env `{name}` is not running: after `luoto up -e {name}`, `luoto rm` names the repos \
+             with work no remote has"
         );
     }
     if !yes
@@ -499,20 +688,72 @@ pub fn rm(name: &str, yes: bool) -> Result<ExitCode> {
              Work not pushed or pulled (`luoto pull`) is lost"
         ))
     {
-        bail!("aborted (`luoto rm -e {name} --yes` skips the question)");
+        return Err(crate::prompt::declined(
+            "removed",
+            &format!("luoto rm -e {name} --yes"),
+        ));
     }
-    // Volumes live in the VM, which may have stopped on idle; a deleted VM took them along.
-    if machine::gone(&ctx.rt) {
-        env::forget(&ctx, name)?;
-    } else {
-        env::ensure_vm(&ctx)?;
-        env::remove(&ctx, name)?;
-    }
-    crate::ssh::forget_host_key(&ctx, name)?;
-    std::fs::remove_file(&cfg)?;
-    crate::ssh::write_config(&ctx)?;
+    remove_env(&ctx, name)?;
     out!("env `{name}` removed");
     Ok(ExitCode::SUCCESS)
+}
+
+/// The repos luoto put at `/workspace/<name>` in `name`. A state that won't load must not
+/// keep an env from being removed.
+fn seeded_repos(ctx: &Ctx, name: &str) -> std::collections::BTreeSet<String> {
+    EnvState::load(&ctx.paths, name)
+        .ok()
+        .flatten()
+        .map(|s| s.repos)
+        .unwrap_or_default()
+}
+
+/// The work in running env `name` that no remote has, as `luoto rm` names it: `/workspace`
+/// and each of its repos.
+pub fn unpushed(ctx: &Ctx, name: &str) -> Result<Vec<crate::repos::Unpushed>> {
+    crate::repos::unpushed(ctx, name, &seeded_repos(ctx, name))
+}
+
+/// What running env `name` holds that its folder, and its repos' folders, don't have: for
+/// each folder with something, what. Nothing for an env with no folder here.
+pub fn unpulled(ctx: &Ctx, name: &str) -> Result<Vec<workspace::Unpulled>> {
+    let ws = env::layered(ctx, name)?.workspace;
+    let targets = if ws.dir.is_some() {
+        pull_targets(ctx, name, None, None)?
+    } else {
+        // Without a folder of its own, only its repos copied in from one have a folder.
+        let mut all = Vec::new();
+        for repo in seeded_repos(ctx, name) {
+            if ws.repos.get(&repo).is_some_and(|r| r.dir.is_some()) {
+                all.extend(pull_targets(ctx, name, None, Some(&repo))?);
+            }
+        }
+        all
+    };
+    let _waiting = crate::progress::waiting("comparing the env's files with yours");
+    let mut found = Vec::new();
+    for t in &targets {
+        let u = workspace::unpulled(ctx, name, t)?;
+        if u.any() {
+            found.push(u);
+        }
+    }
+    Ok(found)
+}
+
+/// Remove env `name`: its containers and volumes, its host key and its config file.
+pub fn remove_env(ctx: &Ctx, name: &str) -> Result<()> {
+    // Volumes live in the VM, which may have stopped on idle; a deleted VM took them along.
+    if machine::gone(&ctx.rt) {
+        env::forget(ctx, name)?;
+    } else {
+        env::ensure_vm(ctx)?;
+        env::remove(ctx, name)?;
+    }
+    crate::ssh::forget_host_key(ctx, name)?;
+    std::fs::remove_file(ctx.paths.env_config(name))?;
+    crate::ssh::write_config(ctx)?;
+    Ok(())
 }
 
 pub fn reset_home(name: &str, yes: bool) -> Result<ExitCode> {
@@ -527,11 +768,14 @@ pub fn reset_home(name: &str, yes: bool) -> Result<ExitCode> {
              toolchains? The workspace stays"
         ))
     {
-        bail!("aborted (`luoto reset-home -e {name} --yes` skips the question)");
+        return Err(crate::prompt::declined(
+            "discarded",
+            &format!("luoto reset-home -e {name} --yes"),
+        ));
     }
     let running = ctx.rt.is_running(&names::dev(name));
     if !env::reset_home(&ctx, name)? {
-        out!("`{name}` has no home yet: nothing to discard");
+        out!("env `{name}` has no home yet: nothing to discard");
         return Ok(ExitCode::SUCCESS);
     }
     out!("discarded the home of `{name}`");
@@ -544,15 +788,19 @@ pub fn reset_home(name: &str, yes: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn list(size: bool) -> Result<ExitCode> {
+pub fn list(size: bool, json: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let envs = config::list_envs(&ctx.paths)?;
+    if envs.is_empty() && json {
+        println!("[]");
+        return Ok(ExitCode::SUCCESS);
+    }
     if envs.is_empty() {
         out!("no envs yet: `luoto init` in a project folder, or `luoto init <new-folder>`");
         return Ok(ExitCode::SUCCESS);
     }
     let states = ctx.rt.states().unwrap_or_default();
-    if states.vm_stopped {
+    if states.vm_stopped && !json {
         out!("luoto's VM is stopped; `luoto up` starts it with the env\n");
     }
     let sizes = if size && !states.vm_stopped {
@@ -586,11 +834,45 @@ pub fn list(size: bool) -> Result<ExitCode> {
             ),
         })
         .collect();
+    let now = chrono::Utc::now();
+    if json {
+        let listed: Vec<ListedEnv> = rows
+            .into_iter()
+            .map(|(env, from, image, presets)| {
+                let (dev, gate) = states.env(&env);
+                let running = states.running(&names::dev(&env));
+                ListedEnv {
+                    last_used: match running {
+                        true => Some(now),
+                        false => crate::used::of(&ctx.paths, &env).time(),
+                    },
+                    size: sizes.as_ref().map(|s| s.env(&env).total),
+                    presets: presets
+                        .split(',')
+                        .filter(|p| !p.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                    env,
+                    dev,
+                    gate,
+                    from,
+                    image,
+                }
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&listed)?);
+        return Ok(ExitCode::SUCCESS);
+    }
     let rows: Vec<ListRow> = rows
         .into_iter()
         .map(|(env, from, image, presets)| {
             let (dev, gate) = states.env(&env);
+            let running = states.running(&names::dev(&env));
             ListRow {
+                used: match running {
+                    true => "now".into(),
+                    false => crate::used::of(&ctx.paths, &env).shown(now),
+                },
                 size: size.then(|| size_of(&env)),
                 env,
                 dev,
@@ -613,6 +895,22 @@ pub fn list(size: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// An env in `luoto list --json`.
+#[derive(serde::Serialize)]
+struct ListedEnv {
+    env: String,
+    dev: String,
+    gate: String,
+    /// Bytes on disk, with `--size`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    /// When it was last used: now while it runs; none without a record.
+    last_used: Option<chrono::DateTime<chrono::Utc>>,
+    from: String,
+    image: String,
+    presets: Vec<String>,
+}
+
 /// An env in `luoto list`.
 struct ListRow {
     env: String,
@@ -620,6 +918,8 @@ struct ListRow {
     gate: String,
     /// With `--size`.
     size: Option<String>,
+    /// When it was last used (`used.rs`): `now` while it runs.
+    used: String,
     from: String,
     image: String,
     presets: String,
@@ -640,24 +940,30 @@ fn list_lines(rows: &[ListRow], width: usize) -> Vec<String> {
         wide("FROM", &|r| &r.from),
     );
     let size_w = wide("SIZE", &|r| r.size.as_deref().unwrap_or(""));
+    let used_w = wide("USED", &|r| &r.used);
     let sized = rows.iter().any(|r| r.size.is_some());
-    let line = |env: &str, dev: &str, gate: &str, size: &str, from: &str, image: &str| {
-        let size = if sized {
-            format!("{size:<size_w$}  ")
-        } else {
-            String::new()
-        };
-        format!("{env:<env_w$}  {dev:<dev_w$}  {gate:<gate_w$}  {size}{from:<from_w$}  {image}")
+    let line =
+        |env: &str, dev: &str, gate: &str, size: &str, used: &str, from: &str, image: &str| {
+            let size = if sized {
+                format!("{size:<size_w$}  ")
+            } else {
+                String::new()
+            };
+            format!(
+                "{env:<env_w$}  {dev:<dev_w$}  {gate:<gate_w$}  {size}{used:<used_w$}  \
+             {from:<from_w$}  {image}"
+            )
             .trim_end()
             .to_string()
-    };
-    let mut out = vec![line("ENV", "DEV", "GATE", "SIZE", "FROM", "IMAGE")];
+        };
+    let mut out = vec![line("ENV", "DEV", "GATE", "SIZE", "USED", "FROM", "IMAGE")];
     for r in rows {
         out.push(line(
             &r.env,
             &r.dev,
             &r.gate,
             r.size.as_deref().unwrap_or(""),
+            &r.used,
             &r.from,
             &r.image,
         ));
@@ -686,13 +992,24 @@ fn from(ws: &config::Workspace) -> String {
     }
 }
 
-pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
+/// How `luoto status` prints.
+pub enum StatusAs {
+    Text,
+    /// What the text says, as JSON.
+    Json,
+    /// The compiled policy the gate gets.
+    PolicyJson,
+}
+
+pub fn status(name: &str, shape: StatusAs, size: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
-    if json {
+    if let StatusAs::PolicyJson = shape {
         let p = env::plan(&ctx, name)?;
         println!("{}", serde_json::to_string_pretty(&p.compiled.policy)?);
         return Ok(ExitCode::SUCCESS);
     }
+    let json = matches!(shape, StatusAs::Json);
+    let mut j = serde_json::Map::new();
     let f = EnvFile::load(&ctx.paths, name)?;
     let states = ctx.rt.states().unwrap_or_default();
     let (dev, gate) = if states.vm_stopped {
@@ -727,11 +1044,39 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
             },
         ),
     ];
-    if let Some(until) = f.cfg.egress.open_at(chrono::Utc::now())? {
+    j.insert("env".into(), name.into());
+    j.insert("config".into(), f.path.display().to_string().into());
+    j.insert("dev".into(), dev.clone().into());
+    j.insert("gate".into(), gate.clone().into());
+    j.insert("isolation".into(), rows[3].1.clone().into());
+    j.insert(
+        "idle_stop".into(),
+        crate::idle::limit(&ctx.global, &f.cfg)
+            .map(|d| serde_json::json!({ "seconds": d.as_secs() }))
+            .unwrap_or_default(),
+    );
+    let open = f.cfg.egress.open_at(chrono::Utc::now())?;
+    // Open: `{"until": null}` with no end.
+    j.insert(
+        "egress_open".into(),
+        open.map(|until| serde_json::json!({ "until": until }))
+            .unwrap_or_default(),
+    );
+    if let Some(until) = open {
         let width = crate::text::columns().saturating_sub(STATUS_KEYS);
         rows.push(("egress", egress::state_line(name, until, width)));
     }
     let ws = &f.cfg.workspace;
+    j.insert(
+        "workspace".into(),
+        serde_json::json!({
+            "folder": ws.dir,
+            "remote": ws.url,
+            "branch": ws.branch,
+            "repos": ws.repos.keys().collect::<Vec<_>>(),
+        }),
+    );
+    j.insert("pull_on_stop".into(), ws.dangerously_pull_on_stop.into());
     rows.push(match (&ws.dir, &ws.url) {
         (None, Some(url)) => (
             "workspace",
@@ -767,6 +1112,15 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
             format!("{dir} (copied in; `luoto pull -e {name}` brings changes back)"),
         ),
     });
+    if f.cfg.workspace.dangerously_pull_on_stop {
+        rows.push((
+            "pull",
+            format!(
+                "at every stop, with nobody reviewing it (`luoto pull --on-stop off -e {name}` \
+                 ends that)"
+            ),
+        ));
+    }
     let ca_dir = ctx.paths.env_state(name);
     if let Some(n) = crate::ca::notice(&ca_dir, name) {
         rows.push(("CA", n));
@@ -774,13 +1128,10 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
     let plan = env::plan(&ctx, name);
     if dev == "running" {
         let published = plan.as_ref().map_or(&f.cfg.ports, |p| &p.cfg.ports);
-        rows.push((
-            "ports",
-            ports_text(
-                name,
-                &ports::of_env(&ctx.paths, name, published, gate == "running"),
-            ),
-        ));
+        let p = ports::of_env(&ctx.paths, name, published, gate == "running");
+        let urls: Vec<String> = p.open().into_iter().map(ports::url).collect();
+        j.insert("ports".into(), urls.into());
+        rows.push(("ports", ports_text(name, &p)));
     }
     if gate == "running" {
         let s = ctl::gate_status(&ctx.rt, name)?;
@@ -792,6 +1143,15 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
             }
             _ => "ok".to_string(),
         };
+        j.insert(
+            "policy".into(),
+            serde_json::json!({
+                "rules": s.rules,
+                "ca": ca,
+                "vault_configured": s.vault_configured,
+                "pending_requests": s.pending_requests,
+            }),
+        );
         rows.push((
             "policy",
             format!(
@@ -807,11 +1167,21 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
         ));
     }
     if let Ok(v) = ctl::vault_status(&ctx.rt) {
+        j.insert("vault_locked".into(), v.locked.into());
         rows.push((
             "vault",
             if v.locked { LOCKED } else { "unlocked" }.to_string(),
         ));
         if let Some(e) = v.envs.iter().find(|e| e.env == name) {
+            j.insert("credentials".into(), e.bindings.clone().into());
+            j.insert(
+                "missing_secrets".into(),
+                e.missing
+                    .iter()
+                    .map(|r| crate::secrets::shown_ref(r))
+                    .collect::<Vec<_>>()
+                    .into(),
+            );
             if !e.bindings.is_empty() {
                 rows.push(("credentials", e.bindings.join(", ")));
             }
@@ -823,10 +1193,21 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
     // Last of the rows: the runtime walks every volume for it.
     if size && !states.vm_stopped {
         let disk = match crate::progress::wait("measuring every volume", || disk::sizes(&ctx.rt)) {
-            Ok(s) => s.env(name).describe(),
+            Ok(s) => {
+                j.insert("size".into(), s.env(name).total.into());
+                s.env(name).describe()
+            }
             Err(e) => format!("not read ({e:#})"),
         };
         rows.push(("disk", disk));
+    }
+    if json {
+        let plan = plan?;
+        j.insert("warnings".into(), plan.compiled.warnings.clone().into());
+        let policy = serde_json::to_value(&plan.compiled.policy)?;
+        j.insert("rules".into(), policy["rules"].clone());
+        println!("{}", serde_json::to_string_pretty(&j)?);
+        return Ok(ExitCode::SUCCESS);
     }
     block!(
         "{}",
@@ -844,7 +1225,7 @@ pub fn status(name: &str, json: bool, size: bool) -> Result<ExitCode> {
 const STATUS_KEYS: usize = 2 + "missing secrets".len() + 3;
 
 /// What `status` and `vault status` say of a locked vault.
-const LOCKED: &str = "LOCKED: `luoto vault unlock` (or `luoto up`) loads the secrets";
+const LOCKED: &str = "locked: `luoto vault unlock` (or `luoto up`) loads the secrets";
 
 /// The env's forwarded ports, and a line for each taken here.
 fn ports_text(name: &str, p: &ports::EnvPorts) -> String {
@@ -1126,13 +1507,27 @@ fn print_request(e: &str, r: &AccessRequest) {
     );
 }
 
-pub fn requests(name: Option<&str>, watch: bool) -> Result<ExitCode> {
+pub fn requests(name: Option<&str>, follow: bool, json: bool) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     let now = pending(&ctx, name)?;
+    if json {
+        #[derive(serde::Serialize)]
+        struct Pending<'a> {
+            env: &'a str,
+            #[serde(flatten)]
+            request: &'a AccessRequest,
+        }
+        let listed: Vec<Pending> = now
+            .iter()
+            .map(|(env, request)| Pending { env, request })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&listed)?);
+        return Ok(ExitCode::SUCCESS);
+    }
     for (e, r) in &now {
         print_request(e, r);
     }
-    if !watch {
+    if !follow {
         if now.is_empty() {
             println!("no pending requests");
         }
@@ -1185,7 +1580,10 @@ pub fn approve(
         println!("grants less: {}", rules::describe(&rule));
     }
     if !yes && !confirm("Approve?") {
-        bail!("not approved (use --yes to skip the prompt)");
+        return Err(crate::prompt::declined(
+            "approved",
+            &format!("luoto approve -e {name} {id} --yes"),
+        ));
     }
     match rules::accepting_risks(force, |force| {
         rules::approve(&ctx, name, &req, ttl, narrow, force)
@@ -1305,6 +1703,16 @@ pub fn egress(
             // No rule opens these (the metadata service, the gate's own ranges): the message
             // says what does, if anything.
             s.last_message.clone().unwrap_or_default()
+        } else if let Some(service) = (s.denied > 0)
+            .then(|| crate::packages::service_of(&s.host, s.last_denied_path.as_deref()))
+            .flatten()
+        {
+            // A private feed: a rule alone gets its 401; the env's token opens it.
+            let a = if service.starts_with('A') { "an" } else { "a" };
+            format!(
+                "{} → {a} {service} feed: luoto feed add -e {name} <feed URL>",
+                s.last_message.clone().unwrap_or_default()
+            )
         } else if s.denied > 0 && s.last_reason.as_deref() == Some("path_not_allowed") {
             // Other paths of the host are open (a relay may be open only for some): allowing
             // all of it would undo that.
@@ -1427,7 +1835,7 @@ pub fn egress_open(name: &str, window: Option<&str>) -> Result<ExitCode> {
         ("keep hosts", format!("luoto egress keep -e {name}")),
     ];
     if !running {
-        rows.push(("applies", format!("when it starts: luoto up -e {name}")));
+        rows.push(("applies", format!("at `luoto up -e {name}`")));
     }
     let title = format!(
         "egress of `{name}` is open {}",
@@ -1530,8 +1938,10 @@ pub fn egress_keep(name: &str, since: Option<&str>, yes: bool) -> Result<ExitCod
         match crate::wizard::pick_kept(&rows)? {
             Some(picked) => picked,
             None => {
-                println!("nothing kept");
-                return Ok(ExitCode::SUCCESS);
+                return Err(crate::prompt::declined(
+                    "kept",
+                    &format!("luoto egress keep -e {name} --yes"),
+                ));
             }
         }
     };
@@ -1835,11 +2245,12 @@ mod tests {
 
     #[test]
     fn list_puts_an_envs_presets_under_it() {
-        let row = |env: &str, presets: &str| ListRow {
+        let row = |env: &str, used: &str, presets: &str| ListRow {
             env: env.into(),
             dev: "running".into(),
             gate: "running".into(),
             size: None,
+            used: used.into(),
             from: "~/src/web".into(),
             image: "localhost/luoto-base:dev".into(),
             presets: presets.into(),
@@ -1848,22 +2259,26 @@ mod tests {
             &[
                 row(
                     "web",
+                    "now",
                     "debian,github,github-releases,toolchains,crates,npm,pypi,go,ruby",
                 ),
-                row("api", ""),
+                row("api", "45d ago", ""),
+                row("old", "unknown", ""),
             ],
             79,
         );
         assert_eq!(
             lines,
             [
-                "ENV  DEV      GATE     FROM       IMAGE",
-                "web  running  running  ~/src/web  localhost/luoto-base:dev",
+                "ENV  DEV      GATE     USED     FROM       IMAGE",
+                "web  running  running  now      ~/src/web  localhost/luoto-base:dev",
                 "  presets  debian, github, github-releases, toolchains, crates, npm, pypi, go,",
                 "           ruby",
-                "api  running  running  ~/src/web  localhost/luoto-base:dev",
+                "api  running  running  45d ago  ~/src/web  localhost/luoto-base:dev",
+                "old  running  running  unknown  ~/src/web  localhost/luoto-base:dev",
             ]
         );
+        fits(&lines);
     }
 
     #[test]

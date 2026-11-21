@@ -16,6 +16,8 @@ Step by step, for a task; the reference is [configuration](../configuration.md),
   from your `az` login or a service principal, with the tokens outside the env.
 - [Cloud APIs](cloud-apis.md): Hetzner, UpCloud, DigitalOcean and Cloudflare for their CLIs
   and terraform, read-only unless the env writes, with the tokens outside the env.
+- [Private package feeds](package-feeds.md): `luoto feed add` for Azure DevOps, GitHub
+  Packages and self-hosted Gitea, Forgejo and GitLab feeds, with your token outside the env.
 - [Environment variables](env-vars.md): plain values, secrets the code reads and tokens it
   never sees, with `luoto var`.
 - [Agent settings](agent-settings.md): model and effort, credentials without the prompt,

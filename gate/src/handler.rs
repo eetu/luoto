@@ -27,6 +27,7 @@ use crate::creds::apply;
 use crate::guards;
 use crate::imds;
 use crate::limits::{self, Activity, HEAD_GRACE, Limits, Slot, Watched};
+use crate::redirects::Url;
 use crate::respond;
 use crate::state::State;
 use crate::upstream::{DialError, Reach, dial, http1_sender, test_server};
@@ -313,18 +314,32 @@ async fn handle_inner(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
 
+    // Before the policy: a policy applied in between leaves this request's redirect ungranted.
+    let generation = state.redirects.generation();
     let policy = state.policy();
-    let decision = policy.decide(
-        &RequestInfo {
-            host: &target.host,
-            port: target.port,
-            method: &method,
-            path: &path,
-            websocket,
-            content_length,
+    let info = RequestInfo {
+        host: &target.host,
+        port: target.port,
+        method: &method,
+        path: &path,
+        websocket,
+        content_length,
+    };
+    // A URL a feed's redirect named goes through on its permit, unless a deny refuses it.
+    let here = Url::of(target.tls, &target.host, target.port, &path, query);
+    let permit = state.redirects.allows(&method, &here, Instant::now());
+    let decision = match &permit {
+        Some(granted) => match policy.explicitly_denied(&info) {
+            Some(reason) => Decision::Deny(reason),
+            None => Decision::Allow {
+                rule: format!("redirect from {}", granted.from),
+                max_body: None,
+                allow_private: granted.private,
+                idle: None,
+            },
         },
-        Utc::now(),
-    );
+        None => policy.decide(&info, Utc::now()),
+    };
     let (rule, max_body, allow_private, rule_idle) = match decision {
         Decision::Allow {
             rule,
@@ -340,7 +355,7 @@ async fn handle_inner(
     // Every wait on this connection follows the rule until the next request is decided.
     ctx.activity.set_rule_idle(rule_idle);
     let mut ev = ev;
-    ev.rule = Some(rule);
+    ev.rule = Some(rule.clone());
 
     let client_upgrade = websocket.then(|| hyper::upgrade::on(&mut req));
     let (mut parts, incoming) = req.into_parts();
@@ -355,6 +370,13 @@ async fn handle_inner(
     parts.version = Version::HTTP_11;
     if let Ok(v) = HeaderValue::from_str(&target.authority()) {
         parts.headers.insert(HOST, v);
+    }
+    // The signed URL is the whole authorization: storage refuses a request that carries
+    // another, and nothing of the client's own goes with it.
+    if permit.is_some() {
+        for h in AUTH_HEADERS.iter().copied().chain(["cookie"]) {
+            parts.headers.remove(h);
+        }
     }
 
     let guarded = guards::check(
@@ -381,13 +403,11 @@ async fn handle_inner(
             };
             return deny(ev, reason);
         }
-        // Java servers drop `;` parameters and resolve the `..` before them, and some decode
-        // an escaped slash: a path the rules read one way would reach another.
-        let lower = path.to_ascii_lowercase();
-        if path.contains(';') || lower.contains("%2f") || lower.contains("%5c") {
+        // A path the rules read one way would reach another (npm's `@scope%2fname` passes).
+        if luoto_shared::host::hides_a_path(&path) {
             let reason = DenyReason::Guard {
                 reason: format!(
-                    "paths with `;` or an escaped slash are not allowed to {}",
+                    "paths with `;` or an escaped slash (other than npm's `@scope%2fname`) are not allowed to {}",
                     target.host
                 ),
             };
@@ -536,6 +556,19 @@ async fn handle_inner(
     }
 
     let (mut rparts, rbody) = boxed_parts(resp);
+    if status.is_redirection() && permit.is_none() {
+        let to = policy.redirect_targets(&method, &target.host, &path);
+        let location = rparts.headers.get(http::header::LOCATION);
+        if let (false, Some(loc)) = (to.is_empty(), location.and_then(|l| l.to_str().ok())) {
+            let plain = |host: &str| test_server(&state, host).is_some();
+            if let Some(url) = Url::redirect(loc, &to, plain) {
+                let private = policy.redirect_private(&target.host, &path, &url.host);
+                state
+                    .redirects
+                    .grant(url, &rule, private, generation, Instant::now());
+            }
+        }
+    }
     // A response that streams on is progress for the connection's idle limit.
     let mut rbody = watched(rbody, ctx.activity.clone());
     if status != StatusCode::SWITCHING_PROTOCOLS {

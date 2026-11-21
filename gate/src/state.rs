@@ -51,6 +51,7 @@ pub struct State {
     pub host_tls: std::collections::HashMap<String, Arc<ClientConfig>>,
     /// Apple: the host's dialer for private addresses (`hostdial.rs`), set once at start.
     pub host_dial: std::sync::OnceLock<crate::hostdial::HostDial>,
+    pub redirects: crate::redirects::Permits,
 }
 
 impl State {
@@ -91,6 +92,7 @@ impl State {
             client_tls,
             host_tls,
             host_dial: std::sync::OnceLock::new(),
+            redirects: Default::default(),
             cfg,
         }))
     }
@@ -117,6 +119,7 @@ impl State {
             serde_json::to_vec_pretty(&policy)?.as_slice(),
         )?;
         *write(&self.policy) = Arc::new(policy);
+        self.redirects.clear();
         if let Some(v) = self.vault() {
             v.flush();
         }

@@ -471,7 +471,14 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     ask_credentials(ctx, env)?;
     let image = env_image(ctx, &layered(ctx, env)?);
     let ids = ensure_images(ctx, &image)?;
+    // A pull of the stopped env reads its volume, and `luoto prune --envs` removes it: the
+    // env starts once that has ended, if it is still there.
+    let pulling = crate::autopull::lock(&ctx.paths, env)?;
+    if !ctx.paths.env_config(env).exists() {
+        return Err(config::no_env(env));
+    }
     let state = state::ensure(ctx, env, &image)?;
+    crate::used::started(&ctx.paths, env);
     // Its warnings are about choices the user made: `edit` and `status` show them.
     let mut p = plan(ctx, env)?;
     let rt = &ctx.rt;
@@ -537,6 +544,8 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         Restart::No
     };
     let dev = start_dev(ctx, env, &p, &state, &ids, restart)?;
+    crate::autopull::started(&ctx.paths, env);
+    drop(pulling);
     if state.dev_ca.as_deref() != Some(ca_sha.as_str()) {
         EnvState::update(&ctx.paths, env, |s| s.dev_ca = Some(ca_sha))?;
     }
@@ -564,11 +573,15 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         match (&ws.dir, &ws.url) {
             (Some(dir), _) => {
                 let dir = workspace::canonical(dir)?;
-                let n = crate::progress::step(
+                let pushed = crate::progress::step(
                     &format!("copying {} into the env", crate::ssh::tilde(&dir)),
                     || workspace::push(ctx, env, &dir, None),
                 )?;
-                out!("copied {n} file(s); bring changes back with `luoto pull -e {env}`");
+                workspace::keep_base(ctx, env, None, &dir, pushed.files);
+                out!(
+                    "copied {} file(s); bring changes back with `luoto pull -e {env}`",
+                    pushed.count
+                );
                 // The env's luoto.toml is the folder's, until the env changes it. One that
                 // can't be read here (a link, too large) is refused where it is reviewed.
                 if let Ok(Some(text)) = crate::project::read_host(&dir) {
@@ -1463,12 +1476,22 @@ pub fn stop_vm_if_unused(ctx: &Ctx) -> Result<bool> {
     Ok(true)
 }
 
-/// Stop the env's containers; whether any was running.
+/// Stop the env's containers; whether any was running. What its repos hold that no remote
+/// has is kept first (`used::stopping`): `luoto prune --envs` can't ask a stopped env.
 pub fn down(ctx: &Ctx, env: &str) -> Result<bool> {
+    down_with(ctx, env, None)
+}
+
+/// [`down`] by a caller that has just asked the env's repos what they hold (`work`).
+pub fn down_with(ctx: &Ctx, env: &str, work: Option<crate::used::Work>) -> Result<bool> {
+    crate::used::stopping(ctx, env, work);
     let _waiting = crate::progress::waiting(&format!("stopping `{env}`"));
     let mut was = false;
     for c in [names::dev(env), names::gate(env)] {
         was |= ctx.rt.stop(&c)?;
+    }
+    if was {
+        crate::used::touch(&ctx.paths, env);
     }
     Ok(was)
 }
@@ -1507,6 +1530,7 @@ pub fn forget(ctx: &Ctx, env: &str) -> Result<()> {
         std::fs::remove_dir_all(&state)?;
     }
     crate::shares::forget(env);
+    crate::autopull::forget(&ctx.paths, env);
     Ok(())
 }
 
