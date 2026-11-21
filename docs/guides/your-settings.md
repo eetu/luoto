@@ -114,6 +114,11 @@ exist only there. Never copy `~/.claude.json`, a login or your history.
 `theme` takes `auto`, `dark` or `light`. A script a setting names goes in the folder too
 (`.claude/statusline.sh`).
 
+Claude Code loads a plugin's folder (the one holding its `.claude-plugin/plugin.json`) placed in
+`.claude/skills/<name>/` as `<name>@skills-dir`, with nothing to install. Link each plugin of a
+marketplace you keep on this machine there, and every env has it, as it is at each `up`:
+`ln -s ~/dev/skills/plugins/style ~/.config/luoto/home/.claude/skills/style`.
+
 After the copy, on every `up`, luoto merges its own entries into the same files and keeps the
 rest. These keys are luoto's; set them through luoto, not in your file:
 
