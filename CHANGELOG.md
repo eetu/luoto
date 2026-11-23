@@ -11,10 +11,8 @@ release may break.
 
 ### Fixed
 
-- `--repo` no longer refuses a repo whose name has spaces, `%20`, parentheses or accents: it
-  is named `Data-Lake-TF` for `Data%20Lake%20(TF)` and `Paakayttaja` for `Pääkäyttäjä`.
-- An env or share named after such a folder drops the accents and `%20` too (`data-lake-tf`, not
-  `data-20lake-20-tf`).
+- `--repo` no longer refuses a repo whose name has spaces, `%20`, parentheses or accents, and
+  repos, envs and shares named after one drop them (`Data%20Lake%20(TF)` → `Data-Lake-TF`).
 
 ## [0.7.0] - 2026-11-21
 
