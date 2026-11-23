@@ -42,7 +42,10 @@ env's name and its current rules.
 - **Writes.** Remote writes only work where the user granted them (for example pushing
   feature branches to one GitHub repository). Protected branches, tags, deleting a branch,
   merging a pull request, releases, workflow files and GitHub Actions are off-limits: a pull
-  request you open waits for the user.
+  request you open waits for the user. GitHub's GraphQL takes only the mutations the user
+  allowed, so a refused `gh` command (`gh issue close --comment`) can go over REST:
+  `gh api repos/<owner>/<repo>/issues/<n>/comments -f body=…`, then
+  `gh api -X PATCH repos/<owner>/<repo>/issues/<n> -f state=closed -f state_reason=completed`.
 - **Files.** Only this container exists. The project is in `/workspace`: a copy of the user's
   folder made when the env was created, without what git ignores (`.env`, local state,
   `node_modules`), or a clone of a remote that has no copy on their machine. A missing ignored

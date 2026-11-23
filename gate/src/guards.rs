@@ -415,7 +415,10 @@ fn check_graphql(guard: &GithubGuard, body: &[u8]) -> Result<(), String> {
                         Selection::Field(f) => {
                             if !guard.graphql_mutations.iter().any(|a| a == f.name) {
                                 return Err(format!(
-                                    "GraphQL mutation `{}` is not allowed from the sandbox",
+                                    "GraphQL mutation `{}` is not allowed from the sandbox: \
+                                     use the REST API (`gh api repos/<owner>/<repo>/…`), or \
+                                     the user adds it to `graphql_mutations` in \
+                                     `[credentials.github]`",
                                     f.name
                                 ));
                             }

@@ -7,6 +7,12 @@ release may break.
 
 ## [Unreleased]
 
+### Fixed
+
+- Agents took a GitHub GraphQL mutation the gate refused (`gh issue close --comment`) for a
+  fixed limit: the denial and the sandbox's instructions name the REST route and
+  `graphql_mutations`.
+
 ## [0.7.1] - 2026-11-23
 
 ### Added
