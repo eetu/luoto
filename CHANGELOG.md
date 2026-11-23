@@ -7,6 +7,13 @@ release may break.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-23
+
+### Fixed
+
+- `--repo` no longer refuses a repo whose name has spaces, `%20`, parentheses or accents: it
+  is named `Data-Lake-TF` for `Data%20Lake%20(TF)` and `Paakayttaja` for `Pääkäyttäjä`.
+
 ## [0.7.0] - 2026-11-21
 
 ### Added
@@ -548,7 +555,8 @@ release may break.
 
 - First release.
 
-[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/eetu/luoto/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/eetu/luoto/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/eetu/luoto/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/eetu/luoto/compare/v0.6.0...v0.6.1
