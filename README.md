@@ -121,7 +121,8 @@ Reference:
 
 ## Day to day
 
-Commands act on the env of the current folder; `-e NAME` picks another (`luoto status -e web`).
+Commands act on the env of the current folder; `-e NAME` picks another. Like every option, it
+goes anywhere after the command: `luoto status -e web`, `luoto repo -e web add ./api`.
 An env cloned from a remote has no folder here, so it always takes `-e`.
 
 | you want                                                                                             | run                                                                                                                                |

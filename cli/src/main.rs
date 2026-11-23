@@ -86,7 +86,8 @@ use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter, PathCompleter
     about = "Supply-chain-safe dev sandboxes: egress only through your policy",
     after_help = "Start with `luoto setup`, then run `luoto init` in a project folder.\n\
                   `luoto ui` opens the web UI.\n\
-                  Commands act on the env of the current folder; `-e NAME` picks another."
+                  Commands act on the env of the current folder; `-e NAME` picks another.\n\
+                  Options go anywhere after the command: `luoto repo add ./api -e web`."
 )]
 struct Cli {
     /// Show what tools print as they run, instead of a spinner.
