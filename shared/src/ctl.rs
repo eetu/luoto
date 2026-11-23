@@ -38,6 +38,18 @@ pub enum GateCtl {
     },
     /// Drop cached credentials so a vault lock or binding change applies at once.
     FlushCredentials,
+    /// Resolve a host the env's own rules name, as the gate does before it dials: whether
+    /// the gate's DNS answers, without asking it about anything the env doesn't reach.
+    Lookup,
+}
+
+/// What [`GateCtl::Lookup`] found.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LookupReply {
+    /// The host looked up; none when no rule names one that can be.
+    pub host: Option<String>,
+    /// Its addresses; 0 when the resolver answered that there is no such name.
+    pub addresses: usize,
 }
 
 impl Drop for GateCtl {

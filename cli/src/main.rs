@@ -125,9 +125,17 @@ enum Cmd {
         /// with secrets and what identifies you taken out.
         #[arg(long, value_name = "FILE", num_args = 0..=1, add = ArgValueCompleter::new(PathCompleter::any()))]
         report: Option<Option<String>>,
+        /// Also check that containers reach the internet: a connection to 1.1.1.1 and a
+        /// lookup of example.com, the only parties doctor contacts.
+        #[arg(long)]
+        network: bool,
     },
-    /// Update luoto to the latest release.
-    Upgrade,
+    /// Update luoto to the latest release (asks GitHub which one that is).
+    Upgrade {
+        /// Only say whether a newer release is out.
+        #[arg(long)]
+        check: bool,
+    },
     /// Remove everything luoto made, after listing it; the binary stays.
     ///
     /// Its envs, vault, images, keychain entries, config and data, and its VM when nothing
@@ -902,7 +910,7 @@ fn attends(cmd: &Cmd) -> bool {
             | Cmd::SshProxy { .. }
             | Cmd::Setup(_)
             | Cmd::Doctor { .. }
-            | Cmd::Upgrade
+            | Cmd::Upgrade { .. }
             | Cmd::Uninstall { .. }
             | Cmd::Logs { .. }
             | Cmd::Up { .. }
@@ -924,8 +932,8 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
     let env = |given: Option<String>| workspace::resolve(&paths, given.as_deref());
     match cmd {
         Cmd::Setup(o) => setup::setup(o),
-        Cmd::Doctor { report } => setup::doctor(report),
-        Cmd::Upgrade => upgrade::upgrade(),
+        Cmd::Doctor { report, network } => setup::doctor(report, network),
+        Cmd::Upgrade { check } => upgrade::upgrade(check),
         Cmd::Uninstall { yes } => uninstall::uninstall(yes),
         Cmd::Prune {
             yes,
@@ -1523,7 +1531,7 @@ mod tests {
     #[test]
     fn a_report_file_is_optional() {
         let report = |args: &[&str]| match parse(args).unwrap().cmd {
-            Cmd::Doctor { report } => report,
+            Cmd::Doctor { report, .. } => report,
             _ => panic!("not doctor"),
         };
         assert_eq!(report(&["doctor"]), None);

@@ -1490,6 +1490,15 @@ pub fn down_with(ctx: &Ctx, env: &str, work: Option<crate::used::Work>) -> Resul
     for c in [names::dev(env), names::gate(env)] {
         was |= ctx.rt.stop(&c)?;
     }
+    if ctx.rt.flavor == Flavor::Apple {
+        // An Apple network's DNS can stay silent after its containers start again, and only a
+        // new network answers. The gate keeps nothing but its volume: `up` makes both anew.
+        ctx.rt.remove_container(&names::gate(env))?;
+        let net = names::egress_net(env);
+        if ctx.rt.network_exists(&net) {
+            ctx.rt.run(["network", "rm", &net])?;
+        }
+    }
     if was {
         crate::used::touch(&ctx.paths, env);
     }

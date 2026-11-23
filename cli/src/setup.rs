@@ -15,6 +15,7 @@ use crate::names;
 use crate::paths::Paths;
 use crate::release;
 use crate::runtime::{Flavor, Runtime};
+use luoto_shared::ctl::LookupReply;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeInfo {
@@ -499,7 +500,9 @@ pub fn build_images(rt: &Runtime, tag: &str) -> Result<()> {
         if !status.success() {
             // A build's downloads fail when Apple's VMs have lost their way out.
             if rt.flavor == Flavor::Apple {
-                bail!("building {image} failed; `luoto doctor` checks the network a build needs");
+                bail!(
+                    "building {image} failed; `luoto doctor --network` checks the network a build needs"
+                );
             }
             bail!("building {image} failed");
         }
@@ -859,11 +862,11 @@ impl Checks {
 
 /// `luoto doctor`; with `report` (`--report [FILE]`), its checks and more go to a redacted
 /// file for a bug report (`report.rs`), also when the checks can't run.
-pub fn doctor(report: Option<Option<String>>) -> Result<ExitCode> {
+pub fn doctor(report: Option<Option<String>>, network: bool) -> Result<ExitCode> {
     let mut out = Checks::default();
     let ctx = Ctx::load();
     let checked = match &ctx {
-        Ok(ctx) => checks(ctx, &mut out),
+        Ok(ctx) => checks(ctx, network, &mut out),
         Err(e) => Err(anyhow::anyhow!("{e:#}")),
     };
     let ok = match (checked, &report) {
@@ -885,17 +888,11 @@ pub fn doctor(report: Option<Option<String>>) -> Result<ExitCode> {
 }
 
 /// The checks, printed and kept in `out`; whether all passed.
-fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
+/// Only `network` contacts anyone outside this machine; each env's gate is asked about a host
+/// its own rules name.
+fn checks(ctx: &Ctx, network: bool, out: &mut Checks) -> Result<bool> {
     let mut ok = true;
-    let current = luoto_shared::VERSION;
-    out.say(match crate::upgrade::latest() {
-        Ok(Some(l)) if crate::upgrade::newer(&l, current) => {
-            format!("luoto {current}: {l} is out (`luoto upgrade`)")
-        }
-        Ok(Some(_)) => format!("luoto {current} (latest)"),
-        Ok(None) => format!("luoto {current} (no release published yet)"),
-        Err(_) => format!("luoto {current} (could not check for a newer release)"),
-    });
+    out.say(format!("luoto {}", luoto_shared::VERSION));
     if ctx.rt.flavor == Flavor::Podman && machine::supported() {
         if !machine::is_luoto(ctx.rt.connection.as_deref()) {
             out.say("VM: not luoto's own (run `luoto setup`); envs refuse to start".into());
@@ -974,7 +971,7 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
             if present { "ok" } else { "missing" }
         ));
     }
-    if let Some((passed, line)) = network_check(ctx) {
+    if network && let Some((passed, line)) = network_check(ctx) {
         ok &= passed;
         out.say(line);
     }
@@ -1039,8 +1036,10 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
                         config::Isolation::Gvisor => "gVisor",
                         config::Isolation::Container => "container",
                     });
+                let (dns_ok, dns) = upstream_dns(ctx, &env_name);
+                ok &= dns_ok;
                 out.say(format!(
-                    "env {env_name}: {} ({isolation})\n{}",
+                    "env {env_name}: {} ({isolation})\n{}\n{dns}",
                     if r.ok { "isolated" } else { "NOT ISOLATED" },
                     r.render()
                 ));
@@ -1055,6 +1054,65 @@ fn checks(ctx: &Ctx, out: &mut Checks) -> Result<bool> {
         let _ = ctx.rt.run(["rm", "-f", &probe_name]);
     }
     Ok(ok)
+}
+
+/// Whether the env's gate resolves names upstream, as a self-test line: when its network's DNS
+/// stops answering, every request it allows fails with a 502. The gate looks up a host of the
+/// env's own rules, so nothing the env doesn't reach is asked about.
+fn upstream_dns(ctx: &Ctx, env: &str) -> (bool, String) {
+    let looked = crate::progress::wait(&format!("resolving through `{env}`'s gate"), || {
+        crate::ctl::gate_lookup(&ctx.rt, env)
+    });
+    dns_line(looked.map_err(|e| format!("{e:#}")), ctx.rt.flavor, env)
+}
+
+fn dns_line(looked: Result<LookupReply, String>, flavor: Flavor, env: &str) -> (bool, String) {
+    let line = |mark: &str, detail: String| format!("  {mark} {:<14} {detail}", "upstream_dns");
+    let pad = "";
+    let e = match looked {
+        Ok(LookupReply { host: None, .. }) => {
+            return (true, line("skip", "no rule names a host to look up".into()));
+        }
+        Ok(LookupReply {
+            host: Some(host),
+            addresses: 0,
+        }) => {
+            let detail = format!("the gate's DNS answers ({host}: no such name)");
+            return (true, line("ok  ", detail));
+        }
+        Ok(LookupReply {
+            host: Some(host),
+            addresses: n,
+        }) => {
+            let plural = if n == 1 { "" } else { "es" };
+            let detail = format!("the gate resolved {host} ({n} address{plural})");
+            return (true, line("ok  ", detail));
+        }
+        Err(e) => e,
+    };
+    if e.contains("bad request") {
+        let detail = format!("an older gate: `luoto down -e {env}`, then `luoto up -e {env}`");
+        return (true, line("skip", detail));
+    }
+    let cause = if e.ends_with("timed out") {
+        "timed out"
+    } else {
+        e.rsplit(": ").next().unwrap_or(&e)
+    };
+    let fix = if flavor == Flavor::Apple {
+        format!(
+            "recreate the network:\n{pad:22}`luoto down -e {env}`, `container rm {}`,\n{pad:22}\
+             `container network rm {}`,\n{pad:22}`luoto up -e {env}`",
+            names::gate(env),
+            names::egress_net(env)
+        )
+    } else {
+        format!(
+            "check DNS where the runtime runs, then\n{pad:22}`luoto down -e {env}`, `luoto up -e {env}`"
+        )
+    };
+    let detail = format!("the gate's DNS doesn't answer ({cause}):\n{pad:22}{fix}");
+    (false, line("FAIL", detail))
 }
 
 /// Where luoto's containers run has swap: whether the vault stays out of it, and what can be
@@ -1094,6 +1152,54 @@ fn which(bin: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_dns_lines() {
+        let reply = |host: Option<&str>, addresses| {
+            Ok(LookupReply {
+                host: host.map(str::to_string),
+                addresses,
+            })
+        };
+        let (ok, l) = dns_line(reply(Some("github.com"), 2), Flavor::Podman, "web");
+        assert!(
+            ok && l.ends_with("the gate resolved github.com (2 addresses)"),
+            "{l}"
+        );
+        let (ok, l) = dns_line(reply(Some("gone.example"), 0), Flavor::Podman, "web");
+        assert!(
+            ok && l.contains("answers (gone.example: no such name)"),
+            "{l}"
+        );
+        let (ok, l) = dns_line(reply(None, 0), Flavor::Podman, "web");
+        assert!(ok && l.contains("skip"), "{l}");
+        let old = Err("luoto-dev-web-gate: bad request: unknown variant `lookup`".into());
+        let (ok, l) = dns_line(old, Flavor::Podman, "web");
+        assert!(
+            ok && l.contains("skip") && l.contains("`luoto up -e web`"),
+            "{l}"
+        );
+        let failed = Err(
+            "luoto-dev-web-gate: DNS lookup for github.com failed: failed to lookup address \
+             information: Try again"
+                .into(),
+        );
+        let (ok, l) = dns_line(failed, Flavor::Apple, "web");
+        assert!(!ok, "{l}");
+        assert!(l.contains("(Try again)") && l.contains("container network rm luoto-dev-web-out"));
+        for l in l.lines() {
+            assert!(l.chars().count() <= 80, "{l}");
+        }
+        let timed = Err("x: DNS lookup for github.com timed out".into());
+        let (_, l) = dns_line(timed, Flavor::Docker, "web");
+        assert!(
+            l.contains("(timed out)") && !l.contains("container rm"),
+            "{l}"
+        );
+        for l in l.lines() {
+            assert!(l.chars().count() <= 80, "{l}");
+        }
+    }
 
     #[test]
     fn a_setup_is_the_first_until_the_config_names_a_runtime() {

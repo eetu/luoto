@@ -54,14 +54,22 @@ pub fn newer(candidate: &str, current: &str) -> bool {
     key(candidate) > key(current)
 }
 
-pub fn upgrade() -> Result<ExitCode> {
+pub fn upgrade(check: bool) -> Result<ExitCode> {
     let current = luoto_shared::VERSION;
     let Some(latest) = latest()? else {
         println!("no luoto release is published yet");
         return Ok(ExitCode::SUCCESS);
     };
+    if newer(current, &latest) {
+        println!("luoto {current} is newer than the latest release, {latest}");
+        return Ok(ExitCode::SUCCESS);
+    }
     if !newer(&latest, current) {
         println!("luoto {current} is the latest release");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if check {
+        out!("luoto {latest} is out ({current} here); `luoto upgrade` installs it");
         return Ok(ExitCode::SUCCESS);
     }
     let exe = std::env::current_exe()?.canonicalize()?;

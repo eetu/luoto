@@ -3,8 +3,9 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use luoto_shared::ctl::{CtlResponse, GateCtl, GateStatus, read_request};
+use luoto_shared::ctl::{CtlResponse, GateCtl, GateStatus, LookupReply, read_request};
 use luoto_shared::events::{Event, EventKind};
+use luoto_shared::policy::Policy;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 
@@ -28,6 +29,7 @@ pub async fn serve(state: Arc<State>, listener: UnixListener) {
                 Err(_) => return,
             };
             let resp = match serde_json::from_slice::<GateCtl>(&buf) {
+                Ok(GateCtl::Lookup) => lookup(&state).await,
                 Ok(op) => dispatch(&state, op),
                 Err(e) => CtlResponse::err(format!("bad request: {e}")),
             };
@@ -35,6 +37,52 @@ pub async fn serve(state: Arc<State>, listener: UnixListener) {
             out.push(b'\n');
             let _ = w.write_all(&out).await;
         });
+    }
+}
+
+/// A host of the policy the env reaches anyway: exact, named, public and not expiring.
+fn lookup_host(policy: &Policy) -> Option<String> {
+    policy
+        .rules
+        .iter()
+        .map(|r| &r.rule)
+        .find(|r| {
+            !r.host.contains('*')
+                && r.host.contains('.')
+                && r.host.parse::<std::net::IpAddr>().is_err()
+                && !r.host.eq_ignore_ascii_case(luoto_shared::THIS_MACHINE)
+                && !r.allow_private
+                && r.expires.is_none()
+        })
+        .map(|r| r.host.to_ascii_lowercase())
+}
+
+async fn lookup(state: &State) -> CtlResponse {
+    let Some(host) = lookup_host(&state.policy()) else {
+        return CtlResponse::ok(LookupReply {
+            host: None,
+            addresses: 0,
+        });
+    };
+    let found = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::lookup_host((host.clone(), 443)),
+    )
+    .await;
+    match found {
+        Err(_) => CtlResponse::err(format!("DNS lookup for {host} timed out")),
+        // musl's words for NXDOMAIN: the resolver answered.
+        Ok(Err(e)) if e.to_string().contains("Name does not resolve") => {
+            CtlResponse::ok(LookupReply {
+                host: Some(host),
+                addresses: 0,
+            })
+        }
+        Ok(Err(e)) => CtlResponse::err(format!("DNS lookup for {host} failed: {e}")),
+        Ok(Ok(addrs)) => CtlResponse::ok(LookupReply {
+            host: Some(host),
+            addresses: addrs.count(),
+        }),
     }
 }
 
@@ -103,6 +151,7 @@ fn dispatch(state: &State, mut op: GateCtl) -> CtlResponse {
                 Err(e) => CtlResponse::err(e),
             }
         }
+        GateCtl::Lookup => CtlResponse::err("lookup is answered before dispatch"),
         GateCtl::FlushCredentials => {
             if let Some(v) = state.vault() {
                 v.flush();
@@ -115,4 +164,55 @@ fn dispatch(state: &State, mut op: GateCtl) -> CtlResponse {
 /// `luoto-gate ctl`: forward one request from stdin to the socket, print the response.
 pub fn client() -> ExitCode {
     luoto_shared::ctl::client("luoto-gate")
+}
+
+#[cfg(test)]
+mod tests {
+    use luoto_shared::policy::{CompiledRule, Rule};
+
+    use super::*;
+
+    fn policy(rules: Vec<Rule>) -> Policy {
+        Policy {
+            rules: rules
+                .into_iter()
+                .map(|rule| CompiledRule {
+                    id: String::new(),
+                    origin: "user".into(),
+                    rule,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn host(h: &str) -> Rule {
+        Rule {
+            host: h.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn looks_up_only_a_host_the_env_reaches_for_good() {
+        let expiring = Rule {
+            expires: Some(chrono::Utc::now()),
+            ..host("downloads.example.org")
+        };
+        let private = Rule {
+            allow_private: true,
+            ..host("git.internal.example")
+        };
+        let p = policy(vec![
+            host("*.npmjs.org"),
+            host("10.0.0.1"),
+            host(luoto_shared::THIS_MACHINE),
+            host("localhost"),
+            expiring,
+            private,
+            host("Registry.Example.com"),
+        ]);
+        assert_eq!(lookup_host(&p).as_deref(), Some("registry.example.com"));
+        assert_eq!(lookup_host(&policy(vec![host("*.example.com")])), None);
+    }
 }

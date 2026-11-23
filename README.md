@@ -158,7 +158,7 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | what each env takes on disk, and how full the disk that holds them is                                | `luoto status --size`<br>`luoto list --size`<br>`luoto doctor`                                                                     |
 | the space luoto's superseded images take, back on this machine (volumes stay)                        | `luoto prune`                                                                                                                      |
 | the stopped envs nobody has used for 30 days, removed (one holding work stays)                       | `luoto prune --envs` (`--older-than 7d`, `--match 'job-*'`)                                                                        |
-| to check isolation, or a bug report with secrets and what identifies you taken out                   | `luoto doctor`<br>`luoto doctor --report`                                                                                          |
+| to check isolation and DNS, or a bug report with secrets and what identifies you taken out           | `luoto doctor`<br>`luoto doctor --report`                                                                                          |
 | to remove luoto: envs, vault, images, keychain entries, config and data (the binary stays)           | `luoto uninstall`                                                                                                                  |
 
 Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host> --reason …`

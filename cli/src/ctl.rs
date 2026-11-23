@@ -1,7 +1,7 @@
 //! Talking to the gate and vault control sockets through the runtime's `exec -i`.
 
 use anyhow::{Context, Result, bail};
-use luoto_shared::ctl::{CtlResponse, GateCtl, GateStatus, VaultCtl, VaultStatus};
+use luoto_shared::ctl::{CtlResponse, GateCtl, GateStatus, LookupReply, VaultCtl, VaultStatus};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -55,6 +55,11 @@ pub fn vault<T: DeserializeOwned>(rt: &Runtime, op: &VaultCtl) -> Result<T> {
 
 pub fn gate_status(rt: &Runtime, env: &str) -> Result<GateStatus> {
     gate(rt, env, &GateCtl::Status)
+}
+
+/// What the env's gate's own DNS says of a host its rules name.
+pub fn gate_lookup(rt: &Runtime, env: &str) -> Result<LookupReply> {
+    gate(rt, env, &GateCtl::Lookup)
 }
 
 pub fn vault_status(rt: &Runtime) -> Result<VaultStatus> {
