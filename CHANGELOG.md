@@ -7,6 +7,27 @@ release may break.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-23
+
+### Added
+
+- `luoto doctor` checks that each running env's gate resolves a host its rules allow, and says
+  how to fix its network when it doesn't (every request the gate allowed failed with a 502).
+- `luoto upgrade --check` says whether a newer release is out, without installing it.
+
+### Changed
+
+- `luoto doctor` contacts no one outside this machine: `luoto upgrade --check` asks for a newer
+  release, and `--network` checks the way out. [What luoto
+  contacts](https://github.com/eetu/luoto/blob/main/docs/install.md).
+
+### Fixed
+
+- `--repo` no longer refuses a repo whose name has spaces, `%20`, parentheses or accents, and
+  repos, envs and shares named after one drop them (`Data%20Lake%20(TF)` → `Data-Lake-TF`).
+- On Apple's `container`, an env started again could reach nothing (every request a 502, `DNS
+  lookup … failed`): `luoto down` now removes its gate and network, and `up` makes them anew.
+
 ## [0.7.0] - 2026-11-21
 
 ### Added
@@ -548,7 +569,8 @@ release may break.
 
 - First release.
 
-[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/eetu/luoto/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/eetu/luoto/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/eetu/luoto/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/eetu/luoto/compare/v0.6.0...v0.6.1

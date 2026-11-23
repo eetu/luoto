@@ -80,8 +80,8 @@ pub fn name_from(s: &str) -> String {
         .unwrap_or(s)
         .trim_end_matches(".git");
     let mut out = String::new();
-    for c in base.chars() {
-        let c = c.to_ascii_lowercase();
+    for c in crate::azure::decode(base).chars() {
+        let c = crate::repos::ascii_letter(c).to_ascii_lowercase();
         if c.is_ascii_alphanumeric() {
             out.push(c);
         } else if !out.ends_with('-') && !out.is_empty() {
@@ -2863,6 +2863,8 @@ mod tests {
         assert_eq!(name_from("/Users/x/dev/My_Project"), "my-project");
         assert_eq!(name_from("eetu/luoto.git"), "luoto");
         assert_eq!(name_from("/tmp/x/"), "x");
+        assert_eq!(name_from("/x/Data%20Lake%20(TF)"), "data-lake-tf");
+        assert_eq!(name_from("/x/Pääkäyttäjä"), "paakayttaja");
     }
 
     #[test]

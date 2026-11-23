@@ -161,7 +161,10 @@ fn remote_workspace(
     }
     let name = match name {
         Some(n) => n.to_string(),
-        None => workspace::name_from(&repos::default_name(&repos::Source::Remote(url.into()))?),
+        None => workspace::name_from(
+            &repos::default_name(&repos::Source::Remote(url.into()))
+                .context("pick a name with --name")?,
+        ),
     };
     config::validate_name(&name)
         .with_context(|| format!("pick a name with --name (derived `{name}` is not valid)"))?;
@@ -250,7 +253,12 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
     }
     for spec in &o.repos {
         let src = repos::parse_source(spec)?;
-        let repo_name = repos::default_name(&src)?;
+        let repo_name = repos::default_name(&src).with_context(|| {
+            format!(
+                "leave it out and add it after init: `luoto repo add -e {name} {} --name <name>`",
+                crate::text::sh_quote(spec)
+            )
+        })?;
         let repo = match src {
             repos::Source::Folder(d) => {
                 repos::check_folder(workspace.dir.as_deref(), &d)?;
@@ -266,8 +274,9 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
         };
         if workspace.repos.insert(repo_name.clone(), repo).is_some() {
             bail!(
-                "two --repo are named `{repo_name}`; add one with `luoto repo add … --name` \
-                 after init"
+                "two --repo are named `{repo_name}`; leave one out and add it after init: \
+                 `luoto repo add -e {name} {} --name <name>`",
+                crate::text::sh_quote(spec)
             );
         }
     }

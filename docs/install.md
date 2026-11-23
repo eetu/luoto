@@ -8,7 +8,7 @@ carries checksums and build provenance (`gh attestation verify <file> --repo eet
 container images are signed and pinned by digest in the binary.
 
 `luoto upgrade` updates a script or tarball install (Homebrew: `brew upgrade luoto`, Scoop:
-`scoop update luoto`); `luoto doctor` says when a newer release is out. After an update, the
+`scoop update luoto`); `luoto upgrade --check` only says whether a newer one is out. After an update, the
 next `luoto up` pulls the release's images, showing progress, and moves the env's gate and
 the vault onto them; `luoto up --recreate` moves its dev container too, keeping its volumes.
 The images it replaced stay in luoto's VM until `luoto prune` removes them (`up` says how much
@@ -42,6 +42,12 @@ runtime and VM, doctor's checks, `config.toml`, each env's config and state, the
 watcher's log and the gates' and vault's recent lifecycle and error events, with secret
 references, tokens, your home folder, user names and email addresses taken out. Host and
 repository names stay, so read it before you share it.
+
+luoto itself contacts only GitHub, for `luoto upgrade` (also with `--check`) and the install
+script; `ghcr.io`, for its images (`luoto setup`, the first `up` after an update); the [model
+servers](guides/model-servers.md) you add; and, with `luoto doctor --network`, `1.1.1.1` and
+`example.com`, from a container. `luoto doctor` has each running env's gate look up a host its
+rules already allow. All other traffic is your envs', as their policy allows.
 
 A source build runs as `luoto-dev`, beside a release in the same VM: its config is in
 `~/.config/luoto-dev`, its envs' containers are `luoto-dev-<env>`, it has a vault of its own,

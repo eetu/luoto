@@ -393,8 +393,29 @@ pub fn parse_source(s: &str) -> Result<Source> {
         }
         return Ok(Source::Folder(dir));
     }
-    check_url(s)?;
-    Ok(Source::Remote(s.to_string()))
+    // Written as forges' own links write them, so the URL git sends matches the gate's rules.
+    let s = s.replace('(', "%28").replace(')', "%29");
+    check_url(&s)?;
+    Ok(Source::Remote(s))
+}
+
+/// The ASCII letter a common accented Latin one is written as (`ä` → `a`), as forges' own
+/// names drop the accent.
+pub fn ascii_letter(c: char) -> char {
+    const FROM: &str = "àáâãäåāăąçćčďèéêëēęěìíîïīłñńňòóôõöøōőřśšťùúûüūůűýÿźżž";
+    const TO: &str = "aaaaaaaaacccdeeeeeeeiiiiilnnnoooooooorsstuuuuuuuyyzzz";
+    let lower = c.to_lowercase().next().unwrap_or(c);
+    match FROM.chars().position(|f| f == lower) {
+        Some(i) => {
+            let a = TO.as_bytes()[i] as char;
+            if c.is_uppercase() {
+                a.to_ascii_uppercase()
+            } else {
+                a
+            }
+        }
+        None => c,
+    }
 }
 
 /// The repo's folder name in the workspace by default: the last part of its path or URL.
@@ -408,8 +429,25 @@ pub fn default_name(src: &Source) -> Result<String> {
         .rsplit(['/', '\\', ':'])
         .next()
         .unwrap_or_default();
-    let name = last.strip_suffix(".git").unwrap_or(last).to_string();
-    check_name(&name).context("name it with --name")?;
+    let last = crate::azure::decode(last.strip_suffix(".git").unwrap_or(last));
+    let mut name = String::new();
+    for c in last.chars().map(ascii_letter) {
+        let c = if c.is_ascii_alphanumeric() || "._-".contains(c) {
+            c
+        } else {
+            '-'
+        };
+        if !(c == '-' && name.ends_with('-')) {
+            name.push(c);
+        }
+    }
+    let name: String = name
+        .trim_start_matches(['.', '-'])
+        .trim_end_matches('-')
+        .chars()
+        .take(100)
+        .collect();
+    check_name(&name)?;
     Ok(name)
 }
 
@@ -2039,7 +2077,7 @@ pub fn add(
     let src = parse_source(spec)?;
     let name = match name {
         Some(n) => n.to_string(),
-        None => default_name(&src)?,
+        None => default_name(&src).context("name it with --name")?,
     };
     check_name(&name)?;
     if f.cfg.workspace.repos.contains_key(&name) {
@@ -2417,6 +2455,7 @@ repos = ["other/app"]
             "acme/.github",
             "https://github.com/acme/api.git",
             "https://org@dev.azure.com/org/Data%20Team/_git/api",
+            "https://dev.azure.com/org/Data%20Team/_git/Data%20Lake%20%28TF%29",
             "ssh://git@github.com/acme/api.git",
             "ssh://git@host.example:2222/x/y",
             "git@github.com:acme/api.git",
@@ -2600,11 +2639,47 @@ repos = ["other/app"]
     }
 
     #[test]
+    fn accents_map_one_to_one() {
+        assert_eq!(
+            "àáâãäåāăąçćčďèéêëēęěìíîïīłñńňòóôõöøōőřśšťùúûüūůűýÿźżž"
+                .chars()
+                .count(),
+            "aaaaaaaaacccdeeeeeeeiiiiilnnnoooooooorsstuuuuuuuyyzzz".len()
+        );
+        let name: String = "DvořákŮÝŽ".chars().map(ascii_letter).collect();
+        assert_eq!(name, "DvorakUYZ");
+    }
+
+    #[test]
+    fn brackets_in_a_remote_are_percent_encoded() {
+        assert_eq!(
+            parse_source("https://dev.azure.com/o/p/_git/Lake%20(TF)").unwrap(),
+            Source::Remote("https://dev.azure.com/o/p/_git/Lake%20%28TF%29".into())
+        );
+    }
+
+    #[test]
     fn default_names_come_from_the_last_part() {
         let remote = |u: &str| default_name(&Source::Remote(u.into())).unwrap();
         assert_eq!(remote("acme/api"), "api");
         assert_eq!(remote("git@github.com:acme/web.git"), "web");
         assert_eq!(remote("https://dev.azure.com/o/p/_git/infra"), "infra");
+        assert_eq!(
+            remote("https://dev.azure.com/o/p/_git/Data%20Lake%20(TF)"),
+            "Data-Lake-TF"
+        );
+        assert_eq!(
+            default_name(&Source::Folder("/x/Data%20Lake TF".into())).unwrap(),
+            "Data-Lake-TF"
+        );
+        assert_eq!(
+            remote("https://dev.azure.com/o/p/_git/P%C3%A4%C3%A4k%C3%A4ytt%C3%A4j%C3%A4"),
+            "Paakayttaja"
+        );
+        assert_eq!(
+            default_name(&Source::Folder("/x/Övrigt Åtgärd".into())).unwrap(),
+            "Ovrigt-Atgard"
+        );
         assert_eq!(
             default_name(&Source::Folder("/home/me/dev/lib".into())).unwrap(),
             "lib"

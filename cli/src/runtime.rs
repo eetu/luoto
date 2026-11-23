@@ -110,7 +110,8 @@ impl States {
         self.by_name.contains_key(name)
     }
 
-    /// An env's dev and gate container states, `absent` for one that doesn't exist.
+    /// An env's dev and gate container states, `absent` for one that doesn't exist. A stopped
+    /// env's gate may be gone (Apple's `down` removes it): it reads as its dev container does.
     pub fn env(&self, env: &str) -> (String, String) {
         if self.vm_stopped {
             return ("stopped".into(), "stopped".into());
@@ -120,7 +121,11 @@ impl States {
                 .get(&c)
                 .map_or_else(|| "absent".into(), String::clone)
         };
-        (state(names::dev(env)), state(names::gate(env)))
+        let (dev, gate) = (state(names::dev(env)), state(names::gate(env)));
+        if gate == "absent" && dev != "absent" && dev != "running" {
+            return (dev.clone(), dev);
+        }
+        (dev, gate)
     }
 }
 
@@ -1479,6 +1484,8 @@ mod tests {
         assert!(!s.running(&dev));
         assert_eq!(s.env("web"), ("exited".into(), "running".into()));
         assert_eq!(s.env("api"), ("absent".into(), "absent".into()));
+        let stopped = States::parse(&format!("{dev} stopped\n"));
+        assert_eq!(stopped.env("web"), ("stopped".into(), "stopped".into()));
         let off = States {
             vm_stopped: true,
             ..Default::default()

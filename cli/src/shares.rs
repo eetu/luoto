@@ -573,7 +573,13 @@ pub fn sync_for_ui(ctx: &Ctx, env: &str) -> Result<SyncedShares> {
 fn default_name(folder: &Path) -> String {
     let base = folder
         .file_name()
-        .map(|n| n.to_string_lossy().to_lowercase())
+        .map(|n| {
+            n.to_string_lossy()
+                .chars()
+                .map(crate::repos::ascii_letter)
+                .collect::<String>()
+                .to_lowercase()
+        })
         .unwrap_or_default();
     let name: String = base
         .chars()
@@ -810,6 +816,7 @@ mod tests {
             assert!(checked(&p, bad, &folder).is_err(), "{bad:?}");
         }
         assert_eq!(default_name(Path::new("/x/My Recordings")), "my-recordings");
+        assert_eq!(default_name(Path::new("/x/Äänitteet")), "aanitteet");
     }
 
     #[test]
