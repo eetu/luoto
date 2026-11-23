@@ -274,8 +274,9 @@ pub fn propose(paths: &Paths, o: &InitOpts) -> Result<Proposal> {
         };
         if workspace.repos.insert(repo_name.clone(), repo).is_some() {
             bail!(
-                "two --repo are named `{repo_name}`; add one with `luoto repo add … --name` \
-                 after init"
+                "two --repo are named `{repo_name}`; leave one out and add it after init: \
+                 `luoto repo add -e {name} {} --name <name>`",
+                crate::text::sh_quote(spec)
             );
         }
     }

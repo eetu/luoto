@@ -401,7 +401,7 @@ pub fn parse_source(s: &str) -> Result<Source> {
 
 /// The ASCII letter a common accented Latin one is written as (`ä` → `a`), as forges' own
 /// names drop the accent.
-fn ascii_letter(c: char) -> char {
+pub fn ascii_letter(c: char) -> char {
     const FROM: &str = "àáâãäåāăąçćčďèéêëēęěìíîïīłñńňòóôõöøōőřśšťùúûüūůűýÿźżž";
     const TO: &str = "aaaaaaaaacccdeeeeeeeiiiiilnnnoooooooorsstuuuuuuuyyzzz";
     let lower = c.to_lowercase().next().unwrap_or(c);
