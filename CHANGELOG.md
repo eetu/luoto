@@ -7,6 +7,11 @@ release may break.
 
 ## [Unreleased]
 
+### Fixed
+
+- On Apple's `container`, your Mac could lose its own network (Wi-Fi dropped its address) while
+  the vault or an env ran: luoto's networks now take 10.212.0.0/16, and `up` moves older ones.
+
 ## [0.7.1] - 2026-11-23
 
 ### Added

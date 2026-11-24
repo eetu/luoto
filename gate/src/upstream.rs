@@ -86,12 +86,14 @@ pub async fn dial_tcp_to(
     let mut addrs: Vec<SocketAddr> = if let Some(addr) = test_server(state, host) {
         vec![addr]
     } else {
+        let mut gateway = false;
         let addrs: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
             vec![SocketAddr::new(ip, port)]
         } else if let Some(at) = state.cfg.host_gateway.as_deref()
             && host.eq_ignore_ascii_case(luoto_shared::THIS_MACHINE)
         {
             // Never DNS: on a LAN, a resolver may name another machine this.
+            gateway = true;
             vec![SocketAddr::new(this_machine(at)?, port)]
         } else {
             tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, port)))
@@ -106,7 +108,7 @@ pub async fn dial_tcp_to(
         // Any private record taints the name: mixed answers are a rebinding trick.
         if addrs
             .iter()
-            .any(|a| is_never_dialed(a.ip()) || (!allow_private && is_private(a.ip())))
+            .any(|a| refused(a.ip(), gateway, allow_private))
         {
             return Err(DialError::Denied(DenyReason::PrivateAddress));
         }
@@ -175,6 +177,12 @@ pub async fn dial_tcp_to(
         &failed,
         private_timed_out,
     )))
+}
+
+/// Whether `ip` is refused before a dial. The gateway is this machine, even in luoto's own
+/// never-dialed range (Apple's NAT networks).
+fn refused(ip: IpAddr, gateway: bool, allow_private: bool) -> bool {
+    (!gateway && is_never_dialed(ip)) || (!allow_private && is_private(ip))
 }
 
 /// [`luoto_shared::THIS_MACHINE`]'s address from `LUOTO_HOST_GATEWAY`: an address, or `route`,
@@ -258,7 +266,16 @@ pub async fn http1_sender(io: Box<dyn Io>) -> Result<SendRequest<Body>, DialErro
 
 #[cfg(test)]
 mod this_machine_tests {
-    use super::{default_gateway, this_machine};
+    use super::{default_gateway, refused, this_machine};
+
+    #[test]
+    fn only_this_machine_is_dialed_in_luotos_own_range() {
+        let gw: std::net::IpAddr = "10.212.3.1".parse().unwrap();
+        assert!(!refused(gw, true, true));
+        assert!(refused(gw, false, true));
+        assert!(refused("10.212.0.2".parse().unwrap(), false, true));
+        assert!(refused(gw, true, false));
+    }
 
     #[test]
     fn this_machine_is_the_default_gateway_or_the_address_given() {

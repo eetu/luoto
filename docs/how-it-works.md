@@ -86,11 +86,12 @@ service listening on all of your Mac's interfaces, so the dev VM is on none. Whi
 background watcher isn't running, the env is cut off; `luoto up` starts it. The gate is on
 the env's NAT network only. It reaches the vault the same way: the background watcher keeps a
 few connections open to a socket the gate publishes and joins each, when the gate uses it, to
-the vault's published socket under the env's name. Connections a rule allows to a private
-address (`luoto allow --private`) leave from your Mac the same way, through the watcher, so
-hosts behind a VPN on your Mac connect whenever it is up. What doesn't run there is under
-Limits in
-the [README](../README.md#limits).
+the vault's published socket under the env's name. luoto picks the NAT networks' subnets in
+10.212.0.0/16 (the vault's is 10.212.0.0/24): your Mac takes each network's first address, and
+`container` would pick from 192.168.64.0/24 on, where your Mac's own network can be.
+Connections a rule allows to a private address (`luoto allow --private`) leave from your Mac
+the same way, through the watcher, so hosts behind a VPN on your Mac connect whenever it is
+up. What doesn't run there is under Limits in the [README](../README.md#limits).
 
 With podman and Docker, each gate mounts one folder of the vault's socket volume, its env's,
 and asks the vault over the socket in it; gates share no network with each other or the vault.

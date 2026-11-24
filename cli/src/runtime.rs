@@ -741,17 +741,42 @@ impl Runtime {
         self.run(args).map(|_| ())
     }
 
-    pub fn create_bridge_network(&self, name: &str, labels: &[(String, String)]) -> Result<()> {
+    pub fn create_bridge_network(
+        &self,
+        name: &str,
+        subnet: &str,
+        labels: &[(String, String)],
+    ) -> Result<()> {
         if self.network_exists(name) {
             return Ok(());
         }
+        self.run(self.bridge_network_args(name, subnet, labels))
+            .map(|_| ())
+    }
+
+    /// The subnet of Apple network `name`; None when it is missing or unreadable.
+    pub fn network_subnet(&self, name: &str) -> Option<String> {
+        let out = self.run(["network", "inspect", name]).ok()?;
+        apple_subnets(&out).ok()?.into_iter().next().map(|(_, s)| s)
+    }
+
+    /// On Apple, luoto's `subnet`: the Mac takes its first address.
+    fn bridge_network_args(
+        &self,
+        name: &str,
+        subnet: &str,
+        labels: &[(String, String)],
+    ) -> Vec<String> {
         let mut args: Vec<String> = vec!["network".into(), "create".into()];
+        if self.flavor == Flavor::Apple {
+            args.extend(["--subnet".into(), subnet.into()]);
+        }
         for (k, v) in self.kept(labels) {
             args.push("--label".into());
             args.push(format!("{k}={v}"));
         }
         args.push(name.into());
-        self.run(args).map(|_| ())
+        args
     }
 
     pub fn run_args(&self, spec: &RunSpec, create_only: bool) -> Vec<String> {
@@ -1350,6 +1375,44 @@ mod tests {
             flavor,
             connection: None,
             api: None,
+        }
+    }
+
+    #[test]
+    fn a_nat_networks_subnet_is_read_whoever_picked_it() {
+        let luotos = r#"[{"configuration":{"creationDate":"2026-11-24T10:37:04Z","ipv4Subnet":"10.212.255.0/24","labels":{"luoto.role":"vault","luoto.version":"0.7.1"},"mode":"nat","name":"luoto-dev-vault-out","options":{},"plugin":"container-network-vmnet"},"id":"luoto-dev-vault-out","status":{"ipv4Gateway":"10.212.255.1","ipv4Subnet":"10.212.255.0/24","ipv6Subnet":"fd2d:268a:f0dd:9e96::/64"}}]"#;
+        let containers = r#"[{"configuration":{"creationDate":"2026-11-24T10:42:59Z","labels":{"luoto.env":"e2e","luoto.role":"net","luoto.version":"0.7.1"},"mode":"nat","name":"luoto-dev-e2e-out","options":{},"plugin":"container-network-vmnet"},"id":"luoto-dev-e2e-out","status":{"ipv4Gateway":"192.168.72.1","ipv4Subnet":"192.168.72.0/24","ipv6Subnet":"fdca:85a2:ded4:40cd::/64"}}]"#;
+        assert_eq!(
+            apple_subnets(luotos).unwrap(),
+            [(
+                "luoto-dev-vault-out".to_string(),
+                "10.212.255.0/24".to_string()
+            )]
+        );
+        assert_eq!(
+            apple_subnets(containers).unwrap(),
+            [(
+                "luoto-dev-e2e-out".to_string(),
+                "192.168.72.0/24".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn only_apple_nat_networks_get_luotos_subnet() {
+        let labels = [("luoto.role".to_string(), "vault".to_string())];
+        let apple =
+            rt(Flavor::Apple).bridge_network_args("luoto-vault-out", "10.212.0.0/24", &labels);
+        assert_eq!(
+            apple.join(" "),
+            "network create --subnet 10.212.0.0/24 --label luoto.role=vault luoto-vault-out"
+        );
+        for flavor in [Flavor::Podman, Flavor::Docker] {
+            let a = rt(flavor).bridge_network_args("luoto-vault-out", "10.212.0.0/24", &labels);
+            assert_eq!(
+                a.join(" "),
+                "network create --label luoto.role=vault luoto-vault-out"
+            );
         }
     }
 
