@@ -7,6 +7,16 @@ release may break.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-24
+
+### Fixed
+
+- On Apple's `container`, your Mac could lose its own network (Wi-Fi dropped its address) while
+  the vault or an env ran: luoto's networks now take 10.212.0.0/16, and `up` moves older ones.
+- Agents took a GitHub GraphQL mutation the gate refused (`gh issue close --comment`) for a
+  fixed limit: the denial and the sandbox's instructions name the REST route and
+  `graphql_mutations`.
+
 ## [0.7.1] - 2026-11-23
 
 ### Added
@@ -569,7 +579,8 @@ release may break.
 
 - First release.
 
-[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/eetu/luoto/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/eetu/luoto/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/eetu/luoto/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/eetu/luoto/compare/v0.6.1...v0.6.2

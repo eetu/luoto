@@ -47,6 +47,15 @@ pub fn vault_out_net() -> String {
     format!("{}-vault-out", instance())
 }
 
+/// The vault network's subnet on Apple, on an octet no env takes ([`env_octets`]).
+pub fn vault_out_subnet() -> String {
+    vault_out_subnet_of(crate::release::pinned())
+}
+
+fn vault_out_subnet_of(release: bool) -> String {
+    format!("10.212.{}.0/24", if release { 0 } else { 255 })
+}
+
 /// The volume of the vault's sockets, a folder per env; each gate mounts its env's.
 pub fn vault_sockets() -> String {
     format!("{}-vault-sock", instance())
@@ -86,6 +95,8 @@ pub fn volume(env: &str, what: &str) -> String {
 /// Addresses inside an env's /24.
 pub struct Addrs {
     pub subnet: String,
+    /// The subnet of the env's NAT network on Apple.
+    pub egress_subnet: String,
     pub gateway: Ipv4Addr,
     pub gate: Ipv4Addr,
     pub dev: Ipv4Addr,
@@ -94,6 +105,7 @@ pub struct Addrs {
 pub fn addrs(octet: u8) -> Addrs {
     Addrs {
         subnet: format!("10.213.{octet}.0/24"),
+        egress_subnet: format!("10.212.{octet}.0/24"),
         gateway: Ipv4Addr::new(10, 213, octet, 1),
         gate: Ipv4Addr::new(10, 213, octet, 2),
         dev: Ipv4Addr::new(10, 213, octet, 3),
@@ -145,6 +157,19 @@ mod tests {
         let (release, dev) = (octets_of(true), octets_of(false));
         assert!(release.end() < dev.start());
         assert!(!release.contains(&0) && !dev.contains(&255));
+    }
+
+    #[test]
+    fn nat_subnets_stay_in_luotos_own_range() {
+        let vaults = [vault_out_subnet_of(true), vault_out_subnet_of(false)];
+        assert_eq!(vaults, ["10.212.0.0/24", "10.212.255.0/24"]);
+        for octet in octets_of(true).chain(octets_of(false)) {
+            let egress = addrs(octet).egress_subnet;
+            assert!(
+                egress.starts_with("10.212.") && !vaults.contains(&egress),
+                "{egress}"
+            );
+        }
     }
 
     #[test]

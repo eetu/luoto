@@ -254,7 +254,7 @@ pub fn watch() -> Result<ExitCode> {
     #[cfg(unix)]
     let mut dialers: Option<crate::hostdial::Dialers> = None;
     #[cfg(unix)]
-    let mut dial_gates: Option<Vec<String>> = None;
+    let mut dial_gates: Option<(Vec<String>, Instant)> = None;
     // Apple restarts nothing on its own: a gate seen stopped under a running dev container
     // (since when, and when it was last started here).
     let mut gate_down: HashMap<String, (Instant, Option<Instant>)> = HashMap::new();
@@ -385,11 +385,13 @@ pub fn watch() -> Result<ExitCode> {
                 dialers = crate::hostdial::Dialers::new().ok();
             }
             if let Some(d) = dialers.as_mut() {
-                if dial_gates.as_ref() != Some(&gates)
-                    && let Ok(nets) = ctx.rt.subnets()
-                {
+                // A gate made anew within a tick can be on another network: read them now and then.
+                let stale = dial_gates
+                    .as_ref()
+                    .is_none_or(|(g, t)| *g != gates || t.elapsed() >= RECOVER_EVERY);
+                if stale && let Ok(nets) = ctx.rt.subnets() {
                     d.set_nets(&nets);
-                    dial_gates = Some(gates.clone());
+                    dial_gates = Some((gates.clone(), Instant::now()));
                 }
                 let want: Vec<(String, PathBuf)> = gates
                     .iter()
