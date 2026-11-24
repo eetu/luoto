@@ -155,7 +155,15 @@ fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
     let apple = rt.flavor == Flavor::Apple;
     let net = names::vault_out_net();
     let subnet = names::vault_out_subnet();
-    nat_network(ctx, &net, &subnet, &labels("", "vault"), &names::vault())?;
+    let up = format!("{} up", names::instance());
+    nat_network(
+        ctx,
+        &net,
+        &subnet,
+        &labels("", "vault"),
+        &names::vault(),
+        &up,
+    )?;
     let mut spec = RunSpec {
         name: names::vault(),
         image: ctx.image("vault"),
@@ -203,29 +211,28 @@ fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// The NAT network `net`. On Apple, one on a subnet other than `subnet` goes first, with
-/// container `on`, the one on it, so both are made anew.
+/// The NAT network `net`. On Apple, one on another subnet, or one whose subnet can't be read,
+/// goes first, with container `on`, the one on it, so both are made anew; `up` is the command
+/// that tries again.
 fn nat_network(
     ctx: &Ctx,
     net: &str,
     subnet: &str,
     labels: &[(String, String)],
     on: &str,
+    up: &str,
 ) -> Result<()> {
     let rt = &ctx.rt;
-    if rt.flavor == Flavor::Apple {
-        match rt.network_subnet(net) {
-            Some(s) if s == subnet => return Ok(()),
-            Some(_) => {
-                rt.remove_container(on)?;
-                if rt.network_exists(net) {
-                    rt.run(["network", "rm", net]).with_context(|| {
-                        format!("network `{net}` is on an old subnet: `container network rm {net}`")
-                    })?;
-                }
-            }
-            None => {}
+    if rt.flavor == Flavor::Apple
+        && let Some(old) = rt.network_subnet(net)
+    {
+        if old.as_deref() == Some(subnet) {
+            return Ok(());
         }
+        rt.remove_container(on)?;
+        rt.run(["network", "rm", net]).with_context(|| {
+            format!("network `{net}` didn't move to {subnet}: `{up}` tries again")
+        })?;
     }
     rt.create_bridge_network(net, subnet, labels)
 }
@@ -557,6 +564,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         &a.egress_subnet,
         &labels(env, "net"),
         &names::gate(env),
+        &format!("{} up -e {env}", names::instance()),
     )?;
     // The workspace is filled once per volume: the host remembers that it did, but a volume
     // created now (a new VM, a removed volume) starts empty whatever the host remembers.

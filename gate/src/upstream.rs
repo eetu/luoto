@@ -179,10 +179,11 @@ pub async fn dial_tcp_to(
     )))
 }
 
-/// Whether `ip` is refused before a dial. The gateway is this machine, even in luoto's own
-/// never-dialed range (Apple's NAT networks).
+/// Whether `ip` is refused before a dial. The gateway is this machine, even in 10.212.0.0/16,
+/// luoto's own never-dialed range that Apple's NAT networks take.
 fn refused(ip: IpAddr, gateway: bool, allow_private: bool) -> bool {
-    (!gateway && is_never_dialed(ip)) || (!allow_private && is_private(ip))
+    let nat = matches!(ip, IpAddr::V4(v4) if v4.octets()[..2] == [10, 212]);
+    (is_never_dialed(ip) && !(gateway && nat)) || (!allow_private && is_private(ip))
 }
 
 /// [`luoto_shared::THIS_MACHINE`]'s address from `LUOTO_HOST_GATEWAY`: an address, or `route`,
@@ -275,6 +276,8 @@ mod this_machine_tests {
         assert!(refused(gw, false, true));
         assert!(refused("10.212.0.2".parse().unwrap(), false, true));
         assert!(refused(gw, true, false));
+        assert!(refused("127.0.0.1".parse().unwrap(), true, true));
+        assert!(refused("169.254.169.254".parse().unwrap(), true, true));
     }
 
     #[test]

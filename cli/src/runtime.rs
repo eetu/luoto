@@ -754,10 +754,18 @@ impl Runtime {
             .map(|_| ())
     }
 
-    /// The subnet of Apple network `name`; None when it is missing or unreadable.
-    pub fn network_subnet(&self, name: &str) -> Option<String> {
+    /// Apple network `name`: None when it is missing, else its subnet, None when unreadable.
+    pub fn network_subnet(&self, name: &str) -> Option<Option<String>> {
         let out = self.run(["network", "inspect", name]).ok()?;
-        apple_subnets(&out).ok()?.into_iter().next().map(|(_, s)| s)
+        if json_array(&out).is_ok_and(|n| n.is_empty()) {
+            return None;
+        }
+        Some(
+            apple_subnets(&out)
+                .ok()
+                .and_then(|n| n.into_iter().next())
+                .map(|(_, s)| s),
+        )
     }
 
     /// On Apple, luoto's `subnet`: the Mac takes its first address.
