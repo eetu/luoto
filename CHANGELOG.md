@@ -9,6 +9,8 @@ release may break.
 
 ### Fixed
 
+- On Apple's `container`, your Mac could lose its own network (Wi-Fi dropped its address) while
+  the vault or an env ran: luoto's networks now take 10.212.0.0/16, and `up` moves older ones.
 - Agents took a GitHub GraphQL mutation the gate refused (`gh issue close --comment`) for a
   fixed limit: the denial and the sandbox's instructions name the REST route and
   `graphql_mutations`.

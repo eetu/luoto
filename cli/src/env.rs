@@ -152,13 +152,15 @@ const APPLE_VAULT_SOCKET: &str = "/run/luoto-vault/vault.sock";
 /// The vault from its image `image_id`, its egress network and its socket volume.
 fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
     let rt = &ctx.rt;
-    rt.create_bridge_network(&names::vault_out_net(), &labels("", "vault"))?;
     let apple = rt.flavor == Flavor::Apple;
+    let net = names::vault_out_net();
+    let subnet = names::vault_out_subnet();
+    nat_network(ctx, &net, &subnet, &labels("", "vault"), &names::vault())?;
     let mut spec = RunSpec {
         name: names::vault(),
         image: ctx.image("vault"),
         hostname: Some(names::vault()),
-        networks: vec![(names::vault_out_net(), None)],
+        networks: vec![(net, None)],
         env: vec![
             ("LUOTO_CTL_SOCKET".into(), "/run/luoto/ctl.sock".into()),
             ("LUOTO_VAULT_SOCKETS".into(), VAULT_SOCKETS.into()),
@@ -199,6 +201,33 @@ fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
     wait_until(Duration::from_secs(20), || ctl::vault_status(rt).ok())
         .context("vault did not come up")?;
     Ok(())
+}
+
+/// The NAT network `net`. On Apple, one on a subnet other than `subnet` goes first, with
+/// container `on`, the one on it, so both are made anew.
+fn nat_network(
+    ctx: &Ctx,
+    net: &str,
+    subnet: &str,
+    labels: &[(String, String)],
+    on: &str,
+) -> Result<()> {
+    let rt = &ctx.rt;
+    if rt.flavor == Flavor::Apple {
+        match rt.network_subnet(net) {
+            Some(s) if s == subnet => return Ok(()),
+            Some(_) => {
+                rt.remove_container(on)?;
+                if rt.network_exists(net) {
+                    rt.run(["network", "rm", net]).with_context(|| {
+                        format!("network `{net}` is on an old subnet: `container network rm {net}`")
+                    })?;
+                }
+            }
+            None => {}
+        }
+    }
+    rt.create_bridge_network(net, subnet, labels)
 }
 
 /// The network every gate shared with the vault before luoto 0.4.4, once the vault and the
@@ -522,7 +551,13 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             &labels(env, "net"),
         )?;
     }
-    rt.create_bridge_network(&names::egress_net(env), &labels(env, "net"))?;
+    nat_network(
+        ctx,
+        &names::egress_net(env),
+        &a.egress_subnet,
+        &labels(env, "net"),
+        &names::gate(env),
+    )?;
     // The workspace is filled once per volume: the host remembers that it did, but a volume
     // created now (a new VM, a removed volume) starts empty whatever the host remembers.
     let fresh_work = create_volume(ctx, env, "work")?;
