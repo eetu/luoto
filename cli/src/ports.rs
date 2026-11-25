@@ -343,6 +343,8 @@ mod tests {
 
     use super::*;
 
+    /// The loop runs in a Linux container: here, under a Unix host's `sh`.
+    #[cfg(unix)]
     #[test]
     fn a_listening_loop_ends_once_a_newer_one_started() {
         use std::process::{Command, Stdio};
