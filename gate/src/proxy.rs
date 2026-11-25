@@ -132,6 +132,7 @@ async fn connect(state: Arc<State>, slot: Slot, req: Request<Incoming>) -> Respo
                 return respond::deny(&state.cfg.env, "CONNECT", &url, &host, "", &reason);
             }
             Err(DialError::Failed(msg)) => {
+                tunnel_failed(&state, Intake::Proxy, &host, port, rule_id, &msg);
                 return respond::plain(StatusCode::BAD_GATEWAY, format!("{msg}\n"));
             }
         };
@@ -165,6 +166,29 @@ async fn connect(state: Arc<State>, slot: Slot, req: Request<Incoming>) -> Respo
         }
     });
     Response::new(empty())
+}
+
+/// A tunnel a rule allowed whose upstream couldn't be reached: logged as an allowed request
+/// that failed is, with 502.
+pub fn tunnel_failed(
+    state: &State,
+    intake: Intake,
+    host: &str,
+    port: u16,
+    rule_id: String,
+    msg: &str,
+) {
+    state.events.emit(Event {
+        kind: Some(EventKind::Tunnel),
+        intake: Some(intake),
+        verdict: Some(Verdict::Allow),
+        host: Some(host.to_string()),
+        port: Some(port),
+        rule: Some(rule_id),
+        status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+        message: Some(msg.to_string()),
+        ..Default::default()
+    });
 }
 
 /// Copy both ways between the client and the upstream a tunnel rule allowed, until either

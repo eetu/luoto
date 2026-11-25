@@ -7,6 +7,21 @@ release may break.
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-11-25
+
+### Added
+
+- A sandbox can ask for private access to a host on your network or VPN
+  (`sandbox request --private`): `luoto approve` asks about it apart, and the UI's switch starts on.
+
+### Fixed
+
+- On Apple's `container`, a rule with private access timed out on a public address your Mac
+  reaches over a VPN.
+- A client that connects straight to an address, such as a database client, was refused under a
+  tunnel rule for that address.
+- A tunnel that couldn't connect left nothing in the env's log.
+
 ## [0.7.3] - 2026-11-25
 
 ### Added
@@ -597,7 +612,8 @@ release may break.
 
 - First release.
 
-[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/eetu/luoto/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/eetu/luoto/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/eetu/luoto/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/eetu/luoto/compare/v0.7.0...v0.7.1

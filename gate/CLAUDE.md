@@ -11,7 +11,8 @@ sockets, then drops to uid 65534 (`system.rs`).
   IP named as the host (no SNI, `Host: <ip>`) is dialed only where the policy allows it. A connection
   whose name and port have a tunnel rule passes through unread before any byte is sniffed
   (any protocol, server-first ones and pinned TLS too; SSH under `[credentials.ssh]`, whose
-  login the vault signs).
+  login the vault signs); for a client that connected to an address itself (not a fake one),
+  a tunnel rule naming that address does the same, as CONNECT to it would.
 - `handler.rs` per-request pipeline shared by every intake: one canonical path
   (`host::canonical_path`: dot and empty segments and backslashes refused, unreserved escapes
   decoded), matched and forwarded alike; upper-case methods only (`canonical_request`, which
@@ -53,8 +54,8 @@ sockets, then drops to uid 65534 (`system.rs`).
   an unbound env. With `LUOTO_VAULT_UPLINK` (Apple) `uplink.rs` serves that socket itself,
   pairing each connection with an idle link the host opened to the uplink socket (both bound
   as root before the drop); with none within 8 s the call fails closed. With `LUOTO_HOST_DIAL`
-  (Apple) `hostdial.rs` dials a private address an `allow_private` rule allows
-  (`host::leaves_host`; not `private_only`) over a link the host opened to that socket: one
+  (Apple) `hostdial.rs` dials an address an `allow_private` rule allows, private or
+  public, since the Mac may route either over a VPN (`host::leaves_host`; not `private_only`) over a link the host opened to that socket: one
   line `dial <addr>`, one answer (`ok`, `refused` → dial it here, `failed`); no link in 8 s
   names the watcher.
 - `ctl.rs` unix socket; `state.rs` persists policy/CA/vault settings in the state volume so a

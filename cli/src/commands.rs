@@ -1470,8 +1470,13 @@ fn fmt_request(r: &AccessRequest) -> String {
             ),
         },
     };
+    let private = if r.private {
+        "\n   on your network or VPN: a private address, or one only a VPN reaches"
+    } else {
+        ""
+    };
     format!(
-        "{what}\n   reason (written by the sandbox, untrusted): {:?}",
+        "{what}{private}\n   reason (written by the sandbox, untrusted): {:?}",
         r.reason
     )
 }
@@ -1550,7 +1555,7 @@ pub fn requests(name: Option<&str>, follow: bool, json: bool) -> Result<ExitCode
 
 /// How `luoto approve` grants: its flags.
 pub struct Approval {
-    /// The rule reaches the host at a private address.
+    /// The rule reaches the host on the user's network or VPN.
     pub private: bool,
     /// Nothing asked.
     pub yes: bool,
@@ -1603,13 +1608,20 @@ pub fn approve(
     // Looked up only once approved, as the gate does: the name is the sandbox's, and a lookup
     // carries whatever it put in it. On a private address here, it is reached only if the
     // user says so.
-    let resolved = if private || req.install.is_some() {
+    let resolved = if private || req.private || req.install.is_some() {
         rules::Resolved::default()
     } else {
         rules::resolve(&req.host)
     };
     let at = resolved.private.join(", ");
-    if !at.is_empty() && !yes {
+    if req.private && !private {
+        // `--yes` approves as asked.
+        private = yes
+            || confirm(&format!(
+                "It asks to reach {} on your network or VPN. Let the rule reach it there?",
+                crate::text::display(&req.host)
+            ));
+    } else if !at.is_empty() && !yes {
         private = confirm(&format!(
             "{} resolves to {at}, a private address (your network or a VPN). Let the rule reach \
              it?",
@@ -1622,8 +1634,13 @@ pub fn approve(
         rules::Approved::Installed { installed } => out_text!("{installed}"),
         rules::Approved::Rule(rule) => {
             head!(
-                "approved: {}{}",
+                "approved: {}{}{}",
                 rules::describe(&rule),
+                if rule.allow_private {
+                    ", on your network or VPN"
+                } else {
+                    ""
+                },
                 rule.expires
                     .map(|e| format!(", until {}", egress::at_text(e)))
                     .unwrap_or_default()
@@ -2255,6 +2272,7 @@ mod tests {
             port: None,
             access: luoto_shared::policy::AccessLevel::Read,
             paths: vec![],
+            private: false,
             reason: "to install packages".into(),
             status: RequestStatus::Pending,
             created: chrono::Utc::now(),

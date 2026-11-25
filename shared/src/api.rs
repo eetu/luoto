@@ -99,6 +99,9 @@ pub struct NewAccessRequest {
     pub access: AccessLevel,
     #[serde(default)]
     pub paths: Vec<String>,
+    /// The host is on the user's network or VPN: the rule asked for reaches it there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private: bool,
     pub reason: String,
     /// Software to install; `host` is then empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -241,6 +244,9 @@ pub struct AccessRequest {
     pub access: AccessLevel,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+    /// Asks to reach the host on the user's network or VPN (a rule's `allow_private`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private: bool,
     /// Written by code in the sandbox — untrusted text, display escaped.
     pub reason: String,
     pub status: RequestStatus,
@@ -259,13 +265,15 @@ pub const MAX_PENDING_REQUESTS: usize = 5;
 pub const MAX_REASON_LEN: usize = 500;
 
 /// The rule a request for `host` asks for, or why the sandbox may not ask for it: a host or a
-/// wildcard the sandbox may name, never an address range or a private address; with `port`, an
-/// uninspected tunnel to that one host and port, which HTTP(S)'s 80 and 443 never get.
+/// wildcard the sandbox may name, never an address range, and a private address only in a
+/// plain private range and as `private`; with `port`, an uninspected tunnel to that one host
+/// and port, which HTTP(S)'s 80 and 443 never get. The rule leaves `allow_private` to the user.
 pub fn requested_rule(
     host: &str,
     port: Option<u16>,
     access: AccessLevel,
     paths: &[String],
+    private: bool,
 ) -> Result<Rule, String> {
     let host = host.trim();
     let host = match host.strip_prefix("*.") {
@@ -277,10 +285,17 @@ pub fn requested_rule(
         if host.starts_with("*.") {
             return Err(format!("`{host}` is not a host pattern"));
         }
-        if is_private(ip) || is_never_dialed(ip) {
-            return Err(format!(
-                "{ip} is a private address, which the sandbox may not ask for"
-            ));
+        // On the user's network: RFC 1918, CGNAT or unique-local, never loopback or the like.
+        let plain = crate::host::leaves_host(ip);
+        if (is_private(ip) || is_never_dialed(ip)) && !(private && plain) {
+            return Err(if plain {
+                format!(
+                    "{ip} is a private address: ask for it with private access if it is on the \
+                     user's network or VPN"
+                )
+            } else {
+                format!("{ip} is an address the sandbox may not ask for")
+            });
         }
     }
     let rule = match port {
@@ -342,7 +357,13 @@ impl AccessRequest {
                 self.id
             ));
         }
-        requested_rule(&self.host, self.port, self.access, &self.paths)
+        requested_rule(
+            &self.host,
+            self.port,
+            self.access,
+            &self.paths,
+            self.private,
+        )
     }
 
     /// The rule granting the request, narrowed by `n`; refused if `n` would grant anything
@@ -416,6 +437,7 @@ mod tests {
             port,
             access,
             paths: paths.iter().map(|p| p.to_string()).collect(),
+            private: false,
             reason: "r".into(),
             status: RequestStatus::Pending,
             created: Utc::now(),
@@ -427,7 +449,8 @@ mod tests {
 
     #[test]
     fn a_port_request_is_a_tunnel_to_one_public_host() {
-        let r = requested_rule("DB.Example.com", Some(5432), AccessLevel::Read, &[]).unwrap();
+        let r =
+            requested_rule("DB.Example.com", Some(5432), AccessLevel::Read, &[], false).unwrap();
         assert_eq!(
             (r.host.as_str(), r.port, r.mode, r.access),
             (
@@ -452,18 +475,39 @@ mod tests {
             ("user@db.example.com", 5432, &[][..]),
         ] {
             assert!(
-                requested_rule(host, Some(port), AccessLevel::Write, paths).is_err(),
+                requested_rule(host, Some(port), AccessLevel::Write, paths, false).is_err(),
                 "{host}:{port} {paths:?}"
             );
         }
-        assert!(requested_rule("203.0.113.9", Some(5432), AccessLevel::Write, &[]).is_err());
-        assert!(requested_rule("8.8.8.8", Some(5432), AccessLevel::Write, &[]).is_ok());
+        assert!(requested_rule("203.0.113.9", Some(5432), AccessLevel::Write, &[], false).is_err());
+        assert!(requested_rule("8.8.8.8", Some(5432), AccessLevel::Write, &[], false).is_ok());
+    }
+
+    #[test]
+    fn a_private_address_is_asked_for_only_with_private_access() {
+        let ask = |host: &str, private: bool| {
+            requested_rule(host, Some(6443), AccessLevel::Write, &[], private)
+        };
+        for host in ["10.10.0.8", "192.168.1.20", "100.64.0.9", "[fd12::8]"] {
+            assert!(ask(host, false).is_err(), "{host}");
+            let rule = ask(host, true).unwrap();
+            assert!(!rule.allow_private, "{host}: the user's to give");
+        }
+        for host in [
+            "127.0.0.1",
+            "169.254.169.254",
+            "169.254.1.2",
+            "10.212.0.5",
+            "192.0.2.1",
+        ] {
+            assert!(ask(host, true).is_err(), "{host}");
+        }
     }
 
     #[test]
     fn host_requests_keep_their_checks() {
-        assert!(requested_rule("docs.rs", None, AccessLevel::Read, &[]).is_ok());
-        assert!(requested_rule("*.mycompany.dev", None, AccessLevel::Read, &[]).is_ok());
+        assert!(requested_rule("docs.rs", None, AccessLevel::Read, &[], false).is_ok());
+        assert!(requested_rule("*.mycompany.dev", None, AccessLevel::Read, &[], false).is_ok());
         for host in [
             "*",
             "*.github.io",
@@ -472,12 +516,12 @@ mod tests {
             "192.168.1.1",
         ] {
             assert!(
-                requested_rule(host, None, AccessLevel::Read, &[]).is_err(),
+                requested_rule(host, None, AccessLevel::Read, &[], false).is_err(),
                 "{host}"
             );
         }
         let bad_path = ["v1/**".to_string()];
-        assert!(requested_rule("docs.rs", None, AccessLevel::Read, &bad_path).is_err());
+        assert!(requested_rule("docs.rs", None, AccessLevel::Read, &bad_path, false).is_err());
     }
 
     #[test]

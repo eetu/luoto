@@ -54,25 +54,29 @@ enum Cmd {
         target: Option<String>,
         /// A system package (apt, apk or dnf) the env should have; approved, it is installed
         /// now and again whenever the container is recreated.
-        #[arg(long, conflicts_with_all = ["target", "tool", "write", "paths"])]
+        #[arg(long, conflicts_with_all = ["target", "tool", "write", "private", "paths"])]
         package: Option<String>,
         /// A toolchain mise installs, as TOOL@VERSION (`node@24`, `cargo:ripgrep@latest`),
         /// kept in the env's config like a package.
-        #[arg(long, value_name = "TOOL@VERSION", conflicts_with_all = ["target", "write", "paths"])]
+        #[arg(long, value_name = "TOOL@VERSION", conflicts_with_all = ["target", "write", "private", "paths"])]
         tool: Option<String>,
         /// One of luoto's presets (`npm`, `pypi`, …) for a registry or service, instead of its
         /// hosts one by one.
-        #[arg(long, conflicts_with_all = ["target", "package", "tool", "write", "paths"])]
+        #[arg(long, conflicts_with_all = ["target", "package", "tool", "write", "private", "paths"])]
         preset: Option<String>,
         /// An environment variable with a plain value the code needs (`RUST_LOG`): the user
         /// gives or accepts its value on the host, and new shells here get it. `NAME=value`
         /// suggests the value, which the user sees filled in. Not for a secret: the user adds
         /// one on the host (`luoto var set NAME`).
-        #[arg(long, value_name = "NAME[=VALUE]", conflicts_with_all = ["target", "package", "tool", "preset", "write", "paths"])]
+        #[arg(long, value_name = "NAME[=VALUE]", conflicts_with_all = ["target", "package", "tool", "preset", "write", "private", "paths"])]
         var: Option<String>,
         /// Ask for write access (any method) instead of read-only.
         #[arg(long)]
         write: bool,
+        /// The host is on the user's network or VPN (a private address, or one only a VPN
+        /// reaches): ask for a rule that reaches it there.
+        #[arg(long)]
+        private: bool,
         /// Restrict to path globs (`/serde/**`).
         #[arg(long = "path")]
         paths: Vec<String>,
@@ -147,6 +151,7 @@ fn main() -> ExitCode {
             preset,
             var,
             write,
+            private,
             paths,
             reason,
             wait,
@@ -172,6 +177,7 @@ fn main() -> ExitCode {
                 target.as_deref(),
                 install,
                 write,
+                private,
                 paths,
                 &reason,
                 wait.then(|| Duration::from_secs(timeout)),
@@ -360,6 +366,15 @@ fn approve_hint(env: &str, id: u64) -> String {
 
 /// What a request asks for, for people.
 fn what(r: &AccessRequest) -> String {
+    let asked = asked_for(r);
+    if r.private {
+        format!("{asked} on the user's network or VPN")
+    } else {
+        asked
+    }
+}
+
+fn asked_for(r: &AccessRequest) -> String {
     match (&r.install, r.port) {
         (Some(i @ (Install::Preset { .. } | Install::Var { .. })), _) => i.describe(),
         (Some(i), _) => format!("install {}", i.describe()),
@@ -416,6 +431,7 @@ pub fn request_access(
     host: &str,
     port: Option<u16>,
     write: bool,
+    private: bool,
     paths: Vec<String>,
     reason: &str,
     wait: Option<Duration>,
@@ -430,6 +446,7 @@ pub fn request_access(
                 AccessLevel::Read
             },
             paths,
+            private,
             reason: reason.to_string(),
             install: None,
         },
@@ -445,6 +462,7 @@ pub fn request_install(install: Install, reason: &str, wait: Option<Duration>) -
             port: None,
             access: AccessLevel::Read,
             paths: Vec::new(),
+            private: false,
             reason: reason.to_string(),
             install: Some(install),
         },
@@ -551,6 +569,7 @@ fn request(
     target: Option<&str>,
     install: Option<Install>,
     write: bool,
+    private: bool,
     paths: Vec<String>,
     reason: &str,
     wait: Option<Duration>,
@@ -559,7 +578,7 @@ fn request(
         (Some(i), _) => request_install(i, reason, wait)?,
         (None, Some(t)) => {
             let (host, port) = parse_target(t)?;
-            request_access(&host, port, write, paths, reason, wait)?
+            request_access(&host, port, write, private, paths, reason, wait)?
         }
         (None, None) => {
             anyhow::bail!("name a host, --preset, --package, --tool or --var")
@@ -658,6 +677,7 @@ mod tests {
             port: Some(5432),
             access: AccessLevel::Write,
             paths: vec![],
+            private: false,
             reason: "migrations".into(),
             status: RequestStatus::Approved,
             created: Default::default(),
@@ -666,6 +686,14 @@ mod tests {
             install: None,
         };
         assert_eq!(what(&r), "a tunnel to db.example.com:5432");
+        let private = AccessRequest {
+            private: true,
+            ..r.clone()
+        };
+        assert_eq!(
+            what(&private),
+            "a tunnel to db.example.com:5432 on the user's network or VPN"
+        );
         let said = describe(&Outcome {
             request: r,
             waited: None,

@@ -89,9 +89,9 @@ few connections open to a socket the gate publishes and joins each, when the gat
 the vault's published socket under the env's name. luoto picks the NAT networks' subnets in
 10.212.0.0/16 (the vault's is 10.212.0.0/24): your Mac takes each network's first address, and
 `container` would pick from 192.168.64.0/24 on, where your Mac's own network can be.
-Connections a rule allows to a private address (`luoto allow --private`) leave from your Mac
-the same way, through the watcher, so hosts behind a VPN on your Mac connect whenever it is
-up. What doesn't run there is under Limits in the [README](../README.md#limits).
+Connections under a rule with private access (`luoto allow --private`) leave from your Mac
+the same way, through the watcher, public addresses too, so hosts behind a VPN on your Mac
+connect whenever it is up. What doesn't run there is under Limits in the [README](../README.md#limits).
 
 With podman and Docker, each gate mounts one folder of the vault's socket volume, its env's,
 and asks the vault over the socket in it; gates share no network with each other or the vault.

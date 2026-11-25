@@ -545,12 +545,19 @@ async fn a_private_address_a_rule_allows_is_dialed_from_the_host() {
         "10.99.0.2:443".parse().unwrap(),
         "10.99.0.3:8080".parse().unwrap(),
     );
+    // A public address the Mac may route over a VPN.
+    let vpn: SocketAddr = "8.8.8.8:8443".parse().unwrap();
     let env = Env::start_host_dial(&[
         ("kb.test", kb),
         ("tunnel.test", tunnel),
         ("closed.test", closed),
+        ("vpn.test", vpn),
     ]);
-    let asked = env.dial_from_host(&[(kb, *upstream.address()), (tunnel, echo_server())]);
+    let asked = env.dial_from_host(&[
+        (kb, *upstream.address()),
+        (tunnel, echo_server()),
+        (vpn, *upstream.address()),
+    ]);
     let private = |mut r: CompiledRule| {
         r.rule.allow_private = true;
         r
@@ -562,6 +569,7 @@ async fn a_private_address_a_rule_allows_is_dialed_from_the_host() {
         rules: vec![
             private(read("kb", "kb.test")),
             tunnel_rule,
+            private(read("vpn", "vpn.test")),
             // No `allow_private`: dialed from the gate, never asked of the host.
             read("closed", "closed.test"),
         ],
@@ -570,6 +578,7 @@ async fn a_private_address_a_rule_allows_is_dialed_from_the_host() {
 
     assert_eq!(env.get("http://kb.test/ok").status, 200);
     open_tunnel(&env);
+    assert_eq!(env.get("http://vpn.test/ok").status, 200);
     // The gate dials this one itself, where nothing answers: the path is chosen before.
     let port = env.gate_port;
     std::thread::spawn(move || {
@@ -581,7 +590,11 @@ async fn a_private_address_a_rule_allows_is_dialed_from_the_host() {
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(
         *asked.lock().unwrap(),
-        ["dial 10.99.0.1:8080", "dial 10.99.0.2:443"]
+        [
+            "dial 10.99.0.1:8080",
+            "dial 10.99.0.2:443",
+            "dial 8.8.8.8:8443"
+        ]
     );
 }
 
@@ -1582,6 +1595,36 @@ async fn a_tunnel_closes_once_its_rule_is_revoked() {
         "closed after {:?}",
         revoked.elapsed()
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn a_tunnel_rule_for_an_address_admits_a_direct_connection_to_it() {
+    let transparent = free_port();
+    let redirect = format!("127.0.0.1:{transparent}=10.99.0.5:5432");
+    let env = Env::start_with(
+        &[("10.99.0.5", echo_server())],
+        &[("LUOTO_TEST_TRANSPARENT", &redirect)],
+    );
+    let echoes = || {
+        let mut s = TcpStream::connect(("127.0.0.1", transparent)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        s.write_all(b"ping").unwrap();
+        let mut echo = [0u8; 4];
+        s.read_exact(&mut echo).is_ok_and(|()| &echo == b"ping")
+    };
+    // A database client ignores the proxy: without the rule, its bytes are refused.
+    assert!(!echoes());
+    let mut tunnel = read("db", "10.99.0.5");
+    tunnel.rule.access = Access::Level(AccessLevel::Write);
+    tunnel.rule.mode = Mode::Tunnel;
+    tunnel.rule.port = Some(5432);
+    tunnel.rule.allow_private = true;
+    env.apply(Policy {
+        rules: vec![tunnel],
+        ..Default::default()
+    });
+    assert!(echoes());
 }
 
 /// A tunnel to `tunnel.test:443` through the proxy, checked to echo.

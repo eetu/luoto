@@ -59,6 +59,7 @@ fn tools() -> Value {
                     "port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Only for a protocol other than HTTP(S): its port, never 80 or 443"},
                     "preset": {"type": "string", "description": "Instead of a host, one of luoto's presets for a registry or service: npm, pypi, crates, go, maven, …"},
                     "access": {"type": "string", "enum": ["read", "write"], "default": "read"},
+                    "private": {"type": "boolean", "default": false, "description": "The host is on the user's network or VPN (a private address, or one only a VPN reaches): ask for a rule that reaches it there"},
                     "paths": {"type": "array", "items": {"type": "string"}, "description": "Optional path globs, e.g. /serde/**"},
                     "reason": {"type": "string", "description": "Why this is needed, shown to the user"},
                     "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 900, "default": 0, "description": "Wait this long for the user's decision"}
@@ -139,6 +140,7 @@ fn call(name: &str, args: &Value) -> Value {
                 });
             }
             let write = args["access"].as_str() == Some("write");
+            let private = args["private"].as_bool().unwrap_or(false);
             let paths = args["paths"]
                 .as_array()
                 .map(|a| {
@@ -164,7 +166,7 @@ fn call(name: &str, args: &Value) -> Value {
                 }
             };
             Ok(
-                match request_access(&host, port, write, paths, reason, wait) {
+                match request_access(&host, port, write, private, paths, reason, wait) {
                     Ok(o) => text(describe(&o), false),
                     Err(e) => text(format!("request refused: {e:#}"), true),
                 },

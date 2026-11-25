@@ -29,6 +29,9 @@ impl Requests {
     pub fn create(&mut self, new: NewAccessRequest) -> Result<AccessRequest, String> {
         if let Some(install) = &new.install {
             install.check()?;
+            if new.private {
+                return Err("an install has no host to reach on the user's network".into());
+            }
             let reason = clean_reason(&new.reason);
             if reason.is_empty() {
                 return Err("a reason is required".into());
@@ -46,6 +49,7 @@ impl Requests {
                 port: None,
                 access: AccessLevel::Read,
                 paths: Vec::new(),
+                private: false,
                 reason,
                 status: RequestStatus::Pending,
                 created: Utc::now(),
@@ -54,7 +58,7 @@ impl Requests {
                 install: Some(install.clone()),
             });
         }
-        let rule = requested_rule(&new.host, new.port, new.access, &new.paths)?;
+        let rule = requested_rule(&new.host, new.port, new.access, &new.paths, new.private)?;
         let access = match rule.access {
             Access::Level(level) => level,
             Access::Methods(_) => new.access,
@@ -68,6 +72,7 @@ impl Requests {
                 && r.host == rule.host
                 && r.port == rule.port
                 && r.access == access
+                && r.private == new.private
         }) {
             return Ok(existing.clone());
         }
@@ -77,6 +82,7 @@ impl Requests {
             port: rule.port,
             access,
             paths: rule.paths,
+            private: new.private,
             reason,
             status: RequestStatus::Pending,
             created: Utc::now(),
@@ -156,6 +162,7 @@ mod tests {
             port: None,
             access: AccessLevel::Read,
             paths: vec![],
+            private: false,
             reason: "read the docs\n\u{1b}[31m".into(),
             install: None,
         }
@@ -195,6 +202,34 @@ mod tests {
     }
 
     #[test]
+    fn a_request_for_private_access_is_its_own() {
+        let mut r = Requests::default();
+        let private = |host: &str| NewAccessRequest {
+            port: Some(6443),
+            private: true,
+            ..new(host)
+        };
+        let plain = r
+            .create(NewAccessRequest {
+                port: Some(6443),
+                ..new("k8s.example")
+            })
+            .unwrap();
+        let asked = r.create(private("k8s.example")).unwrap();
+        assert!(asked.private && !plain.private);
+        assert_ne!(asked.id, plain.id);
+        assert_eq!(r.create(private("k8s.example")).unwrap().id, asked.id);
+        assert!(r.create(private("10.10.0.8")).unwrap().private);
+        let install = NewAccessRequest {
+            host: String::new(),
+            private: true,
+            install: Some(Install::Package { name: "jq".into() }),
+            ..new("")
+        };
+        assert!(r.create(install).is_err());
+    }
+
+    #[test]
     fn creates_dedups_and_limits() {
         let mut r = Requests::default();
         let a = r.create(new("Docs.rs")).unwrap();
@@ -219,6 +254,7 @@ mod tests {
             port: None,
             access: AccessLevel::Read,
             paths: vec![],
+            private: false,
             reason: "psql for the migrations".into(),
             install: Some(install),
         };

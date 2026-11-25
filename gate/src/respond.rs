@@ -101,9 +101,8 @@ fn fix(env: &str, method: &str, url: &str, host: &str, path: &str, reason: &Deny
             };
             let request = asked.map_or_else(String::new, |a| {
                 format!(
-                    "\nFrom inside the sandbox, request it, saying it is on the user's network or \
-                     VPN, for them to approve with private access:\n  \
-                     sandbox request {a} --reason \"<why; on your network or VPN>\""
+                    "\nFrom inside the sandbox, request it with private access:\n  \
+                     sandbox request {a} --private --reason \"<why; on your network or VPN>\""
                 )
             });
             format!(
@@ -158,7 +157,7 @@ mod tests {
             "{http}"
         );
         assert!(
-            http.contains("sandbox request k8s.internal --reason"),
+            http.contains("sandbox request k8s.internal --private --reason"),
             "{http}"
         );
         let tunnel = fix(
@@ -174,7 +173,7 @@ mod tests {
             "{tunnel}"
         );
         assert!(
-            tunnel.contains("sandbox request k8s.internal:7443 --reason"),
+            tunnel.contains("sandbox request k8s.internal:7443 --private --reason"),
             "{tunnel}"
         );
         // A tunnel on 443 only the user grants: the sandbox can't ask for one.

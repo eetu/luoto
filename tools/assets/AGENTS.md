@@ -144,7 +144,8 @@ the merge request.
    `luoto-sandbox` MCP server) to see the policy and recent denials, and read the 403's
    text: a fixed guard rail no request lifts, a locked vault needs the user's
    `luoto vault unlock`, and a host on a private address (the user's network, a VPN, their
-   machine) needs a rule that reaches it: the text names it.
+   machine) needs a rule that reaches it: the text names it. A connection that times out to a
+   host only the user's VPN reaches needs the same, even at a public address.
 2. If access is genuinely needed for the task, request it. Never try to work around the gate
    with other proxies, raw sockets, DNS tricks, mirrors or alternative hosts.
 
@@ -157,15 +158,16 @@ the merge request.
    uninspected tunnel: clients connect to the host and port as they are. So is a TLS
    service whose client checks the server against its own CA, such as a Kubernetes API from a
    kubeconfig: the gate's inspection shows its own certificate, which that client refuses.
-   A host on the user's network or VPN is reached only when the user approves with private
-   access: say so in the reason (`--reason "kubectl to the cluster API, on your VPN"`). The
-   sandbox can't ask for a tunnel on port 80 or 443: give the user the command instead,
+   A host only the user's network or VPN reaches (a private address, an internal name, a
+   public address their VPN routes) needs private access, which the user grants or not:
+   `sandbox request 10.0.0.8:6443 --private --reason "kubectl to the API, on your VPN" --wait`.
+   The sandbox can't ask for a tunnel on port 80 or 443: give the user the command instead,
    `luoto allow -e <env> <host> --port 443 --tunnel --private`.
 
 3. Tell the user what you requested and why. They approve it on the host with
-   `luoto approve -e <env> <id>` (`--private` for a host on their network) or in `luoto ui`,
-   possibly for less than you asked (read instead of write, fewer paths; the approval's note
-   says), or grant it directly, optionally time-boxed:
+   `luoto approve -e <env> <id>` or in `luoto ui`, possibly for less than you asked (read
+   instead of write, fewer paths, not on their network; the approval's note says), or grant
+   it directly, optionally time-boxed:
    `luoto allow -e <env> <host> [--write] [--for 1h]`.
 4. Ask for the narrowest access that works: read over write, one exact host over a wildcard,
    every path in one request (`--path` repeats). For one-off research such as reading API

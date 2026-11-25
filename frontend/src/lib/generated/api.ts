@@ -17,6 +17,8 @@ export type AccessRequest = {
   port?: number;
   access: AccessLevel;
   paths?: string[];
+  /** Asks to reach the host on the user's network or VPN (a rule's `allow_private`). */
+  private?: boolean;
   /** Written by code in the sandbox — untrusted text, display escaped. */
   reason: string;
   status: RequestStatus;
@@ -85,7 +87,10 @@ export type Decision = {
   ttl?: string | null;
   /** Less than the request asked for. */
   narrow?: Narrowing;
-  /** The rule reaches the host at a private address (the user's network, a VPN). */
+  /**
+   * The rule reaches the host on the user's network or VPN: the UI's switch, which starts as
+   * the request asked.
+   */
   private?: boolean;
   force?: boolean;
   /** A variable request's answer: its plain value. */

@@ -82,9 +82,7 @@
             ? "busy"
             : r.install
               ? undefined
-              : r.port
-                ? "tunnel, 1 h"
-                : `${r.access}, 1 h`,
+              : `${r.port ? "tunnel" : r.access}${r.private ? ", your network" : ""}, 1 h`,
       },
       {
         label: "Reject",
@@ -160,11 +158,16 @@
             >
           {:else if r.port}
             <span
-              >an uninspected tunnel to <b>{requestTarget(r)}</b> requested from inside the sandbox</span
+              >an uninspected tunnel to <b>{requestTarget(r)}</b>{r.private
+                ? " on your network or VPN"
+                : ""} requested from inside the sandbox</span
             >
           {:else}
             <span
-              ><b>{r.access}</b> access to <b>{r.host}</b> requested from inside the sandbox</span
+              ><b>{r.access}</b> access to <b>{r.host}</b>{r.private
+                ? " on your network or VPN"
+                : ""}
+              requested from inside the sandbox</span
             >
           {/if}
           <span class="muted">#{r.id}, {ago(r.created)}: review</span>
