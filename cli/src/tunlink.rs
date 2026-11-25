@@ -1,21 +1,44 @@
 //! The host's part of an env without a network card (Apple): join the dev's published tun
-//! socket to the gate's, byte for byte, and the gate's vault uplinks to the vault's socket. It
-//! never reads what it carries; when either side drops, both are closed (the dev is cut off)
-//! and joined again once both accept.
+//! socket to the gate's, a packet at a time, and the gate's vault uplinks to the vault's
+//! socket, byte for byte. Of what it carries it reads only the tun link's frame lengths; when
+//! either side drops, both are closed (the dev is cut off) and joined again once both accept.
+//!
+//! Each side is read whatever the other does. A VM serves its published sockets, `exec`
+//! streams and its own agent from one vsock device, which stalls whole, a vCPU with it, while
+//! one write waits for a reader on this Mac: a join that stopped reading one VM while it
+//! waited on the other froze both, each waiting on the other through it. What a side isn't
+//! taking is held up to [`HELD`]; past that the tun link drops whole packets, as a wire does,
+//! and an uplink ends.
 
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-/// How often a blocked read looks at the stop flag.
+use luoto_shared::frame;
+
+/// How often a blocked read or write looks at the stop flag.
 const POLL: Duration = Duration::from_millis(200);
 const BACKOFF_MIN: Duration = Duration::from_millis(100);
 const BACKOFF_MAX: Duration = Duration::from_secs(2);
+/// What one direction holds for a side that isn't reading.
+pub const HELD: usize = 4 << 20;
+/// How long a stream's last bytes may take to go once its sender closed.
+const FLUSH: Duration = Duration::from_secs(10);
+
+/// What a direction does with what it read once [`HELD`] is full.
+#[derive(Clone, Copy, PartialEq)]
+enum Full {
+    /// Drop it, in whole packets: the tun link carries IP, whose senders send again.
+    Drop,
+    /// End the connection: a byte stream can't lose bytes.
+    End,
+}
 
 /// A splice running on its own thread until stopped or dropped.
 pub struct Link {
@@ -54,7 +77,7 @@ pub fn run(a: &Path, b: &Path, stop: &AtomicBool) {
     let mut backoff = BACKOFF_MIN;
     while !stop.load(Ordering::Relaxed) {
         let carried = match connect(a, b) {
-            Ok((x, y)) => splice(x, y, stop),
+            Ok((x, y)) => splice(x, y, Full::Drop, stop),
             Err(_) => false,
         };
         if carried {
@@ -71,49 +94,195 @@ fn connect(a: &Path, b: &Path) -> io::Result<(UnixStream, UnixStream)> {
     let x = UnixStream::connect(a)?;
     let y = UnixStream::connect(b)?;
     for s in [&x, &y] {
-        s.set_read_timeout(Some(POLL))?;
+        polled(s)?;
     }
     Ok((x, y))
 }
 
+/// Reads and writes on `s` wake every [`POLL`] to look at the stop flags.
+fn polled(s: &UnixStream) -> io::Result<()> {
+    s.set_read_timeout(Some(POLL))?;
+    s.set_write_timeout(Some(POLL))
+}
+
+fn waited(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+    )
+}
+
 /// Whether any byte went either way.
-fn splice(x: UnixStream, y: UnixStream, stop: &AtomicBool) -> bool {
+fn splice(x: UnixStream, y: UnixStream, full: Full, stop: &AtomicBool) -> bool {
     let ended = AtomicBool::new(false);
     std::thread::scope(|s| {
-        let there = s.spawn(|| copy(&x, &y, stop, &ended));
-        let back = copy(&y, &x, stop, &ended);
+        let there = s.spawn(|| pump(&x, &y, full, stop, &ended));
+        let back = pump(&y, &x, full, stop, &ended);
         there.join().unwrap_or(false) || back
     })
 }
 
-/// Copy `from` to `to` until either ends or `stop` is set; then shut both, which ends the
-/// copy the other way too. Whether any byte went.
-fn copy(mut from: &UnixStream, mut to: &UnixStream, stop: &AtomicBool, ended: &AtomicBool) -> bool {
-    let mut buf = vec![0u8; 256 * 1024];
-    let mut carried = false;
-    while !stop.load(Ordering::Relaxed) && !ended.load(Ordering::Relaxed) {
-        match from.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                carried = true;
-                if to.write_all(&buf[..n]).is_err() {
+/// Carry `from` to `to` until either ends or `stop` is set; then shut both, which ends the
+/// other way too. `from` is read on this thread and `to` written on another, so a `to` that
+/// isn't reading never holds `from` up. Whether any byte went.
+fn pump(
+    from: &UnixStream,
+    to: &UnixStream,
+    full: Full,
+    stop: &AtomicBool,
+    ended: &AtomicBool,
+) -> bool {
+    let held = &Held::default();
+    let (written, all_written) = std::sync::mpsc::channel::<()>();
+    let carried = std::thread::scope(|s| {
+        s.spawn(move || {
+            while let Some(chunk) = held.pop(stop, ended) {
+                if write_out(to, &chunk, stop, ended).is_err() {
+                    ended.store(true, Ordering::Relaxed);
                     break;
                 }
             }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock
-                        | io::ErrorKind::TimedOut
-                        | io::ErrorKind::Interrupted
-                ) => {}
-            Err(_) => break,
+            let _ = written.send(());
+        });
+        let (carried, closed) = fill(from, held, full, stop, ended);
+        held.finish();
+        // A stream's last bytes still go, for a while: a reply read just before its sender
+        // closed. Packets left over are dropped with the link.
+        if closed && full == Full::End {
+            let _ = all_written.recv_timeout(FLUSH);
         }
-    }
-    ended.store(true, Ordering::Relaxed);
+        ended.store(true, Ordering::Relaxed);
+        carried
+    });
     let _ = from.shutdown(Shutdown::Both);
     let _ = to.shutdown(Shutdown::Both);
     carried
+}
+
+/// Read `from` into `held` until it ends, `stop` or `ended` is set, or (with [`Full::End`])
+/// `held` is full. Whether any byte came, and whether `from` ended.
+fn fill(
+    mut from: &UnixStream,
+    held: &Held,
+    full: Full,
+    stop: &AtomicBool,
+    ended: &AtomicBool,
+) -> (bool, bool) {
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut packets = (full == Full::Drop).then(|| frame::Decoder::new(frame::MAX_FRAME));
+    let mut carried = false;
+    while !stop.load(Ordering::Relaxed) && !ended.load(Ordering::Relaxed) {
+        let n = match from.read(&mut buf) {
+            Ok(0) => return (carried, true),
+            Ok(n) => n,
+            Err(e) if waited(&e) => continue,
+            Err(_) => break,
+        };
+        carried = true;
+        let chunk = match &mut packets {
+            None => buf[..n].to_vec(),
+            Some(d) => {
+                d.push(&buf[..n]);
+                // A stream out of step: end it, as the tun's own ends do.
+                let Ok(whole) = whole_packets(d) else { break };
+                whole
+            }
+        };
+        if !chunk.is_empty() && !held.push(chunk) && full == Full::End {
+            break;
+        }
+    }
+    (carried, false)
+}
+
+/// The whole packets `d` holds, framed as they came.
+fn whole_packets(d: &mut frame::Decoder) -> Result<Vec<u8>, frame::FrameError> {
+    let mut out = Vec::new();
+    while let Some(p) = d.next_frame()? {
+        frame::encode(p, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// Write all of `data` to `to`, giving up once `stop` or `ended` is set.
+fn write_out(
+    mut to: &UnixStream,
+    mut data: &[u8],
+    stop: &AtomicBool,
+    ended: &AtomicBool,
+) -> io::Result<()> {
+    while !data.is_empty() {
+        if stop.load(Ordering::Relaxed) || ended.load(Ordering::Relaxed) {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        match to.write(data) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => data = &data[n..],
+            Err(e) if waited(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// What one direction read and hasn't written yet, up to [`HELD`] bytes.
+#[derive(Default)]
+struct Held {
+    chunks: Mutex<Chunks>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct Chunks {
+    queue: VecDeque<Vec<u8>>,
+    bytes: usize,
+    finished: bool,
+}
+
+impl Held {
+    fn lock(&self) -> MutexGuard<'_, Chunks> {
+        self.chunks.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Hold `chunk`, unless that would pass [`HELD`]: then it is dropped, and false.
+    fn push(&self, chunk: Vec<u8>) -> bool {
+        let mut c = self.lock();
+        if c.bytes + chunk.len() > HELD {
+            return false;
+        }
+        c.bytes += chunk.len();
+        c.queue.push_back(chunk);
+        self.ready.notify_one();
+        true
+    }
+
+    /// No more chunks come: [`pop`](Self::pop) ends once what is held is taken.
+    fn finish(&self) {
+        self.lock().finished = true;
+        self.ready.notify_one();
+    }
+
+    /// The next chunk to write; None once finished and empty, or when `stop` or `ended` is set.
+    fn pop(&self, stop: &AtomicBool, ended: &AtomicBool) -> Option<Vec<u8>> {
+        let mut c = self.lock();
+        loop {
+            if stop.load(Ordering::Relaxed) || ended.load(Ordering::Relaxed) {
+                return None;
+            }
+            if let Some(chunk) = c.queue.pop_front() {
+                c.bytes -= chunk.len();
+                return Some(chunk);
+            }
+            if c.finished {
+                return None;
+            }
+            c = self
+                .ready
+                .wait_timeout(c, POLL)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
 }
 
 /// The links of one env's gate to the vault on Apple: [`UPLINKS`] at a time open to the gate's
@@ -167,7 +336,7 @@ fn uplink(gate: &Path, vault: &Path, env: &str, stop: &AtomicBool) {
 /// Wait for the gate's first bytes on `g`, then join it to the vault, after the env's line.
 /// Whether the gate wrote on it.
 fn join_to_vault(g: UnixStream, vault: &Path, env: &str, stop: &AtomicBool) -> bool {
-    if g.set_read_timeout(Some(POLL)).is_err() {
+    if polled(&g).is_err() {
         return false;
     }
     let mut buf = vec![0u8; 16 * 1024];
@@ -178,13 +347,7 @@ fn join_to_vault(g: UnixStream, vault: &Path, env: &str, stop: &AtomicBool) -> b
         match (&g).read(&mut buf) {
             Ok(0) => return false,
             Ok(n) => break n,
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock
-                        | io::ErrorKind::TimedOut
-                        | io::ErrorKind::Interrupted
-                ) => {}
+            Err(e) if waited(&e) => {}
             Err(_) => return false,
         }
     };
@@ -194,10 +357,10 @@ fn join_to_vault(g: UnixStream, vault: &Path, env: &str, stop: &AtomicBool) -> b
     };
     let mut first = format!("{env}\n").into_bytes();
     first.extend_from_slice(&buf[..n]);
-    if v.set_read_timeout(Some(POLL)).is_err() || (&v).write_all(&first).is_err() {
+    if polled(&v).is_err() || write_out(&v, &first, stop, &AtomicBool::new(false)).is_err() {
         return true;
     }
-    splice(g, v, stop);
+    splice(g, v, Full::End, stop);
     true
 }
 
@@ -221,21 +384,35 @@ mod tests {
         buf
     }
 
-    #[test]
-    fn joins_both_ways_and_rejoins_after_a_drop() {
-        let dir = tempfile::tempdir().unwrap();
-        let (pa, pb) = (dir.path().join("a.sock"), dir.path().join("b.sock"));
+    fn framed(packets: &[&[u8]]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for p in packets {
+            frame::encode(p, &mut out).unwrap();
+        }
+        out
+    }
+
+    fn joined(dir: &Path) -> (Link, UnixListener, UnixListener) {
+        let (pa, pb) = (dir.join("a.sock"), dir.join("b.sock"));
         let (la, lb) = (
             UnixListener::bind(&pa).unwrap(),
             UnixListener::bind(&pb).unwrap(),
         );
-        let link = Link::start(pa, pb);
+        (Link::start(pa, pb), la, lb)
+    }
+
+    #[test]
+    fn joins_both_ways_and_rejoins_after_a_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let (link, la, lb) = joined(dir.path());
 
         let (mut a, _) = la.accept().unwrap();
         let (mut b, _) = lb.accept().unwrap();
-        a.write_all(b"from a").unwrap();
-        assert_eq!(read_n(&mut b, 6), b"from a");
-        let big: Vec<u8> = (0..1_000_000u32).map(|i| i as u8).collect();
+        let hello = framed(&[b"from a"]);
+        a.write_all(&hello).unwrap();
+        assert_eq!(read_n(&mut b, hello.len()), hello);
+        let packets: Vec<Vec<u8>> = (0..700u32).map(|i| vec![i as u8; 1400]).collect();
+        let big = framed(&packets.iter().map(Vec::as_slice).collect::<Vec<_>>());
         let mut w = b.try_clone().unwrap();
         let sent = big.clone();
         let writer = std::thread::spawn(move || w.write_all(&sent).unwrap());
@@ -248,12 +425,77 @@ mod tests {
         assert_eq!(b.read(&mut [0; 8]).unwrap(), 0);
         let (mut a, _) = la.accept().unwrap();
         let (mut b, _) = lb.accept().unwrap();
-        b.write_all(b"again").unwrap();
-        assert_eq!(read_n(&mut a, 5), b"again");
+        let again = framed(&[b"again"]);
+        b.write_all(&again).unwrap();
+        assert_eq!(read_n(&mut a, again.len()), again);
 
         a.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         drop(link);
         assert_eq!(a.read(&mut [0; 8]).unwrap(), 0);
+    }
+
+    /// Both ends write far more than anything holds before they read, as two VMs' vsock
+    /// devices do under load: a join that stopped reading one end while it waited on the other
+    /// left both stuck writing.
+    #[test]
+    fn an_end_that_isnt_reading_never_stops_the_other_being_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (link, la, lb) = joined(dir.path());
+        let ends = [la.accept().unwrap().0, lb.accept().unwrap().0];
+        let packet = [7u8; 1400];
+        let bulk = framed(&vec![&packet[..]; 1000]);
+        let rounds = (3 * HELD) / bulk.len() + 1;
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (done, finished) = std::sync::mpsc::channel();
+        for mut end in ends {
+            let (barrier, done, bulk) = (barrier.clone(), done.clone(), bulk.clone());
+            std::thread::spawn(move || {
+                for _ in 0..rounds {
+                    end.write_all(&bulk).unwrap();
+                }
+                // Take what came through, then send one last packet each way.
+                barrier.wait();
+                end.set_read_timeout(Some(Duration::from_millis(500)))
+                    .unwrap();
+                let mut d = frame::Decoder::new(frame::MAX_FRAME);
+                let mut buf = vec![0u8; 1 << 16];
+                let mut whole = 0;
+                let mut take = |end: &mut UnixStream, until_end: bool| loop {
+                    match end.read(&mut buf) {
+                        Ok(0) => panic!("the join closed"),
+                        Ok(n) => d.push(&buf[..n]),
+                        Err(e) if waited(&e) && !until_end => return,
+                        Err(e) => panic!("{e}"),
+                    }
+                    while let Some(p) = d.next_frame().unwrap() {
+                        if p == &b"end"[..] {
+                            return;
+                        }
+                        assert_eq!(p, &packet[..], "only whole packets arrive");
+                        whole += 1;
+                    }
+                };
+                take(&mut end, false);
+                barrier.wait();
+                end.write_all(&framed(&[b"end"])).unwrap();
+                end.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                take(&mut end, true);
+                done.send(whole).unwrap();
+            });
+        }
+        for _ in 0..2 {
+            let Ok(whole) = finished.recv_timeout(Duration::from_secs(30)) else {
+                // Its threads are stuck too: joining them would never end.
+                std::mem::forget(link);
+                panic!("both ends stuck writing");
+            };
+            assert!(
+                whole > 0 && whole < rounds * 1000,
+                "{whole} of {}",
+                rounds * 1000
+            );
+        }
+        drop(link);
     }
 
     #[test]
@@ -273,11 +515,44 @@ mod tests {
         assert_eq!(read_n(&mut v, 10), b"web\nPOST /");
         v.write_all(b"200").unwrap();
         assert_eq!(read_n(&mut g, 3), b"200");
-        // The vault's side closes: so does the gate's, and a new link comes in its place.
-        drop(v);
+        // The vault answers and closes at once: all of the answer arrives, then the gate's
+        // side closes too, and a new link comes in its place.
+        let answer: Vec<u8> = (0..1_000_000u32).map(|i| i as u8).collect();
+        let sent = answer.clone();
+        let vault = std::thread::spawn(move || v.write_all(&sent).unwrap());
+        assert_eq!(read_n(&mut g, answer.len()), answer);
+        vault.join().unwrap();
         g.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         assert_eq!(g.read(&mut [0; 8]).unwrap(), 0);
         let _fresh = lg.accept().unwrap();
+        drop(links);
+    }
+
+    /// A vault that stops reading ends the uplink: the gate is never left waiting to write.
+    #[test]
+    fn an_uplink_ends_rather_than_stop_reading_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (pg, pv) = (dir.path().join("g.sock"), dir.path().join("v.sock"));
+        let (lg, lv) = (
+            UnixListener::bind(&pg).unwrap(),
+            UnixListener::bind(&pv).unwrap(),
+        );
+        let links = Uplinks::start(pg, pv, "web".into());
+        let mut g = lg.accept().unwrap().0;
+        g.write_all(b"POST /").unwrap();
+        let (_v, _) = lv.accept().unwrap();
+        g.set_write_timeout(Some(Duration::from_secs(30))).unwrap();
+        let chunk = vec![0u8; 1 << 20];
+        let e = (0..3 * HELD / chunk.len() + 2)
+            .try_for_each(|_| g.write_all(&chunk))
+            .unwrap_err();
+        assert!(
+            matches!(
+                e.kind(),
+                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+            ),
+            "{e}"
+        );
         drop(links);
     }
 

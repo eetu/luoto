@@ -7,6 +7,16 @@ release may break.
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-11-25
+
+### Fixed
+
+- On Apple's `container`, heavy traffic (a large download) could freeze an env and its gate
+  until killed, and with them every command that runs something in an env, `luoto ui` included.
+- A gate or vault that stops answering fails the command after a minute instead of hanging it.
+- On Apple's `container`, every start of the background watcher left one more port probe
+  running in each env.
+
 ## [0.7.2] - 2026-11-24
 
 ### Fixed
@@ -579,7 +589,8 @@ release may break.
 
 - First release.
 
-[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/eetu/luoto/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/eetu/luoto/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/eetu/luoto/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/eetu/luoto/compare/v0.6.2...v0.7.0

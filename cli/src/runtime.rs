@@ -388,6 +388,37 @@ impl Runtime {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
+        self.limited(args, None, limit, cap)
+    }
+
+    /// [`run_stdin`](Self::run_stdin) given up on (and killed) once `limit` passes after
+    /// `input` is written, or once its stdout passes `cap` bytes: for a container that may stop
+    /// answering.
+    pub fn run_stdin_limited<I, S>(
+        &self,
+        args: I,
+        input: &[u8],
+        limit: std::time::Duration,
+        cap: usize,
+    ) -> Result<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        self.limited(args, Some(input), limit, cap)
+    }
+
+    fn limited<I, S>(
+        &self,
+        args: I,
+        input: Option<&[u8]>,
+        limit: std::time::Duration,
+        cap: usize,
+    ) -> Result<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
         use std::io::Read;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -397,11 +428,24 @@ impl Runtime {
             let mut child = self
                 .command()
                 .args(&args)
-                .stdin(Stdio::null())
+                .stdin(if input.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
                 .with_context(|| format!("run {}", self.bin))?;
+            if let Some(input) = input {
+                // Dropped once written: the command reads to its end.
+                child
+                    .stdin
+                    .take()
+                    .context("stdin")?
+                    .write_all(input)
+                    .context("write to runtime stdin")?;
+            }
             let over = Arc::new(AtomicBool::new(false));
             let read = |pipe: Option<Box<dyn Read + Send>>, over: Option<Arc<AtomicBool>>| {
                 std::thread::spawn(move || {
@@ -1446,6 +1490,24 @@ mod tests {
         let e = sh.run_limited(["-c", "exec yes"], limit, 4096).unwrap_err();
         assert!(e.to_string().contains("more than 4096 bytes"), "{e}");
         assert!(sh.run_limited(["-c", "exit 2"], limit, 100).is_err());
+
+        // A control call: its body on stdin, its answer awaited no longer than the limit.
+        assert_eq!(
+            sh.run_stdin_limited(["-c", "cat"], b"{}", limit, 100)
+                .unwrap(),
+            "{}"
+        );
+        let started = Instant::now();
+        let e = sh
+            .run_stdin_limited(
+                ["-c", "cat >/dev/null; exec sleep 30"],
+                b"{}",
+                Duration::from_millis(300),
+                100,
+            )
+            .unwrap_err();
+        assert!(e.to_string().contains("no answer"), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     fn spec() -> RunSpec {

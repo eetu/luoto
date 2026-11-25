@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -181,9 +182,9 @@ async fn carry(mut link: UnixStream, v: Vetted, conns: &Arc<Semaphore>, own: Own
     let answer = match conns.clone().try_acquire_owned() {
         Err(_) => format!("failed {MAX_CONNS} connections from this Mac already open\n"),
         Ok(_permit) => match connect(v, own).await {
-            Ok(mut tcp) => {
+            Ok(tcp) => {
                 if link.write_all(b"ok\n").await.is_ok() {
-                    let _ = tokio::io::copy_bidirectional(&mut link, &mut tcp).await;
+                    join(link, tcp).await;
                 }
                 return;
             }
@@ -191,6 +192,47 @@ async fn carry(mut link: UnixStream, v: Vetted, conns: &Arc<Semaphore>, own: Own
         },
     };
     let _ = link.write_all(answer.as_bytes()).await;
+}
+
+/// Carry `link` and `tcp` both ways until both are done. The link, a VM's, is read whatever the
+/// server does (see `tunlink`): what the server isn't taking is held up to
+/// [`tunlink::HELD`](crate::tunlink::HELD), past which, or once the server can't be written,
+/// the connection ends.
+async fn join(link: UnixStream, tcp: TcpStream) {
+    let (mut gate_r, mut gate_w) = link.into_split();
+    let (mut server_r, mut server_w) = tcp.into_split();
+    let held = &AtomicUsize::new(0);
+    let end = &tokio::sync::Notify::new();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let from_gate = async move {
+        let mut buf = vec![0u8; 64 * 1024];
+        // Ended by the gate: what is held still goes, then the server's side is shut.
+        while let Ok(n @ 1..) = gate_r.read(&mut buf).await {
+            let over = held.fetch_add(n, Ordering::Relaxed) + n > crate::tunlink::HELD;
+            if over || tx.send(buf[..n].to_vec()).is_err() {
+                end.notify_one();
+                return;
+            }
+        }
+    };
+    let to_server = async move {
+        while let Some(chunk) = rx.recv().await {
+            if server_w.write_all(&chunk).await.is_err() {
+                end.notify_one();
+                return;
+            }
+            held.fetch_sub(chunk.len(), Ordering::Relaxed);
+        }
+        let _ = server_w.shutdown().await;
+    };
+    let back = async move {
+        let _ = tokio::io::copy(&mut server_r, &mut gate_w).await;
+        let _ = gate_w.shutdown().await;
+    };
+    tokio::select! {
+        _ = async { tokio::join!(from_gate, to_server, back) } => {}
+        () = end.notified() => {}
+    }
 }
 
 /// An address checked to be dialed from this Mac; only [`vet`] makes one.
@@ -420,6 +462,36 @@ mod tests {
         assert_eq!(&back, b"hello");
         let mut rest = Vec::new();
         assert_eq!(gate.read_to_end(&mut rest).await.unwrap(), 0);
+    }
+
+    /// A server that stops reading ends the connection: the gate is never left waiting to
+    /// write, with its VM's vsock device stalled behind it.
+    #[tokio::test]
+    async fn a_dial_ends_rather_than_stop_reading_the_gate() {
+        let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        let (done, finished) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let (unread, _) = server.accept().await.unwrap();
+            let _ = finished.await;
+            drop(unread);
+        });
+        let (mut gate, host, _dir) = link().await;
+        let conns = Arc::new(Semaphore::new(1));
+        tokio::spawn(async move { carry(host, Vetted(addr), &conns, Own::Allowed).await });
+        let mut ok = [0u8; 3];
+        gate.read_exact(&mut ok).await.unwrap();
+        let chunk = vec![0u8; 1 << 20];
+        let wrote = tokio::time::timeout(Duration::from_secs(30), async {
+            for _ in 0..4 * crate::tunlink::HELD / chunk.len() + 16 {
+                gate.write_all(&chunk).await?;
+            }
+            io::Result::Ok(())
+        })
+        .await
+        .expect("the gate was left waiting to write");
+        assert!(wrote.is_err(), "the connection ended");
+        drop(done);
     }
 
     #[tokio::test]
