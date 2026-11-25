@@ -408,6 +408,8 @@ mod tests {
 
         let (mut a, _) = la.accept().unwrap();
         let (mut b, _) = lb.accept().unwrap();
+        // While it is open: macOS refuses to set options on a socket its peer shut.
+        b.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let hello = framed(&[b"from a"]);
         a.write_all(&hello).unwrap();
         assert_eq!(read_n(&mut b, hello.len()), hello);
@@ -421,7 +423,6 @@ mod tests {
 
         // One side gone: the other is closed, and both are joined anew.
         drop(a);
-        b.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         assert_eq!(b.read(&mut [0; 8]).unwrap(), 0);
         let (mut a, _) = la.accept().unwrap();
         let (mut b, _) = lb.accept().unwrap();
@@ -510,6 +511,8 @@ mod tests {
         let mut idle: Vec<UnixStream> = (0..UPLINKS).map(|_| lg.accept().unwrap().0).collect();
 
         let mut g = idle.pop().unwrap();
+        // While it is open: macOS refuses to set options on a socket its peer shut.
+        g.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         g.write_all(b"POST /").unwrap();
         let (mut v, _) = lv.accept().unwrap();
         assert_eq!(read_n(&mut v, 10), b"web\nPOST /");
@@ -522,7 +525,6 @@ mod tests {
         let vault = std::thread::spawn(move || v.write_all(&sent).unwrap());
         assert_eq!(read_n(&mut g, answer.len()), answer);
         vault.join().unwrap();
-        g.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         assert_eq!(g.read(&mut [0; 8]).unwrap(), 0);
         let _fresh = lg.accept().unwrap();
         drop(links);
