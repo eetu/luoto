@@ -85,6 +85,8 @@ export type Decision = {
   ttl?: string | null;
   /** Less than the request asked for. */
   narrow?: Narrowing;
+  /** The rule reaches the host at a private address (the user's network, a VPN). */
+  private?: boolean;
   force?: boolean;
   /** A variable request's answer: its plain value. */
   var?: string | null;

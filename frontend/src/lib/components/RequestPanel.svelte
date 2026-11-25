@@ -5,6 +5,7 @@
   import CopyCommand from "$lib/components/CopyCommand.svelte";
   import Risks from "$lib/components/Risks.svelte";
   import Segmented from "$lib/components/Segmented.svelte";
+  import Switch from "$lib/components/Switch.svelte";
   import { act, ago, app, installLabel, requestTarget, say, TTLS } from "$lib/stores/app.svelte";
   import type { Narrowing } from "$lib/types";
 
@@ -16,6 +17,9 @@
   // Less than asked: read for a write request, some of its paths. The backend refuses wider.
   let grant = $state<"asked" | "read">("asked");
   let paths = $state("");
+  // More than asked, only when the user picks it. Never looked up first: the name is the
+  // sandbox's, and a lookup from this machine would carry whatever it put in it.
+  let allowPrivate = $state(false);
   // A variable request's value: the one the sandbox suggests is filled in, to check.
   const variable = $derived(req?.install?.kind === "var" ? req.install : null);
   const suggestion = $derived(variable?.value ?? null);
@@ -28,6 +32,7 @@
     void id;
     grant = "asked";
     paths = "";
+    allowPrivate = false;
     risks = [];
     // Polls refresh `req`: only another request starts the value over.
     given = untrack(() => suggestion) ?? "";
@@ -80,7 +85,7 @@
     const narrow = narrowing();
     const rule = await act(
       "approving…",
-      () => api.approve(env, shown, ttl ? `${ttl}m` : undefined, force, narrow),
+      () => api.approve(env, shown, ttl ? `${ttl}m` : undefined, force, narrow, allowPrivate),
       `approved #${id}: ${requestTarget(shown)}${narrow ? " (narrowed)" : ""}`,
       (found) => (risks = found),
     );
@@ -261,6 +266,15 @@
           />
         </label>
       {/if}
+      <div class="field">
+        <span>private</span>
+        <Switch
+          checked={allowPrivate}
+          label="allow private address"
+          onchange={(v) => ((allowPrivate = v), (risks = []))}
+        />
+        <span class="muted small">for a host on your network or VPN</span>
+      </div>
       <label class="field">
         <span>for</span>
         <select bind:value={ttl}>
@@ -285,6 +299,10 @@
 </div>
 
 <style>
+  .field:has(.small) {
+    grid-template-columns: 58px auto 1fr;
+  }
+
   .opens {
     display: block;
     font-size: 12px;

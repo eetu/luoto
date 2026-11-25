@@ -9,6 +9,12 @@ release may break.
 
 ## [0.7.3] - 2026-11-25
 
+### Added
+
+- Approving an access request can let it reach a private address (your network, a VPN):
+  `luoto approve --private`, asked when the host resolves to one, and a switch in `luoto ui`.
+  The gate's refusal and the sandbox's instructions say how to ask for such a tunnel.
+
 ### Fixed
 
 - On Apple's `container`, heavy traffic (a large download) could freeze an env and its gate

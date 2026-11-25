@@ -17,7 +17,7 @@ pub fn deny(
     reason: &DenyReason,
 ) -> Response<Body> {
     let message = reason.message(host);
-    let fix = fix(env, method, host, path, reason);
+    let fix = fix(env, method, url, host, path, reason);
     let body = format!(
         "luoto: egress blocked by the sandbox policy of env \"{env}\"\n\
          request: {method} {url}\n\
@@ -56,8 +56,9 @@ pub fn deny(
     resp
 }
 
-/// How the user can allow what `reason` denied.
-fn fix(env: &str, method: &str, host: &str, path: &str, reason: &DenyReason) -> String {
+/// How the user can allow what `reason` denied. A CONNECT denied for its address is a tunnel
+/// rule's (`url` is `host:port`): any other is decided inside, per request.
+fn fix(env: &str, method: &str, url: &str, host: &str, path: &str, reason: &DenyReason) -> String {
     let write = if reason.wants_write() { " --write" } else { "" };
     match reason {
         // The host is open on other paths (a relay such as the Go module proxy may be open only
@@ -83,9 +84,33 @@ fn fix(env: &str, method: &str, host: &str, path: &str, reason: &DenyReason) -> 
         DenyReason::Explicit { .. } | DenyReason::Guard { .. } | DenyReason::InvalidHost => {
             "This is a fixed guard-rail of the sandbox; it cannot be lifted by a rule.".to_string()
         }
-        DenyReason::PrivateAddress => format!(
-            "Private/host addresses need an explicit rule on the host:\n  luoto allow -e {env} {host} --private"
-        ),
+        DenyReason::PrivateAddress => {
+            let port = (method == "CONNECT")
+                .then(|| {
+                    url.rsplit_once(':')
+                        .and_then(|(_, p)| p.parse::<u16>().ok())
+                })
+                .flatten();
+            let (allow, asked) = match port {
+                Some(p) => (
+                    format!("{host} --port {p} --tunnel --private"),
+                    // The sandbox may ask for a tunnel on any port but these.
+                    (p != 80 && p != 443).then(|| format!("{host}:{p}")),
+                ),
+                None => (format!("{host} --private"), Some(host.to_string())),
+            };
+            let request = asked.map_or_else(String::new, |a| {
+                format!(
+                    "\nFrom inside the sandbox, request it, saying it is on the user's network or \
+                     VPN, for them to approve with private access:\n  \
+                     sandbox request {a} --reason \"<why; on your network or VPN>\""
+                )
+            });
+            format!(
+                "A private address (the user's network, a VPN, this machine) needs a rule that \
+                 reaches it. The user can run on the host:\n  luoto allow -e {env} {allow}{request}"
+            )
+        }
         _ => format!(
             "To allow it, the user can run on the host:\n  luoto allow -e {env} {host}{write}\n\
              or approve it in `luoto ui`. From inside the sandbox, request it with:\n  \
@@ -119,9 +144,55 @@ pub fn json(status: StatusCode, value: &impl Serialize) -> Response<Body> {
 mod tests {
     use super::*;
 
+    /// `fix` for a request inside a connection: its URL plays no part.
+    fn fix_for(env: &str, method: &str, host: &str, path: &str, reason: &DenyReason) -> String {
+        fix(env, method, "", host, path, reason)
+    }
+
+    #[test]
+    fn a_private_address_denial_names_the_rule_that_reaches_it() {
+        let reason = DenyReason::PrivateAddress;
+        let http = fix_for("web", "GET", "k8s.internal", "/version", &reason);
+        assert!(
+            http.contains("luoto allow -e web k8s.internal --private\n"),
+            "{http}"
+        );
+        assert!(
+            http.contains("sandbox request k8s.internal --reason"),
+            "{http}"
+        );
+        let tunnel = fix(
+            "web",
+            "CONNECT",
+            "k8s.internal:7443",
+            "k8s.internal",
+            "",
+            &reason,
+        );
+        assert!(
+            tunnel.contains("luoto allow -e web k8s.internal --port 7443 --tunnel --private\n"),
+            "{tunnel}"
+        );
+        assert!(
+            tunnel.contains("sandbox request k8s.internal:7443 --reason"),
+            "{tunnel}"
+        );
+        // A tunnel on 443 only the user grants: the sandbox can't ask for one.
+        let https = fix(
+            "web",
+            "CONNECT",
+            "k8s.internal:443",
+            "k8s.internal",
+            "",
+            &reason,
+        );
+        assert!(https.contains("--port 443 --tunnel --private"), "{https}");
+        assert!(!https.contains("sandbox request"), "{https}");
+    }
+
     #[test]
     fn a_path_denial_offers_that_path_not_the_host() {
-        let f = fix(
+        let f = fix_for(
             "web",
             "GET",
             "proxy.golang.org",
@@ -137,7 +208,7 @@ mod tests {
         assert!(
             f.contains("sandbox request proxy.golang.org --path '/filippo.io/edwards25519/@v/**'")
         );
-        let post = fix(
+        let post = fix_for(
             "web",
             "POST",
             "api.example",
@@ -148,7 +219,7 @@ mod tests {
             post.contains("luoto allow -e web api.example --path '/v1/items/**' --write\n"),
             "{post}"
         );
-        let hostile = fix(
+        let hostile = fix_for(
             "web",
             "GET",
             "h.example",
@@ -159,7 +230,7 @@ mod tests {
             hostile.contains("--path '<path glob>'") && !hostile.contains("rm -rf"),
             "{hostile}"
         );
-        let host = fix("web", "GET", "docs.rs", "/x", &DenyReason::NoRule);
+        let host = fix_for("web", "GET", "docs.rs", "/x", &DenyReason::NoRule);
         assert!(host.contains("luoto allow -e web docs.rs\n"), "{host}");
     }
 }

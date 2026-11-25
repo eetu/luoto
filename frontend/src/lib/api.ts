@@ -125,12 +125,20 @@ export const api = {
     ),
   requests: (name: string) => request<AccessRequest[]>("GET", `${env(name)}/requests`),
   // `created` names the request shown: the gate numbers requests anew when it restarts.
-  approve: (name: string, req: AccessRequest, ttl?: string, force = false, narrow?: Narrowing) =>
+  approve: (
+    name: string,
+    req: AccessRequest,
+    ttl?: string,
+    force = false,
+    narrow?: Narrowing,
+    allowPrivate = false,
+  ) =>
     request<Approved, Decision>("POST", `${env(name)}/requests/${req.id}/approve`, {
       created: req.created,
       ttl,
       force,
       narrow,
+      private: allowPrivate || undefined,
     }),
   approveVar: (name: string, req: AccessRequest, value: string) =>
     request<Approved, Decision>("POST", `${env(name)}/requests/${req.id}/approve`, {

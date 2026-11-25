@@ -363,6 +363,20 @@ pub fn describe(rule: &Rule) -> String {
     crate::text::display(&format!("{at} {}{paths}", rule.access.describe()))
 }
 
+/// What `luoto allow` takes to make `rule` again, without its access: the host, its port and
+/// whether it tunnels (`k8s.example.com --port 7443 --tunnel`). Its host may come from the
+/// sandbox.
+pub fn allow_args(rule: &Rule) -> String {
+    let mut args = crate::text::display(&rule.host);
+    if let Some(port) = rule.port {
+        args.push_str(&format!(" --port {port}"));
+    }
+    if rule.mode == Mode::Tunnel {
+        args.push_str(" --tunnel");
+    }
+    args
+}
+
 /// The rule a pending access request grants, narrowed by `narrow`; refused if `narrow` would
 /// widen it.
 pub fn grant(req: &AccessRequest, narrow: &Narrowing) -> Result<Rule> {
@@ -382,24 +396,26 @@ pub enum Approved {
     Installed { installed: String },
 }
 
-/// Approve a pending request: an access request becomes a rule, narrowed by `narrow` and
-/// failing with [`Risks`] unless `force`; an install request installs. A request for a
-/// variable is refused: only a terminal asks for its value (`vars::approve`).
+/// Approve a pending request: an access request becomes a rule, narrowed by `narrow`,
+/// reaching the host's private address with `private`, and failing with [`Risks`] unless
+/// `force`; an install request installs. A request for a variable is refused: only a terminal
+/// asks for its value (`vars::approve`).
 pub fn approve(
     ctx: &Ctx,
     name: &str,
     req: &AccessRequest,
     ttl: Option<&str>,
     narrow: &Narrowing,
+    private: bool,
     force: bool,
 ) -> Result<Approved> {
     if let Some(var) = req.install.as_ref().and_then(Install::variable) {
         bail!(crate::vars::needs_terminal(name, req.id, var));
     }
     if req.install.is_some() {
-        if !narrow.is_empty() {
+        if !narrow.is_empty() || private {
             bail!(
-                "request #{} asks for an install: there is no access to narrow",
+                "request #{} asks for an install: there is no access to narrow or widen",
                 req.id
             );
         }
@@ -416,13 +432,17 @@ pub fn approve(
         );
     }
     let mut rule = grant(req, narrow)?;
+    rule.allow_private |= private;
     rule.expires = ttl.map(parse_duration).transpose()?.map(|d| Utc::now() + d);
     rule.note = Some(format!("approved request #{}", req.id));
     let rule = add_rule_checked(ctx, name, rule, force)?;
-    // The sandbox reads the note: it learns what it got, if less than it asked for.
+    // The sandbox reads the note: it learns what it got, if less or more than it asked for.
     let mut notes = Vec::new();
     if !narrow.is_empty() {
         notes.push(format!("granted less: {}", describe(&rule)));
+    }
+    if rule.allow_private {
+        notes.push("it reaches the host at a private address".to_string());
     }
     if policy.partly_denied(&req.host) {
         notes.push("[[deny]] rules still refuse some of it".to_string());
@@ -540,6 +560,13 @@ mod tests {
         let e = allowed(&["k8s.example.com:7443", "--port", "443"]).unwrap_err();
         assert!(e.to_string().contains("give one"), "{e}");
         assert!(allowed(&["k8s.example.com:99999"]).is_err());
+    }
+
+    #[test]
+    fn a_rule_is_named_again_as_luoto_allow_takes_it() {
+        let tunnel = allowed(&["k8s.example.com:7443", "--tunnel"]).unwrap();
+        assert_eq!(allow_args(&tunnel), "k8s.example.com --port 7443 --tunnel");
+        assert_eq!(allow_args(&allowed(&["docs.rs"]).unwrap()), "docs.rs");
     }
 
     #[test]
