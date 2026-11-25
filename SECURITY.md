@@ -33,16 +33,17 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   rule that says so reaches a private address (a self-hosted forge's, a model server's on
   this machine or your network), and a connection dialed for one carries no request another
   rule or open egress allowed.
-- **Private addresses on Apple's `container`.** A gate's VM leaves through macOS's NAT, which
-  translates only out of the Mac's primary interface, never onto a VPN. There, a connection a rule allows to a private address (10/8,
-  172.16/12, 192.168/16, 100.64/10, fc00::/7) is opened by the background watcher on your Mac,
-  over a socket of the gate's that only your user reaches, so it follows your Mac's routes and
-  arrives as your Mac. The gate decides as everywhere: policy, then every address vetted. The
-  watcher takes only an address, never a name, checks the range again, and refuses loopback,
-  link-local and metadata addresses, your Mac's own addresses and the runtime's networks;
-  those the gate dials itself, as before. TLS, inspection and credentials stay in the gate. A
-  `--private` rule therefore reaches whatever your Mac's VPN and network let your Mac reach
-  at that name's address.
+- **Private access on Apple's `container`.** A gate's VM leaves through macOS's NAT, which
+  translates only out of the Mac's primary interface, never onto a VPN. There, a connection
+  under a rule with private access, to a private address (10/8, 172.16/12, 192.168/16,
+  100.64/10, fc00::/7) or a public one, is opened by the background watcher on your Mac, over a
+  socket of the gate's that only your user reaches, so it follows your Mac's routes (a VPN's
+  for a public address too) and arrives as your Mac. The gate decides as everywhere: policy,
+  then every address vetted. The watcher takes only an address, never a name, checks it again,
+  and refuses loopback, link-local and metadata addresses, your Mac's own addresses and the
+  runtime's networks; those the gate dials itself, as before. TLS, inspection and credentials
+  stay in the gate. A `--private` rule therefore reaches whatever your Mac's VPN and network
+  let your Mac reach at that name's address.
 - **Open egress.** `luoto egress open` (an hour unless told otherwise; `open = true` until
   removed) lets out over HTTP(S), as rule `open`, what no rule allows, to any host and port.
   It never widens a host that gets a credential (its rules stay its only access), a muted
@@ -391,11 +392,13 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   host, or one the same pull writes) that points elsewhere.
 - **Social engineering.** Access requests are written by code in the sandbox. Read the host
   and access, not the reason; grant less than asked where that will do (`luoto approve --read`,
-  `--path`). A request can't name an address range or a private address, and one for a port
-  is an uninspected tunnel to that host and port, never 80 or 443. A name on a private
-  address (your network, a VPN) is reached only if you approve it so (`luoto approve
-  --private`, the UI's private switch); `luoto approve` looks the name up to ask only once
-  you approved, since a lookup carries whatever the sandbox put in the name. A preset request names one
+  `--path`). A request can't name an address range, nor a private address unless it asks for
+  private access, and one for a port is an uninspected tunnel to that host and port, never 80
+  or 443. A host on your network or VPN is reached only if you approve it so: a request may ask
+  for that (`sandbox request --private`), and `luoto approve` asks you separately, or the UI's
+  private switch starts on, which you may turn off. Without that ask, `luoto approve --private`
+  or the switch grants it; `luoto approve` looks the name up to ask only once you approved,
+  since a lookup carries whatever the sandbox put in the name. A preset request names one
   of luoto's presets; approving it opens all of that preset's hosts and keeps it in the env's
   config (`luoto status` lists them). An install request names a
   package or toolchain the gate has checked to be a plain name; approving it runs that

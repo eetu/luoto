@@ -1,11 +1,11 @@
-//! The host's part of a gate's dials to private addresses on Apple (`gate/src/hostdial.rs`),
-//! whose VMs leave through macOS's NAT, which translates only out of the primary interface,
-//! never onto a VPN: [`IDLE`] links open
-//! to each gate's `dial.sock`; on a line naming an address, check it again, connect from this
-//! Mac (its routes, a VPN's among them) and join the link to the connection. The gate decided
-//! already; this side takes only an address, never a name, and refuses any that isn't a plain
-//! private one (`host::leaves_host`), this Mac's own, or a container network's, so a stray
-//! writer on the socket can't make it a relay to anything else.
+//! The host's part of a gate's dials under rules with private access on Apple
+//! (`gate/src/hostdial.rs`), whose VMs leave through macOS's NAT, which translates only out of
+//! the primary interface, never onto a VPN: [`IDLE`] links open to each gate's `dial.sock`; on
+//! a line naming an address, check it again, connect from this Mac (its routes, a VPN's among
+//! them) and join the link to the connection. The gate decided already; this side takes only an
+//! address, never a name, and refuses any but a plain private or a public one
+//! (`host::leaves_host`), this Mac's own, or a container network's, so a stray writer on the
+//! socket can't make it a relay to anything else.
 
 use std::collections::HashMap;
 use std::io;
@@ -255,7 +255,7 @@ fn vet(line: &str, nets: &[IpNet]) -> Result<Vetted, Refusal> {
     }
     let ip = addr.ip();
     if !leaves_host(ip) {
-        return Err(Refusal::Refused("not a private address"));
+        return Err(Refusal::Refused("not an address it dials"));
     }
     if nets.iter().any(|n| n.contains(&ip)) {
         return Err(Refusal::Refused("a container network"));
@@ -315,12 +315,14 @@ mod tests {
     }
 
     #[test]
-    fn only_a_plain_private_address_is_dialed() {
+    fn only_a_plain_private_or_public_address_is_dialed() {
         assert_eq!(
             vet("dial 10.10.0.8:443", &nets()),
             Ok(Vetted("10.10.0.8:443".parse().unwrap()))
         );
         assert!(vet("dial [fd12::8]:443", &nets()).is_ok());
+        // A public address the Mac may route over a VPN.
+        assert!(vet("dial 8.8.8.8:7443", &nets()).is_ok());
         for line in [
             "dial kb.example:443",
             "dial 10.10.0.8",
@@ -334,14 +336,17 @@ mod tests {
         for line in [
             "dial 127.0.0.1:22",
             "dial 169.254.169.254:80",
-            "dial 8.8.8.8:53",
+            "dial 169.254.1.2:80",
             "dial [::1]:22",
             "dial [::ffff:10.0.0.1]:443",
+            "dial [::ffff:8.8.8.8]:443",
             "dial 10.213.4.2:3128",
+            "dial 224.0.0.1:5353",
         ] {
             assert_eq!(
                 vet(line, &nets()),
-                Err(Refusal::Refused("not a private address"))
+                Err(Refusal::Refused("not an address it dials")),
+                "{line}"
             );
         }
         assert_eq!(
@@ -381,7 +386,7 @@ mod tests {
         let local = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = local.local_addr().unwrap().port();
         let (_, answer) = ask(&listener, &format!("dial 127.0.0.1:{port}\n")).await;
-        assert_eq!(answer, "refused not a private address");
+        assert_eq!(answer, "refused not an address it dials");
         let accepted = tokio::time::timeout(Duration::from_millis(300), local.accept()).await;
         assert!(accepted.is_err(), "a loopback dial connected");
         drop(d);

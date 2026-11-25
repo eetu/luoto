@@ -628,7 +628,8 @@ struct Decision {
     /// Less than the request asked for.
     #[serde(default)]
     narrow: Narrowing,
-    /// The rule reaches the host at a private address (the user's network, a VPN).
+    /// The rule reaches the host on the user's network or VPN: the UI's switch, which starts as
+    /// the request asked.
     #[serde(default)]
     private: bool,
     #[serde(default)]

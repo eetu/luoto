@@ -522,11 +522,12 @@ enum Cmd {
         /// Grant only these path globs (repeatable), within the request's paths.
         #[arg(long = "path", value_name = "GLOB")]
         paths: Vec<String>,
-        /// Let the rule reach the host at a private address (your network, a VPN, this
-        /// machine); asked when the host resolves to one here.
+        /// Let the rule reach the host on your network or VPN (a private address, or one only
+        /// a VPN reaches); asked when the request asks for it or the host resolves to a private
+        /// address here.
         #[arg(long)]
         private: bool,
-        /// Approve without asking.
+        /// Approve without asking (as asked).
         #[arg(long, short)]
         yes: bool,
         /// Accept the rule's risks without asking.

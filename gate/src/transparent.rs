@@ -120,14 +120,14 @@ async fn conn(state: Arc<State>, stream: TcpStream, dst: SocketAddr, slot: Slot)
     let label = name.clone().unwrap_or_else(|| ip.to_string());
 
     // A tunnel rule for the name and port passes the connection through before a byte is
-    // read: any protocol, including ones whose server speaks first, and TLS a client pins.
+    // read: any protocol, including ones whose server speaks first, and TLS a client pins. For
+    // a client that connected to an address itself, a rule naming that address, as CONNECT to
+    // it would be.
     let port = dst.port();
-    let rule = name.as_deref().and_then(|h| {
-        state
-            .policy()
-            .tunnel_rule(h, port, chrono::Utc::now())
-            .map(|r| (h.to_string(), r.id.clone(), r.rule.allow_private))
-    });
+    let rule = state
+        .policy()
+        .tunnel_rule(&label, port, chrono::Utc::now())
+        .map(|r| (label.clone(), r.id.clone(), r.rule.allow_private));
     if let Some((host, rule_id, allow_private)) = rule {
         match crate::upstream::dial_tcp(&state, &host, port, allow_private).await {
             Ok(upstream) => {
@@ -146,7 +146,10 @@ async fn conn(state: Arc<State>, stream: TcpStream, dst: SocketAddr, slot: Slot)
             Err(crate::upstream::DialError::Denied(reason)) => {
                 direct(&state, &label, port, reason.message(&host));
             }
-            Err(crate::upstream::DialError::Failed(msg)) => direct(&state, &label, port, msg),
+            Err(crate::upstream::DialError::Failed(msg)) => {
+                let intake = Intake::Transparent;
+                crate::proxy::tunnel_failed(&state, intake, &host, port, rule_id, &msg);
+            }
         }
         return;
     }

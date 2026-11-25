@@ -397,7 +397,8 @@ pub enum Approved {
 }
 
 /// Approve a pending request: an access request becomes a rule, narrowed by `narrow`,
-/// reaching the host's private address with `private`, and failing with [`Risks`] unless
+/// reaching the host on the user's network or VPN with `private` (the user's answer, whatever
+/// the request asked), and failing with [`Risks`] unless
 /// `force`; an install request installs. A request for a variable is refused: only a terminal
 /// asks for its value (`vars::approve`).
 pub fn approve(
@@ -432,7 +433,7 @@ pub fn approve(
         );
     }
     let mut rule = grant(req, narrow)?;
-    rule.allow_private |= private;
+    rule.allow_private = private;
     rule.expires = ttl.map(parse_duration).transpose()?.map(|d| Utc::now() + d);
     rule.note = Some(format!("approved request #{}", req.id));
     let rule = add_rule_checked(ctx, name, rule, force)?;
@@ -442,7 +443,9 @@ pub fn approve(
         notes.push(format!("granted less: {}", describe(&rule)));
     }
     if rule.allow_private {
-        notes.push("it reaches the host at a private address".to_string());
+        notes.push("it reaches the host on the user's network or VPN".to_string());
+    } else if req.private {
+        notes.push("not on the user's network or VPN".to_string());
     }
     if policy.partly_denied(&req.host) {
         notes.push("[[deny]] rules still refuse some of it".to_string());
@@ -654,6 +657,7 @@ mod tests {
             port: None,
             access: AccessLevel::Write,
             paths: vec![],
+            private: false,
             reason: "r".into(),
             status: RequestStatus::Pending,
             created: Utc::now(),

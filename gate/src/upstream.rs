@@ -125,15 +125,16 @@ pub async fn dial_tcp_to(
     // IPv4 first: many networks (CI runners among them) have no IPv6 route, and each address
     // that can't connect costs a timeout.
     addrs.sort_by_key(|a| a.is_ipv6());
-    // Apple: a private address a rule allows leaves through the host, whose VPN routes the VM's
-    // NAT doesn't follow. Not a credential over plain HTTP: that goes to this machine.
+    // Apple: an address a rule with private access allows leaves through the host, whose VPN
+    // routes the VM's NAT doesn't follow. Not a credential over plain HTTP: that goes to this
+    // machine.
     let host_dial = state
         .host_dial
         .get()
         .filter(|_| allow_private && !private_only);
     // Every address and how it failed: why one family can't connect shows beside the other.
     let mut failed = Vec::new();
-    let mut private_timed_out = false;
+    let mut timed_out = Timeout::Plain;
     for addr in addrs {
         if let Some(hd) = host_dial
             && leaves_host(addr.ip())
@@ -153,7 +154,9 @@ pub async fn dial_tcp_to(
                     )));
                 }
                 Err(HostDialError::Failed(why)) => {
-                    private_timed_out |= why == "connect timed out";
+                    if why == "connect timed out" {
+                        timed_out = timed_out.max(Timeout::OnNetwork);
+                    }
                     failed.push(format!("{addr} from this Mac: {why}"));
                     continue;
                 }
@@ -166,16 +169,19 @@ pub async fn dial_tcp_to(
             }
             Ok(Err(e)) => failed.push(format!("{addr}: {e}")),
             Err(_) => {
-                private_timed_out |= is_private(addr.ip());
+                timed_out = timed_out.max(if is_private(addr.ip()) {
+                    Timeout::OnNetwork
+                } else if state.host_dial.get().is_some() && !allow_private {
+                    Timeout::MaybeVpn
+                } else {
+                    Timeout::Plain
+                });
                 failed.push(format!("{addr}: connect timed out"));
             }
         }
     }
     Err(DialError::Failed(cannot_connect(
-        host,
-        port,
-        &failed,
-        private_timed_out,
+        host, port, &failed, timed_out,
     )))
 }
 
@@ -216,15 +222,27 @@ fn default_gateway(table: &str) -> Option<IpAddr> {
     })
 }
 
-/// Why `host:port` can't be reached: each address's failure, and for a private address that
-/// timed out, what usually causes that.
-fn cannot_connect(host: &str, port: u16, failed: &[String], private_timed_out: bool) -> String {
+/// What a connect that timed out may mean, by what the gate knows of the address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Timeout {
+    Plain,
+    /// A public address dialed from Apple's VM, whose NAT never goes onto the Mac's VPN.
+    MaybeVpn,
+    /// On the user's network or VPN: a private address, or one this Mac dialed.
+    OnNetwork,
+}
+
+/// Why `host:port` can't be reached: each address's failure, and for one that timed out on
+/// the user's network or VPN, what usually causes that.
+fn cannot_connect(host: &str, port: u16, failed: &[String], timed_out: Timeout) -> String {
     let mut msg = format!("could not connect to {host}:{port} ({})", failed.join("; "));
-    if private_timed_out {
-        msg.push_str(
-            "; a private address: is the network or VPN that reaches it up on this machine?",
-        );
-    }
+    msg.push_str(match timed_out {
+        Timeout::Plain => "",
+        Timeout::MaybeVpn => {
+            "; if this machine reaches it over a VPN, the rule needs private access"
+        }
+        Timeout::OnNetwork => "; is the network or VPN that reaches it up on this machine?",
+    });
     msg
 }
 
@@ -301,20 +319,25 @@ mod this_machine_tests {
 
 #[cfg(test)]
 mod connect_tests {
-    use super::cannot_connect;
+    use super::{Timeout, cannot_connect};
 
     #[test]
-    fn a_private_address_that_timed_out_asks_about_the_network() {
+    fn a_timeout_on_the_users_network_asks_about_it() {
         let failed = ["10.10.0.8:443: connect timed out".to_string()];
         assert_eq!(
-            cannot_connect("kb.example", 443, &failed, true),
-            "could not connect to kb.example:443 (10.10.0.8:443: connect timed out); a private \
-             address: is the network or VPN that reaches it up on this machine?"
+            cannot_connect("kb.example", 443, &failed, Timeout::OnNetwork),
+            "could not connect to kb.example:443 (10.10.0.8:443: connect timed out); is the \
+             network or VPN that reaches it up on this machine?"
         );
         let failed = ["203.0.113.5:443: connect timed out".to_string()];
         assert_eq!(
-            cannot_connect("api.example", 443, &failed, false),
+            cannot_connect("api.example", 443, &failed, Timeout::Plain),
             "could not connect to api.example:443 (203.0.113.5:443: connect timed out)"
+        );
+        assert!(
+            cannot_connect("api.example", 443, &failed, Timeout::MaybeVpn).ends_with(
+                "; if this machine reaches it over a VPN, the rule needs private access"
+            )
         );
     }
 }

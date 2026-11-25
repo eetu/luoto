@@ -125,13 +125,14 @@ export const api = {
     ),
   requests: (name: string) => request<AccessRequest[]>("GET", `${env(name)}/requests`),
   // `created` names the request shown: the gate numbers requests anew when it restarts.
+  // `allowPrivate`: on the user's network or VPN, as the request asked unless the user chose.
   approve: (
     name: string,
     req: AccessRequest,
     ttl?: string,
     force = false,
     narrow?: Narrowing,
-    allowPrivate = false,
+    allowPrivate = req.private ?? false,
   ) =>
     request<Approved, Decision>("POST", `${env(name)}/requests/${req.id}/approve`, {
       created: req.created,

@@ -341,17 +341,21 @@ fn is_never_dialed_v4(v4: Ipv4Addr) -> bool {
         || (o[0] == 198 && (o[1] & 0xfe) == 18)
 }
 
-/// Private addresses a gate on Apple's `container` reaches through the Mac, whose routes (a
-/// VPN's among them) its VM doesn't have: RFC 1918, CGNAT and unique-local v6, written as
+/// Addresses a gate on Apple's `container` reaches through the Mac under a rule with private
+/// access, since the Mac's routes (a VPN's among them, for public addresses too) go where its
+/// VM's NAT doesn't: RFC 1918, CGNAT, unique-local v6 and public addresses, written as
 /// themselves (no v4 inside a v6 form), and none the gate never dials. An allowlist: loopback,
-/// link-local and every public address are outside it.
+/// link-local, documentation and multicast are outside it.
 pub fn leaves_host(ip: IpAddr) -> bool {
     let listed = match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
-            v4.is_private() || (o[0] == 100 && (o[1] & 0xc0) == 64)
+            v4.is_private() || (o[0] == 100 && (o[1] & 0xc0) == 64) || !is_private_v4(v4)
         }
-        IpAddr::V6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00,
+        IpAddr::V6(v6) => {
+            (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (embedded_v4(v6).is_none() && !is_private_v6(v6))
+        }
     };
     listed && !is_never_dialed(ip)
 }
@@ -629,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_private_ranges_leave_through_the_host() {
+    fn plain_private_and_public_addresses_leave_through_the_host() {
         use super::{is_private, leaves_host};
         for ip in [
             "10.0.0.1",
@@ -643,6 +647,10 @@ mod tests {
             "100.127.255.255",
             "fc00::1",
             "fd12:3456::8",
+            // Public: the Mac may route one over a VPN.
+            "8.8.8.8",
+            "172.15.255.255",
+            "2606:4700::1111",
         ] {
             assert!(leaves_host(ip.parse().unwrap()), "{ip}");
         }
@@ -660,39 +668,38 @@ mod tests {
             "10.212.0.5",
             "10.213.3.2",
             "198.18.0.5",
-            // Range edges.
-            "172.15.255.255",
-            "172.32.0.0",
-            "100.63.255.255",
-            "100.128.0.0",
-            "192.169.0.1",
-            // Private v4 inside v6 forms: mapped, NAT64, 6to4, compatible.
+            // v4 inside v6 forms, private and public: mapped, NAT64, 6to4, compatible.
             "::ffff:10.0.0.1",
+            "::ffff:8.8.8.8",
             "64:ff9b::a00:1",
+            "64:ff9b::808:808",
             "2002:a00:1::1",
             "::a00:1",
-            // Multicast, broadcast, documentation, public.
+            // Multicast, broadcast, documentation, reserved.
             "224.0.0.1",
+            "ff02::1",
             "255.255.255.255",
+            "240.0.0.1",
             "192.0.2.1",
             "2001:db8::1",
-            "8.8.8.8",
-            "2606:4700::1111",
         ] {
             assert!(!leaves_host(ip.parse().unwrap()), "{ip}");
         }
-        // Inside what the gate may dial for a private rule, for every v4 address and a v6 sweep.
+        // What leaves is public or in a plain private range, for a sweep of v4 and of v6.
         for n in (0..=u32::MAX).step_by(65_521) {
-            let ip = std::net::IpAddr::V4(n.into());
+            let v4 = std::net::Ipv4Addr::from(n);
+            let ip = std::net::IpAddr::V4(v4);
+            let plain = v4.is_private() || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64);
             assert!(
-                !leaves_host(ip) || (is_private(ip) && !is_never_dialed(ip)),
+                !leaves_host(ip) || (!is_never_dialed(ip) && (plain || !is_private(ip))),
                 "{ip}"
             );
         }
         for hi in (0..=u16::MAX).step_by(251) {
             let ip = std::net::IpAddr::V6(std::net::Ipv6Addr::new(hi, 0, 0, 0, 0, 0, 0xa00, 1));
+            let ula = (hi & 0xfe00) == 0xfc00;
             assert!(
-                !leaves_host(ip) || (is_private(ip) && !is_never_dialed(ip)),
+                !leaves_host(ip) || (!is_never_dialed(ip) && (ula || !is_private(ip))),
                 "{ip}"
             );
         }

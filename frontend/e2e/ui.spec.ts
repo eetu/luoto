@@ -486,6 +486,44 @@ test("a tunnel request reaches a private address only when that is picked", asyn
   expect(looked).toEqual([]);
 });
 
+test("a request for private access starts with it on, which the user may turn off", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const request = {
+    id: 11,
+    host: "10.0.0.8",
+    port: 6443,
+    access: "write",
+    private: true,
+    reason: "kubectl to the cluster API, on your VPN",
+    status: "pending",
+    created: new Date().toISOString(),
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [request] }),
+  );
+  const sent: unknown[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/11/approve",
+    (route, req) => {
+      sent.push(req.postDataJSON());
+      return route.fulfill({ json: { host: request.host, port: 6443, mode: "tunnel" } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: /10\.0\.0\.8:6443 on your network or VPN/ }).click();
+  const private_ = page.getByRole("switch", { name: "allow private address" });
+  await expect(private_).toHaveAttribute("aria-checked", "true");
+  await private_.click();
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
+
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).not.toHaveProperty("private");
+});
+
 test("selected requests are approved together, each as it was shown", async ({ page }) => {
   await mockApi(page);
   const created = new Date().toISOString();

@@ -170,8 +170,8 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   and joins to the vault's published socket after a line naming the env (`tunlink::Uplinks`).
   macOS's NAT for VMs translates only out of the primary interface (pf anchor
   `com.apple.internet-sharing/shared_v4`), never onto a
-  VPN, so the gate's dials to private addresses under an `allow_private` rule
-  (`host::leaves_host`) go over links the watcher opens to its published `dial.sock`
+  VPN, so the gate's dials under an `allow_private` rule, to private and public addresses
+  (`host::leaves_host`), go over links the watcher opens to its published `dial.sock`
   (`gate/src/hostdial.rs`); the watcher checks the address again and connects from the Mac
   (`cli/src/hostdial.rs`), refusing its own addresses and the runtime's networks, which the
   gate then dials itself. Apple caps no container's output: a gate writes its events to a capped file in its volume

@@ -1,8 +1,9 @@
 //! Apple's `container`: the gate's VM leaves through macOS's NAT, which translates only out of
-//! the Mac's primary interface, so a host the Mac routes over a VPN never answers. A private address a rule allows (`host::leaves_host`) is dialed by luoto's watcher on
-//! the Mac instead, over links it keeps open to `dial.sock`: a dial takes one, names the vetted
-//! address on one line (`dial 10.10.0.8:443`), and reads one answer line (`ok`, `refused …`,
-//! `failed …`) before the link carries the connection. One dial per link.
+//! the Mac's primary interface, so a host the Mac routes over a VPN never answers. An address a
+//! rule with private access allows, public ones too (`host::leaves_host`), is dialed by luoto's
+//! watcher on the Mac instead, over links it keeps open to `dial.sock`: a dial takes one, names
+//! the vetted address on one line (`dial 10.10.0.8:443`), and reads one answer line (`ok`,
+//! `refused …`, `failed …`) before the link carries the connection. One dial per link.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -17,8 +17,9 @@
   // Less than asked: read for a write request, some of its paths. The backend refuses wider.
   let grant = $state<"asked" | "read">("asked");
   let paths = $state("");
-  // More than asked, only when the user picks it. Never looked up first: the name is the
-  // sandbox's, and a lookup from this machine would carry whatever it put in it.
+  // On the user's network or VPN: as the request asked, which the user may turn off, or more
+  // than asked when the user picks it. Never looked up first: the name is the sandbox's, and a
+  // lookup from this machine would carry whatever it put in it.
   let allowPrivate = $state(false);
   // A variable request's value: the one the sandbox suggests is filled in, to check.
   const variable = $derived(req?.install?.kind === "var" ? req.install : null);
@@ -32,7 +33,7 @@
     void id;
     grant = "asked";
     paths = "";
-    allowPrivate = false;
+    allowPrivate = untrack(() => req?.private) ?? false;
     risks = [];
     // Polls refresh `req`: only another request starts the value over.
     given = untrack(() => suggestion) ?? "";
@@ -221,6 +222,10 @@
         <dt>paths</dt>
         <dd>{req.paths?.length ? req.paths.join(", ") : "all"}</dd>
       {/if}
+      {#if req.private}
+        <dt>where</dt>
+        <dd>on your network or VPN: a private address, or one only a VPN reaches</dd>
+      {/if}
       <dt>filed</dt>
       <dd>{ago(req.created)}</dd>
       <dt>status</dt>
@@ -273,7 +278,9 @@
           label="allow private address"
           onchange={(v) => ((allowPrivate = v), (risks = []))}
         />
-        <span class="muted small">for a host on your network or VPN</span>
+        <span class="muted small"
+          >{req.private ? "as it asks" : "for a host on your network or VPN"}</span
+        >
       </div>
       <label class="field">
         <span>for</span>
