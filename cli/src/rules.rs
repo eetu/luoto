@@ -36,7 +36,8 @@ pub fn parse_duration(s: &str) -> Result<TimeDelta> {
 
 #[derive(clap::Args)]
 pub struct AllowOpts {
-    /// The host (`docs.rs`), a wildcard over its subdomains (`*.docs.rs`), or a URL.
+    /// The host (`docs.rs`), a wildcard over its subdomains (`*.docs.rs`), or a URL; with a
+    /// port (`k8s.example.com:6443`), only that port.
     pub host: String,
     /// Any method (default: read-only GET/HEAD/OPTIONS).
     #[arg(long)]
@@ -77,10 +78,24 @@ pub struct AllowOpts {
 
 pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
     let host = o.host.trim();
-    let host = if host == "*" || host.contains('/') || host.starts_with("*.") {
+    let mut port = o.port;
+    let range = host.contains('/') && !host.contains("://");
+    let host = if host == "*" || range || host.starts_with("*.") {
         host.to_string()
     } else {
-        luoto_shared::host::normalize_host(luoto_shared::host::host_of(host))?
+        let bare = luoto_shared::host::host_of(host);
+        if let Some(named) = port_after(host, bare) {
+            let named: u16 = named
+                .parse()
+                .map_err(|_| anyhow::anyhow!("`{host}`: {named} is not a port"))?;
+            match port {
+                Some(p) if p != named => {
+                    bail!("`{host}` names port {named} and --port {p}: give one")
+                }
+                _ => port = Some(named),
+            }
+        }
+        luoto_shared::host::normalize_host(bare)?
     };
     if let Some(idle) = &o.idle {
         luoto_shared::policy::parse_idle(idle).map_err(anyhow::Error::msg)?;
@@ -95,7 +110,7 @@ pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
     Ok(Rule {
         id: Some(new_rule_id()),
         host,
-        port: o.port,
+        port,
         access,
         paths: o.paths.clone(),
         expires: o
@@ -116,6 +131,13 @@ pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
         ignore_case: false,
         idle: o.idle.clone(),
     })
+}
+
+/// The port `target` names after its host `bare` (`host:7443`, a URL's), as `host_of` read it.
+fn port_after<'a>(target: &'a str, bare: &str) -> Option<&'a str> {
+    let no_scheme = target.split_once("://").map_or(target, |(_, r)| r);
+    let authority = no_scheme.split(['/', '?', '#']).next()?;
+    authority.strip_prefix(bare)?.strip_prefix(':')
 }
 
 /// The risks of adding `rule` to an env with `policy`, or why it is refused: refused when
@@ -494,6 +516,31 @@ pub fn reject(ctx: &Ctx, name: &str, id: u64, note: Option<String>) -> Result<Ac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn allowed(args: &[&str]) -> Result<Rule> {
+        #[derive(clap::Parser)]
+        struct Allow {
+            #[command(flatten)]
+            o: AllowOpts,
+        }
+        use clap::Parser;
+        build_rule(&Allow::parse_from(std::iter::once("allow").chain(args.iter().copied())).o)
+    }
+
+    #[test]
+    fn a_port_after_the_host_is_the_rules_port() {
+        let r = allowed(&["k8s.example.com:7443", "--tunnel", "--private"]).unwrap();
+        assert_eq!((r.host.as_str(), r.port), ("k8s.example.com", Some(7443)));
+        assert!(r.allow_private && r.mode == Mode::Tunnel);
+        let r = allowed(&["https://k8s.example.com:7443/version"]).unwrap();
+        assert_eq!((r.host.as_str(), r.port), ("k8s.example.com", Some(7443)));
+        let r = allowed(&["k8s.example.com:7443", "--port", "7443"]).unwrap();
+        assert_eq!(r.port, Some(7443));
+        assert_eq!(allowed(&["docs.rs"]).unwrap().port, None);
+        let e = allowed(&["k8s.example.com:7443", "--port", "443"]).unwrap_err();
+        assert!(e.to_string().contains("give one"), "{e}");
+        assert!(allowed(&["k8s.example.com:99999"]).is_err());
+    }
 
     #[test]
     fn a_presets_hosts_are_listed_with_their_access_and_no_name_makes_some_up() {

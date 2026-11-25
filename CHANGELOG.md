@@ -16,6 +16,8 @@ release may break.
 - A gate or vault that stops answering fails the command after a minute instead of hanging it.
 - On Apple's `container`, every start of the background watcher left one more port probe
   running in each env.
+- `luoto allow <host>:<port>` dropped the port (the rule covered 80 and 443), and `luoto allow`
+  didn't read a URL's host.
 
 ## [0.7.2] - 2026-11-24
 
