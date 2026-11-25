@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -194,22 +193,22 @@ async fn carry(mut link: UnixStream, v: Vetted, conns: &Arc<Semaphore>, own: Own
     let _ = link.write_all(answer.as_bytes()).await;
 }
 
-/// Carry `link` and `tcp` both ways until both are done. The link, a VM's, is read whatever the
-/// server does (see `tunlink`): what the server isn't taking is held up to
-/// [`tunlink::HELD`](crate::tunlink::HELD), past which, or once the server can't be written,
-/// the connection ends.
+/// Carry `link` and `tcp` both ways until both are done; a server that can't be written ends
+/// both. The link is a VM's (see `tunlink`): it is read ahead of the server by up to
+/// [`tunlink::HELD`](crate::tunlink::HELD), so a burst never waits on it, and past that waits
+/// for the server, which is no VM, so no VM ends up waiting on itself. A server that stops
+/// reading but stays connected holds the gate's VM up until it reads or closes.
 async fn join(link: UnixStream, tcp: TcpStream) {
+    const CHUNK: usize = 64 * 1024;
     let (mut gate_r, mut gate_w) = link.into_split();
     let (mut server_r, mut server_w) = tcp.into_split();
-    let held = &AtomicUsize::new(0);
     let end = &tokio::sync::Notify::new();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(crate::tunlink::HELD / CHUNK);
     let from_gate = async move {
-        let mut buf = vec![0u8; 64 * 1024];
+        let mut buf = vec![0u8; CHUNK];
         // Ended by the gate: what is held still goes, then the server's side is shut.
         while let Ok(n @ 1..) = gate_r.read(&mut buf).await {
-            let over = held.fetch_add(n, Ordering::Relaxed) + n > crate::tunlink::HELD;
-            if over || tx.send(buf[..n].to_vec()).is_err() {
+            if tx.send(buf[..n].to_vec()).await.is_err() {
                 end.notify_one();
                 return;
             }
@@ -221,7 +220,6 @@ async fn join(link: UnixStream, tcp: TcpStream) {
                 end.notify_one();
                 return;
             }
-            held.fetch_sub(chunk.len(), Ordering::Relaxed);
         }
         let _ = server_w.shutdown().await;
     };
@@ -464,34 +462,48 @@ mod tests {
         assert_eq!(gate.read_to_end(&mut rest).await.unwrap(), 0);
     }
 
-    /// A server that stops reading ends the connection: the gate is never left waiting to
-    /// write, with its VM's vsock device stalled behind it.
+    /// A server slower than the link gets all of a large upload, in order: once what is read
+    /// ahead fills, the link waits for it.
     #[tokio::test]
-    async fn a_dial_ends_rather_than_stop_reading_the_gate() {
+    async fn a_slow_server_gets_all_of_a_large_upload() {
         let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = server.local_addr().unwrap();
-        let (done, finished) = tokio::sync::oneshot::channel::<()>();
-        tokio::spawn(async move {
-            let (unread, _) = server.accept().await.unwrap();
-            let _ = finished.await;
-            drop(unread);
+        let received = tokio::spawn(async move {
+            let (mut s, _) = server.accept().await.unwrap();
+            let (mut got, mut buf) = (Vec::new(), vec![0u8; 64 * 1024]);
+            loop {
+                let n = s.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    return got;
+                }
+                got.extend_from_slice(&buf[..n]);
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
         });
         let (mut gate, host, _dir) = link().await;
         let conns = Arc::new(Semaphore::new(1));
         tokio::spawn(async move { carry(host, Vetted(addr), &conns, Own::Allowed).await });
         let mut ok = [0u8; 3];
         gate.read_exact(&mut ok).await.unwrap();
-        let chunk = vec![0u8; 1 << 20];
-        let wrote = tokio::time::timeout(Duration::from_secs(30), async {
-            for _ in 0..4 * crate::tunlink::HELD / chunk.len() + 16 {
-                gate.write_all(&chunk).await?;
-            }
-            io::Result::Ok(())
+        let sent: Vec<u8> = (0..3 * crate::tunlink::HELD as u32)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        tokio::time::timeout(Duration::from_secs(60), async {
+            gate.write_all(&sent).await.unwrap();
+            gate.shutdown().await.unwrap();
         })
         .await
-        .expect("the gate was left waiting to write");
-        assert!(wrote.is_err(), "the connection ended");
-        drop(done);
+        .expect("the gate wrote it all");
+        let got = tokio::time::timeout(Duration::from_secs(60), received)
+            .await
+            .expect("the server got it all")
+            .unwrap();
+        assert!(
+            got == sent,
+            "{} of {} bytes, in order",
+            got.len(),
+            sent.len()
+        );
     }
 
     #[tokio::test]
