@@ -8,6 +8,12 @@ use serde::de::DeserializeOwned;
 use crate::names;
 use crate::runtime::{Runtime, exec};
 
+/// How long a gate or vault has to answer: every call is quick, and one whose container
+/// stopped answering would otherwise hold its command (and the UI) for good.
+const LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// The most an answer may hold.
+const CAP: usize = 16 << 20;
+
 fn call<T: DeserializeOwned>(
     rt: &Runtime,
     container: &str,
@@ -17,7 +23,7 @@ fn call<T: DeserializeOwned>(
     // `ctl` reads stdin to its end: no line break needed, so the buffer is exactly the JSON.
     let body = luoto_shared::ctl::to_json(op)?;
     let args = exec(container).stdin().argv(argv);
-    let res = rt.run_stdin(&args, &body);
+    let res = rt.run_stdin_limited(&args, &body, LIMIT, CAP);
     drop(body);
     let out = match res {
         Ok(o) => o,

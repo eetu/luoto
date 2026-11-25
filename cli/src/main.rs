@@ -522,6 +522,10 @@ enum Cmd {
         /// Grant only these path globs (repeatable), within the request's paths.
         #[arg(long = "path", value_name = "GLOB")]
         paths: Vec<String>,
+        /// Let the rule reach the host at a private address (your network, a VPN, this
+        /// machine); asked when the host resolves to one here.
+        #[arg(long)]
+        private: bool,
         /// Approve without asking.
         #[arg(long, short)]
         yes: bool,
@@ -1192,6 +1196,7 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
             read,
             methods,
             paths,
+            private,
             yes,
             force,
         } => {
@@ -1200,7 +1205,12 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
                 methods,
                 paths,
             };
-            c::approve(&env(e.env)?, id, window.as_deref(), &narrow, yes, force)
+            let how = c::Approval {
+                private,
+                yes,
+                force,
+            };
+            c::approve(&env(e.env)?, id, window.as_deref(), &narrow, how)
         }
         Cmd::Reject { e, id, note } => c::reject(&env(e.env)?, id, note),
         Cmd::Egress {
@@ -1320,6 +1330,17 @@ mod tests {
         assert_eq!(window.as_deref(), Some("2h"));
         assert!(parse(&["approve", "3", "--read", "--method", "GET"]).is_err());
         assert!(parse(&["approve", "3", "--ttl", "2h"]).is_err());
+        assert!(matches!(
+            parse(&["approve", "4", "--private", "--yes"]),
+            Ok(Cli {
+                cmd: Cmd::Approve {
+                    private: true,
+                    yes: true,
+                    ..
+                },
+                ..
+            })
+        ));
     }
 
     #[test]

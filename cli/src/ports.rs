@@ -123,7 +123,8 @@ pub fn listening(rt: &Runtime, dev: &str) -> Option<BTreeSet<u16>> {
 
 /// The ports a dev container listens on, from one `exec` that prints its tables every 2 s
 /// (Apple logs each `exec` in the VM's console log, which nothing caps, so a look per tick
-/// would grow it all day). Dropping it ends the `exec`.
+/// would grow it all day). Dropping it ends the `exec` here; inside, the loop ends once a newer
+/// one started, since a process the runtime runs outlives the `exec` that started it there.
 pub struct Listening {
     child: std::process::Child,
     open: Arc<std::sync::Mutex<Option<BTreeSet<u16>>>>,
@@ -133,12 +134,22 @@ pub struct Listening {
 const LISTENING_END: &str = "--luoto-end--";
 /// The most one printing may hold: the sandbox writes what that `exec` prints.
 const LISTENING_CAP: usize = 1 << 20;
+/// Where the newest loop keeps its pid (the tmpfs every dev container has, root's).
+const LISTENING_PID: &str = "/run/luoto/listening.pid";
+
+/// The loop printing the tables every 2 s while `pid_file` names it. One that can't write or
+/// read the file runs on.
+fn listening_script(pid_file: &str) -> String {
+    format!(
+        "f={pid_file}; echo $$ >$f 2>/dev/null; \
+         while [ \"$(cat $f 2>/dev/null || echo $$)\" = $$ ]; do \
+         cat /proc/net/tcp /proc/net/tcp6; echo {LISTENING_END}; sleep 2; done"
+    )
+}
 
 impl Listening {
     pub fn start(rt: &Runtime, dev: &str) -> Option<Self> {
-        let script = format!(
-            "while :; do cat /proc/net/tcp /proc/net/tcp6; echo {LISTENING_END}; sleep 2; done"
-        );
+        let script = listening_script(LISTENING_PID);
         let mut child = rt
             .command()
             .args(exec(dev).env(crate::idle::PROBE).sh(&script))
@@ -331,6 +342,41 @@ mod tests {
     }
 
     use super::*;
+
+    /// The loop runs in a Linux container: here, under a Unix host's `sh`.
+    #[cfg(unix)]
+    #[test]
+    fn a_listening_loop_ends_once_a_newer_one_started() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let pid = dir.path().join("listening.pid");
+        let script = listening_script(pid.to_str().unwrap());
+        let start = || {
+            Command::new("sh")
+                .args(["-c", &script])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        let wait_until = |what: &str, done: &mut dyn FnMut() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(Instant::now() < deadline, "{what}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        let mut older = start();
+        wait_until("the loop wrote its pid", &mut || pid.exists());
+        let mut newer = start();
+        wait_until("the older loop runs on", &mut || {
+            older.try_wait().unwrap().is_some()
+        });
+        assert!(newer.try_wait().unwrap().is_none(), "the newer loop ended");
+        let _ = newer.kill();
+        let _ = newer.wait();
+    }
 
     #[test]
     fn listening_ports_come_from_both_tables() {

@@ -628,6 +628,9 @@ struct Decision {
     /// Less than the request asked for.
     #[serde(default)]
     narrow: Narrowing,
+    /// The rule reaches the host at a private address (the user's network, a VPN).
+    #[serde(default)]
+    private: bool,
     #[serde(default)]
     force: bool,
     /// A variable request's answer: its plain value.
@@ -655,7 +658,15 @@ async fn approve(
             let installed = crate::vars::approve_with(&ctx, &name, &req, value)?;
             return Ok(rules::Approved::Installed { installed });
         }
-        rules::approve(&ctx, &name, &req, d.ttl.as_deref(), &d.narrow, d.force)
+        rules::approve(
+            &ctx,
+            &name,
+            &req,
+            d.ttl.as_deref(),
+            &d.narrow,
+            d.private,
+            d.force,
+        )
     })
     .await
     .map(Json)

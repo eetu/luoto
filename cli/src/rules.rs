@@ -36,7 +36,8 @@ pub fn parse_duration(s: &str) -> Result<TimeDelta> {
 
 #[derive(clap::Args)]
 pub struct AllowOpts {
-    /// The host (`docs.rs`), a wildcard over its subdomains (`*.docs.rs`), or a URL.
+    /// The host (`docs.rs`), a wildcard over its subdomains (`*.docs.rs`), or a URL; with a
+    /// port (`k8s.example.com:6443`), only that port.
     pub host: String,
     /// Any method (default: read-only GET/HEAD/OPTIONS).
     #[arg(long)]
@@ -77,10 +78,24 @@ pub struct AllowOpts {
 
 pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
     let host = o.host.trim();
-    let host = if host == "*" || host.contains('/') || host.starts_with("*.") {
+    let mut port = o.port;
+    let range = host.contains('/') && !host.contains("://");
+    let host = if host == "*" || range || host.starts_with("*.") {
         host.to_string()
     } else {
-        luoto_shared::host::normalize_host(luoto_shared::host::host_of(host))?
+        let bare = luoto_shared::host::host_of(host);
+        if let Some(named) = port_after(host, bare) {
+            let named: u16 = named
+                .parse()
+                .map_err(|_| anyhow::anyhow!("`{host}`: {named} is not a port"))?;
+            match port {
+                Some(p) if p != named => {
+                    bail!("`{host}` names port {named} and --port {p}: give one")
+                }
+                _ => port = Some(named),
+            }
+        }
+        luoto_shared::host::normalize_host(bare)?
     };
     if let Some(idle) = &o.idle {
         luoto_shared::policy::parse_idle(idle).map_err(anyhow::Error::msg)?;
@@ -95,7 +110,7 @@ pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
     Ok(Rule {
         id: Some(new_rule_id()),
         host,
-        port: o.port,
+        port,
         access,
         paths: o.paths.clone(),
         expires: o
@@ -116,6 +131,13 @@ pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
         ignore_case: false,
         idle: o.idle.clone(),
     })
+}
+
+/// The port `target` names after its host `bare` (`host:7443`, a URL's), as `host_of` read it.
+fn port_after<'a>(target: &'a str, bare: &str) -> Option<&'a str> {
+    let no_scheme = target.split_once("://").map_or(target, |(_, r)| r);
+    let authority = no_scheme.split(['/', '?', '#']).next()?;
+    authority.strip_prefix(bare)?.strip_prefix(':')
 }
 
 /// The risks of adding `rule` to an env with `policy`, or why it is refused: refused when
@@ -341,6 +363,20 @@ pub fn describe(rule: &Rule) -> String {
     crate::text::display(&format!("{at} {}{paths}", rule.access.describe()))
 }
 
+/// What `luoto allow` takes to make `rule` again, without its access: the host, its port and
+/// whether it tunnels (`k8s.example.com --port 7443 --tunnel`). Its host may come from the
+/// sandbox.
+pub fn allow_args(rule: &Rule) -> String {
+    let mut args = crate::text::display(&rule.host);
+    if let Some(port) = rule.port {
+        args.push_str(&format!(" --port {port}"));
+    }
+    if rule.mode == Mode::Tunnel {
+        args.push_str(" --tunnel");
+    }
+    args
+}
+
 /// The rule a pending access request grants, narrowed by `narrow`; refused if `narrow` would
 /// widen it.
 pub fn grant(req: &AccessRequest, narrow: &Narrowing) -> Result<Rule> {
@@ -360,24 +396,26 @@ pub enum Approved {
     Installed { installed: String },
 }
 
-/// Approve a pending request: an access request becomes a rule, narrowed by `narrow` and
-/// failing with [`Risks`] unless `force`; an install request installs. A request for a
-/// variable is refused: only a terminal asks for its value (`vars::approve`).
+/// Approve a pending request: an access request becomes a rule, narrowed by `narrow`,
+/// reaching the host's private address with `private`, and failing with [`Risks`] unless
+/// `force`; an install request installs. A request for a variable is refused: only a terminal
+/// asks for its value (`vars::approve`).
 pub fn approve(
     ctx: &Ctx,
     name: &str,
     req: &AccessRequest,
     ttl: Option<&str>,
     narrow: &Narrowing,
+    private: bool,
     force: bool,
 ) -> Result<Approved> {
     if let Some(var) = req.install.as_ref().and_then(Install::variable) {
         bail!(crate::vars::needs_terminal(name, req.id, var));
     }
     if req.install.is_some() {
-        if !narrow.is_empty() {
+        if !narrow.is_empty() || private {
             bail!(
-                "request #{} asks for an install: there is no access to narrow",
+                "request #{} asks for an install: there is no access to narrow or widen",
                 req.id
             );
         }
@@ -394,13 +432,17 @@ pub fn approve(
         );
     }
     let mut rule = grant(req, narrow)?;
+    rule.allow_private |= private;
     rule.expires = ttl.map(parse_duration).transpose()?.map(|d| Utc::now() + d);
     rule.note = Some(format!("approved request #{}", req.id));
     let rule = add_rule_checked(ctx, name, rule, force)?;
-    // The sandbox reads the note: it learns what it got, if less than it asked for.
+    // The sandbox reads the note: it learns what it got, if less or more than it asked for.
     let mut notes = Vec::new();
     if !narrow.is_empty() {
         notes.push(format!("granted less: {}", describe(&rule)));
+    }
+    if rule.allow_private {
+        notes.push("it reaches the host at a private address".to_string());
     }
     if policy.partly_denied(&req.host) {
         notes.push("[[deny]] rules still refuse some of it".to_string());
@@ -494,6 +536,38 @@ pub fn reject(ctx: &Ctx, name: &str, id: u64, note: Option<String>) -> Result<Ac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn allowed(args: &[&str]) -> Result<Rule> {
+        #[derive(clap::Parser)]
+        struct Allow {
+            #[command(flatten)]
+            o: AllowOpts,
+        }
+        use clap::Parser;
+        build_rule(&Allow::parse_from(std::iter::once("allow").chain(args.iter().copied())).o)
+    }
+
+    #[test]
+    fn a_port_after_the_host_is_the_rules_port() {
+        let r = allowed(&["k8s.example.com:7443", "--tunnel", "--private"]).unwrap();
+        assert_eq!((r.host.as_str(), r.port), ("k8s.example.com", Some(7443)));
+        assert!(r.allow_private && r.mode == Mode::Tunnel);
+        let r = allowed(&["https://k8s.example.com:7443/version"]).unwrap();
+        assert_eq!((r.host.as_str(), r.port), ("k8s.example.com", Some(7443)));
+        let r = allowed(&["k8s.example.com:7443", "--port", "7443"]).unwrap();
+        assert_eq!(r.port, Some(7443));
+        assert_eq!(allowed(&["docs.rs"]).unwrap().port, None);
+        let e = allowed(&["k8s.example.com:7443", "--port", "443"]).unwrap_err();
+        assert!(e.to_string().contains("give one"), "{e}");
+        assert!(allowed(&["k8s.example.com:99999"]).is_err());
+    }
+
+    #[test]
+    fn a_rule_is_named_again_as_luoto_allow_takes_it() {
+        let tunnel = allowed(&["k8s.example.com:7443", "--tunnel"]).unwrap();
+        assert_eq!(allow_args(&tunnel), "k8s.example.com --port 7443 --tunnel");
+        assert_eq!(allow_args(&allowed(&["docs.rs"]).unwrap()), "docs.rs");
+    }
 
     #[test]
     fn a_presets_hosts_are_listed_with_their_access_and_no_name_makes_some_up() {

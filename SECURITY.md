@@ -392,7 +392,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Social engineering.** Access requests are written by code in the sandbox. Read the host
   and access, not the reason; grant less than asked where that will do (`luoto approve --read`,
   `--path`). A request can't name an address range or a private address, and one for a port
-  is an uninspected tunnel to that host and port, never 80 or 443. A preset request names one
+  is an uninspected tunnel to that host and port, never 80 or 443. A name on a private
+  address (your network, a VPN) is reached only if you approve it so (`luoto approve
+  --private`, the UI's private switch); `luoto approve` looks the name up to ask only once
+  you approved, since a lookup carries whatever the sandbox put in the name. A preset request names one
   of luoto's presets; approving it opens all of that preset's hosts and keeps it in the env's
   config (`luoto status` lists them). An install request names a
   package or toolchain the gate has checked to be a plain name; approving it runs that

@@ -439,6 +439,53 @@ test("a write request can be approved as read-only on some of its paths", async 
   });
 });
 
+test("a tunnel request reaches a private address only when that is picked", async ({ page }) => {
+  await mockApi(page);
+  const request = {
+    id: 10,
+    host: "k8s.internal.example",
+    port: 7443,
+    access: "write",
+    reason: "the cluster API, on my VPN",
+    status: "pending",
+    created: new Date().toISOString(),
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [request] }),
+  );
+  const looked: string[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/resolve",
+    (route, req) => {
+      looked.push(req.url());
+      return route.fulfill({ json: { private: [], never: false } });
+    },
+  );
+  const sent: unknown[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/10/approve",
+    (route, req) => {
+      sent.push(req.postDataJSON());
+      return route.fulfill({
+        json: { host: request.host, port: 7443, mode: "tunnel", allow_private: true },
+      });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: /k8s\.internal\.example/ }).click();
+  const private_ = page.getByRole("switch", { name: "allow private address" });
+  await expect(private_).toHaveAttribute("aria-checked", "false");
+  await private_.click();
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
+
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toMatchObject({ created: request.created, private: true });
+  // The sandbox chose the name: this machine never looks it up before it is approved.
+  expect(looked).toEqual([]);
+});
+
 test("selected requests are approved together, each as it was shown", async ({ page }) => {
   await mockApi(page);
   const created = new Date().toISOString();

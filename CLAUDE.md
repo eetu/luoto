@@ -177,6 +177,10 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   gate then dials itself. Apple caps no container's output: a gate writes its events to a capped file in its volume
   (`LUOTO_EVENTS_FILE`), which luoto reads through `luoto-gate events` (`events::in_file`),
   and init.sh closes the dev container's output once ready (`LUOTO_OUTPUT=startup`).
+  A VM's vsock device (its published sockets, `exec` streams, its agent) stalls whole, with a
+  vCPU, while one write waits for a reader on the Mac, and only killing the VM ends that: luoto
+  reads whatever a VM sends, whatever the other side does (`tunlink.rs`, `hostdial.rs`; past
+  a bound a packet is dropped, a stream ended). Read every `exec`'s output as it comes.
 - `disk.rs` reads sizes and free space (podman and docker print them differently; its parsers
   read both) and picks what `luoto prune` removes: this instance's images by repository (an
   unnamed one by podman's names history, or the build stages' `luoto.build` label), never one

@@ -1366,7 +1366,7 @@ pub fn allow(name: &str, o: AllowOpts) -> Result<ExitCode> {
             "{} resolves to {private}, which the rule doesn't reach: `luoto allow -e {name} {} \
              --private` makes one that does",
             rule.host,
-            rule.host
+            rules::allow_args(&rule)
         );
     }
     Ok(ExitCode::SUCCESS)
@@ -1548,14 +1548,28 @@ pub fn requests(name: Option<&str>, follow: bool, json: bool) -> Result<ExitCode
     }
 }
 
+/// How `luoto approve` grants: its flags.
+pub struct Approval {
+    /// The rule reaches the host at a private address.
+    pub private: bool,
+    /// Nothing asked.
+    pub yes: bool,
+    /// Its risks accepted.
+    pub force: bool,
+}
+
 pub fn approve(
     name: &str,
     id: u64,
     ttl: Option<&str>,
     narrow: &Narrowing,
-    yes: bool,
-    force: bool,
+    how: Approval,
 ) -> Result<ExitCode> {
+    let Approval {
+        mut private,
+        yes,
+        force,
+    } = how;
     let ctx = Ctx::load()?;
     let req = rules::request(&ctx, name, id)?;
     println!("request #{id}: {}", fmt_request(&req));
@@ -1580,22 +1594,49 @@ pub fn approve(
         println!("grants less: {}", rules::describe(&rule));
     }
     if !yes && !confirm("Approve?") {
+        let private = if private { " --private" } else { "" };
         return Err(crate::prompt::declined(
             "approved",
-            &format!("luoto approve -e {name} {id} --yes"),
+            &format!("luoto approve -e {name} {id}{private} --yes"),
+        ));
+    }
+    // Looked up only once approved, as the gate does: the name is the sandbox's, and a lookup
+    // carries whatever it put in it. On a private address here, it is reached only if the
+    // user says so.
+    let resolved = if private || req.install.is_some() {
+        rules::Resolved::default()
+    } else {
+        rules::resolve(&req.host)
+    };
+    let at = resolved.private.join(", ");
+    if !at.is_empty() && !yes {
+        private = confirm(&format!(
+            "{} resolves to {at}, a private address (your network or a VPN). Let the rule reach \
+             it?",
+            crate::text::display(&req.host)
         ));
     }
     match rules::accepting_risks(force, |force| {
-        rules::approve(&ctx, name, &req, ttl, narrow, force)
+        rules::approve(&ctx, name, &req, ttl, narrow, private, force)
     })? {
         rules::Approved::Installed { installed } => out_text!("{installed}"),
-        rules::Approved::Rule(rule) => head!(
-            "approved: {}{}",
-            rules::describe(&rule),
-            rule.expires
-                .map(|e| format!(", until {}", egress::at_text(e)))
-                .unwrap_or_default()
-        ),
+        rules::Approved::Rule(rule) => {
+            head!(
+                "approved: {}{}",
+                rules::describe(&rule),
+                rule.expires
+                    .map(|e| format!(", until {}", egress::at_text(e)))
+                    .unwrap_or_default()
+            );
+            if !at.is_empty() && !rule.allow_private {
+                out!(
+                    "{} resolves to {at}, which the rule doesn't reach: `luoto allow -e {name} {} \
+                     --private` makes one that does",
+                    crate::text::display(&rule.host),
+                    rules::allow_args(&rule)
+                );
+            }
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
