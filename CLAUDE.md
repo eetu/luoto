@@ -291,6 +291,9 @@ What the CLI asks and prints follows one grammar, whatever the feature:
 - `just test` (unit), `just it` (integration), `just e2e` (pull-on-stop against a runtime:
   one env made and removed in the `luoto-dev` instance), `just test-ui` (Playwright),
   `just lint`, `just format`, `just shots` (README screenshots; needs a runtime).
+- CI runs the `luoto` and `luoto-shared` tests on Windows too, where a temp path is
+  `C:\Users\…`: formatted into a TOML basic string (`"…"`) its backslashes are escapes, so use a
+  literal string (`'…'`) or serialize it; a path in a shell line needs `#[cfg(unix)]`.
 - After changing gate/vault/tools code, rebuild images and `luoto up <env>` to pick them up;
   dev containers keep running (`luoto up --recreate` recreates them, volumes kept).
 
