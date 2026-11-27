@@ -186,6 +186,8 @@ struct Env {
     dial_sock: PathBuf,
     /// Stops the fake watcher of `dial_from_host`.
     dialing: Arc<AtomicBool>,
+    /// CAs every applied policy carries unless it names its own (`with_cas`).
+    cas: BTreeMap<String, String>,
     _gate: Proc,
     _vault: Proc,
     _dir: tempfile::TempDir,
@@ -330,6 +332,7 @@ impl Env {
             linked,
             dial_sock,
             dialing: Arc::new(AtomicBool::new(false)),
+            cas: BTreeMap::new(),
             _gate: gate,
             _vault: vault,
             _dir: dir,
@@ -348,9 +351,20 @@ impl Env {
         ctl(&self.vault_sock, op)
     }
 
+    /// With these hosts' own CAs in every policy applied.
+    fn with_cas(mut self, cas: BTreeMap<String, String>) -> Env {
+        self.cas = cas;
+        self
+    }
+
     fn apply(&self, policy: Policy) {
         let policy = Box::new(Policy {
             env: ENV.into(),
+            upstream_cas: if policy.upstream_cas.is_empty() {
+                self.cas.clone()
+            } else {
+                policy.upstream_cas.clone()
+            },
             ..policy
         });
         self.gate(&GateCtl::ApplyPolicy { policy });
@@ -1870,13 +1884,11 @@ impl TestCa {
     }
 }
 
-/// `LUOTO_UPSTREAM_CAS`: each host's own upstream CA.
-fn upstream_cas(cas: &[(&str, &TestCa)]) -> String {
-    let map: BTreeMap<&str, &str> = cas
-        .iter()
-        .map(|(h, ca)| (*h, ca.cert_pem.as_str()))
-        .collect();
-    serde_json::to_string(&map).unwrap()
+/// `Policy::upstream_cas`: each host's own upstream CA.
+fn upstream_cas(cas: &[(&str, &TestCa)]) -> BTreeMap<String, String> {
+    cas.iter()
+        .map(|(h, ca)| (h.to_string(), ca.cert_pem.clone()))
+        .collect()
 }
 
 #[derive(Clone)]
@@ -1976,11 +1988,8 @@ async fn intercepted_tls_shows_a_leaf_for_the_destination_signed_by_the_env_ca()
     let env_ca = TestCa::new("luoto sandbox CA (it)");
     let forge_ca = TestCa::new("forge CA");
     let forge = Https::start(&forge_ca, "forge.test");
-    let cas = upstream_cas(&[("forge.test", &forge_ca)]);
-    let env = Env::start_with(
-        &[("forge.test", forge.addr)],
-        &[("LUOTO_UPSTREAM_CAS", &cas)],
-    );
+    let env = Env::start(&[("forge.test", forge.addr)])
+        .with_cas(upstream_cas(&[("forge.test", &forge_ca)]));
     env_ca.install(&env);
     env.apply(Policy {
         rules: vec![read("read", "forge.test")],
@@ -2019,11 +2028,8 @@ async fn a_renewed_env_ca_signs_every_leaf_from_its_install_on() {
     let new = TestCa::new("luoto sandbox CA (it)");
     let forge_ca = TestCa::new("forge CA");
     let forge = Https::start(&forge_ca, "forge.test");
-    let cas = upstream_cas(&[("forge.test", &forge_ca)]);
-    let env = Env::start_with(
-        &[("forge.test", forge.addr)],
-        &[("LUOTO_UPSTREAM_CAS", &cas)],
-    );
+    let env = Env::start(&[("forge.test", forge.addr)])
+        .with_cas(upstream_cas(&[("forge.test", &forge_ca)]));
     let reported = |env: &Env| env.gate(&GateCtl::Status)["data"]["ca_pem_sha256"].clone();
     let sha = |ca: &TestCa| hex::encode(Sha256::digest(ca.cert_pem.as_bytes()));
     assert_eq!(reported(&env), serde_json::Value::Null);
@@ -2055,11 +2061,8 @@ async fn sni_and_host_must_name_the_connect_destination() {
     let env_ca = TestCa::new("luoto sandbox CA (it)");
     let api_ca = TestCa::new("api CA");
     let api = Https::start(&api_ca, "api.test");
-    let cas = upstream_cas(&[("api.test", &api_ca)]);
-    let env = Env::start_with(
-        &[("api.test", api.addr), ("other.test", api.addr)],
-        &[("LUOTO_UPSTREAM_CAS", &cas)],
-    );
+    let env = Env::start(&[("api.test", api.addr), ("other.test", api.addr)])
+        .with_cas(upstream_cas(&[("api.test", &api_ca)]));
     env_ca.install(&env);
     env.apply(Policy {
         rules: vec![read("api", "api.test"), read("other", "other.test")],
@@ -2081,12 +2084,36 @@ async fn sni_and_host_must_name_the_connect_destination() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "spawns binaries; run with `just it`"]
+async fn a_hosts_own_ca_is_trusted_once_a_policy_names_it() {
+    let env_ca = TestCa::new("luoto sandbox CA (it)");
+    let internal_ca = TestCa::new("internal CA");
+    let api = Https::start(&internal_ca, "api.test");
+    let env = Env::start(&[("api.test", api.addr)]);
+    env_ca.install(&env);
+    let policy = || Policy {
+        rules: vec![read("api", "api.test")],
+        ..Default::default()
+    };
+    env.apply(policy());
+    let r = env.https(&env_ca, "api.test", "/ok", &[]);
+    assert_eq!(r.status, 502, "{}", r.head);
+    assert!(r.body.contains("api.test --ca <file>"), "{}", r.body);
+    // The running gate takes it with the policy.
+    env.apply(Policy {
+        upstream_cas: upstream_cas(&[("api.test", &internal_ca)]),
+        ..policy()
+    });
+    assert_eq!(env.https(&env_ca, "api.test", "/ok", &[]).status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
 async fn credentials_go_only_over_tls_in_place_of_the_clients_own() {
     let env_ca = TestCa::new("luoto sandbox CA (it)");
     let api_ca = TestCa::new("api CA");
     let api = Https::start(&api_ca, "api.test");
-    let cas = upstream_cas(&[("api.test", &api_ca)]);
-    let env = Env::start_with(&[("api.test", api.addr)], &[("LUOTO_UPSTREAM_CAS", &cas)]);
+    let env =
+        Env::start(&[("api.test", api.addr)]).with_cas(upstream_cas(&[("api.test", &api_ca)]));
     env_ca.install(&env);
     env.credentials(
         &[(
@@ -2141,15 +2168,15 @@ async fn upstream_certificates_verify_only_for_the_host_their_ca_is_trusted_for(
     let other = Https::start(&forge_ca, "other.test");
     // Trusted for `alias.test`, but its certificate names another host.
     let alias = Https::start(&forge_ca, "forge.test");
-    let cas = upstream_cas(&[("forge.test", &forge_ca), ("alias.test", &forge_ca)]);
-    let env = Env::start_with(
-        &[
-            ("forge.test", forge.addr),
-            ("other.test", other.addr),
-            ("alias.test", alias.addr),
-        ],
-        &[("LUOTO_UPSTREAM_CAS", &cas)],
-    );
+    let env = Env::start(&[
+        ("forge.test", forge.addr),
+        ("other.test", other.addr),
+        ("alias.test", alias.addr),
+    ])
+    .with_cas(upstream_cas(&[
+        ("forge.test", &forge_ca),
+        ("alias.test", &forge_ca),
+    ]));
     env_ca.install(&env);
     env.apply(Policy {
         rules: vec![

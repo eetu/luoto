@@ -7,6 +7,21 @@ release may break.
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-11-27
+
+### Added
+
+- An allow rule can trust an internal service's own CA for its host (`luoto allow <host> --ca
+  <file>`), so the gate inspects it instead of failing the handshake; the error says how.
+- A GitHub App credential may take `actions = "read"`, to read runs, their logs and artifacts.
+
+### Fixed
+
+- Reading GitHub Actions logs and artifacts from an env (`gh run view --log`, `gh run
+  download`) failed: GitHub's storage hosts they redirect to were refused. With a GitHub
+  credential alone, source archives and a private repo's release assets downloaded through the
+  API failed the same way.
+
 ## [0.7.4] - 2026-11-25
 
 ### Added
@@ -612,7 +627,8 @@ release may break.
 
 - First release.
 
-[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.4...HEAD
+[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.5...HEAD
+[0.7.5]: https://github.com/eetu/luoto/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/eetu/luoto/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/eetu/luoto/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/eetu/luoto/compare/v0.7.1...v0.7.2

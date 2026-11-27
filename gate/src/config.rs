@@ -1,4 +1,4 @@
-//! Gate configuration from the environment luoto sets on the container.
+//! Gate configuration from the enironment luoto sets on the container.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -26,9 +26,6 @@ pub struct Config {
     pub dns: bool,
     /// Extra PEM roots trusted for upstream TLS (corporate TLS inspection upstream).
     pub upstream_ca: Option<PathBuf>,
-    /// More roots for upstream TLS, each for one host only: the CAs of self-hosted forges
-    /// (`{"git.example": "<PEM>"}`).
-    pub upstream_cas: std::collections::BTreeMap<String, String>,
     /// Drop to this uid/gid after binding sockets (Linux).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub run_as: Option<u32>,
@@ -105,11 +102,6 @@ impl Config {
             transparent: flag("LUOTO_TRANSPARENT", false),
             dns: flag("LUOTO_DNS", false),
             upstream_ca: var("LUOTO_UPSTREAM_CA").map(PathBuf::from),
-            upstream_cas: var("LUOTO_UPSTREAM_CAS")
-                .map(|v| serde_json::from_str(&v))
-                .transpose()
-                .context("LUOTO_UPSTREAM_CAS")?
-                .unwrap_or_default(),
             run_as: var("LUOTO_RUN_AS")
                 .map(|v| v.parse())
                 .transpose()

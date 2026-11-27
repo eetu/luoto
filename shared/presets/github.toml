@@ -22,3 +22,29 @@ host = "raw.githubusercontent.com"
 [[rule]]
 host = "cli.github.com"
 note = "GitHub CLI apt/rpm packages"
+
+# Actions logs and artifacts: the API answers with a redirect to a signed URL on GitHub's
+# storage, and only that URL opens.
+[[redirect]]
+host = "api.github.com"
+paths = [
+  "/repos/*/*/actions/jobs/*/logs",
+  "/repos/*/*/actions/runs/*/logs",
+  "/repos/*/*/actions/runs/*/attempts/*/logs",
+  "/repos/*/*/actions/artifacts/*/zip",
+]
+ignore_case = true
+to = ["*.blob.core.windows.net", "results-receiver.actions.githubusercontent.com"]
+
+# Source archives and release assets through the API (a private repo's with a credential).
+[[redirect]]
+host = "api.github.com"
+paths = ["/repos/*/*/tarball", "/repos/*/*/tarball/**", "/repos/*/*/zipball", "/repos/*/*/zipball/**"]
+ignore_case = true
+to = ["codeload.github.com"]
+
+[[redirect]]
+host = "api.github.com"
+paths = ["/repos/*/*/releases/assets/*"]
+ignore_case = true
+to = ["release-assets.githubusercontent.com", "objects.githubusercontent.com"]

@@ -325,7 +325,7 @@ async fn handle_inner(
         websocket,
         content_length,
     };
-    // A URL a feed's redirect named goes through on its permit, unless a deny refuses it.
+    // A URL an allowed redirect named goes through on its permit, unless a deny refuses it.
     let here = Url::of(target.tls, &target.host, target.port, &path, query);
     let permit = state.redirects.allows(&method, &here, Instant::now());
     let decision = match &permit {

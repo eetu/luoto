@@ -106,6 +106,11 @@ pub struct Rule {
     /// in place of its default: for long polls such as `kubectl logs -f`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle: Option<String>,
+    /// A PEM file on this machine with the CA the host's certificate is signed by (an internal
+    /// service's), trusted for this host only. The user's to set, never a project's or the
+    /// sandbox's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca: Option<String>,
 }
 
 /// The longest `idle` a rule may set.
@@ -510,8 +515,9 @@ impl Open {
 
 /// Where responses from `host`'s `paths` may send the client: a redirect to a URL on one of
 /// `to` lets that exact URL through for GET and HEAD, for a while (the gate's redirect
-/// permits). Only credentials add one, for a service whose downloads redirect to signed
-/// storage URLs on hosts no list can name.
+/// permits). Credentials and presets (`[[redirect]]`) add them, for a service whose downloads
+/// redirect to signed storage URLs on hosts no list can name; never one a project or the
+/// sandbox writes.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Redirect {
     pub host: String,
@@ -564,6 +570,10 @@ pub struct Policy {
     pub plain_http_credentials: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redirects: Vec<Redirect>,
+    /// PEM roots trusted for one host's TLS besides the public ones, by lowercase host: a
+    /// self-hosted forge's CA, or the one a user's rule names (`Rule::ca`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub upstream_cas: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1067,6 +1077,27 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
             "allows dialing private/host addresses (e.g. services on your machine)".into(),
         ));
     }
+    if rule.ca.is_some() {
+        if origin == RuleOrigin::Sandbox {
+            issues.push(err(
+                "a CA to trust is the user's to give, on their machine".into()
+            ));
+        } else if rule.host == "*"
+            || rule.host.starts_with("*.")
+            || rule.host.contains('/')
+            || rule.mode == Mode::Tunnel
+        {
+            issues.push(err(format!(
+                "a CA goes with one exact host the gate inspects, not `{}`{}",
+                rule.host,
+                if rule.mode == Mode::Tunnel {
+                    " as a tunnel"
+                } else {
+                    ""
+                }
+            )));
+        }
+    }
     if rule.mode != Mode::Tunnel
         && rule.access == Access::Level(AccessLevel::Write)
         && origin == RuleOrigin::Host
@@ -1157,6 +1188,40 @@ mod tests {
             assert!(p.wholly_denied("telemetry.example").is_none());
             assert!(p.partly_denied("telemetry.example"));
             assert!(!p.partly_denied("example.com"));
+        }
+    }
+
+    #[test]
+    fn a_ca_is_the_users_and_goes_with_one_inspected_host() {
+        let with_ca = |host: &str, mode: Mode| Rule {
+            host: host.into(),
+            mode,
+            ca: Some("/certs/internal.pem".into()),
+            ..Default::default()
+        };
+        // The errors about its CA.
+        let refused = |r: &Rule, o: RuleOrigin| {
+            validate_rule(r, o)
+                .into_iter()
+                .filter(|i| i.severity == Severity::Error && i.message.contains("CA"))
+                .count()
+        };
+        for host in ["api.internal", "10.0.0.8"] {
+            assert_eq!(
+                refused(&with_ca(host, Mode::Inspect), RuleOrigin::Host),
+                0,
+                "{host}"
+            );
+        }
+        let asked = with_ca("api.internal", Mode::Inspect);
+        assert_eq!(refused(&asked, RuleOrigin::Sandbox), 1);
+        for (host, mode) in [
+            ("*.example.com", Mode::Inspect),
+            ("10.0.0.0/8", Mode::Inspect),
+            ("*", Mode::Inspect),
+            ("api.internal", Mode::Tunnel),
+        ] {
+            assert_eq!(refused(&with_ca(host, mode), RuleOrigin::Host), 1, "{host}");
         }
     }
 

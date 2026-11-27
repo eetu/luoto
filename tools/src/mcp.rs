@@ -51,11 +51,11 @@ fn tools() -> Value {
         },
         {
             "name": "sandbox_request_access",
-            "description": "Ask the user to allow egress to a host, or to add one of luoto's presets (a registry's hosts, e.g. npm). Only the user can approve, on the host. Use the narrowest access: read unless writes are required; one exact host. For a protocol other than HTTP(S), such as a database, give its port: approved, that host and port get an uninspected tunnel, and clients connect to them as they are.",
+            "description": "Ask the user to allow egress to a host, or to add one of luoto's presets (a registry's hosts, e.g. npm). Only the user can approve, on the host. Use the narrowest access: read unless writes are required; one exact host. For a protocol other than HTTP(S), such as a database, or a TLS service whose client checks the server against its own CA (a Kubernetes API from a kubeconfig), give its port: approved, that host and port get an uninspected tunnel, and clients connect to them as they are. A host only the user's network or VPN reaches (a private address, an internal name, a public address their VPN routes) needs `private`. An internal HTTPS service the gate can't verify (its error names `--ca`) is the user's to trust: tell them the command it names.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "host": {"type": "string", "description": "Exact host, e.g. docs.rs"},
+                    "host": {"type": "string", "description": "Exact host, e.g. docs.rs; with `private`, also an address on the user's network, e.g. 10.0.0.8"},
                     "port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Only for a protocol other than HTTP(S): its port, never 80 or 443"},
                     "preset": {"type": "string", "description": "Instead of a host, one of luoto's presets for a registry or service: npm, pypi, crates, go, maven, …"},
                     "access": {"type": "string", "enum": ["read", "write"], "default": "read"},

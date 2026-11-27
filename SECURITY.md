@@ -44,6 +44,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   runtime's networks; those the gate dials itself, as before. TLS, inspection and credentials
   stay in the gate. A `--private` rule therefore reaches whatever your Mac's VPN and network
   let your Mac reach at that name's address.
+- **A host's own CA.** A rule's `ca` (`luoto allow <host> --ca <file>`) is trusted for that one
+  exact host, never a wildcard, range or tunnel, so no other host's certificate may chain to
+  it. Only your env file names one: a project's `luoto.toml` and a sandbox request can't.
 - **Open egress.** `luoto egress open` (an hour unless told otherwise; `open = true` until
   removed) lets out over HTTP(S), as rule `open`, what no rule allows, to any host and port.
   It never widens a host that gets a credential (its rules stay its only access), a muted
@@ -94,7 +97,11 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   repository's CI as any branch does, with code the sandbox wrote, and CI runs outside the
   sandbox: keep CI secrets in environments and protected branches, and give a token no
   `workflow` scope, which would let a push change the workflows (luoto can check that only
-  for an App).
+  for an App; an App's `actions` permission only as `read`). Actions logs and artifacts are
+  read through the API, whose answer redirects to a signed URL on GitHub's storage: that exact
+  URL opens for GET and HEAD for ten minutes, as a feed's download does, and no rule opens
+  those hosts. They bring back into the sandbox what a run could read, and artifacts are not
+  masked: CI the sandbox's code ran can hand it what CI reached.
 - **Azure DevOps writes.** The PAT goes only on the granted repositories' git paths and their
   pull requests' REST paths, and pushes pass the same guard as on GitHub. A pull request's
   body is an allowlist of fields (title, description, branches, draft, reviewers, work items,

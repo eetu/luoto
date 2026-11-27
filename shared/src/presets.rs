@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-use crate::policy::Rule;
+use crate::policy::{Redirect, Rule};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +19,10 @@ pub struct Preset {
     pub tools: Vec<String>,
     #[serde(default, rename = "rule")]
     pub rules: Vec<Rule>,
+    /// Where its hosts' answers may redirect a read (`Policy::redirects`): signed URLs on
+    /// storage no rule names.
+    #[serde(default, rename = "redirect")]
+    pub redirects: Vec<Redirect>,
     /// Environment for the env's shells, as agents set theirs: what turns a tool's update
     /// checks and telemetry off.
     #[serde(default)]
@@ -203,6 +207,23 @@ mod tests {
                     "preset {} host {} is a risky wildcard ({risk:?})",
                     p.name,
                     r.host
+                );
+            }
+            // A redirect opens only the URL an answer named, so its targets may be wide; where
+            // it comes from may not.
+            for r in &p.redirects {
+                assert!(
+                    !r.host.contains('*') && !r.paths.is_empty() && !r.allow_private,
+                    "preset {} redirects from {} too widely",
+                    p.name,
+                    r.host
+                );
+                assert!(
+                    !r.to.is_empty()
+                        && r.to.iter().all(|t| t.starts_with("*.") || !t.contains('*')),
+                    "preset {} redirects to {:?}",
+                    p.name,
+                    r.to
                 );
             }
         }

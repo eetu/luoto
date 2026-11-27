@@ -65,6 +65,10 @@ pub struct AllowOpts {
     /// Allow private/host addresses (e.g. a service on your machine).
     #[arg(long)]
     pub private: bool,
+    /// The CA its certificate is signed by, a PEM file here (an internal service's): trusted
+    /// for this host only, so the gate can inspect it.
+    #[arg(long, value_name = "FILE")]
+    pub ca: Option<std::path::PathBuf>,
     /// The one port it covers (default: 80 and 443).
     #[arg(long, value_name = "PORT")]
     pub port: Option<u16>,
@@ -130,6 +134,17 @@ pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
         note: o.note.clone(),
         ignore_case: false,
         idle: o.idle.clone(),
+        // Kept as a full path: the env file is read from anywhere.
+        ca: o
+            .ca
+            .as_deref()
+            .map(|p| {
+                let p = crate::workspace::expand(&p.to_string_lossy());
+                std::fs::canonicalize(&p)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .with_context(|| format!("the CA {}", p.display()))
+            })
+            .transpose()?,
     })
 }
 

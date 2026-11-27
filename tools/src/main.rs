@@ -318,6 +318,7 @@ where
     out.push_str(&format!(
         "\nNeed more access? sandbox request <host> [--write] --reason \"…\" --wait\n\
          Not HTTP(S) (a database)? sandbox request <host>:<port> --reason \"…\" --wait\n\
+         On the user's network or VPN? add --private to the request\n\
          The user can also grant it on the host: luoto allow -e {} <host> [--write] [--for 1h]\n\
          A system package or toolchain to keep: sandbox request --package <name> | --tool node@24 \
          --reason \"…\" --wait\n\

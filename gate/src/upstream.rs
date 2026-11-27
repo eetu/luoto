@@ -2,7 +2,6 @@
 //! connect to exactly the vetted address, verify TLS for the policy host.
 
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 use std::time::Duration;
 
 use hyper::client::conn::http1::{self, SendRequest};
@@ -259,16 +258,34 @@ pub async fn dial(
     }
     let name = ServerName::try_from(host.to_string())
         .map_err(|_| DialError::Failed(format!("invalid TLS name {host}")))?;
-    let tls = state
-        .host_tls
-        .get(&host.to_ascii_lowercase())
-        .unwrap_or(&state.client_tls);
-    let connector = TlsConnector::from(Arc::clone(tls));
+    let connector = TlsConnector::from(state.tls_for(host));
     let stream = tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(name, tcp))
         .await
         .map_err(|_| DialError::Failed(format!("TLS handshake with {host} timed out")))?
-        .map_err(|e| DialError::Failed(format!("TLS handshake with {host} failed: {e}")))?;
+        .map_err(|e| DialError::Failed(tls_failed(&state.cfg.env, host, &e)))?;
     Ok(Box::new(stream))
+}
+
+/// Why the handshake with `host` failed; for a certificate no CA the gate trusts signed, how
+/// the user trusts the host's own.
+fn tls_failed(env: &str, host: &str, e: &std::io::Error) -> String {
+    let unknown_ca = e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+        .is_some_and(|e| {
+            matches!(
+                e,
+                rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)
+            )
+        });
+    let mut msg = format!("TLS handshake with {host} failed: {e}");
+    if unknown_ca {
+        msg.push_str(&format!(
+            "; if {host} has a CA of its own (an internal service), the user can trust it for \
+             this host: luoto allow -e {env} {host} --ca <file>"
+        ));
+    }
+    msg
 }
 
 pub async fn http1_sender(io: Box<dyn Io>) -> Result<SendRequest<Body>, DialError> {
@@ -319,7 +336,26 @@ mod this_machine_tests {
 
 #[cfg(test)]
 mod connect_tests {
-    use super::{Timeout, cannot_connect};
+    use super::{Timeout, cannot_connect, tls_failed};
+
+    #[test]
+    fn an_unknown_ca_names_how_the_user_trusts_the_hosts_own() {
+        let failed = |e: rustls::Error| {
+            let e = std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+            tls_failed("web", "api.internal", &e)
+        };
+        let unknown = failed(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer,
+        ));
+        assert!(
+            unknown.ends_with("luoto allow -e web api.internal --ca <file>"),
+            "{unknown}"
+        );
+        let expired = failed(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::Expired,
+        ));
+        assert!(!expired.contains("--ca"), "{expired}");
+    }
 
     #[test]
     fn a_timeout_on_the_users_network_asks_about_it() {

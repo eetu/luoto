@@ -64,9 +64,6 @@ pub struct Compiled {
     /// Placeholder logins for hosts the gate adds a credential on, for clients that send none
     /// without one (`/run/luoto/netrc`, which `NETRC` names).
     pub netrc: String,
-    /// CA certificates (PEM) the gate trusts upstream besides the public roots, each for its
-    /// own host only: those of self-hosted git hosts.
-    pub upstream_cas: BTreeMap<String, String>,
     /// The `azcli:` ref whose token's tenant (`tid`) the env's `ARM_TENANT_ID` and
     /// `AZURE_TENANT_ID` name, when `[credentials.azure]` names no tenant.
     pub tenant_from: Option<String>,
@@ -154,6 +151,7 @@ pub fn compile(
         for (i, r) in p.rules.into_iter().enumerate() {
             b.rule(format!("{name}-{i}"), &format!("preset:{name}"), r);
         }
+        b.redirects.extend(p.redirects);
         b.dev_env.extend(p.env);
     }
 
@@ -205,7 +203,7 @@ pub fn compile(
         .as_ref()
         .map(|c| compile_azure_identity(&mut b, c))
         .transpose()?;
-    let (git, upstream_cas) = compile_git(&mut b, &cfg.credentials.git)?;
+    let (git, mut upstream_cas) = compile_git(&mut b, &cfg.credentials.git)?;
     for c in &cfg.credentials.git {
         if c.repos.is_empty() && c.read_repos.is_empty() {
             continue;
@@ -232,6 +230,16 @@ pub fn compile(
         } else {
             "user"
         };
+        if let Some(ca) = &r.ca {
+            if origin == "project" {
+                bail!("rule `{id}`: a project can't name a CA to trust");
+            }
+            let certs = ca_file(&format!("rule for `{}`", r.host), ca)?;
+            let held = upstream_cas.entry(r.host.to_ascii_lowercase()).or_default();
+            if !held.contains(&certs) {
+                held.push_str(&certs);
+            }
+        }
         b.rule(id, origin, r.clone());
     }
     for d in &cfg.deny {
@@ -298,6 +306,7 @@ pub fn compile(
         open,
         plain_http_credentials: b.plain_http_credentials,
         redirects: b.redirects,
+        upstream_cas,
     };
     // A tunnel passes bytes unread: one you or a repository wrote can't cover a host whose
     // credentials, forge guards or denies the gate applies (`luoto allow` refuses it too).
@@ -319,7 +328,6 @@ pub fn compile(
         git_config: git_config(&b.rewrites),
         known_hosts,
         netrc: b.netrc,
-        upstream_cas,
         tenant_from: b.tenant_from,
         warnings: b.warnings,
     })
@@ -914,6 +922,16 @@ fn compile_github(b: &mut Builder, creds: &[GithubCred]) -> Result<Option<Github
             reason: reason.into(),
         });
     }
+    // The `github` preset's redirects (Actions logs and artifacts), as its reads above, with
+    // the preset or without it.
+    for r in presets::get("github")
+        .map(|p| p.redirects)
+        .unwrap_or_default()
+    {
+        if !b.redirects.contains(&r) {
+            b.redirects.push(r);
+        }
+    }
     b.dev_env.insert("GH_TOKEN".into(), GH_PLACEHOLDER.into());
     b.dev_env
         .insert("GITHUB_TOKEN".into(), GH_PLACEHOLDER.into());
@@ -947,10 +965,19 @@ fn compile_github_one(
              or only read (`read_repos`)"
         );
     }
-    for p in gh.permissions.keys() {
+    for (p, level) in &gh.permissions {
+        // Reading runs, their logs and artifacts; starting or cancelling one stays refused.
+        if p == "actions" && level == "read" {
+            continue;
+        }
         if FORBIDDEN_GITHUB_PERMISSIONS.contains(&p.as_str()) {
+            let read = if p == "actions" {
+                " (`actions = \"read\"` reads runs, logs and artifacts)"
+            } else {
+                ""
+            };
             bail!(
-                "credentials.github: permission `{p}` is refused — it would let the sandbox reach CI secrets or account settings"
+                "credentials.github: permission `{p}` is refused — it would let the sandbox reach CI secrets or account settings{read}"
             );
         }
     }
@@ -1386,18 +1413,23 @@ fn compile_git(
     Ok((guards, cas))
 }
 
-/// The certificates of a `[[credentials.git]]`'s `ca` file, a file on this machine; only the
-/// certificates, so a file that also holds a key keeps it here.
+/// The certificates of a `[[credentials.git]]`'s `ca` file, a file on this machine.
 pub(crate) fn git_ca(host: &str, ca: &str) -> Result<String> {
+    ca_file(&format!("credentials.git ({host})"), ca)
+}
+
+/// The certificates in a CA file on this machine, for `what` names it in errors; only the
+/// certificates, so a file that also holds a key keeps it here.
+pub(crate) fn ca_file(what: &str, ca: &str) -> Result<String> {
     if crate::workspace::network_path(ca) {
         bail!(
-            "credentials.git ({host}): its CA `{}` is on another machine; give a file on this one",
+            "{what}: its CA `{}` is on another machine; give a file on this one",
             crate::text::display(ca)
         );
     }
     let path = crate::workspace::expand(ca);
     let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("credentials.git ({host}): read its CA {}", path.display()))?;
+        .with_context(|| format!("{what}: read its CA {}", path.display()))?;
     let certs: String = text
         .split_inclusive("-----END CERTIFICATE-----")
         .filter_map(|c| {
@@ -1407,10 +1439,7 @@ pub(crate) fn git_ca(host: &str, ca: &str) -> Result<String> {
         })
         .collect();
     if certs.is_empty() {
-        bail!(
-            "credentials.git ({host}): {} holds no PEM certificate",
-            path.display()
-        );
+        bail!("{what}: {} holds no PEM certificate", path.display());
     }
     Ok(certs)
 }
@@ -3074,8 +3103,8 @@ ca = '{}'
                 .is_empty()
         );
         assert_eq!(p.git[0].repos, ["infra/platform/api"]);
-        assert!(c.upstream_cas["forge.internal"].contains("BEGIN CERTIFICATE"));
-        assert!(!c.upstream_cas["forge.internal"].contains("KEY"));
+        assert!(p.upstream_cas["forge.internal"].contains("BEGIN CERTIFICATE"));
+        assert!(!p.upstream_cas["forge.internal"].contains("KEY"));
         assert!(c.git_config.contains("insteadOf = \"git@forge.internal:\""));
         assert!(c.git_config.contains("https://forge.internal:3000/"));
         assert!(
@@ -3158,6 +3187,105 @@ ca = '{}'
         ] {
             assert!(compile("t", &cfg(bad), GATE, &[]).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn actions_logs_and_artifacts_redirect_to_githubs_storage_only() {
+        let storage = [
+            "*.blob.core.windows.net",
+            "results-receiver.actions.githubusercontent.com",
+        ];
+        let credential = "[credentials.github]\ntoken = \"op://v/pat/token\"\nrepos = [\"a/b\"]";
+        // The credential alone, the preset alone, and both (one redirect, not two).
+        for text in [
+            credential.to_string(),
+            "presets = [\"github\"]".to_string(),
+            format!("presets = [\"github\"]\n{credential}"),
+        ] {
+            let p = compile("t", &cfg(&text), GATE, &[]).unwrap().policy;
+            for path in [
+                "/repos/a/b/actions/jobs/139290784675/logs",
+                "/repos/A/B/actions/runs/45638629391/logs",
+                "/repos/a/b/actions/runs/45638629391/attempts/2/logs",
+                "/repos/a/b/actions/artifacts/15035726636/zip",
+            ] {
+                assert_eq!(
+                    p.redirect_targets("GET", "api.github.com", path),
+                    storage,
+                    "{text}: {path}"
+                );
+            }
+            for (path, to) in [
+                ("/repos/a/b/tarball/main", "codeload.github.com"),
+                ("/repos/a/b/zipball", "codeload.github.com"),
+                (
+                    "/repos/a/b/releases/assets/321",
+                    "release-assets.githubusercontent.com",
+                ),
+            ] {
+                let targets = p.redirect_targets("GET", "api.github.com", path);
+                assert!(targets.contains(&to), "{text}: {path} {targets:?}");
+                assert!(!targets.contains(&"*.blob.core.windows.net"), "{path}");
+            }
+            assert!(
+                p.redirect_targets("GET", "api.github.com", "/repos/a/b/pulls")
+                    .is_empty()
+            );
+            assert!(
+                p.redirect_targets("DELETE", "api.github.com", "/repos/a/b/actions/runs/1/logs")
+                    .is_empty()
+            );
+        }
+        let none = compile("t", &cfg("presets = [\"npm\"]"), GATE, &[]).unwrap();
+        assert!(none.policy.redirects.is_empty());
+    }
+
+    #[test]
+    fn an_app_may_read_actions_but_never_write_them() {
+        let app = |level: &str| {
+            cfg(&format!(
+                "[credentials.github]\napp_id = \"1\"\ninstallation_id = 2\n\
+                 private_key = \"op://v/app/key\"\nrepos = [\"a/b\"]\n\
+                 permissions = {{ contents = \"write\", actions = \"{level}\" }}"
+            ))
+        };
+        assert!(compile("t", &app("read"), GATE, &[]).is_ok());
+        let err = compile("t", &app("write"), GATE, &[]).err().unwrap();
+        assert!(err.to_string().contains("`actions = \"read\"`"), "{err}");
+    }
+
+    #[test]
+    fn a_rules_ca_is_trusted_for_its_host_and_never_a_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("internal.pem");
+        std::fs::write(
+            &ca,
+            "-----BEGIN PRIVATE KEY-----\nKKKK\n-----END PRIVATE KEY-----\n\
+             -----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let rule = |id: &str| {
+            format!(
+                // A literal string: a Windows path's backslashes are no escapes.
+                "[[allow]]\nid = \"{id}\"\nhost = \"API.internal\"\nca = '{}'",
+                ca.display()
+            )
+        };
+        let c = compile("t", &cfg(&rule("r1")), GATE, &[]).unwrap();
+        let held = &c.policy.upstream_cas["api.internal"];
+        assert!(
+            held.contains("BEGIN CERTIFICATE") && !held.contains("KEY"),
+            "{held}"
+        );
+        let err = compile("t", &cfg(&rule("project-r1")), GATE, &[])
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("a project can't name a CA"),
+            "{err}"
+        );
+        let gone = cfg(&rule("r1").replace("internal.pem", "missing.pem"));
+        assert!(compile("t", &gone, GATE, &[]).is_err());
     }
 
     #[test]

@@ -29,6 +29,7 @@ host = "docs.rs"
 paths = ["/serde/**"]         # /serde and below; `*` stays within one path segment
 expires = "2026-12-01T00:00:00Z"
 # idle = "2h"                 # how long it may sit silent before the gate closes it (see Limits in the README)
+# ca = "/Users/me/certs/internal-ca.pem"   # an internal service's CA, trusted for this host only
 
 [egress]                      # open: any HTTP(S) host no rule allows (`luoto egress open`)
 open_until = "2026-12-01T15:00:00Z"   # or `open = true`: until you remove it
@@ -173,7 +174,9 @@ in it points to, and only the env's own file names one. Not on Windows yet.
 
 A GitHub App for luoto needs only repository permissions such as Contents and Pull requests;
 luoto refuses Workflows, Actions, Secrets and Administration
-([why](../SECURITY.md#what-holds-the-line)). A token or App installation reaches one owner's
+([why](../SECURITY.md#what-holds-the-line)), but for `actions = "read"` in `permissions`,
+which lets the env read runs, their logs and artifacts (`gh run view --log`); a token reads
+them as it is. A token or App installation reaches one owner's
 repos; for another owner's, write `[[credentials.github]]` once per owner instead of
 `[credentials.github]`. Each repo's requests get the credential that lists it, and GraphQL
 (`gh pr create`) the first one that may write, so the others open pull requests over REST

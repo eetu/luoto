@@ -1120,13 +1120,6 @@ fn gate_spec(ctx: &Ctx, env: &str, p: &Plan, a: &names::Addrs) -> RunSpec {
         spec.add_hosts
             .push((crate::model_servers::HOST.into(), "host-gateway".into()));
     }
-    // Read at start: a changed CA changes the spec, which recreates the gate.
-    if !p.compiled.upstream_cas.is_empty() {
-        spec.env.push((
-            "LUOTO_UPSTREAM_CAS".into(),
-            serde_json::to_string(&p.compiled.upstream_cas).unwrap_or_default(),
-        ));
-    }
     spec
 }
 
