@@ -3266,7 +3266,8 @@ ca = '{}'
         .unwrap();
         let rule = |id: &str| {
             format!(
-                "[[allow]]\nid = \"{id}\"\nhost = \"API.internal\"\nca = \"{}\"",
+                // A literal string: a Windows path's backslashes are no escapes.
+                "[[allow]]\nid = \"{id}\"\nhost = \"API.internal\"\nca = '{}'",
                 ca.display()
             )
         };
