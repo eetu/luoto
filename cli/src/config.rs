@@ -1993,9 +1993,9 @@ impl EnvFile {
         self.save()
     }
 
-    /// Remove rules by id or by exact host. Returns how many were removed.
+    /// Remove the rules `id_or_host` names (`rules::named_by`). Returns how many were removed.
     pub fn remove_rules(&mut self, id_or_host: &str) -> Result<usize> {
-        self.retain_rules(|r| r.id.as_deref() != Some(id_or_host) && r.host != id_or_host)
+        self.retain_rules(|r| !crate::rules::named_by(r, id_or_host))
     }
 
     /// Put `rule` where the rule with id `id` is, in one save; false when there is none.

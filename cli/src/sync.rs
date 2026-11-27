@@ -227,6 +227,36 @@ pub fn unlock_all(ctx: &Ctx) -> Result<usize> {
     Ok(n)
 }
 
+/// After the vault started anew (an upgrade, a restart of its container), bind again the envs
+/// whose gates still run and load their secrets: it held them in memory only, and their
+/// credentialed hosts fail closed without them. `except` is an env that binds its own.
+pub fn rebind_running(ctx: &Ctx, except: Option<&str>) {
+    if let Err(e) = rebind(ctx, except) {
+        crate::progress::warn(&format!(
+            "{e:#}; the vault started anew, so the credentialed hosts of running envs return \
+             403 until `luoto vault unlock` succeeds"
+        ));
+    }
+}
+
+fn rebind(ctx: &Ctx, except: Option<&str>) -> Result<()> {
+    let states = ctx.rt.states()?;
+    let mut refs = BTreeSet::new();
+    for env in config::list_envs(&ctx.paths)? {
+        if except == Some(env.as_str()) || !states.running(&names::gate(&env)) {
+            continue;
+        }
+        let p = env::plan(ctx, &env)?;
+        let Some(state) = &p.state else { continue };
+        bind_vault(ctx, &env, state, &p.compiled)?;
+        refs.extend(p.compiled.vault_refs());
+    }
+    if !refs.is_empty() {
+        load_secrets(ctx, &refs, "your running envs", true)?;
+    }
+    Ok(())
+}
+
 /// Run `f` with `rules` added to the env's policy as grants that expire after `ttl`. They
 /// are removed when `f` returns, and expire on their own if luoto dies first.
 pub fn with_grants<T>(

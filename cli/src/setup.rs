@@ -704,7 +704,9 @@ fn finish(
     }
     config::save_global(&paths, &global)?;
     let ctx = Ctx { paths, global, rt };
-    env::ensure_vault(&ctx)?;
+    if env::ensure_vault(&ctx)? {
+        crate::sync::rebind_running(&ctx, None);
+    }
     if new_images {
         crate::progress::wait("looking for older images", || {
             crate::disk::note_superseded(&ctx)

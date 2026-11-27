@@ -461,13 +461,24 @@ pub fn path_glob(path: &str) -> Option<String> {
 
 /// The host in what a user typed for one: a bare name, `host:port`, or a URL.
 pub fn host_of(target: &str) -> &str {
+    split_target(target).0
+}
+
+/// The host and the port, if one is named, in what a user typed for a host: a bare name or
+/// address (IPv6 too), `host:port`, `[v6]:port`, or a URL.
+pub fn split_target(target: &str) -> (&str, Option<&str>) {
     let t = target.trim();
     let no_scheme = t.split_once("://").map_or(t, |(_, r)| r);
     let authority = no_scheme.split(['/', '?', '#']).next().unwrap_or(no_scheme);
-    authority
-        .rsplit_once(':')
-        .filter(|(_, p)| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-        .map_or(authority, |(h, _)| h)
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, a)| a);
+    // A bare IPv6 address: its last group is no port.
+    if !authority.starts_with('[') && authority.matches(':').count() > 1 {
+        return (authority, None);
+    }
+    match authority.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h, Some(p)),
+        _ => (authority, None),
+    }
 }
 
 #[cfg(test)]
@@ -806,5 +817,16 @@ mod tests {
         assert_eq!(host_of("http://example.com:8080/x"), "example.com");
         assert_eq!(host_of("*.example.com"), "*.example.com");
         assert_eq!(host_of("example.com:"), "example.com:");
+        assert_eq!(host_of("https://user:pw@example.com/"), "example.com");
+    }
+
+    #[test]
+    fn a_bare_ipv6_address_names_no_port() {
+        assert_eq!(split_target("fd00::1"), ("fd00::1", None));
+        assert_eq!(split_target("2001:db8::8080"), ("2001:db8::8080", None));
+        assert_eq!(split_target("[fd00::1]:5432"), ("[fd00::1]", Some("5432")));
+        assert_eq!(split_target("[fd00::1]"), ("[fd00::1]", None));
+        assert_eq!(split_target("http://[::1]:8080/x"), ("[::1]", Some("8080")));
+        assert_eq!(split_target("db.corp:5432"), ("db.corp", Some("5432")));
     }
 }

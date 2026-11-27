@@ -173,8 +173,11 @@ async fn token(state: &State, req: &Request<Incoming>, target: &Target) -> Answe
         .refused("guard");
     };
     let Some(vault) = state.vault() else {
-        return bad("luoto: the env has no vault yet; the user runs `luoto up` on the host")
-            .refused("locked");
+        return bad(&format!(
+            "luoto: the env has no vault yet; the user runs `luoto up -e {}` on the host",
+            state.cfg.env
+        ))
+        .refused("locked");
     };
     let token = match vault.get(&binding).await {
         Ok(t) => t,

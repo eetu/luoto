@@ -148,7 +148,7 @@ pub async fn dial_tcp_to(
                 Err(HostDialError::NoLink) => {
                     return Err(DialError::Failed(format!(
                         "no link to this Mac for {addr}: luoto's background watcher isn't \
-                         running; `luoto up {}` starts it",
+                         running; `luoto up -e {}` starts it",
                         state.cfg.env
                     )));
                 }

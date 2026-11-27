@@ -137,7 +137,8 @@ pub fn dev_id_map(rt: &Runtime, octet: u8) -> Option<u32> {
     machine::is_luoto(rt.connection.as_deref()).then(|| machine::dev_id_start(octet))
 }
 
-pub fn ensure_vault(ctx: &Ctx) -> Result<()> {
+/// The vault, running; true when it started anew, holding no env's bindings or secrets.
+pub fn ensure_vault(ctx: &Ctx) -> Result<bool> {
     crate::progress::wait("starting the vault", || {
         let id = image_ids(&ctx.rt, &[ctx.image("vault")]).map_or_else(String::new, |[id]| id);
         start_vault(ctx, &id)
@@ -149,8 +150,9 @@ pub fn ensure_vault(ctx: &Ctx) -> Result<()> {
 const VAULT_SOCKETS: &str = "/run/luoto-vault";
 const APPLE_VAULT_SOCKET: &str = "/run/luoto-vault/vault.sock";
 
-/// The vault from its image `image_id`, its egress network and its socket volume.
-fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
+/// The vault from its image `image_id`, its egress network and its socket volume; true when
+/// it started anew (created or started), holding nothing.
+fn start_vault(ctx: &Ctx, image_id: &str) -> Result<bool> {
     let rt = &ctx.rt;
     let apple = rt.flavor == Flavor::Apple;
     let net = names::vault_out_net();
@@ -203,12 +205,13 @@ fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
     } else {
         rt.create_volume(&names::vault_sockets(), &labels("", "vault"))?;
     }
-    if start_or_create(ctx, &spec, image_id, None)? == Launch::Created {
+    let launch = start_or_create(ctx, &spec, image_id, None)?;
+    if launch == Launch::Created {
         remove_old_vault_net(ctx);
     }
     wait_until(Duration::from_secs(20), || ctl::vault_status(rt).ok())
         .context("vault did not come up")?;
-    Ok(())
+    Ok(launch != Launch::AlreadyRunning)
 }
 
 /// The NAT network `net`. On Apple, one on another subnet, or one whose subnet can't be read,
@@ -530,7 +533,9 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
 
     // Quick when the env runs, so it says nothing then.
     let starting = crate::progress::waiting(&format!("starting `{env}`"));
-    crate::progress::wait("starting the vault", || start_vault(ctx, &ids.vault))?;
+    if crate::progress::wait("starting the vault", || start_vault(ctx, &ids.vault))? {
+        sync::rebind_running(ctx, Some(env));
+    }
 
     // On Apple the dev container's only link is the tun device to its gate: no env network.
     let apple = rt.flavor == Flavor::Apple;

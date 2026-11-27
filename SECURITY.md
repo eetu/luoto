@@ -98,9 +98,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   sandbox: keep CI secrets in environments and protected branches, and give a token no
   `workflow` scope, which would let a push change the workflows (luoto can check that only
   for an App; an App's `actions` permission only as `read`). Actions logs and artifacts are
-  read through the API, whose answer redirects to a signed URL on GitHub's storage: that exact
-  URL opens for GET and HEAD for ten minutes, as a feed's download does, and no rule opens
-  those hosts. They bring back into the sandbox what a run could read, and artifacts are not
+  read through the API, and pull request diffs and issue attachments through github.com, whose
+  answers redirect to a signed URL on GitHub's storage: that exact URL opens for GET and HEAD
+  for ten minutes, as a feed's download does, and no rule opens those hosts. They bring back into the sandbox what a run could read, and artifacts are not
   masked: CI the sandbox's code ran can hand it what CI reached.
 - **Azure DevOps writes.** The PAT goes only on the granted repositories' git paths and their
   pull requests' REST paths, and pushes pass the same guard as on GitHub. A pull request's
@@ -114,8 +114,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Azure DevOps feeds.** The PAT goes on the feeds' organizations' packaging paths, with GET
   and HEAD only: installs, never a publish. Every feed of those organizations gets it, as a
   feed's own links name its files by project and feed ID; a PAT with only Packaging (Read)
-  keeps it to what it reads. A stored package downloads from a signed Azure Storage URL on a
-  host per file, so no rule names those hosts: the gate lets through only the exact URL a
+  keeps it to what it reads. A stored package downloads from a signed URL on Azure Storage or
+  Azure Artifacts' blob store, on a host per file, so no rule names those hosts: the gate lets through only the exact URL a
   feed's redirect named, for GET and HEAD, for ten minutes, without the client's own
   authorization or cookies. The sandbox never chooses that URL.
 - **Other package feeds.** Each goes on its feed's paths, with GET and HEAD only. A GitHub

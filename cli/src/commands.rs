@@ -1677,6 +1677,41 @@ pub enum Only {
     Opened,
 }
 
+/// The `luoto allow` that lets a host's last denial through: on its port (a rule without one
+/// covers 80 and 443), as a tunnel for what isn't HTTP, with upgrades, writes or private
+/// access where it needed them.
+fn allow_hint(name: &str, s: &events::HostSummary) -> String {
+    let private = s.host.ends_with(".internal")
+        || s.host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(luoto_shared::host::is_private);
+    let host = if s.host.contains(':') {
+        format!("[{}]", s.host)
+    } else {
+        s.host.clone()
+    };
+    let target = match s.last_denied_at.as_ref().map(|(_, p)| *p) {
+        Some(p) if p != 80 && p != 443 => format!("{host}:{p}"),
+        _ => s.host.clone(),
+    };
+    let how = match s.last_reason.as_deref() {
+        Some("not_http") => " --tunnel",
+        Some("websocket_not_allowed") => " --ws",
+        _ if s.wants_write => " --write",
+        _ => "",
+    };
+    format!(
+        "{}{} → luoto allow -e {name} {target}{how}{}",
+        s.last_message.clone().unwrap_or_default(),
+        if private {
+            " (--private exposes a service on your machine or network)"
+        } else {
+            ""
+        },
+        if private { " --private" } else { "" }
+    )
+}
+
 /// `all`: also the denials the env's mutes hide.
 pub fn egress(
     name: &str,
@@ -1789,22 +1824,7 @@ pub fn egress(
                 if s.wants_write { " --write" } else { "" },
             )
         } else if s.denied > 0 {
-            let private = s.host.ends_with(".internal")
-                || s.host
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(luoto_shared::host::is_private);
-            format!(
-                "{}{} → luoto allow -e {name} {}{}{}",
-                s.last_message.clone().unwrap_or_default(),
-                if private {
-                    " (--private exposes a service on your machine or network)"
-                } else {
-                    ""
-                },
-                s.host,
-                if s.wants_write { " --write" } else { "" },
-                if private { " --private" } else { "" }
-            )
+            allow_hint(name, &s)
         } else if s.opened > 0 {
             format!("open egress → luoto egress keep -e {name}")
         } else {
@@ -2266,6 +2286,29 @@ pub fn lock() -> Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_egress_hint_allows_what_the_denial_needed() {
+        let denied = |reason: &str, port: u16| events::HostSummary {
+            host: "db.example.com".into(),
+            denied: 1,
+            last_reason: Some(reason.into()),
+            last_denied_at: Some(("GET".into(), port)),
+            ..Default::default()
+        };
+        for (reason, port, fix) in [
+            ("not_http", 5432, "db.example.com:5432 --tunnel"),
+            ("no_rule", 443, "db.example.com"),
+            ("no_rule", 8443, "db.example.com:8443"),
+            ("websocket_not_allowed", 5173, "db.example.com:5173 --ws"),
+        ] {
+            let hint = allow_hint("web", &denied(reason, port));
+            assert!(
+                hint.ends_with(&format!("luoto allow -e web {fix}")),
+                "{hint}"
+            );
+        }
+    }
 
     #[test]
     fn a_preset_request_shows_the_hosts_it_opens() {

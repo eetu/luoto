@@ -136,6 +136,7 @@ async fn inspect_push(mut body: Body, rules: PushRules<'_>) -> Result<Body, Stri
                 check_updates(rules, &updates)?;
                 break;
             }
+            Err(Parse::FlushOnly) => return probe(buf, body).await,
             Err(Parse::Invalid(e)) => return Err(e),
             Err(Parse::NeedMore) => {}
         }
@@ -154,6 +155,22 @@ async fn inspect_push(mut body: Body, rules: PushRules<'_>) -> Result<Body, Stri
     }
     Ok(prefixed(buf.freeze(), body))
 }
+
+/// git's probe before a push larger than its `http.postBuffer`: a body of one flush packet,
+/// which updates nothing. Anything after the flush makes it a push without ref updates.
+async fn probe(buf: BytesMut, mut body: Body) -> Result<Body, String> {
+    let mut len = buf.len();
+    while len <= FLUSH.len() {
+        match body.frame().await {
+            Some(Ok(frame)) => len += frame.into_data().map_or(0, |d| d.len()),
+            Some(Err(e)) => return Err(format!("reading push: {e}")),
+            None => return Ok(full(buf.freeze())),
+        }
+    }
+    Err("push without ref updates".into())
+}
+
+const FLUSH: &[u8] = b"0000";
 
 /// What a push may update, from either host's guard. Deleting a ref is never allowed.
 #[derive(Debug, Clone, Copy)]
@@ -199,6 +216,8 @@ struct RefUpdate {
 #[derive(Debug, PartialEq, Eq)]
 enum Parse {
     NeedMore,
+    /// A flush packet first: no commands at all.
+    FlushOnly,
     Invalid(String),
 }
 
@@ -262,7 +281,9 @@ fn parse_ref_updates(buf: &[u8]) -> Result<Vec<RefUpdate>, Parse> {
         let len = usize::from_str_radix(len_hex, 16)
             .map_err(|_| Parse::Invalid("bad pkt-line length".into()))?;
         if len == 0 {
-            return if updates.is_empty() {
+            return if pos == 0 {
+                Err(Parse::FlushOnly)
+            } else if updates.is_empty() {
                 Err(Parse::Invalid("push without ref updates".into()))
             } else {
                 Ok(updates)
@@ -589,6 +610,23 @@ mod tests {
             check_updates((&guard()).into(), &ups)
                 .unwrap_err()
                 .contains("tag")
+        );
+    }
+
+    #[tokio::test]
+    async fn gits_probe_before_a_large_push_passes_and_nothing_after_it() {
+        let g = guard();
+        let rules = PushRules::from(&g);
+        let body = inspect_push(full(&b"0000"[..]), rules).await.unwrap();
+        assert_eq!(&body.collect().await.unwrap().to_bytes()[..], b"0000");
+        for after in [&b"0000PACK"[..], b"00000000"] {
+            let err = inspect_push(full(after), rules).await.err().unwrap();
+            assert!(err.contains("without ref updates"), "{err}");
+        }
+        let shallow = format!("{}0000", pkt(&format!("shallow {A}\n")));
+        assert_eq!(
+            parse_ref_updates(shallow.as_bytes()),
+            Err(Parse::Invalid("push without ref updates".into()))
         );
     }
 

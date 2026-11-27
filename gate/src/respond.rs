@@ -59,7 +59,23 @@ pub fn deny(
 /// How the user can allow what `reason` denied. A CONNECT denied for its address is a tunnel
 /// rule's (`url` is `host:port`): any other is decided inside, per request.
 fn fix(env: &str, method: &str, url: &str, host: &str, path: &str, reason: &DenyReason) -> String {
-    let write = if reason.wants_write() { " --write" } else { "" };
+    let port = luoto_shared::host::split_target(url)
+        .1
+        .and_then(|p| p.parse::<u16>().ok());
+    // A rule without a port covers 80 and 443 only; another is named after the host, as
+    // `luoto allow` takes it and `sandbox request` asks for a tunnel to it.
+    let other_port = port.filter(|p| *p != 80 && *p != 443);
+    let target = match other_port {
+        Some(p) if host.contains(':') => format!("[{host}]:{p}"),
+        Some(p) => format!("{host}:{p}"),
+        None => host.to_string(),
+    };
+    let write = if reason.wants_write() || (method != "CONNECT" && !READ_METHODS.contains(&method))
+    {
+        " --write"
+    } else {
+        ""
+    };
     match reason {
         // The host is open on other paths (a relay such as the Go module proxy may be open only
         // for some): allowing all of it would undo that, so the fix names a path, and the
@@ -85,19 +101,13 @@ fn fix(env: &str, method: &str, url: &str, host: &str, path: &str, reason: &Deny
             "This is a fixed guard-rail of the sandbox; it cannot be lifted by a rule.".to_string()
         }
         DenyReason::PrivateAddress => {
-            let port = (method == "CONNECT")
-                .then(|| {
-                    url.rsplit_once(':')
-                        .and_then(|(_, p)| p.parse::<u16>().ok())
-                })
-                .flatten();
-            let (allow, asked) = match port {
+            let (allow, asked) = match port.filter(|_| method == "CONNECT") {
                 Some(p) => (
                     format!("{host} --port {p} --tunnel --private"),
                     // The sandbox may ask for a tunnel on any port but these.
-                    (p != 80 && p != 443).then(|| format!("{host}:{p}")),
+                    other_port.map(|_| target.clone()),
                 ),
-                None => (format!("{host} --private"), Some(host.to_string())),
+                None => (format!("{target} --private"), Some(target.clone())),
             };
             let request = asked.map_or_else(String::new, |a| {
                 format!(
@@ -110,11 +120,22 @@ fn fix(env: &str, method: &str, url: &str, host: &str, path: &str, reason: &Deny
                  reaches it. The user can run on the host:\n  luoto allow -e {env} {allow}{request}"
             )
         }
-        _ => format!(
-            "To allow it, the user can run on the host:\n  luoto allow -e {env} {host}{write}\n\
-             or approve it in `luoto ui`. From inside the sandbox, request it with:\n  \
-             sandbox request {host}{write} --reason \"<why this is needed>\""
+        // Only the user's rule may take upgrades: the sandbox can't ask for them.
+        DenyReason::WebSocketNotAllowed => format!(
+            "To allow websocket upgrades to it, the user can run on the host:\n  \
+             luoto allow -e {env} {target} --ws"
         ),
+        _ => {
+            let (asked, ask) = match other_port {
+                Some(_) => ("a tunnel to it", target.clone()),
+                None => ("it", format!("{host}{write}")),
+            };
+            format!(
+                "To allow it, the user can run on the host:\n  luoto allow -e {env} {target}{write}\n\
+                 or approve it in `luoto ui`. From inside the sandbox, request {asked} with:\n  \
+                 sandbox request {ask} --reason \"<why this is needed>\""
+            )
+        }
     }
 }
 
@@ -231,5 +252,67 @@ mod tests {
         );
         let host = fix_for("web", "GET", "docs.rs", "/x", &DenyReason::NoRule);
         assert!(host.contains("luoto allow -e web docs.rs\n"), "{host}");
+    }
+
+    #[test]
+    fn the_fix_names_the_port_method_and_upgrade_the_request_needs() {
+        let url = "https://nexus.corp:8443/repository/npm/";
+        let port = fix("web", "GET", url, "nexus.corp", "/x", &DenyReason::NoRule);
+        assert!(
+            port.contains("luoto allow -e web nexus.corp:8443\n"),
+            "{port}"
+        );
+        assert!(
+            port.contains("sandbox request nexus.corp:8443 --reason"),
+            "{port}"
+        );
+        let https = fix(
+            "web",
+            "GET",
+            "https://docs.rs/x",
+            "docs.rs",
+            "/x",
+            &DenyReason::NoRule,
+        );
+        assert!(https.contains("luoto allow -e web docs.rs\n"), "{https}");
+        let post = fix_for("web", "POST", "api.example", "/v1", &DenyReason::NoRule);
+        assert!(
+            post.contains("luoto allow -e web api.example --write\n")
+                && post.contains("sandbox request api.example --write --reason"),
+            "{post}"
+        );
+        let upload = fix_for(
+            "web",
+            "PUT",
+            "uploads.github.com",
+            "/x",
+            &DenyReason::BodyTooLarge { max: 1 },
+        );
+        assert!(upload.contains("uploads.github.com --write\n"), "{upload}");
+        let ws = fix(
+            "web",
+            "GET",
+            "http://localhost.dev:5173/",
+            "localhost.dev",
+            "/",
+            &DenyReason::WebSocketNotAllowed,
+        );
+        assert!(
+            ws.ends_with("luoto allow -e web localhost.dev:5173 --ws"),
+            "{ws}"
+        );
+        assert!(!ws.contains("sandbox request"), "{ws}");
+        let private = fix(
+            "web",
+            "GET",
+            "http://[fd00::5]:8080/",
+            "fd00::5",
+            "/",
+            &DenyReason::PrivateAddress,
+        );
+        assert!(
+            private.contains("luoto allow -e web [fd00::5]:8080 --private\n"),
+            "{private}"
+        );
     }
 }

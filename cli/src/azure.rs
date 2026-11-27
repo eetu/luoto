@@ -160,9 +160,9 @@ pub fn parse_repo(entry: &str) -> Result<Repo> {
 /// The host of Azure Artifacts' feeds; an organization's legacy one is
 /// [`legacy_pkgs_host`].
 pub const PKGS_HOST: &str = "pkgs.dev.azure.com";
-/// Where a feed's stored packages download from: signed URLs on Azure Storage, a host per
-/// blob.
-pub const FEED_STORAGE: &str = "*.blob.core.windows.net";
+/// Where a feed's stored packages download from: signed URLs on Azure Storage or on Azure
+/// Artifacts' own blob store, a host per blob.
+pub const FEED_STORAGE: [&str; 2] = ["*.blob.core.windows.net", "*.vsblob.vsassets.io"];
 
 pub fn legacy_pkgs_host(org: &str) -> String {
     format!("{}.pkgs.visualstudio.com", org.to_ascii_lowercase())

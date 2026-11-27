@@ -9,7 +9,7 @@ use crate::azure_identity::AzureIdentity;
 use crate::creds::Injection;
 use crate::forges;
 use crate::glob;
-use crate::host::{WildcardRisk, host_matches, normalize_host, normalize_pattern, wildcard_risk};
+use crate::host::{WildcardRisk, host_matches, normalize_pattern, wildcard_risk};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -1025,15 +1025,14 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
         }
     };
 
-    let host_ok = rule.host == "*"
-        || rule.host.contains('/')
-        || rule
-            .host
-            .strip_prefix("*.")
-            .map_or_else(|| normalize_host(&rule.host), normalize_host)
-            .is_ok();
-    if !host_ok {
-        issues.push(err(format!("invalid host pattern `{}`", rule.host)));
+    // A host no canonical one can equal would match nothing.
+    if normalize_pattern(&rule.host).is_none() {
+        let path = if rule.host.contains('/') {
+            " (a path goes in the rule's paths)"
+        } else {
+            ""
+        };
+        issues.push(err(format!("invalid host pattern `{}`{path}", rule.host)));
     }
     match wildcard_risk(&rule.host) {
         WildcardRisk::None => {}

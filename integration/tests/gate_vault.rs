@@ -1354,6 +1354,10 @@ async fn pushes_go_only_to_granted_repos_and_unprotected_branches() {
     let seen = upstream.received_requests().await.unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].body, feature);
+    // git's probe before a push larger than its post buffer: one flush packet.
+    let r = receive("/o/r.git/git-receive-pack", &[], b"0000");
+    assert_eq!(r.status, 200, "{}", r.head);
+    assert_eq!(upstream.received_requests().await.unwrap()[1].body, b"0000");
 
     let r = receive("/other/r.git/git-receive-pack", &[], &feature);
     refused(&r, "granted repositories");
@@ -1426,7 +1430,7 @@ async fn pushes_go_only_to_granted_repos_and_unprotected_branches() {
 
     assert_eq!(
         upstream.received_requests().await.unwrap().len(),
-        1,
+        2,
         "no refused push reached upstream"
     );
 }

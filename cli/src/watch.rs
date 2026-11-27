@@ -45,6 +45,16 @@ const STOP_WAIT: Duration = Duration::from_secs(20);
 const STOP_LIMIT: Duration = Duration::from_secs(1800);
 /// How often at least the watcher looks for a stopped env with a pull owed.
 const RECOVER_EVERY: Duration = Duration::from_secs(30);
+/// How long the watcher's looks (its config, the runtime's containers) may fail before it
+/// leaves: past a config being saved and a runtime restarting.
+const LOOK_FAILS: Duration = Duration::from_secs(300);
+
+/// Whether a failed look ends the watcher: never while an env's network runs through it
+/// (`links`, Apple), else once looks have failed since `since` for [`LOOK_FAILS`].
+fn gave_up<T>(since: &mut Option<Instant>, links: &HashMap<String, T>) -> bool {
+    let since = *since.get_or_insert_with(Instant::now);
+    links.is_empty() && since.elapsed() >= LOOK_FAILS
+}
 
 /// Run this luoto with `args` as a child whose output is the watcher's log.
 fn luoto(args: &[&str]) -> std::io::Result<std::process::Child> {
@@ -279,6 +289,8 @@ pub fn watch() -> Result<ExitCode> {
     let mut recovering: Option<std::process::Child> = None;
     let mut recover_checked: Option<Instant> = None;
     let mut ran: Vec<String> = Vec::new();
+    // Since when the looks below have failed.
+    let mut failing: Option<Instant> = None;
     loop {
         std::thread::sleep(TICK);
         // `stop` (luoto uninstall) removed it, and waits for this process to leave.
@@ -310,11 +322,11 @@ pub fn watch() -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         seen = now;
-        // An env's network runs through this process: while it links any, a failed look (a
-        // config being saved, the runtime busy) waits for the next tick instead of leaving.
+        // A failed look (a config being saved, the runtime busy or restarting) keeps every
+        // forward and link and waits for the next tick.
         let ctx = match Ctx::load() {
             Ok(c) => c,
-            Err(e) if links.is_empty() => return Err(e),
+            Err(e) if gave_up(&mut failing, &links) => return Err(e),
             Err(_) => continue,
         };
         settle_stops(
@@ -324,7 +336,7 @@ pub fn watch() -> Result<ExitCode> {
         );
         let states = match ctx.rt.states() {
             Ok(s) => s,
-            Err(_) if !links.is_empty() => continue,
+            Err(_) if !gave_up(&mut failing, &links) => continue,
             Err(_) => Default::default(),
         };
         if states.vm_stopped && stopping.is_empty() {
@@ -332,9 +344,10 @@ pub fn watch() -> Result<ExitCode> {
         }
         let envs = match config::list_envs(&ctx.paths) {
             Ok(e) => e,
-            Err(e) if links.is_empty() => return Err(e),
+            Err(e) if gave_up(&mut failing, &links) => return Err(e),
             Err(_) => continue,
         };
+        failing = None;
         let running: Vec<String> = envs
             .into_iter()
             .filter(|e| states.running(&names::dev(e)))
@@ -781,5 +794,22 @@ fn reread_refused(
             }
         }
         Err(e) => println!("{} refused secrets not read again: {e:#}", Utc::now()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_looks_end_the_watcher_after_a_while_and_never_while_it_links() {
+        let none: HashMap<String, ()> = HashMap::new();
+        let mut since = None;
+        assert!(!gave_up(&mut since, &none));
+        assert!(since.is_some());
+        let mut long = Instant::now().checked_sub(LOOK_FAILS);
+        assert!(gave_up(&mut long, &none));
+        let linked = HashMap::from([("web".to_string(), ())]);
+        assert!(!gave_up(&mut long, &linked));
     }
 }

@@ -5,7 +5,7 @@
 //! for `status` and the UI; `luoto forward` does one by hand.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::env::UID;
 use crate::paths::{Paths, write_private};
-use crate::runtime::{Runtime, exec};
+use crate::runtime::{Flavor, Runtime, exec};
 
 /// Where Linux's ephemeral range starts: a server asking for any free port lands at or above
 /// it (an editor's remote server, a login's loopback callback). Forwarded too, but quietly:
@@ -306,7 +306,18 @@ fn relay(rt: &Runtime, dev: &str, port: u16, stream: TcpStream) -> Result<()> {
     let up = std::thread::spawn(move || {
         let _ = std::io::copy(&mut inbound, &mut to_env);
     });
-    let _ = std::io::copy(&mut from_env, &mut outbound);
+    if rt.flavor == Flavor::Apple {
+        if !held_copy(&mut from_env, &outbound) {
+            // The client went or stopped reading: the relay ends with the connection.
+            let _ = outbound.shutdown(std::net::Shutdown::Both);
+            let _ = child.kill();
+            let _ = up.join();
+            let _ = child.wait();
+            return Ok(());
+        }
+    } else {
+        let _ = std::io::copy(&mut from_env, &mut outbound);
+    }
     let _ = outbound.shutdown(std::net::Shutdown::Write);
     let _ = up.join();
     let out = child.wait_with_output()?;
@@ -315,6 +326,47 @@ fn relay(rt: &Runtime, dev: &str, port: u16, stream: TcpStream) -> Result<()> {
         bail!("{}", err.trim().trim_start_matches("sandbox: "));
     }
     Ok(())
+}
+
+/// What a relay holds for a client that isn't reading.
+const HELD: usize = 4 << 20;
+const CHUNK: usize = 64 << 10;
+
+/// Copy `from` (the env's side of a relay) to `to` through a thread holding up to [`HELD`],
+/// so `from` is read whatever the client does: on Apple a VM stalls whole while its exec output
+/// waits for this Mac to read it. True when `from` ended; false when `to` failed, or held
+/// [`HELD`] it didn't read, which ends it.
+fn held_copy(from: &mut impl Read, to: &TcpStream) -> bool {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(HELD / CHUNK);
+    let Ok(mut out) = to.try_clone() else {
+        return false;
+    };
+    let writer = std::thread::spawn(move || {
+        for chunk in rx {
+            if out.write_all(&chunk).is_err() {
+                break;
+            }
+        }
+    });
+    let mut buf = vec![0u8; CHUNK];
+    let ended = loop {
+        match from.read(&mut buf) {
+            Ok(0) => break true,
+            Ok(n) => {
+                if tx.try_send(buf[..n].to_vec()).is_err() {
+                    break false;
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(_) => break true,
+        }
+    };
+    drop(tx);
+    if !ended {
+        let _ = to.shutdown(std::net::Shutdown::Both);
+    }
+    let _ = writer.join();
+    ended
 }
 
 /// `LOCAL:ENV`, or one port for both.
@@ -334,6 +386,27 @@ pub fn parse_spec(spec: &str) -> Result<(u16, u16)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_relay_keeps_reading_the_env_and_ends_a_client_that_stopped_reading() {
+        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let to = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (mut client, _) = l.accept().unwrap();
+        let data: Vec<u8> = (0..=255u8).cycle().take(3 << 20).collect();
+        let reader = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            client.read_to_end(&mut got).unwrap();
+            got
+        });
+        assert!(held_copy(&mut data.as_slice(), &to));
+        to.shutdown(std::net::Shutdown::Write).unwrap();
+        assert!(reader.join().unwrap() == data);
+
+        // A client that never reads, and an env that never stops writing.
+        let to = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (_idle, _) = l.accept().unwrap();
+        assert!(!held_copy(&mut std::io::repeat(7), &to));
+    }
+
     #[test]
     fn a_host_service_on_any_address_keeps_its_port() {
         let l = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();

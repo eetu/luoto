@@ -81,26 +81,7 @@ pub struct AllowOpts {
 }
 
 pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
-    let host = o.host.trim();
-    let mut port = o.port;
-    let range = host.contains('/') && !host.contains("://");
-    let host = if host == "*" || range || host.starts_with("*.") {
-        host.to_string()
-    } else {
-        let bare = luoto_shared::host::host_of(host);
-        if let Some(named) = port_after(host, bare) {
-            let named: u16 = named
-                .parse()
-                .map_err(|_| anyhow::anyhow!("`{host}`: {named} is not a port"))?;
-            match port {
-                Some(p) if p != named => {
-                    bail!("`{host}` names port {named} and --port {p}: give one")
-                }
-                _ => port = Some(named),
-            }
-        }
-        luoto_shared::host::normalize_host(bare)?
-    };
+    let (host, port) = rule_target(&o.host, o.port)?;
     if let Some(idle) = &o.idle {
         luoto_shared::policy::parse_idle(idle).map_err(anyhow::Error::msg)?;
     }
@@ -149,10 +130,71 @@ pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
 }
 
 /// The port `target` names after its host `bare` (`host:7443`, a URL's), as `host_of` read it.
-fn port_after<'a>(target: &'a str, bare: &str) -> Option<&'a str> {
-    let no_scheme = target.split_once("://").map_or(target, |(_, r)| r);
-    let authority = no_scheme.split(['/', '?', '#']).next()?;
-    authority.strip_prefix(bare)?.strip_prefix(':')
+/// The host pattern a rule matches and its port, from what the user typed for one (`*`,
+/// `*.example.com`, an address range, a name or address, each maybe with `:port`, or a URL)
+/// and the port given apart, if any.
+pub fn rule_target(typed: &str, port: Option<u16>) -> Result<(String, Option<u16>)> {
+    use luoto_shared::host;
+    let t = typed.trim();
+    let (pattern, named) = match t.split_once('/') {
+        // An address range, maybe with a port after its prefix length.
+        Some((addr, len))
+            if !t.contains("://")
+                && addr
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok() =>
+        {
+            match len.split_once(':') {
+                Some((len, p)) => (format!("{addr}/{len}"), Some(p)),
+                None => (t.to_string(), None),
+            }
+        }
+        _ => {
+            let (h, p) = host::split_target(t);
+            (h.to_string(), p)
+        }
+    };
+    let named = named
+        .map(|p| {
+            p.parse::<u16>()
+                .ok()
+                .filter(|&n| n != 0)
+                .with_context(|| format!("`{t}`: {p} is not a port"))
+        })
+        .transpose()?;
+    let port = match (port, named) {
+        (Some(p), Some(n)) if p != n => bail!("`{t}` names port {n} and --port {p}: give one"),
+        (p, n) => p.or(n),
+    };
+    let pattern = match host::normalize_pattern(&pattern) {
+        Some(p) => p,
+        None if pattern.starts_with("*.") || pattern.contains('/') => {
+            bail!("`{t}` is not a host, a wildcard over one or an address range")
+        }
+        None => host::normalize_host(&pattern)?,
+    };
+    Ok((pattern, port))
+}
+
+/// Whether `typed` names rule `r`: its id, or its host as `luoto allow` takes one
+/// (`k8s.example.com:7443`, a URL, any case); with a port, only that port's rules.
+pub fn named_by(r: &Rule, typed: &str) -> bool {
+    let typed = typed.trim();
+    if r.id.as_deref() == Some(typed) || r.host == typed {
+        return true;
+    }
+    rule_target(typed, None).is_ok_and(|(host, port)| {
+        luoto_shared::host::normalize_pattern(&r.host).is_some_and(|h| h == host)
+            && port.is_none_or(|p| r.port == Some(p))
+    })
+}
+
+/// `rule`'s host as a rule matches it, with the port it named, for a rule made elsewhere than
+/// [`build_rule`] (the UI).
+fn normalize(rule: &mut Rule) -> Result<()> {
+    (rule.host, rule.port) = rule_target(&rule.host, rule.port)?;
+    Ok(())
 }
 
 /// The risks of adding `rule` to an env with `policy`, or why it is refused: refused when
@@ -190,6 +232,7 @@ impl std::error::Error for Risks {}
 /// added: with an id.
 pub fn add_rule_checked(ctx: &Ctx, name: &str, mut rule: Rule, force: bool) -> Result<Rule> {
     rule.id.get_or_insert_with(new_rule_id);
+    normalize(&mut rule)?;
     let risks = risks(&env::plan(ctx, name)?.compiled.policy, &rule)?;
     if !risks.is_empty() && !force {
         return Err(Risks(risks).into());
@@ -263,6 +306,7 @@ pub fn replace(ctx: &Ctx, name: &str, id: &str, mut rule: Rule, force: bool) -> 
         );
     }
     rule.id = Some(new_rule_id());
+    normalize(&mut rule)?;
     let risks = risks(&env::plan(ctx, name)?.compiled.policy, &rule)?;
     if !risks.is_empty() && !force {
         return Err(Risks(risks).into());
@@ -578,6 +622,60 @@ mod tests {
         let e = allowed(&["k8s.example.com:7443", "--port", "443"]).unwrap_err();
         assert!(e.to_string().contains("give one"), "{e}");
         assert!(allowed(&["k8s.example.com:99999"]).is_err());
+    }
+
+    #[test]
+    fn a_rules_host_is_kept_as_the_gate_compares_it() {
+        for (typed, host, port) in [
+            ("API.Example.com.", "api.example.com", None),
+            ("docs.rs/serde", "docs.rs", None),
+            ("*.Example.com", "*.example.com", None),
+            ("*.corp.example:8443", "*.corp.example", Some(8443)),
+            ("10.0.0.0/8", "10.0.0.0/8", None),
+            ("10.0.0.0/8:5432", "10.0.0.0/8", Some(5432)),
+            ("fd00::1", "fd00::1", None),
+            ("[fd00::1]:5432", "fd00::1", Some(5432)),
+            ("*", "*", None),
+        ] {
+            let r = allowed(&[typed]).unwrap_or_else(|e| panic!("{typed}: {e}"));
+            assert_eq!((r.host.as_str(), r.port), (host, port), "{typed}");
+        }
+        for typed in ["*.10.0.0.1", "10.0.0.0/99", "exa mple.com"] {
+            assert!(allowed(&[typed]).is_err(), "{typed}");
+        }
+        let mut ui = Rule {
+            host: "Api.Example.com:8443".into(),
+            ..Default::default()
+        };
+        normalize(&mut ui).unwrap();
+        assert_eq!((ui.host.as_str(), ui.port), ("api.example.com", Some(8443)));
+    }
+
+    #[test]
+    fn a_rule_is_named_by_its_id_or_its_host_as_allow_takes_it() {
+        let k8s = Rule {
+            id: Some("r1".into()),
+            host: "k8s.example.com".into(),
+            port: Some(7443),
+            ..Default::default()
+        };
+        for typed in [
+            "r1",
+            "k8s.example.com",
+            "K8s.Example.com:7443",
+            "https://k8s.example.com:7443/version",
+        ] {
+            assert!(named_by(&k8s, typed), "{typed}");
+        }
+        for typed in ["k8s.example.com:443", "example.com", "r2"] {
+            assert!(!named_by(&k8s, typed), "{typed}");
+        }
+        // One kept as it was typed, before hosts were normalized.
+        let old = Rule {
+            host: "Docs.rs".into(),
+            ..Default::default()
+        };
+        assert!(named_by(&old, "Docs.rs") && named_by(&old, "docs.rs"));
     }
 
     #[test]

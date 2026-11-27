@@ -13,6 +13,7 @@ use luoto_shared::creds::{
     BindingSpec, FORBIDDEN_GITHUB_PERMISSIONS, Injection, Placement, SSH_BINDING,
     default_github_api,
 };
+use luoto_shared::host::normalize_pattern;
 use luoto_shared::policy::{
     Access, AccessLevel, AzureGuard, BodyDeny, CompiledRule, DenyRule, GitGuard, GithubGuard,
     InternalName, Mode, Open, Policy, READ_METHODS, Redirect, Rule, RuleOrigin, rule_error,
@@ -218,7 +219,15 @@ pub fn compile(
 
     for (i, r) in cfg.allow.iter().enumerate() {
         if let Some(e) = rule_error(r, RuleOrigin::Host) {
-            bail!("rule for `{}`: {}", r.host, e.message);
+            let host = crate::text::display(&r.host);
+            let fix = match r.id.as_deref() {
+                Some(id) if id.starts_with("project-") => String::new(),
+                named => format!(
+                    "; `luoto revoke -e {env} {}` removes it",
+                    named.map_or(host.as_str(), |id| id)
+                ),
+            };
+            bail!("rule for `{host}`: {}{fix}", e.message);
         }
         if r.expired(Utc::now()) {
             continue;
@@ -230,17 +239,22 @@ pub fn compile(
         } else {
             "user"
         };
+        // As the gate compares hosts: `API.Example.com.` is `api.example.com`.
+        let mut r = r.clone();
+        if let Some(host) = normalize_pattern(&r.host) {
+            r.host = host;
+        }
         if let Some(ca) = &r.ca {
             if origin == "project" {
                 bail!("rule `{id}`: a project can't name a CA to trust");
             }
             let certs = ca_file(&format!("rule for `{}`", r.host), ca)?;
-            let held = upstream_cas.entry(r.host.to_ascii_lowercase()).or_default();
+            let held = upstream_cas.entry(r.host.clone()).or_default();
             if !held.contains(&certs) {
                 held.push_str(&certs);
             }
         }
-        b.rule(id, origin, r.clone());
+        b.rule(id, origin, r);
     }
     for d in &cfg.deny {
         let rule = d
@@ -1881,7 +1895,7 @@ fn compile_azure_feeds(b: &mut Builder, feeds: &[azure::Feed]) {
             host,
             paths,
             ignore_case: true,
-            to: vec![azure::FEED_STORAGE.into()],
+            to: azure::FEED_STORAGE.map(String::from).into(),
             ..Default::default()
         });
     }
@@ -2206,7 +2220,7 @@ feeds = ["https://pkgs.dev.azure.com/acme/Web/_packaging/packages/pypi/simple/",
         ] {
             assert!(allowed(pkgs, "GET", path), "{path}");
             assert!(!p.injections_for("GET", pkgs, path).is_empty(), "{path}");
-            assert_eq!(p.redirect_targets("GET", pkgs, path), [azure::FEED_STORAGE]);
+            assert_eq!(p.redirect_targets("GET", pkgs, path), azure::FEED_STORAGE);
         }
         assert!(allowed(
             "acme.pkgs.visualstudio.com",
@@ -3231,6 +3245,18 @@ ca = '{}'
                 p.redirect_targets("GET", "api.github.com", "/repos/a/b/pulls")
                     .is_empty()
             );
+            assert_eq!(
+                p.redirect_targets("GET", "github.com", "/Cli/cli/pull/1.diff"),
+                ["patch-diff.githubusercontent.com"]
+            );
+            assert!(
+                p.redirect_targets("GET", "github.com", "/user-attachments/assets/8be7-4c84")
+                    .contains(&"github-production-user-asset-6210df.s3.amazonaws.com")
+            );
+            assert!(
+                p.redirect_targets("GET", "github.com", "/cli/cli/pull/1")
+                    .is_empty()
+            );
             assert!(
                 p.redirect_targets("DELETE", "api.github.com", "/repos/a/b/actions/runs/1/logs")
                     .is_empty()
@@ -3252,6 +3278,26 @@ ca = '{}'
         assert!(compile("t", &app("read"), GATE, &[]).is_ok());
         let err = compile("t", &app("write"), GATE, &[]).err().unwrap();
         assert!(err.to_string().contains("`actions = \"read\"`"), "{err}");
+    }
+
+    #[test]
+    fn a_rules_host_is_compared_as_the_gates_and_one_that_matches_nothing_is_refused() {
+        let rule = |host: &str| format!("[[allow]]\nid = \"r1\"\nhost = \"{host}\"");
+        let p = compile("t", &cfg(&rule("API.Example.com.")), GATE, &[])
+            .unwrap()
+            .policy;
+        assert!(matches!(
+            decide(&p, "api.example.com", "GET", "/"),
+            Decision::Allow { .. }
+        ));
+        for host in ["docs.rs/serde", "*.10.0.0.1"] {
+            let err = compile("t", &cfg(&rule(host)), GATE, &[]).err().unwrap();
+            assert!(
+                err.to_string()
+                    .contains("`luoto revoke -e t r1` removes it"),
+                "{err}"
+            );
+        }
     }
 
     #[test]

@@ -7,6 +7,24 @@ release may break.
 
 ## [Unreleased]
 
+### Fixed
+
+- A `git push` of over 1 MiB to a repo of a git credential (GitHub, Azure DevOps, a
+  `[[credentials.git]]` host) was refused with a 403.
+- Packages from an Azure DevOps feed failed to download: their storage host was refused.
+- The first `luoto up` or `luoto setup` after an upgrade left the other running envs without
+  their credentials until `luoto vault unlock`.
+- On podman and Docker, the background watcher quit when it couldn't read the runtime or
+  `config.toml` once, ending port forwards and idle stops until the next `up`.
+- A rule made for a host with a path (`docs.rs/serde`), capitals or a bare IPv6 address, or in
+  `luoto ui` for `host:port`, allowed nothing; one in a config file that can't match is an error.
+- `luoto revoke` didn't find a rule by `host:port`, a URL or the host in other capitals.
+- The fix a denial names covers what was denied: the port of a server on another port, `--ws`
+  for a websocket, `--write` for an upload; `luoto egress` adds `--tunnel` for what isn't HTTP.
+- With the `github` preset or a GitHub credential, pull request diffs (`/pull/1.diff`) and
+  issue attachments were refused.
+- On Apple's `container`, a client that stopped reading a forwarded port could freeze its env.
+
 ## [0.7.5] - 2026-11-27
 
 ### Added
