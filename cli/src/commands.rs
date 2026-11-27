@@ -1354,6 +1354,9 @@ pub fn allow(name: &str, o: AllowOpts) -> Result<ExitCode> {
     if let Some(e) = rule.expires {
         rows.push(("expires", egress::at_text(e)));
     }
+    if let Some(ca) = &rule.ca {
+        rows.push(("trusts CA", crate::text::display(ca)));
+    }
     rows.push(("rule", id.clone()));
     rows.push(("revoke it", format!("luoto revoke -e {name} {id}")));
     let title = format!("allowed {}", rule.host);

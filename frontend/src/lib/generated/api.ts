@@ -576,6 +576,12 @@ export type Rule = {
    * in place of its default: for long polls such as `kubectl logs -f`.
    */
   idle?: string;
+  /**
+   * A PEM file on this machine with the CA the host's certificate is signed by (an internal
+   * service's), trusted for this host only. The user's to set, never a project's or the
+   * sandbox's.
+   */
+  ca?: string;
 };
 
 export type RuntimeChoice = "container" | "podman" | "docker";

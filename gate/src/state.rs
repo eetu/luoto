@@ -46,9 +46,9 @@ pub struct State {
     requests: Mutex<Requests>,
     pub fake_ips: Mutex<FakeIps>,
     pub client_tls: Arc<ClientConfig>,
-    /// For a host with its own CA (a self-hosted forge): the public roots and that CA, which no
-    /// other host's certificate may chain to.
-    pub host_tls: std::collections::HashMap<String, Arc<ClientConfig>>,
+    /// For a host with its own CA (a self-hosted forge, a rule's `ca`): the public roots and
+    /// that CA, which no other host's certificate may chain to. Built from each policy applied.
+    host_tls: RwLock<HostTls>,
     /// Apple: the host's dialer for private addresses (`hostdial.rs`), set once at start.
     pub host_dial: std::sync::OnceLock<crate::hostdial::HostDial>,
     pub redirects: crate::redirects::Permits,
@@ -71,16 +71,7 @@ impl State {
         let vault = read_json::<VaultSettings>(&dir.join("vault.json"))?
             .map(|v| Arc::new(VaultClient::new(cfg.vault_socket.clone(), v.token)));
         let client_tls = Arc::new(upstream_tls(&cfg, None)?);
-        let host_tls = cfg
-            .upstream_cas
-            .iter()
-            .map(|(host, pem)| {
-                Ok((
-                    host.to_ascii_lowercase(),
-                    Arc::new(upstream_tls(&cfg, Some(pem.as_bytes()))?),
-                ))
-            })
-            .collect::<Result<_>>()?;
+        let host_tls = RwLock::new(host_tls(&cfg, &policy)?);
         Ok(Arc::new(State {
             events: Emitter::new(&cfg)?,
             conns: Conns::new(cfg.limits.conns),
@@ -113,12 +104,23 @@ impl State {
         lock(&self.requests)
     }
 
+    /// The TLS settings to verify `host` with: its own CA's where the policy names one.
+    pub fn tls_for(&self, host: &str) -> Arc<ClientConfig> {
+        read(&self.host_tls)
+            .get(&host.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_else(|| self.client_tls.clone())
+    }
+
     pub fn set_policy(&self, policy: Policy) -> Result<()> {
+        // Built first: a CA that doesn't parse leaves the policy in force as it was.
+        let tls = host_tls(&self.cfg, &policy)?;
         write_private(
             &self.cfg.state_dir.join("policy.json"),
             serde_json::to_vec_pretty(&policy)?.as_slice(),
         )?;
         *write(&self.policy) = Arc::new(policy);
+        *write(&self.host_tls) = tls;
         self.redirects.clear();
         if let Some(v) = self.vault() {
             v.flush();
@@ -182,6 +184,21 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     }
     std::fs::rename(&tmp, path).with_context(|| format!("rename to {}", path.display()))?;
     Ok(())
+}
+
+type HostTls = std::collections::HashMap<String, Arc<ClientConfig>>;
+
+/// One verifier per host the policy names a CA for.
+fn host_tls(cfg: &Config, policy: &Policy) -> Result<HostTls> {
+    policy
+        .upstream_cas
+        .iter()
+        .map(|(host, pem)| {
+            let tls = upstream_tls(cfg, Some(pem.as_bytes()))
+                .with_context(|| format!("the CA for {host}"))?;
+            Ok((host.to_ascii_lowercase(), Arc::new(tls)))
+        })
+        .collect()
 }
 
 fn upstream_tls(cfg: &Config, extra: Option<&[u8]>) -> Result<ClientConfig> {

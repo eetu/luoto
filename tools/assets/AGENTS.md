@@ -41,8 +41,10 @@ env's name and its current rules.
   user, not working around it.
 - **Writes.** Remote writes only work where the user granted them (for example pushing
   feature branches to one GitHub repository). Protected branches, tags, deleting a branch,
-  merging a pull request, releases, workflow files and GitHub Actions are off-limits: a pull
-  request you open waits for the user. GitHub's GraphQL takes only the mutations the user
+  merging a pull request, releases, workflow files and starting, rerunning or cancelling a
+  GitHub Actions run are off-limits: a pull request you open waits for the user. Runs, their
+  logs and artifacts are readable (`gh run view --log`, `gh run download`); a 403 there under
+  a GitHub App means its credential lacks `actions = "read"`, which the user adds. GitHub's GraphQL takes only the mutations the user
   allowed, so a refused `gh` command (`gh issue close --comment`) can go over REST:
   `gh api repos/<owner>/<repo>/issues/<n>/comments -f body=…`, then
   `gh api -X PATCH repos/<owner>/<repo>/issues/<n> -f state=closed -f state_reason=completed`.
@@ -145,7 +147,10 @@ the merge request.
    text: a fixed guard rail no request lifts, a locked vault needs the user's
    `luoto vault unlock`, and a host on a private address (the user's network, a VPN, their
    machine) needs a rule that reaches it: the text names it. A connection that times out to a
-   host only the user's VPN reaches needs the same, even at a public address.
+   host only the user's VPN reaches needs the same, even at a public address. An HTTPS service
+   whose certificate the gate can't verify (an internal one with its own CA; the error names
+   `--ca`) is the user's to trust: give them the command it names, and never turn off
+   certificate checks.
 2. If access is genuinely needed for the task, request it. Never try to work around the gate
    with other proxies, raw sockets, DNS tricks, mirrors or alternative hosts.
 
