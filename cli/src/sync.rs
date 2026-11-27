@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use luoto_shared::ctl::{GateCtl, VaultCtl};
+use luoto_shared::ctl::{GateCtl, VaultCtl, VaultStatus};
 use luoto_shared::policy::Rule;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -227,11 +227,21 @@ pub fn unlock_all(ctx: &Ctx) -> Result<usize> {
     Ok(n)
 }
 
-/// After the vault started anew (an upgrade, a restart of its container), bind again the envs
-/// whose gates still run and load their secrets: it held them in memory only, and their
-/// credentialed hosts fail closed without them. `except` is an env that binds its own.
-pub fn rebind_running(ctx: &Ctx, except: Option<&str>) {
-    if let Err(e) = rebind(ctx, except) {
+/// Bind again the envs whose gates run but which the vault, as `held` says, doesn't hold (it
+/// started anew: an upgrade, a restart), and load their secrets: their credentialed hosts fail
+/// closed without them. `except` is an env that binds its own.
+pub fn rebind_running(ctx: &Ctx, except: Option<&str>, held: &VaultStatus) {
+    let Ok(envs) = config::list_envs(&ctx.paths) else {
+        return;
+    };
+    let unbound: Vec<String> = envs
+        .into_iter()
+        .filter(|e| except != Some(e.as_str()) && !held.envs.iter().any(|h| h.env == *e))
+        .collect();
+    if unbound.is_empty() {
+        return;
+    }
+    if let Err(e) = rebind(ctx, &unbound) {
         crate::progress::warn(&format!(
             "{e:#}; the vault started anew, so the credentialed hosts of running envs return \
              403 until `luoto vault unlock` succeeds"
@@ -239,16 +249,16 @@ pub fn rebind_running(ctx: &Ctx, except: Option<&str>) {
     }
 }
 
-fn rebind(ctx: &Ctx, except: Option<&str>) -> Result<()> {
+fn rebind(ctx: &Ctx, envs: &[String]) -> Result<()> {
     let states = ctx.rt.states()?;
     let mut refs = BTreeSet::new();
-    for env in config::list_envs(&ctx.paths)? {
-        if except == Some(env.as_str()) || !states.running(&names::gate(&env)) {
+    for env in envs {
+        if !states.running(&names::gate(env)) {
             continue;
         }
-        let p = env::plan(ctx, &env)?;
+        let p = env::plan(ctx, env)?;
         let Some(state) = &p.state else { continue };
-        bind_vault(ctx, &env, state, &p.compiled)?;
+        bind_vault(ctx, env, state, &p.compiled)?;
         refs.extend(p.compiled.vault_refs());
     }
     if !refs.is_empty() {

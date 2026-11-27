@@ -12,8 +12,8 @@ release may break.
 - A `git push` of over 1 MiB to a repo of a git credential (GitHub, Azure DevOps, a
   `[[credentials.git]]` host) was refused with a 403.
 - Packages from an Azure DevOps feed failed to download: their storage host was refused.
-- The first `luoto up` or `luoto setup` after an upgrade left the other running envs without
-  their credentials until `luoto vault unlock`.
+- After the vault started again (an upgrade, a crash), the other running envs had no
+  credentials until `luoto vault unlock`; any env's `luoto up` now binds them again.
 - On podman and Docker, the background watcher quit when it couldn't read the runtime or
   `config.toml` once, ending port forwards and idle stops until the next `up`.
 - A rule made for a host with a path (`docs.rs/serde`), capitals or a bare IPv6 address, or in

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use luoto_shared::ctl::GateCtl;
+use luoto_shared::ctl::{GateCtl, VaultStatus};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -137,8 +137,8 @@ pub fn dev_id_map(rt: &Runtime, octet: u8) -> Option<u32> {
     machine::is_luoto(rt.connection.as_deref()).then(|| machine::dev_id_start(octet))
 }
 
-/// The vault, running; true when it started anew, holding no env's bindings or secrets.
-pub fn ensure_vault(ctx: &Ctx) -> Result<bool> {
+/// The vault, running, and what it holds.
+pub fn ensure_vault(ctx: &Ctx) -> Result<VaultStatus> {
     crate::progress::wait("starting the vault", || {
         let id = image_ids(&ctx.rt, &[ctx.image("vault")]).map_or_else(String::new, |[id]| id);
         start_vault(ctx, &id)
@@ -150,9 +150,9 @@ pub fn ensure_vault(ctx: &Ctx) -> Result<bool> {
 const VAULT_SOCKETS: &str = "/run/luoto-vault";
 const APPLE_VAULT_SOCKET: &str = "/run/luoto-vault/vault.sock";
 
-/// The vault from its image `image_id`, its egress network and its socket volume; true when
-/// it started anew (created or started), holding nothing.
-fn start_vault(ctx: &Ctx, image_id: &str) -> Result<bool> {
+/// The vault from its image `image_id`, its egress network and its socket volume, and what it
+/// holds once it answers.
+fn start_vault(ctx: &Ctx, image_id: &str) -> Result<VaultStatus> {
     let rt = &ctx.rt;
     let apple = rt.flavor == Flavor::Apple;
     let net = names::vault_out_net();
@@ -205,13 +205,11 @@ fn start_vault(ctx: &Ctx, image_id: &str) -> Result<bool> {
     } else {
         rt.create_volume(&names::vault_sockets(), &labels("", "vault"))?;
     }
-    let launch = start_or_create(ctx, &spec, image_id, None)?;
-    if launch == Launch::Created {
+    if start_or_create(ctx, &spec, image_id, None)? == Launch::Created {
         remove_old_vault_net(ctx);
     }
     wait_until(Duration::from_secs(20), || ctl::vault_status(rt).ok())
-        .context("vault did not come up")?;
-    Ok(launch != Launch::AlreadyRunning)
+        .context("vault did not come up")
 }
 
 /// The NAT network `net`. On Apple, one on another subnet, or one whose subnet can't be read,
@@ -533,9 +531,8 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
 
     // Quick when the env runs, so it says nothing then.
     let starting = crate::progress::waiting(&format!("starting `{env}`"));
-    if crate::progress::wait("starting the vault", || start_vault(ctx, &ids.vault))? {
-        sync::rebind_running(ctx, Some(env));
-    }
+    let held = crate::progress::wait("starting the vault", || start_vault(ctx, &ids.vault))?;
+    sync::rebind_running(ctx, Some(env), &held);
 
     // On Apple the dev container's only link is the tun device to its gate: no env network.
     let apple = rt.flavor == Flavor::Apple;
