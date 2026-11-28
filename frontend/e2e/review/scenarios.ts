@@ -198,6 +198,8 @@ const requestPanel = (nth = 0, name = "request"): View => ({
     await surface(page, "egress").click();
     await page.locator(".request button.open").nth(nth).click();
     await subject(page).getByRole("button", { name: "Reject" }).waitFor();
+    // Shown as the user decides: with the risk check's answer.
+    await page.waitForFunction(() => !document.querySelector('.check[aria-busy="true"]'));
   },
 });
 

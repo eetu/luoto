@@ -276,6 +276,30 @@ What the CLI asks and prints follows one grammar, whatever the feature:
   `Stage`, any key ends it, and no question or spinner draws. Only a first setup (its config
   names no runtime yet) ends with its own next-step line.
 
+## Requests and approval
+
+How the sandbox asks and the user decides, in the CLI, the UI and the sandbox alike. A change
+to one of these changes the test named for it, on purpose, and this list with it.
+
+- **What it may ask:** anything a rule of the user's may be (`RuleOrigin::Request`): a URL on
+  another port asks for that port inspected, `host:port` a tunnel on any port, `--ws`
+  websockets, wildcards and ranges. Never a CA, never private access it didn't ask for. A
+  `luoto.toml` or an install applies without a question, so `RuleOrigin::Sandbox` is
+  stricter. The gate's 403 names the request that works (`respond::fix`).
+- **Risk is decided once:** `validate_rule` and `Policy::credentials_reached`, through
+  `rules::risks`. `luoto approve`, the UI (`rules::approval_risks`) and the sandbox's own
+  output (`risks_said`) show that list and add none of their own.
+- **Less, never more:** an approval may narrow to read, methods, paths, one host of a
+  wildcard or range, or a tunnel inspected (`Narrowing`, `AccessRequest::grant`), and nothing
+  wider. The UI offers each, with the hosts the env tried, and shows the `luoto approve`
+  command its choice equals; a rejection's note goes to the sandbox.
+- **Shown before the decision:** the UI checks as the choice changes, keeps the last answer
+  until the next, and has one approve button, relabelled "Approve anyway" in place; refused
+  or unchecked, nothing approves. `luoto approve` prints them, then asks once.
+- **One vocabulary:** "on your network or VPN" for private access, "uninspected tunnel",
+  "websockets too", a target as `host:port` with an IPv6 address bracketed
+  (`AccessRequest::target`, `requestTarget`).
+
 ## Working on this repo
 
 - A source build is the `luoto-dev` instance (`names::instance`): its own config dirs, vault,

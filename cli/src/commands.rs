@@ -1637,17 +1637,18 @@ pub fn approve(
     // Looked up only once approved, as the gate does: the name is the sandbox's, and a lookup
     // carries whatever it put in it. On a private address here, it is reached only if the
     // user says so.
+    let host = narrow.host.as_deref().unwrap_or(&req.host);
     let resolved = if private || req.private || req.install.is_some() {
         rules::Resolved::default()
     } else {
-        rules::resolve(&req.host)
+        rules::resolve(host)
     };
     let at = resolved.private.join(", ");
     if !at.is_empty() && !yes {
         private = confirm(&format!(
             "{} resolves to {at}, a private address (your network or a VPN). Let the rule reach \
              it?",
-            crate::text::display(&req.host)
+            crate::text::display(host)
         ));
     }
     // A yes on the terminal accepted the risks it showed; private access since adds its own.

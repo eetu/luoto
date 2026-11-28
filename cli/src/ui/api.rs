@@ -690,18 +690,26 @@ async fn approval_risks(
 }
 
 #[derive(Deserialize)]
-struct Shown {
+struct Rejection {
+    /// When the request shown was filed (see [`Decision`]).
     created: DateTime<Utc>,
+    /// Why, for the sandbox to read.
+    #[serde(default)]
+    note: Option<String>,
 }
 
 async fn reject(
     Path((name, id)): Path<(String, u64)>,
-    Json(s): Json<Shown>,
+    Json(r): Json<Rejection>,
 ) -> ApiResult<AccessRequest> {
     blocking(move || {
         let ctx = Ctx::load()?;
-        shown(&ctx, &name, id, s.created)?;
-        rules::reject(&ctx, &name, id, None)
+        shown(&ctx, &name, id, r.created)?;
+        let note = r
+            .note
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty());
+        rules::reject(&ctx, &name, id, note)
     })
     .await
     .map(Json)

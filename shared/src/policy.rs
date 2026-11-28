@@ -889,13 +889,20 @@ impl Policy {
     }
 
     /// Why `rule` would put a credential on requests, one line per credential: it covers a
-    /// host the gate adds that credential on, with a method the credential goes with. Paths
-    /// aren't compared, so it may name one the rule's paths keep clear of.
+    /// host the gate adds that credential on, with a method and a path the credential goes
+    /// with (paths compared by [`crate::glob::may_overlap`], so it may still name one the
+    /// rule's paths keep clear of in a way that can't be shown).
     pub fn credentials_reached(&self, rule: &Rule) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for i in &self.injections {
             let methods = i.methods.is_empty() || i.methods.iter().any(|m| rule.access.allows(m));
-            if !methods || !patterns_overlap(&rule.host, &i.host) {
+            let paths = rule.paths.is_empty()
+                || i.paths.is_empty()
+                || rule
+                    .paths
+                    .iter()
+                    .any(|r| i.paths.iter().any(|p| crate::glob::may_overlap(r, p)));
+            if !methods || !paths || !patterns_overlap(&rule.host, &i.host) {
                 continue;
             }
             let line = format!(
@@ -1895,6 +1902,19 @@ mod tests {
             p.credentials_reached(&rule("example.com", Access::Level(AccessLevel::Write)))
                 .is_empty()
         );
+        // A credential on some paths: a rule kept to others doesn't reach it.
+        p.injections[0].paths = vec!["/v1.0/me/**".into()];
+        let on = |paths: &[&str]| {
+            p.credentials_reached(&Rule {
+                paths: paths.iter().map(|p| p.to_string()).collect(),
+                ..rule("graph.microsoft.com", Access::Level(AccessLevel::Read))
+            })
+            .len()
+        };
+        assert_eq!(on(&["/beta/**"]), 0);
+        assert_eq!(on(&["/v1.0/ME/drive"]), 1);
+        assert_eq!(on(&["/v1.0/**"]), 1);
+        assert_eq!(on(&["/**"]), 1);
     }
 
     #[test]

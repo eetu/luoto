@@ -489,6 +489,127 @@ test("a write request can be approved as read-only on some of its paths", async 
   });
 });
 
+test("a wildcard request is granted for one host it tried, the command to match", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const request = {
+    id: 13,
+    host: "*.corp.example",
+    access: "read",
+    reason: "the internal docs",
+    status: "pending",
+    created: new Date().toISOString(),
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [request] }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/egress",
+    (route) => route.fulfill({ json: [{ ...egressHosts[0], host: "docs.corp.example" }] }),
+  );
+  const sent: unknown[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/13/approve",
+    (route, req) => {
+      sent.push(req.postDataJSON());
+      return route.fulfill({ json: { host: "docs.corp.example", access: "read" } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: /access to \*\.corp\.example/ }).click();
+  await page.getByRole("button", { name: "docs.corp.example", exact: true }).click();
+
+  await expect(page.getByRole("textbox", { name: "host", exact: true })).toHaveValue(
+    "docs.corp.example",
+  );
+  await page.getByText("as a command").click();
+  await expect(
+    page.getByText("luoto approve -e web 13 --host docs.corp.example --for 1h"),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toMatchObject({ narrow: { host: "docs.corp.example" } });
+});
+
+test("a tunnel request may be granted inspected, then narrowed like any other", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const request = {
+    id: 14,
+    host: "nexus.corp.example",
+    port: 8443,
+    mode: "tunnel",
+    access: "write",
+    reason: "the npm feed",
+    status: "pending",
+    created: new Date().toISOString(),
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [request] }),
+  );
+  const sent: unknown[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/14/approve",
+    (route, req) => {
+      sent.push(req.postDataJSON());
+      return route.fulfill({ json: { host: request.host, port: 8443, access: "read" } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: /tunnel to nexus\.corp\.example:8443/ }).click();
+  await expect(page.getByRole("textbox", { name: "paths" })).toHaveCount(0);
+  await page.getByRole("group", { name: "how" }).getByRole("button", { name: "inspected" }).click();
+  await page
+    .getByRole("group", { name: "grant" })
+    .getByRole("button", { name: "read-only" })
+    .click();
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
+
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toMatchObject({ narrow: { inspect: true, read: true } });
+});
+
+test("a rejection carries the note the sandbox reads", async ({ page }) => {
+  await mockApi(page);
+  const request = {
+    id: 15,
+    host: "pastebin.example",
+    access: "write",
+    reason: "share the logs",
+    status: "pending",
+    created: new Date().toISOString(),
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [request] }),
+  );
+  const sent: unknown[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/15/reject",
+    (route, req) => {
+      sent.push(req.postDataJSON());
+      return route.fulfill({ json: { ...request, status: "rejected" } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: /access to pastebin\.example/ }).click();
+  await page.getByRole("textbox", { name: "note" }).fill("put the logs in the workspace instead");
+  await page.getByRole("button", { name: "Reject", exact: true }).click();
+
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toMatchObject({
+    created: request.created,
+    note: "put the logs in the workspace instead",
+  });
+});
+
 test("a tunnel request reaches a private address only when that is picked", async ({ page }) => {
   await mockApi(page);
   const request = {

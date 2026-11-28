@@ -22,13 +22,13 @@ import type {
   PullApply,
   Pulled,
   PullPlans,
+  Rejection,
   Reloaded,
   Resolved,
   Rule,
   SelftestReport,
   SetupInfo,
   SharesView,
-  Shown,
   SyncedShares,
   VaultView,
   VmDisk,
@@ -153,9 +153,11 @@ export const api = {
       created: req.created,
       var: value,
     }),
-  reject: (name: string, req: AccessRequest) =>
-    request<AccessRequest, Shown>("POST", `${env(name)}/requests/${req.id}/reject`, {
+  /** `note` says why, for the sandbox to read. */
+  reject: (name: string, req: AccessRequest, note?: string) =>
+    request<AccessRequest, Rejection>("POST", `${env(name)}/requests/${req.id}/reject`, {
       created: req.created,
+      note: note?.trim() || undefined,
     }),
   addRule: (name: string, rule: Rule, force = false) =>
     request<Rule, NewRule>("POST", `${env(name)}/rules`, { rule, force }),

@@ -133,6 +133,11 @@ export const KNOWN: Known[] = [
     reason:
       "segmented buttons are 23px tall: at 200% zoom the panel's meet the env list's last row",
   },
+  {
+    probe: "tap",
+    target: "subject button.sw[role=switch]",
+    reason: "switches are 15px tall: at 200% zoom the panel's meet the env list's last row",
+  },
 ];
 
 /** The known problem a finding is, if any. */

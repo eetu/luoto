@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::events::Event;
-use crate::host::{is_never_dialed, is_private, normalize_pattern};
+use crate::host::{host_matches, is_never_dialed, is_private, normalize_host, normalize_pattern};
 use crate::policy::{Access, AccessLevel, Mode, Rule, RuleOrigin, rule_error};
 
 pub const API_PREFIX: &str = "/_sandbox";
@@ -366,11 +366,21 @@ pub struct Narrowing {
     pub methods: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+    /// One exact host or address of the wildcard or range asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// A tunnel asked for, granted inspected: the gate reads what passes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inspect: bool,
 }
 
 impl Narrowing {
     pub fn is_empty(&self) -> bool {
-        !self.read && self.methods.is_empty() && self.paths.is_empty()
+        !self.read
+            && self.methods.is_empty()
+            && self.paths.is_empty()
+            && self.host.is_none()
+            && !self.inspect
     }
 }
 
@@ -416,10 +426,28 @@ impl AccessRequest {
             return Ok(rule);
         }
         let id = self.id;
-        if rule.mode == Mode::Tunnel {
+        if let Some(h) = &n.host {
+            let exact = normalize_host(h).map_err(|_| format!("`{}` is not a host", h.trim()))?;
+            if exact != rule.host && !host_matches(&rule.host, &exact) {
+                return Err(format!(
+                    "`{exact}` is not one of `{}`, which request #{id} asked for",
+                    rule.host
+                ));
+            }
+            rule.host = exact;
+        }
+        if n.inspect {
+            if rule.mode != Mode::Tunnel {
+                return Err(format!(
+                    "request #{id} asks for no tunnel: the gate inspects it already"
+                ));
+            }
+            rule.mode = Mode::Inspect;
+        }
+        if rule.mode == Mode::Tunnel && (n.read || !n.methods.is_empty() || !n.paths.is_empty()) {
             return Err(format!(
                 "request #{id} asks for a tunnel, which can't be limited to methods or paths: \
-                 approve it as asked or reject it"
+                 approve it inspected, as asked, or reject it"
             ));
         }
         if n.read && !n.methods.is_empty() {
@@ -676,6 +704,32 @@ mod tests {
         );
         assert!(tunnel.grant(&read).is_err());
         assert!(tunnel.grant(&paths(&["/x"])).is_err());
+        let inspected = Narrowing {
+            inspect: true,
+            ..read.clone()
+        };
+        let rule = tunnel.grant(&inspected).unwrap();
+        assert_eq!(
+            (rule.mode, rule.port, rule.access),
+            (Mode::Inspect, Some(5432), Access::Level(AccessLevel::Read))
+        );
+        assert!(write.grant(&inspected).is_err(), "inspected already");
+
+        let host = |h: &str| Narrowing {
+            host: Some(h.into()),
+            ..Default::default()
+        };
+        let wildcard = asked("*.corp.example", None, AccessLevel::Read, &[]);
+        assert_eq!(
+            wildcard.grant(&host("API.corp.example")).unwrap().host,
+            "api.corp.example"
+        );
+        for wider in ["corp.example", "*.corp.example.evil", "other.example", "*"] {
+            assert!(wildcard.grant(&host(wider)).is_err(), "{wider}");
+        }
+        let range = asked("8.8.8.0/24", None, AccessLevel::Read, &[]);
+        assert_eq!(range.grant(&host("8.8.8.8")).unwrap().host, "8.8.8.8");
+        assert!(range.grant(&host("8.8.9.8")).is_err());
 
         let mut install = asked("", None, AccessLevel::Read, &[]);
         install.install = Some(Install::Package { name: "jq".into() });

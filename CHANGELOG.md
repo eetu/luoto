@@ -13,11 +13,17 @@ release may break.
   names (`[needs.ca.<name>]`), and an env's `[cas.<name>]` does so by hand.
 - `cas` in `config.toml` trusts a CA for every host of every env, as a company network that
   inspects TLS needs; on macOS `luoto setup` offers the root CAs your Mac trusts.
+- `luoto approve --host` grants one host of a wildcard or range a request asked for, and
+  `--inspect` a tunnel request inspected; `luoto ui` offers both, with the hosts the env tried.
+- `luoto ui` shows a request's approval as the `luoto approve` command, and sends a note with
+  a rejection, which the sandbox reads.
 
 ### Changed
 
 - The sandbox may request whatever a rule of yours may be (a tunnel on any port, websockets
   with `--ws`, a wildcard, an address range); `luoto ui` shows the risks before you approve.
+- A rule kept to paths a credential doesn't go on no longer asks you to accept that
+  credential's risk.
 
 ### Fixed
 

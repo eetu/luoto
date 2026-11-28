@@ -416,7 +416,7 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   host, or one the same pull writes) that points elsewhere.
 - **Social engineering.** Access requests are written by code in the sandbox. Read the host
   and access, not the reason; grant less than asked where that will do (`luoto approve --read`,
-  `--path`). A request may ask for what a rule of yours may be (a wildcard, an address range,
+  `--path`, `--host`, `--inspect`). A request may ask for what a rule of yours may be (a wildcard, an address range,
   another port, a tunnel, websocket upgrades), and approving it shows the same risks
   `luoto allow` confirms, in the terminal and in the UI; it never names a CA file, nor a
   private address unless it asks for private access. A host on your network or VPN is reached only if you approve it so: a request may ask

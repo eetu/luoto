@@ -177,8 +177,8 @@ the merge request.
 
 3. Tell the user what you requested and why. They approve it on the host with
    `luoto approve -e <env> <id>` or in `luoto ui`, possibly for less than you asked (read
-   instead of write, fewer paths, not on their network; the approval's note says), or grant
-   it directly, optionally time-boxed:
+   instead of write, fewer paths, one host of a wildcard, a tunnel inspected, not on their
+   network; the approval's note says), or grant it directly, optionally time-boxed:
    `luoto allow -e <env> <host> [--write] [--for 1h]`.
 4. Ask for the narrowest access that works: read over write, one exact host over a wildcard,
    every path in one request (`--path` repeats). For one-off research such as reading API

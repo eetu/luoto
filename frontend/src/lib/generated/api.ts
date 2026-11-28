@@ -334,6 +334,10 @@ export type Narrowing = {
   read?: boolean;
   methods?: string[];
   paths?: string[];
+  /** One exact host or address of the wildcard or range asked for. */
+  host?: string;
+  /** A tunnel asked for, granted inspected: the gate reads what passes. */
+  inspect?: boolean;
 };
 
 export type NewEnv = {
@@ -513,6 +517,13 @@ export type Pulled = {
   failed: [string, string][];
 };
 
+export type Rejection = {
+  /** When the request shown was filed (see [`Decision`]). */
+  created: string;
+  /** Why, for the sandbox to read. */
+  note?: string | null;
+};
+
 /** What [`reload`] did. */
 export type Reloaded = {
   read: number;
@@ -662,10 +673,6 @@ export type SharesView = {
   shares: ShareStatus[];
   /** What the env still needs to read them: the command that gives it. */
   fix: string | null;
-};
-
-export type Shown = {
-  created: string;
 };
 
 export type Source = "gate" | "vault";
