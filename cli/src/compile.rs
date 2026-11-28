@@ -611,6 +611,7 @@ fn compile_provider(
             b.injections.push(Injection {
                 binding: binding.clone(),
                 host: host.to_string(),
+                port: Some(443),
                 paths: paths.to_vec(),
                 methods: methods.clone(),
                 place: Placement::Header {
@@ -623,6 +624,7 @@ fn compile_provider(
                 b.injections.push(Injection {
                     binding: binding.clone(),
                     host: host.to_string(),
+                    port: Some(443),
                     paths: paths.to_vec(),
                     methods,
                     place: Placement::Query { param: q.clone() },
@@ -662,6 +664,7 @@ fn compile_custom(b: &mut Builder, cname: &str, c: &CustomCred) -> Result<()> {
     b.injections.push(Injection {
         binding,
         host: host.clone(),
+        port: None,
         paths: c.paths.clone(),
         methods: if c.write {
             Vec::new()
@@ -1157,6 +1160,7 @@ fn compile_github_one(
         let api = |paths: Vec<String>, ms: &[&str]| Injection {
             binding: binding.clone(),
             host: forges::GITHUB_API.into(),
+            port: Some(443),
             paths,
             methods: methods(ms),
             place: Placement::Header {
@@ -1181,6 +1185,7 @@ fn compile_github_one(
         b.injections.push(Injection {
             binding: binding.clone(),
             host: forges::GITHUB.into(),
+            port: Some(443),
             paths: paths.clone(),
             methods: methods(&["GET", "POST"]),
             place: Placement::Basic {
@@ -1281,6 +1286,7 @@ fn compile_model_servers(b: &mut Builder, cfg: &EnvConfig) -> Result<()> {
         b.injections.push(Injection {
             binding,
             host,
+            port: Some(ep.port),
             paths,
             methods: methods(&["GET", "POST"]),
             place: Placement::Header {
@@ -1451,6 +1457,7 @@ fn compile_git(
                 b.injections.push(Injection {
                     binding: id.clone(),
                     host: host.clone(),
+                    port: Some(port.unwrap_or(443)),
                     paths: paths.clone(),
                     methods: methods(&["GET", "POST"]),
                     place: Placement::Basic {
@@ -1571,6 +1578,7 @@ fn compile_forge_feeds(
     b.injections.push(Injection {
         binding: id.to_string(),
         host: host.to_string(),
+        port: Some(port.unwrap_or(443)),
         paths: paths.clone(),
         methods: methods(&["GET", "HEAD"]),
         place: Placement::Header {
@@ -1680,6 +1688,7 @@ fn compile_azure_identity(b: &mut Builder, c: &AzureCred) -> Result<AzureIdentit
         b.injections.push(Injection {
             binding,
             host: host.clone(),
+            port: Some(443),
             paths: Vec::clone(&paths),
             methods,
             place: Placement::Header {
@@ -1882,6 +1891,7 @@ fn compile_github_feeds(b: &mut Builder, name: &str, owners: &[String]) {
         b.injections.push(Injection {
             binding: name.to_string(),
             host: host.to_string(),
+            port: Some(443),
             paths: paths.clone(),
             methods: methods(&["GET", "HEAD"]),
             place: Placement::Header {
@@ -1943,6 +1953,7 @@ fn compile_azure_feeds(b: &mut Builder, feeds: &[azure::Feed]) {
         b.injections.push(Injection {
             binding: "azure_devops".into(),
             host: host.clone(),
+            port: Some(443),
             paths: paths.clone(),
             methods: methods(&["GET", "HEAD"]),
             place: Placement::Basic {
@@ -1988,6 +1999,7 @@ fn compile_azure_git(
     b.injections.push(Injection {
         binding: "azure_devops".into(),
         host: azure::HOST.into(),
+        port: Some(443),
         paths: paths.clone(),
         methods: methods(&["GET", "POST"]),
         place: Placement::Basic {
@@ -2037,6 +2049,7 @@ fn compile_azure_git(
             b.injections.push(Injection {
                 binding: "azure_devops".into(),
                 host: azure::HOST.into(),
+                port: Some(443),
                 paths: paths.clone(),
                 methods: methods(&ms),
                 place: Placement::Basic {
@@ -2214,7 +2227,7 @@ read_repos = ["fabrikam/Infra/lib"]
         ] {
             assert!(allowed(method, &path), "{method} {path}");
             assert_eq!(
-                p.injections_for("GET", "dev.azure.com", &path).len(),
+                p.injections_for("GET", "dev.azure.com", 443, &path).len(),
                 1,
                 "{path}"
             );
@@ -2234,6 +2247,7 @@ read_repos = ["fabrikam/Infra/lib"]
             p.injections_for(
                 "GET",
                 "dev.azure.com",
+                443,
                 "/fabrikam/Infra/_apis/git/repositories/lib/pullrequests"
             )
             .is_empty()
@@ -2289,7 +2303,10 @@ feeds = ["https://pkgs.dev.azure.com/acme/Web/_packaging/packages/pypi/simple/",
             "/contoso/_packaging/tools/maven/v1/junit/junit/4.13.2/junit-4.13.2.jar",
         ] {
             assert!(allowed(pkgs, "GET", path), "{path}");
-            assert!(!p.injections_for("GET", pkgs, path).is_empty(), "{path}");
+            assert!(
+                !p.injections_for("GET", pkgs, 443, path).is_empty(),
+                "{path}"
+            );
             assert_eq!(p.redirect_targets("GET", pkgs, path), azure::FEED_STORAGE);
         }
         assert!(allowed(
@@ -2311,7 +2328,7 @@ feeds = ["https://pkgs.dev.azure.com/acme/Web/_packaging/packages/pypi/simple/",
         ] {
             assert!(!allowed(host, method, path), "{method} {host}{path}");
         }
-        assert!(p.injections_for("PUT", pkgs, by_id).is_empty());
+        assert!(p.injections_for("PUT", pkgs, 443, by_id).is_empty());
         assert!(p.redirect_targets("POST", pkgs, by_id).is_empty());
         assert!(
             p.redirect_targets("GET", "dev.azure.com", "/acme/Web/_git/site")
@@ -2377,7 +2394,7 @@ feeds = ["acme", "@Tools"]
             ),
         ] {
             assert!(allowed(host, "GET", path), "{host}{path}");
-            let inj = p.injections_for("GET", host, path);
+            let inj = p.injections_for("GET", host, 443, path);
             assert_eq!(inj.len(), 1, "{host}{path}");
             assert_eq!(inj[0].binding, "github");
             assert_eq!(p.redirect_targets("GET", host, path), [storage]);
@@ -2411,7 +2428,10 @@ feeds = ["acme", "@Tools"]
             "/api/v4/projects/12/packages/npm/@acme%2fhello",
             "/api/v4/projects/12/packages/pypi/files/abc/hello.whl",
         ] {
-            assert!(!p.injections_for("GET", host, path).is_empty(), "{path}");
+            assert!(
+                !p.injections_for("GET", host, 443, path).is_empty(),
+                "{path}"
+            );
         }
         for path in [
             "/api/v4/projects/12/repository/files/a",
@@ -2421,7 +2441,10 @@ feeds = ["acme", "@Tools"]
             "/api/v4/projects/12/secure_files/1/download",
             "/api/v4/projects/13/packages/npm/x",
         ] {
-            assert!(p.injections_for("GET", host, path).is_empty(), "{path}");
+            assert!(
+                p.injections_for("GET", host, 443, path).is_empty(),
+                "{path}"
+            );
         }
     }
 
@@ -2464,7 +2487,11 @@ storage_hosts = ["minio.acme.internal"]
             "/api/v4/projects/12/packages/pypi/files/abc/hello.whl",
         ] {
             assert!(allowed("GET", path), "{path}");
-            assert!(!p.injections_for("GET", host, path).is_empty(), "{path}");
+            assert!(
+                !p.injections_for("GET", host, 3443, path).is_empty(),
+                "{path}"
+            );
+            assert!(p.injections_for("GET", host, 443, path).is_empty());
             assert_eq!(
                 p.redirect_targets("GET", host, path),
                 ["minio.acme.internal"]
@@ -2557,6 +2584,7 @@ repos = [
         let inj = p.injections_for(
             "GET",
             "dev.azure.com",
+            443,
             "/FABRIKAM/Apps/_git/web-api/info/refs",
         );
         assert_eq!(inj.len(), 1);
@@ -2568,8 +2596,13 @@ repos = [
             }
         );
         assert_eq!(
-            p.injections_for("GET", "dev.azure.com", "/other/Web/_git/site/info/refs")
-                .len(),
+            p.injections_for(
+                "GET",
+                "dev.azure.com",
+                443,
+                "/other/Web/_git/site/info/refs"
+            )
+            .len(),
             1,
             "another organization's repo, with the same PAT"
         );
@@ -2757,7 +2790,14 @@ api = ["openai"]
         let rule = |id: &str| &p.rules.iter().find(|r| r.id == id).unwrap().rule;
         assert!(rule("model-server-mtplx").allow_private && rule("model-server-gpu").allow_private);
         assert_eq!(p.plain_http_credentials, [here]);
-        assert_eq!(p.injections_for("POST", here, "/v1/messages").len(), 1);
+        assert_eq!(
+            p.injections_for("POST", here, 8000, "/v1/messages").len(),
+            1
+        );
+        assert!(
+            p.injections_for("POST", here, 8001, "/v1/messages")
+                .is_empty()
+        );
         assert!(c.vault_refs().contains("env:MTPLX_TOKEN"));
     }
 
@@ -2830,7 +2870,7 @@ secret = "op://v/svc/key"
         )
         .unwrap();
         let p = &c.policy;
-        let carries = |m: &str, h: &str, path: &str| !p.injections_for(m, h, path).is_empty();
+        let carries = |m: &str, h: &str, path: &str| !p.injections_for(m, h, 443, path).is_empty();
         // What the env's rules allow carries it...
         assert!(carries(
             "GET",
@@ -2926,7 +2966,7 @@ repos = ["Octo/Foo"]
             "a remote in the case it was cloned with"
         );
         assert_eq!(
-            p.injections_for("GET", "github.com", "/Octo/Foo.git/info/refs")
+            p.injections_for("GET", "github.com", 443, "/Octo/Foo.git/info/refs")
                 .len(),
             1
         );
@@ -2985,12 +3025,12 @@ repos = ["Octo/Foo"]
             );
         }
         assert_eq!(
-            p.injections_for("GET", "github.com", "/octo/foo.git/info/refs")
+            p.injections_for("GET", "github.com", 443, "/octo/foo.git/info/refs")
                 .len(),
             1
         );
         assert!(
-            p.injections_for("GET", "github.com", "/other/repo.git/info/refs")
+            p.injections_for("GET", "github.com", 443, "/other/repo.git/info/refs")
                 .is_empty()
         );
         assert!(c.vault_refs().contains("op://v/app/key"));
@@ -3038,7 +3078,7 @@ read_repos = ["org/Infra/agent"]
         assert!(!allowed("api.github.com", "POST", "/repos/acme/lib/pulls"));
         assert!(allowed("api.github.com", "POST", "/repos/acme/web/pulls"));
         let binding = |path| {
-            p.injections_for("GET", "github.com", path)[0]
+            p.injections_for("GET", "github.com", 443, path)[0]
                 .binding
                 .clone()
         };
@@ -3087,7 +3127,7 @@ protected_branches = ["prod"]
         .unwrap();
         let p = &c.policy;
         let binding = |host, path| {
-            p.injections_for("GET", host, path)
+            p.injections_for("GET", host, 443, path)
                 .iter()
                 .map(|i| i.binding.clone())
                 .collect::<Vec<_>>()
@@ -3105,7 +3145,7 @@ protected_branches = ["prod"]
             ["github-2"]
         );
         let graphql = |method| {
-            p.injections_for(method, "api.github.com", "/graphql")
+            p.injections_for(method, "api.github.com", 443, "/graphql")
                 .iter()
                 .map(|i| i.binding.clone())
                 .collect::<Vec<_>>()
@@ -3180,10 +3220,21 @@ ca = '{}'
         assert!(allowed("GET", "/infra/lib.git/info/refs"));
         assert!(!allowed("POST", "/infra/lib.git/git-receive-pack"));
         assert!(!allowed("GET", "/other/repo.git/info/refs"));
-        let inj = p.injections_for("GET", "forge.internal", "/Infra/Platform/api/info/refs");
+        let inj = p.injections_for(
+            "GET",
+            "forge.internal",
+            3000,
+            "/Infra/Platform/api/info/refs",
+        );
         assert!(matches!(&inj[0].place, Placement::Basic { username } if username == "dev"));
         assert!(
-            p.injections_for("GET", "forge.internal", "/other/repo/info/refs")
+            p.injections_for("GET", "forge.internal", 3000, "/other/repo/info/refs")
+                .is_empty()
+        );
+        // Only on its port: another service of the host gets no token.
+        let api = "/Infra/Platform/api/info/refs";
+        assert!(
+            p.injections_for("GET", "forge.internal", 443, api)
                 .is_empty()
         );
         assert_eq!(p.git[0].repos, ["infra/platform/api"]);
@@ -3220,7 +3271,7 @@ ca = '{}'
         .unwrap();
         let p = &c.policy;
         let graphql: Vec<&str> = p
-            .injections_for("POST", "api.github.com", "/graphql")
+            .injections_for("POST", "api.github.com", 443, "/graphql")
             .iter()
             .map(|i| i.binding.as_str())
             .collect();
@@ -3594,7 +3645,7 @@ repos = ["o/r"]
         .unwrap();
         let p = &c.policy;
         let copilot = |host, path| {
-            p.injections_for("GET", host, path)
+            p.injections_for("GET", host, 443, path)
                 .iter()
                 .any(|i| i.binding == "copilot.token")
         };
@@ -3715,7 +3766,7 @@ mode = "tunnel"
                 compile("t", &cfg(&text), GATE, &[]).unwrap()
             };
             let token = |c: &Compiled, method, host, path| {
-                let inj = c.policy.injections_for(method, host, path);
+                let inj = c.policy.injections_for(method, host, 443, path);
                 inj.iter().any(|i| {
                     i.binding == format!("{name}.token")
                         && i.place
@@ -3782,7 +3833,7 @@ mode = "tunnel"
         .unwrap();
         assert!(
             cf.policy
-                .injections_for("GET", "api.cloudflare.com", "/x")
+                .injections_for("GET", "api.cloudflare.com", 443, "/x")
                 .is_empty()
         );
     }
@@ -3814,7 +3865,7 @@ access = "write"
         ));
         assert!(
             c.policy
-                .injections_for("POST", "api.hetzner.cloud", "/v1/servers")
+                .injections_for("POST", "api.hetzner.cloud", 443, "/v1/servers")
                 .is_empty()
         );
     }
@@ -3920,7 +3971,7 @@ methods = ["DELETE"]
             )
         };
         let bound = |p: &Policy, method: &str, path: &str| -> Vec<String> {
-            p.injections_for(method, "management.azure.com", path)
+            p.injections_for(method, "management.azure.com", 443, path)
                 .iter()
                 .map(|i| i.binding.clone())
                 .collect()
@@ -4007,7 +4058,7 @@ graph = true
         let c = compile("t", &cfg(&text), GATE, &[]).unwrap();
         let p = &c.policy;
         let binding = |host: &str| -> Vec<String> {
-            p.injections_for("GET", host, "/x")
+            p.injections_for("GET", host, 443, "/x")
                 .iter()
                 .map(|i| i.binding.clone())
                 .collect()
@@ -4042,7 +4093,7 @@ graph = true
                 allowed,
                 "{method} {host}"
             );
-            let tokens = w.policy.injections_for(method, host, "/x").len();
+            let tokens = w.policy.injections_for(method, host, 443, "/x").len();
             assert_eq!(tokens, usize::from(allowed), "{method} {host}");
         }
         assert!(matches!(
@@ -4051,8 +4102,11 @@ graph = true
         ));
         // Under read, the data planes' tokens go on reads only, whatever else allows a write.
         for host in ["kv-prod.vault.azure.net", "acct.blob.core.windows.net"] {
-            assert_eq!(p.injections_for("GET", host, "/x").len(), 1, "{host}");
-            assert!(p.injections_for("PUT", host, "/x").is_empty(), "{host}");
+            assert_eq!(p.injections_for("GET", host, 443, "/x").len(), 1, "{host}");
+            assert!(
+                p.injections_for("PUT", host, 443, "/x").is_empty(),
+                "{host}"
+            );
         }
 
         let audiences = &p.azure.as_ref().unwrap().audiences;

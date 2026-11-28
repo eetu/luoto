@@ -1129,6 +1129,7 @@ fn imported_state(octet: u8, m: &Moved, cfg: &EnvConfig) -> EnvState {
         .collect();
     EnvState {
         seeded: m.seeded || cfg.workspace.dir.is_some(),
+        imported: true,
         repos: m.repos.iter().cloned().chain(folders).collect(),
         agent_servers,
         ..EnvState::fresh(octet, m.home.clone())
@@ -1581,6 +1582,7 @@ NPM_TOKEN = "env:NPM_TOKEN"
         let s = imported_state(9, &moved, &cfg);
         assert_eq!(s.octet, 9);
         assert!(s.seeded, "the workspace came in the archive");
+        assert!(s.imported, "copied again only after a yes");
         assert!(s.repos.contains("keys"), "a folder repo came in it too");
         assert!(!s.repos.contains("lib"), "a remote not in it is cloned");
         assert!(!s.installs_pending);

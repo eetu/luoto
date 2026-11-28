@@ -468,7 +468,7 @@ async fn handle_inner(
             };
             parts.uri = uri;
         }
-        let injections = policy.injections_for(&method, &target.host, &path);
+        let injections = policy.injections_for(&method, &target.host, target.port, &path);
         if !injections.is_empty() {
             let Some(vault) = state.vault() else {
                 return deny(ev, DenyReason::Locked);

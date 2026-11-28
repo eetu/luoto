@@ -17,6 +17,8 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
 - **The process behind a request,** named from outside by gVisor's runtime monitoring.
 - **Malicious and brand-new package versions** refused at registry hosts (OSV `MAL-*`, a
   minimum release age).
+- **Signed install and upgrade:** `install.sh` and `luoto upgrade` check a signature the
+  release pipeline makes, not only the checksum beside the download.
 - **AWS and GCP credentials outside the sandbox,** as Azure's are: the gate re-signs AWS
   requests (SigV4); the vault mints GCP tokens.
 

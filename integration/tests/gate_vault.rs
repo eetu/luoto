@@ -972,6 +972,7 @@ async fn a_feeds_redirect_to_storage_opens_that_url_alone_for_reads() {
         injections: vec![Injection {
             binding: "azure_devops".into(),
             host: "feed.test".into(),
+            port: None,
             paths: paths.clone(),
             methods: vec!["GET".into(), "HEAD".into()],
             place: Placement::Basic {
@@ -1031,6 +1032,7 @@ fn credentialed_policy() -> Policy {
     let injection = |path: &str, place| Injection {
         binding: "t.key".into(),
         host: "api.test".into(),
+        port: None,
         paths: vec![path.into()],
         methods: Vec::new(),
         ignore_case: false,
@@ -2144,6 +2146,7 @@ async fn credentials_go_only_over_tls_in_place_of_the_clients_own() {
     policy.injections.push(Injection {
         binding: "t.key".into(),
         host: "plain.test".into(),
+        port: None,
         paths: vec![],
         methods: Vec::new(),
         ignore_case: false,
@@ -2525,6 +2528,7 @@ fn azure_policy() -> Policy {
         injections: vec![Injection {
             binding: "azure-arm".into(),
             host: "management.azure.com".into(),
+            port: None,
             paths: paths.to_vec(),
             methods: ["GET", "HEAD", "OPTIONS"].map(String::from).to_vec(),
             ignore_case: true,

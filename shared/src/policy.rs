@@ -850,16 +850,18 @@ impl Policy {
         Decision::Deny(DenyReason::PathNotAllowed)
     }
 
-    /// Injections that apply to this request (method, host and path).
+    /// Injections that apply to this request (method, host, port and path).
     pub fn injections_for<'a>(
         &'a self,
         method: &str,
         host: &str,
+        port: u16,
         path: &str,
     ) -> Vec<&'a Injection> {
         self.injections
             .iter()
             .filter(|i| host_matches(&i.host, host) && i.path_matches(path))
+            .filter(|i| i.port.is_none_or(|p| p == port))
             .filter(|i| i.method_matches(method))
             .collect()
     }
@@ -896,13 +898,19 @@ impl Policy {
         let mut out: Vec<String> = Vec::new();
         for i in &self.injections {
             let methods = i.methods.is_empty() || i.methods.iter().any(|m| rule.access.allows(m));
+            // A rule without a port covers 80 and 443.
+            let port = match (i.port, rule.port) {
+                (None, _) => true,
+                (Some(p), Some(r)) => p == r,
+                (Some(p), None) => p == 80 || p == 443,
+            };
             let paths = rule.paths.is_empty()
                 || i.paths.is_empty()
                 || rule
                     .paths
                     .iter()
                     .any(|r| i.paths.iter().any(|p| crate::glob::may_overlap(r, p)));
-            if !methods || !paths || !patterns_overlap(&rule.host, &i.host) {
+            if !methods || !port || !paths || !patterns_overlap(&rule.host, &i.host) {
                 continue;
             }
             let line = format!(
@@ -1189,6 +1197,7 @@ mod tests {
         let inj = |host: &str, place| Injection {
             binding: "b".into(),
             host: host.into(),
+            port: None,
             paths: vec!["/read/**".into()],
             methods: vec!["GET".into()],
             place,
@@ -1697,6 +1706,7 @@ mod tests {
         p.injections.push(Injection {
             binding: "anthropic".into(),
             host: "api.anthropic.com".into(),
+            port: None,
             paths: vec![],
             methods: vec![],
             place: crate::creds::Placement::Header {
@@ -1844,6 +1854,7 @@ mod tests {
         p.injections.push(Injection {
             binding: "anthropic".into(),
             host: "api.anthropic.com".into(),
+            port: None,
             paths: vec![],
             methods: vec![],
             place: crate::creds::Placement::Header {
@@ -1871,6 +1882,7 @@ mod tests {
         p.injections.push(Injection {
             binding: "azure-graph".into(),
             host: "graph.microsoft.com".into(),
+            port: None,
             paths: vec![],
             methods: READ_METHODS.iter().map(|m| m.to_string()).collect(),
             place: crate::creds::Placement::Header {
@@ -1915,6 +1927,16 @@ mod tests {
         assert_eq!(on(&["/v1.0/ME/drive"]), 1);
         assert_eq!(on(&["/v1.0/**"]), 1);
         assert_eq!(on(&["/**"]), 1);
+        // A credential on its port: a rule on another port of the host doesn't reach it.
+        p.injections[0].port = Some(443);
+        let at = |port| {
+            p.credentials_reached(&Rule {
+                port,
+                ..rule("graph.microsoft.com", Access::Level(AccessLevel::Read))
+            })
+            .len()
+        };
+        assert_eq!((at(None), at(Some(443)), at(Some(8443))), (1, 1, 0));
     }
 
     #[test]

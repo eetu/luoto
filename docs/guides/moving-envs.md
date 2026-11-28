@@ -75,7 +75,8 @@ What only the old machine has stays there:
   `luoto import` lists every ref before it asks; `luoto up` warns about any it can't read.
 - **Folders.** An env made from a folder keeps `[workspace] dir`, and its repos' folders. Its
   workspace came in the file, so nothing is copied in from them: they are where `luoto pull`
-  writes. Where that folder doesn't exist, the env still works, but `luoto pull` needs `--to`
+  writes. Should its workspace volume be made anew (a new VM), `luoto up` asks before it
+  copies them in. Where that folder doesn't exist, the env still works, but `luoto pull` needs `--to`
   until `luoto edit` points `dir` at a folder there. An env cloned from a remote has none.
   Pull-on-stop (`dangerously_pull_on_stop`) is left out, as the folders it writes are
   another machine's to offer: `luoto pull --on-stop on` there, after one reviewed pull.

@@ -620,7 +620,22 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     let waits = |ws: &crate::config::Workspace| {
         ws.dir.is_none() && ws.url.as_deref().is_some_and(|u| repos::waits(env, u))
     };
-    if (fresh_work || !state.seeded) && !waits(ws) {
+    let refill = fresh_work || !state.seeded;
+    // A new volume holds none of the repos, whatever the host remembers.
+    let seeded_repos = if fresh_work {
+        Default::default()
+    } else {
+        state.repos.clone()
+    };
+    // An imported env's folders came in its archive. Copied again (its volume gone), they
+    // would come from this machine's folders the archive named, which only the user's yes does.
+    let from_folders = (refill && ws.dir.is_some())
+        || ws
+            .repos
+            .iter()
+            .any(|(n, r)| r.dir.is_some() && !seeded_repos.contains(n));
+    let copy_folders = !(state.imported && from_folders) || copy_imported(ctx, env, ws)?;
+    if refill && !waits(ws) && (ws.dir.is_none() || copy_folders) {
         match (&ws.dir, &ws.url) {
             (Some(dir), _) => {
                 let dir = workspace::canonical(dir)?;
@@ -662,12 +677,6 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         EnvState::update(&ctx.paths, env, |s| filled(s, cloned_workspace))?;
     }
     let installs_pending = cloned_workspace || state.installs_pending;
-    // A new volume holds none of the repos, whatever the host remembers.
-    let seeded_repos = if fresh_work {
-        Default::default()
-    } else {
-        state.repos.clone()
-    };
     if project::review(ctx, env)? {
         // Its agents and repos may need credentials too.
         ask_credentials(ctx, env)?;
@@ -690,7 +699,13 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             ));
         }
     }
-    let seeded = repos::seed(ctx, env, &p.cfg, &seeded_repos);
+    let seeded = if copy_folders {
+        repos::seed(ctx, env, &p.cfg, &seeded_repos)
+    } else {
+        let mut held = p.cfg.clone();
+        held.workspace.repos.retain(|_, r| r.dir.is_none());
+        repos::seed(ctx, env, &held, &seeded_repos)
+    };
     let repos = seeded.done.clone();
     let cloned = repos.iter().any(|n| {
         !seeded_repos.contains(n)
@@ -923,6 +938,38 @@ fn ask_installs(
 
 /// The state once the workspace is filled: a clone of the env's own remote also opens the
 /// install question, which only a yes closes.
+/// Whether an imported env gets the folders its archive named copied in from this machine (its
+/// volume gone, or a folder repo not there): asked once, and a yes makes them the user's.
+/// Without one, none is copied and the next `up` asks again.
+fn copy_imported(ctx: &Ctx, env: &str, ws: &crate::config::Workspace) -> Result<bool> {
+    let dirs: Vec<String> = ws
+        .dir
+        .iter()
+        .chain(ws.repos.values().filter_map(|r| r.dir.as_ref()))
+        .map(|d| crate::text::display(&crate::ssh::tilde(std::path::Path::new(d))))
+        .collect();
+    if dirs.is_empty() {
+        return Ok(true);
+    }
+    let yes = crate::prompt::confirm(&format!(
+        "`{env}` came from an archive, which names {} of this machine. Copy them into it?",
+        dirs.join(", ")
+    ));
+    if yes {
+        EnvState::update(&ctx.paths, env, |s| s.imported = false)?;
+    } else {
+        // Its folder is still to copy: the next `up` asks for it again.
+        if ws.dir.is_some() {
+            EnvState::update(&ctx.paths, env, |s| s.seeded = false)?;
+        }
+        crate::progress::warn(&format!(
+            "copied nothing of this machine's into `{env}`, as its archive named the folders; \
+             `luoto up -e {env}` on a terminal asks again"
+        ));
+    }
+    Ok(yes)
+}
+
 fn filled(s: &mut EnvState, cloned: bool) {
     s.seeded = true;
     s.installs_pending |= cloned;

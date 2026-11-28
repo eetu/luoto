@@ -27,6 +27,8 @@ release may break.
 
 ### Fixed
 
+- An imported env whose workspace volume was made anew (a new VM) copied in the folders its
+  archive named without asking; `luoto up` now asks first.
 - A `git push` of over 1 MiB to a repo of a git credential (GitHub, Azure DevOps, a
   `[[credentials.git]]` host) was refused with a 403.
 - Packages from an Azure DevOps feed failed to download: their storage host was refused.
@@ -47,6 +49,8 @@ release may break.
 
 ### Security
 
+- A credential went to its host on any port a rule allowed; it goes only to its own port (443,
+  or the one its config names), and `[credentials.custom]` ones still to every port.
 - The push guard let push options through written as git also reads them (`push-options=1`,
   or after a tab): on GitLab a push could open a merge request set to merge itself.
 - An env's or a project's `ports`, and `luoto forward`, could publish on `luoto ui`'s port,

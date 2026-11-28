@@ -225,6 +225,7 @@ mod tests {
         let inj = Injection {
             binding: "a".into(),
             host: "api.anthropic.com".into(),
+            port: None,
             paths: vec![],
             methods: Vec::new(),
             ignore_case: false,
@@ -240,6 +241,7 @@ mod tests {
         let inj = Injection {
             binding: "g".into(),
             host: "github.com".into(),
+            port: None,
             paths: vec![],
             methods: Vec::new(),
             ignore_case: false,
@@ -259,6 +261,7 @@ mod tests {
         let inj = Injection {
             binding: "gem".into(),
             host: "generativelanguage.googleapis.com".into(),
+            port: None,
             paths: vec![],
             methods: Vec::new(),
             ignore_case: false,

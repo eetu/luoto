@@ -89,8 +89,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   attacker's token cannot use it, and it injects only over TLS:
   plain HTTP to a credentialed host is refused, except to a model server on this machine
   (`[model_servers]`), whose requests never leave it; the gate dials one only where every
-  address of its name is private. A credential goes only on the methods and
-  paths its own rules allow: a wider rule (one you add, an approved request) lets more
+  address of its name is private. A credential goes only on the port, methods and
+  paths its own rules allow (443, or the port its config names; a `[credentials.custom]` one
+  on every port of its host): a wider rule (one you add, an approved request) lets more
   requests through, but they go without it.
 - **GitHub writes.** Pushes only to the granted repositories, never to protected branches
   (default `main`, `master`, in any case) or branch deletions, and to tags only where the
@@ -267,8 +268,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   git hosts and the storage hosts their feeds may redirect to. Until your yes, the folders it
   names are only text, never looked up; it refuses your home folder or one that holds it.
   They are where `pull` writes, which the list says; the workspace came in the archive, and
-  is copied in from them again only if the env's workspace volume is made anew (a new VM, a
-  removed volume). The `luoto.toml` accepted where it was exported is not
+  is copied in from them only if the env's workspace volume is made anew (a new VM, a removed
+  volume) and you say yes when `up` asks. The `luoto.toml` accepted where it was exported is not
   accepted here: the next `up` reviews it as a new one. Folders, CA files and `file:` refs on
   another machine (`\\server\share`, `/net/<host>`) are refused in any config, since looking
   one up sends your Windows credentials there or mounts it.

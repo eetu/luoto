@@ -146,6 +146,9 @@ pub struct Injection {
     /// Empty = every path on the host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+    /// The port it goes to; none: every port of the host (a `[credentials.custom]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     /// The methods it goes on, upper-case; empty = every method. A request another rule
     /// allows with a method outside these goes without it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
