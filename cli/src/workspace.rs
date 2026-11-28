@@ -312,10 +312,21 @@ pub fn risky(rel: &str) -> Option<&'static str> {
     }
     match rel.as_str() {
         ".envrc" => return Some("direnv loads it when you enter the folder"),
-        "agents.md" | "claude.md" => {
+        "agents.md"
+        | "claude.md"
+        | "gemini.md"
+        | ".cursorrules"
+        | ".github/copilot-instructions.md" => {
             return Some("instructions a coding agent on the host follows");
         }
-        ".mcp.json" => return Some("MCP servers a coding agent on the host starts"),
+        ".mcp.json" | "opencode.json" => {
+            return Some("MCP servers and commands a coding agent on the host starts");
+        }
+        ".gitlab-ci.yml" | "azure-pipelines.yml" => {
+            return Some("CI runs it with the repository's secrets once pushed");
+        }
+        ".devcontainer.json" => return Some("dev container definition run by your IDE"),
+        "rust-analyzer.toml" => return Some("rust-analyzer runs the commands it names"),
         "bunfig.toml" => return Some("bun preloads the scripts it names"),
         "luoto.toml" => {
             return Some("luoto applies its settings to an env made from this folder");
@@ -347,7 +358,7 @@ pub fn risky(rel: &str) -> Option<&'static str> {
         ("gradle", "wrapper") | (".mvn", _) => {
             return Some("build wrapper and extensions your IDE runs on import");
         }
-        (".github", "workflows") => {
+        (".github" | ".forgejo" | ".gitea", "workflows") => {
             return Some("CI runs it with the repository's secrets once pushed");
         }
         _ => {}
@@ -358,7 +369,10 @@ pub fn risky(rel: &str) -> Option<&'static str> {
         ".husky" => Some("git hooks"),
         ".devcontainer" => Some("dev container definition run by your IDE"),
         ".zed" => Some("Zed tasks and settings"),
-        ".claude" | ".cursor" => Some("coding-agent hooks and settings that run on the host"),
+        ".helix" => Some("Helix runs the language servers it names"),
+        ".claude" | ".cursor" | ".gemini" | ".codex" => {
+            Some("coding-agent hooks and settings that run on the host")
+        }
         _ if file.ends_with(".code-workspace") => Some("VS Code workspace (tasks, settings)"),
         _ => None,
     }
@@ -614,10 +628,68 @@ pub struct Pushed {
     pub files: BTreeMap<String, Print>,
 }
 
+/// Say which repositories a copy takes hold a secret in their git config: it goes in with them,
+/// readable by code in the sandbox.
+fn warn_git_secrets(src: &Path, list: &[(PathBuf, bool)]) {
+    for (rel, dir) in list {
+        let is_config = !dir
+            && rel.file_name().is_some_and(|n| n == "config")
+            && rel
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|n| n == ".git");
+        if !is_config {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(src.join(rel)) else {
+            continue;
+        };
+        if let Some(what) = git_config_secret(&text) {
+            crate::progress::warn(&format!(
+                "{} holds {what}, which goes into the env with the repository, readable by \
+                 code in the sandbox: keep it in a credential helper instead",
+                crate::ssh::tilde(&src.join(rel))
+            ));
+        }
+    }
+}
+
+/// What secret a git config holds, if any: a password or token in a remote's URL, or an
+/// `http` `extraheader` (an authorization header for every request).
+fn git_config_secret(text: &str) -> Option<&'static str> {
+    const TOKEN_USERS: &[&str] = &[
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "github_pat_",
+        "glpat-",
+        "x-access-token",
+        "oauth2",
+    ];
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim().trim_matches('"');
+        if key == "extraheader" || key.ends_with(".extraheader") {
+            return Some("an http extraheader");
+        }
+        if (key == "url" || key == "pushurl")
+            && let Some((user, _, _)) = crate::repos::https_userinfo(value)
+            && (user.contains(':') || TOKEN_USERS.iter().any(|t| user.starts_with(t)))
+        {
+            return Some("a token in a remote's URL");
+        }
+    }
+    None
+}
+
 /// Copy a host directory into the env's workspace, or into its folder `sub` (a repo's name),
 /// created if needed (host → sandbox is the trusted direction): what [`copy_list`] takes.
 pub fn push(ctx: &Ctx, env: &str, src: &Path, sub: Option<&str>) -> Result<Pushed> {
     let list = copy_list(src)?;
+    warn_git_secrets(src, &list);
     let dev = names::dev(env);
     let e = exec(&dev).stdin().user(UID);
     let args = match sub {
@@ -1908,15 +1980,19 @@ pub fn describe(
     w: &mut impl Write,
     style: crate::style::Style,
 ) -> std::io::Result<()> {
-    let conflicts: Vec<&PlanEntry> = plan.entries.iter().filter(|e| e.conflict()).collect();
-    let risky: Vec<&PlanEntry> = plan
-        .entries
+    // By path: the order of a running env's archive is the sandbox's, which would pick what
+    // the shortened lists leave out.
+    let mut entries: Vec<&PlanEntry> = plan.entries.iter().collect();
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    let conflicts: Vec<&PlanEntry> = entries.iter().copied().filter(|e| e.conflict()).collect();
+    let risky: Vec<&PlanEntry> = entries
         .iter()
+        .copied()
         .filter(|e| e.risky.is_some() && !e.conflict())
         .collect();
-    let plain: Vec<&PlanEntry> = plan
-        .entries
+    let plain: Vec<&PlanEntry> = entries
         .iter()
+        .copied()
         .filter(|e| e.risky.is_none() && !e.conflict())
         .collect();
     let total = format!(
@@ -2851,6 +2927,31 @@ mod tests {
     }
 
     #[test]
+    fn a_git_config_holding_a_secret_is_named() {
+        let remote = |url: &str| format!("[remote \"origin\"]\n\turl = {url}\n");
+        assert_eq!(
+            git_config_secret(&remote("https://x-access-token:ghs_abc@github.com/a/b.git")),
+            Some("a token in a remote's URL")
+        );
+        assert_eq!(
+            git_config_secret(&remote("https://ghp_abcdef@github.com/a/b.git")),
+            Some("a token in a remote's URL")
+        );
+        assert_eq!(
+            git_config_secret("[http \"https://ci.example/\"]\n\textraHeader = AUTHORIZATION: x\n"),
+            Some("an http extraheader")
+        );
+        // A user name alone (Bitbucket's copied URLs) or ssh is no secret.
+        for url in [
+            "https://eetu@bitbucket.org/a/b.git",
+            "git@github.com:a/b.git",
+            "https://github.com/a/b.git",
+        ] {
+            assert_eq!(git_config_secret(&remote(url)), None, "{url}");
+        }
+    }
+
+    #[test]
     fn a_folder_git_takes_as_a_repository_waits_for_review() {
         let dir = tempfile::tempdir().unwrap();
         // No folder entries, as the sandbox's tar may write it; names as APFS folds them.
@@ -3021,6 +3122,30 @@ mod tests {
         assert!(risky("mi\u{17f}e.toml").is_some());
         assert!(risky("VSCODE~1/tasks.json").is_some(), "an 8.3 short name");
         assert!(risky("src/notes~draft.md").is_none());
+    }
+
+    #[test]
+    fn every_agents_instructions_and_every_forges_ci_wait_for_review() {
+        for p in [
+            "GEMINI.md",
+            ".cursorrules",
+            "opencode.json",
+            ".github/copilot-instructions.md",
+            ".gemini/settings.json",
+            ".codex/config.toml",
+            ".gitlab-ci.yml",
+            "azure-pipelines.yml",
+            ".forgejo/workflows/ci.yml",
+            ".gitea/workflows/ci.yml",
+            ".devcontainer.json",
+            ".helix/languages.toml",
+            "rust-analyzer.toml",
+        ] {
+            assert!(risky(p).is_some(), "{p}");
+        }
+        assert!(risky("docs/gemini.md.bak").is_none());
+        assert!(crate::autopull::unattended(".pylintrc").is_some());
+        assert!(crate::autopull::unattended("api/mypy.ini").is_some());
     }
 
     #[cfg(unix)]

@@ -338,6 +338,14 @@ pub fn open(name: &str, with: Option<&str>) -> Result<ExitCode> {
             ssh::include_hint(&ctx)
         );
     }
+    if ssh::include_late(&ctx.paths) {
+        crate::progress::warn(&format!(
+            "~/.ssh/config includes luoto's after a `Host` or `Match` block, whose settings \
+             (`ForwardAgent yes` would hand the env your SSH agent) then apply to envs: move \
+             `{}` above the first block",
+            ssh::include_line(&ctx.paths)
+        ));
+    }
     let host = names::dev(name);
     let user =
         EnvState::load(&ctx.paths, name)?.map_or_else(|| "dev".into(), |s| s.login().to_string());

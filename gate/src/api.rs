@@ -59,7 +59,7 @@ pub async fn handle(state: Arc<State>, req: Request<Incoming>) -> Response<Body>
                     );
                     return plain(StatusCode::UNPROCESSABLE_ENTITY, msg);
                 }
-                let created = state.requests().create(new);
+                let created = state.file_request(new);
                 match created {
                     Ok(r) => {
                         state.events.emit(Event {

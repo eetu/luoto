@@ -997,8 +997,44 @@ fn summary(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) -> Vec<String>
         ),
         Err(e) => line("egress", display(&format!("{e:#}"))),
     }
+    if !cfg.presets.is_empty() {
+        line(
+            "presets",
+            format!(
+                "{} (each opens its hosts)",
+                display(&cfg.presets.join(", "))
+            ),
+        );
+    }
     for r in &cfg.allow {
         line("allow", project::rule_line(r));
+    }
+    for m in &cfg.mute {
+        line(
+            "mute",
+            format!(
+                "{} (its denials stay out of `luoto egress` and the UI)",
+                display(&m.host)
+            ),
+        );
+    }
+    if !cfg.deps.system.is_empty() {
+        line(
+            "deps",
+            format!(
+                "{} (installed on `up`)",
+                display(&cfg.deps.system.join(", "))
+            ),
+        );
+    }
+    if !cfg.deps.hosts.is_empty() {
+        line(
+            "deps",
+            format!(
+                "{} (readable while installs run)",
+                display(&cfg.deps.hosts.join(", "))
+            ),
+        );
     }
     for (name, ca) in &cfg.cas {
         let cert = ca

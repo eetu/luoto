@@ -45,7 +45,20 @@ release may break.
 - An unattended pull wrote a folder git takes as a repository when its names differed in case
   or a `commondir` named the rest; `luoto pull` lists such folders as risky.
 - A warning could carry terminal escapes a tool in the env printed to its error output.
-- A sandbox could exhaust the background watcher's memory through the port listing it prints.
+- A sandbox could exhaust the background watcher's memory through the port listing it prints,
+  or its threads by listening on thousands of ports: at most 256 are forwarded per env.
+- On a credentialed host the gate strips the client's own token also as `x_api_key` or
+  `Private_Token`, which some servers read as their dashed names.
+- A request number read before a gate restarted could approve another request filed after it.
+- Pulls hold back more files host tools act on: other agents' instructions and settings
+  (`GEMINI.md`, `.cursorrules`, `.gemini/`, `.codex/`), GitLab, Azure Pipelines, Forgejo and
+  Gitea CI, `.devcontainer.json`, `.helix/`, `rust-analyzer.toml`, and linter configs that load
+  plugins. A reviewed pull lists files by path.
+- `luoto open` warns when `~/.ssh/config` includes luoto's after a `Host` block, whose settings
+  (`ForwardAgent yes`) then apply to envs; copying a folder in warns when its git config holds
+  a token.
+- luoto's config and data folders are readable by you alone; an import's review lists its
+  presets, mutes and `[deps]`, and a rule's line shows paths matched in any case and its CA.
 
 ## [0.7.5] - 2026-11-27
 

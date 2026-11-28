@@ -74,13 +74,17 @@ impl State {
             .map(|v| Arc::new(VaultClient::new(cfg.vault_socket.clone(), v.token)));
         let client_tls = Arc::new(upstream_tls(&cfg, None)?);
         let host_tls = RwLock::new(host_tls(&cfg, &policy)?);
+        let last_request = std::fs::read_to_string(dir.join(REQUEST_IDS))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
         Ok(Arc::new(State {
             events: Emitter::new(&cfg)?,
             conns: Conns::new(cfg.limits.conns),
             policy: RwLock::new(Arc::new(policy)),
             ca: RwLock::new(ca),
             vault: RwLock::new(vault),
-            requests: Mutex::new(Requests::default()),
+            requests: Mutex::new(Requests::continuing(last_request)),
             fake_ips: Mutex::new(FakeIps::new()),
             client_tls,
             host_tls,
@@ -104,6 +108,20 @@ impl State {
 
     pub fn requests(&self) -> MutexGuard<'_, Requests> {
         lock(&self.requests)
+    }
+
+    /// File a request from the sandbox, its number kept in the state volume so a restarted
+    /// gate numbers on from it.
+    pub fn file_request(
+        &self,
+        new: luoto_shared::api::NewAccessRequest,
+    ) -> Result<luoto_shared::api::AccessRequest, String> {
+        let mut requests = self.requests();
+        let created = requests.create(new)?;
+        let last = requests.last_id().to_string();
+        // A number not kept costs only that guarantee, never the request.
+        let _ = write_private(&self.cfg.state_dir.join(REQUEST_IDS), last.as_bytes());
+        Ok(created)
     }
 
     /// The TLS settings to verify `host` with: with the CAs the policy names for it.
@@ -187,6 +205,9 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     std::fs::rename(&tmp, path).with_context(|| format!("rename to {}", path.display()))?;
     Ok(())
 }
+
+/// The state file holding the last request number a gate of this env gave.
+const REQUEST_IDS: &str = "requests.last";
 
 /// By the policy's CA keys: an exact host, a wildcard (`*.corp.example`) or every host (`*`).
 type HostTls = std::collections::HashMap<String, Arc<ClientConfig>>;

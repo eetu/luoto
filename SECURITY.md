@@ -18,7 +18,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 
 - **Network.** The dev container sits on an internal network with no route out. Its default
   route and resolver are the env's gate. The gate is the only egress: HTTP(S) is inspected
-  (per-env CA, key only in the gate, renewed by `up` 60 days before its two years end) and
+  (per-env CA, its key in the gate and in the env's state on this machine, never in the
+  sandbox; renewed by `up` 60 days before its two years end) and
   checked against a default-deny policy of host, port, method, path, body size and expiry,
   unless the env's egress is open (below); explicit denies, luoto's and the user's `[[deny]]`,
   beat every allow. Non-HTTP TCP goes nowhere except through tunnel rules

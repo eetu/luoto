@@ -71,7 +71,7 @@ fn shorthand(url: &str) -> Option<(&str, &str)> {
 }
 
 /// The user name of an `https://` URL, which a token can stand in: its host and path too.
-fn https_userinfo(url: &str) -> Option<(&str, &str, &str)> {
+pub(crate) fn https_userinfo(url: &str) -> Option<(&str, &str, &str)> {
     let rest = url.strip_prefix("https://")?;
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
     let (user, host) = authority.rsplit_once('@')?;

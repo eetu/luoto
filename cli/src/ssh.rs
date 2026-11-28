@@ -54,8 +54,13 @@ pub fn include_line(paths: &Paths) -> String {
 
 /// Does an ssh config include luoto's file (by `~/…` or absolute path)?
 pub fn includes(user_config: &str, generated: &Path) -> bool {
+    include_at(user_config, generated).is_some()
+}
+
+/// The line of an ssh config that includes luoto's file.
+fn include_at(user_config: &str, generated: &Path) -> Option<usize> {
     let forms = [generated.display().to_string(), tilde(generated)];
-    user_config.lines().any(|l| {
+    user_config.lines().position(|l| {
         let l = l.trim();
         let Some(rest) = l
             .strip_prefix("Include")
@@ -69,10 +74,27 @@ pub fn includes(user_config: &str, generated: &Path) -> bool {
     })
 }
 
+/// Whether an ssh config includes luoto's file only after a `Host` or `Match` block: ssh takes
+/// the first value it reads, so such a block's settings (`ForwardAgent yes`) apply to envs.
+pub fn included_late(user_config: &str, generated: &Path) -> bool {
+    let block = user_config.lines().position(|l| {
+        let word = l.split_whitespace().next().unwrap_or_default();
+        word.eq_ignore_ascii_case("host") || word.eq_ignore_ascii_case("match")
+    });
+    matches!((block, include_at(user_config, generated)), (Some(b), Some(i)) if b < i)
+}
+
 pub fn include_present(paths: &Paths) -> bool {
     user_ssh_config()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .is_some_and(|c| includes(&c, &generated(paths)))
+}
+
+/// [`included_late`] of the user's ssh config.
+pub fn include_late(paths: &Paths) -> bool {
+    user_ssh_config()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .is_some_and(|c| included_late(&c, &generated(paths)))
 }
 
 fn ensure_key(ctx: &Ctx) -> Result<PathBuf> {
@@ -222,7 +244,7 @@ pub fn include_hint(ctx: &Ctx) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{includes, valid_user};
+    use super::{included_late, includes, valid_user};
     use std::path::Path;
 
     #[test]
@@ -272,5 +294,23 @@ mod tests {
             generated
         ));
         assert!(!includes("Host luoto-x\n", generated));
+    }
+
+    #[test]
+    fn an_include_after_a_block_is_late() {
+        let generated = Path::new("/home/u/.config/luoto/ssh_config");
+        let include = "Include /home/u/.config/luoto/ssh_config\n";
+        assert!(!included_late(
+            &format!("{include}Host *\n  ForwardAgent yes\n"),
+            generated
+        ));
+        assert!(included_late(
+            &format!("Host *\n  ForwardAgent yes\n{include}"),
+            generated
+        ));
+        assert!(included_late(&format!("match all\n{include}"), generated));
+        // `Hostname` inside a block is no block.
+        assert!(!included_late(&format!("# Host x\n{include}"), generated));
+        assert!(!included_late("Host *\n", generated));
     }
 }

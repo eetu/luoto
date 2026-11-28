@@ -26,6 +26,20 @@ fn clean_reason(s: &str) -> String {
 }
 
 impl Requests {
+    /// None yet, numbered on from `last`, the last number a gate of this env gave: an id read
+    /// before a restart never names a request filed after it.
+    pub fn continuing(last: u64) -> Self {
+        Requests {
+            next: last,
+            items: Vec::new(),
+        }
+    }
+
+    /// The last number given.
+    pub fn last_id(&self) -> u64 {
+        self.next
+    }
+
     pub fn create(&mut self, new: NewAccessRequest) -> Result<AccessRequest, String> {
         if let Some(install) = &new.install {
             install.check()?;
@@ -227,6 +241,13 @@ mod tests {
             ..new("")
         };
         assert!(r.create(install).is_err());
+    }
+
+    #[test]
+    fn a_restarted_gate_numbers_on_from_the_last_request() {
+        let mut r = Requests::continuing(41);
+        assert_eq!(r.create(new("docs.rs")).unwrap().id, 42);
+        assert_eq!(r.last_id(), 42);
     }
 
     #[test]

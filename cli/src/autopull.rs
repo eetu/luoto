@@ -199,6 +199,12 @@ const LOADED_BY_NAME: &[(&str, &str)] = &[
         "nodemon.json",
         "a running nodemon runs the command it names",
     ),
+    (".pylintrc", "names plugins pylint and editors load as code"),
+    ("mypy.ini", "names plugins mypy and editors load as code"),
+    (
+        ".rubocop.yml",
+        "names extensions rubocop and editors load as code",
+    ),
     (
         ".gitignore",
         "decides what later copies into an env leave out",

@@ -402,7 +402,7 @@ pub fn watch() -> Result<ExitCode> {
                 let stale = dial_gates
                     .as_ref()
                     .is_none_or(|(g, t)| *g != gates || t.elapsed() >= RECOVER_EVERY);
-                if stale && let Ok(nets) = ctx.rt.subnets() {
+                if stale && let Ok(nets) = ctx.rt.container_nets() {
                     d.set_nets(&nets);
                     dial_gates = Some((gates.clone(), Instant::now()));
                 }
@@ -491,13 +491,17 @@ pub fn watch() -> Result<ExitCode> {
                 wanted.extend(kept.filter(|(e, _)| e == name).cloned());
                 continue;
             };
-            let mut quiet = 0;
+            let (mut quiet, mut all) = (0, 0);
             for port in open.into_iter().filter(|p| ports::forwards_on_its_own(*p)) {
                 if port >= ports::QUIET_FROM {
                     quiet += 1;
                     if quiet > ports::MAX_QUIET {
                         continue;
                     }
+                }
+                all += 1;
+                if all > ports::MAX_FORWARDS {
+                    continue;
                 }
                 let key = (name.clone(), port);
                 wanted.insert(key.clone());

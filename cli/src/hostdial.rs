@@ -62,7 +62,7 @@ impl Dialers {
         })
     }
 
-    /// The runtime's container networks, as `Runtime::subnets` lists them.
+    /// The runtime's container networks, as `Runtime::container_nets` lists them.
     pub fn set_nets(&mut self, subnets: &[(String, String)]) {
         let nets = subnets.iter().filter_map(|(_, s)| s.parse().ok()).collect();
         *self.nets.write().unwrap_or_else(|e| e.into_inner()) = nets;

@@ -14,14 +14,31 @@ pub struct Paths {
 
 impl Paths {
     pub fn get() -> Result<Self> {
-        if let Ok(home) = std::env::var("LUOTO_HOME") {
+        let paths = if let Ok(home) = std::env::var("LUOTO_HOME") {
             let base = PathBuf::from(home);
-            return Ok(Paths {
+            Paths {
                 config: base.join("config"),
                 data: base.join("data"),
-            });
+            }
+        } else {
+            Self::of(crate::names::instance())?
+        };
+        paths.keep_private();
+        Ok(paths)
+    }
+
+    /// Both folders readable by this user alone: they hold the env's egress history, its
+    /// configs and logs, which no other user of this machine reads (luoto's runtimes run as
+    /// this user, and what a VM mounts lives elsewhere).
+    fn keep_private(&self) {
+        #[cfg(unix)]
+        for dir in [&self.config, &self.data] {
+            use std::os::unix::fs::PermissionsExt;
+            let open = std::fs::metadata(dir).map(|m| m.permissions().mode() & 0o077 != 0);
+            if open.unwrap_or(false) {
+                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            }
         }
-        Self::of(crate::names::instance())
     }
 
     /// Where instance `inst` keeps things, `LUOTO_HOME` aside.
@@ -112,4 +129,28 @@ pub fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
     }
     std::fs::rename(&tmp, path).with_context(|| format!("write {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::Paths;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn its_folders_are_this_users_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config: dir.path().join("config"),
+            data: dir.path().join("data"),
+        };
+        for d in [&paths.config, &paths.data] {
+            std::fs::create_dir(d).unwrap();
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        paths.keep_private();
+        for d in [&paths.config, &paths.data] {
+            let mode = std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{}", d.display());
+        }
+    }
 }

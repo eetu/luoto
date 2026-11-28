@@ -577,6 +577,9 @@ pub fn rule_line(r: &Rule) -> String {
     }];
     if !r.paths.is_empty() {
         parts.push(display(&r.paths.join(" ")));
+        if r.ignore_case {
+            parts.push("paths in any case".into());
+        }
     }
     if let Some(port) = r.port {
         parts.push(format!("port {port}"));
@@ -598,6 +601,9 @@ pub fn rule_line(r: &Rule) -> String {
     }
     if r.allow_private {
         parts.push("PRIVATE addresses".into());
+    }
+    if let Some(ca) = &r.ca {
+        parts.push(format!("TRUSTS the CA in {}", display(ca)));
     }
     if let Some(n) = &r.note {
         parts.push(format!("note: {}", display(n)));
@@ -1352,6 +1358,28 @@ pub fn ignore(ctx: &Ctx, env: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rules_line_shows_how_its_paths_match_and_a_ca_it_trusts() {
+        let r = Rule {
+            host: "git.corp.example".into(),
+            paths: vec!["/a/b/**".into()],
+            ignore_case: true,
+            ca: Some("/certs/corp.pem".into()),
+            ..Default::default()
+        };
+        let line = rule_line(&r);
+        assert!(line.contains("paths in any case"), "{line}");
+        assert!(line.contains("TRUSTS the CA in /certs/corp.pem"), "{line}");
+        let plain = rule_line(&Rule {
+            host: "docs.rs".into(),
+            ..Default::default()
+        });
+        assert!(
+            !plain.contains("any case") && !plain.contains("TRUSTS"),
+            "{plain}"
+        );
+    }
 
     #[test]
     fn a_folder_copy_changed_only_on_this_machine_is_taken_in() {

@@ -27,6 +27,9 @@ pub const QUIET_FROM: u16 = 32768;
 /// Quiet forwards per env at once, so a sandbox listening on thousands of ports can't use up
 /// this machine's.
 pub const MAX_QUIET: usize = 64;
+/// Forwards per env at once, every port counted: each holds two listeners and their threads
+/// in the one watcher all envs share.
+pub const MAX_FORWARDS: usize = 256;
 
 /// Whether the watcher forwards `port` on its own: any above the privileged ones but luoto's
 /// UI ports, so no env serves a page on the UI's origin.
@@ -269,8 +272,14 @@ impl Forward {
         let stop = Arc::new(AtomicBool::new(false));
         for l in std::iter::once(v4).chain(v6) {
             l.set_nonblocking(true)?;
-            let (stop, rt, dev) = (stop.clone(), rt.clone(), dev.to_string());
-            std::thread::spawn(move || accept(&l, &stop, &rt, &dev, env_port));
+            let (ending, rt, dev) = (stop.clone(), rt.clone(), dev.to_string());
+            // Out of threads: refused, never a panic in the watcher every env shares.
+            if let Err(e) =
+                std::thread::Builder::new().spawn(move || accept(&l, &ending, &rt, &dev, env_port))
+            {
+                stop.store(true, Ordering::Relaxed);
+                return Err(e).context("start the forward");
+            }
         }
         Ok(Forward { stop })
     }
@@ -296,7 +305,8 @@ fn accept(l: &TcpListener, stop: &AtomicBool, rt: &Runtime, dev: &str, port: u16
             Ok((s, _)) => {
                 let _ = s.set_nonblocking(false);
                 let (rt, dev) = (rt.clone(), dev.to_string());
-                std::thread::spawn(move || {
+                // Out of threads, the connection is dropped, never the watcher.
+                let _ = std::thread::Builder::new().spawn(move || {
                     // A browser closing a connection ends a relay without a message.
                     if let Err(e) = relay(&rt, &dev, port, s)
                         && !e.to_string().is_empty()
