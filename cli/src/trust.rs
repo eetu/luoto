@@ -158,7 +158,8 @@ fn tempdir() -> std::io::Result<std::path::PathBuf> {
 pub(crate) mod tests {
     use super::*;
 
-    /// A self-signed CA certificate named `cn`, as PEM.
+    /// A self-signed CA certificate named `cn`, as PEM with `\n` line ends, as [`certs`]
+    /// writes it (rcgen ends lines with `\r\n` on Windows).
     pub(crate) fn ca_pem(cn: &str) -> String {
         let mut params = rcgen::CertificateParams::default();
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
@@ -166,7 +167,11 @@ pub(crate) mod tests {
             .distinguished_name
             .push(rcgen::DnType::CommonName, cn);
         let key = rcgen::KeyPair::generate().unwrap();
-        params.self_signed(&key).unwrap().pem()
+        params
+            .self_signed(&key)
+            .unwrap()
+            .pem()
+            .replace("\r\n", "\n")
     }
 
     #[test]
