@@ -235,6 +235,63 @@ fn disguised_git(component: &str) -> bool {
     component != ".git" && (f == ".git" || f.starts_with("git~"))
 }
 
+/// Why a file in a folder git takes as a repository ([`bare_roots`]) waits for a review.
+pub const IN_BARE_REPO: &str = "laid out as a git repository: git run there takes its config";
+
+/// The folders among the env's files (`present`, and `folders` holding them) that git takes as
+/// a repository without a work tree, folded: a `HEAD` with `objects/` and `refs/`, or with a
+/// `commondir` naming where they are. Git run inside one, by a prompt or an editor, takes its
+/// config as the repository's (`core.fsmonitor`, hooks). Names are compared folded, as the
+/// filesystem may; `""` is the folder itself.
+pub fn bare_roots(present: &BTreeSet<String>, folders: &BTreeSet<String>) -> Vec<String> {
+    let split = |p: &str| {
+        let p = fold_path(p);
+        match p.rsplit_once('/') {
+            Some((root, name)) => (root.to_string(), name.to_string()),
+            None => (String::new(), p),
+        }
+    };
+    let mut files: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut dirs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for p in present {
+        let (root, name) = split(p);
+        files.entry(root.clone()).or_default().insert(name);
+        // A file's folders count though the archive named none of them: the sandbox's own
+        // tar can leave folder entries out.
+        let mut at = root;
+        while !at.is_empty() {
+            let (up, name) = split(&at);
+            dirs.entry(up.clone()).or_default().insert(name);
+            at = up;
+        }
+    }
+    for d in folders {
+        let (root, name) = split(d);
+        dirs.entry(root).or_default().insert(name);
+    }
+    files
+        .into_iter()
+        .filter(|(root, names)| {
+            let has_dirs = dirs
+                .get(root)
+                .is_some_and(|d| d.contains("objects") && d.contains("refs"));
+            names.contains("head") && (names.contains("commondir") || has_dirs)
+        })
+        .map(|(root, _)| root)
+        .collect()
+}
+
+/// Whether `rel` is in one of `roots` ([`bare_roots`]), compared folded.
+pub fn in_bare_root(rel: &str, roots: &[String]) -> bool {
+    let rel = fold_path(rel);
+    roots.iter().any(|root| {
+        root.is_empty()
+            || rel
+                .strip_prefix(root.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
+}
+
 /// Paths host tools act on by themselves (opening the folder, entering it, running git, or a
 /// build tool's wrapper and config). A sandbox that can write these can run code on the host.
 /// Compared folded, so case or invisible characters don't hide them.
@@ -1477,6 +1534,13 @@ impl Scanned {
             {
                 let short = |h: &str| h.chars().take(8).collect::<String>();
                 plan.head_moved = Some((short(then), short(now)));
+            }
+        }
+        // A folder git would take as a repository waits for a review, a reviewed pull's too.
+        let bare = bare_roots(&plan.present, &plan.folders);
+        for e in &mut plan.entries {
+            if e.risky.is_none() && in_bare_root(&e.path, &bare) {
+                e.risky = Some(IN_BARE_REPO.to_string());
             }
         }
         plan.digest = hex::encode(&hasher.finalize()[..16]);
@@ -2784,6 +2848,28 @@ mod tests {
             b.append_data(&mut h, path, *data).unwrap();
         }
         b.into_inner().unwrap()
+    }
+
+    #[test]
+    fn a_folder_git_takes_as_a_repository_waits_for_review() {
+        let dir = tempfile::tempdir().unwrap();
+        // No folder entries, as the sandbox's tar may write it; names as APFS folds them.
+        let raw = tar_of(&[
+            ("vendor/x/head", b"ref: refs/heads/main\n"),
+            ("vendor/x/Config", b"[core]\n\tfsmonitor = evil\n"),
+            ("vendor/x/Objects/ab/cdef", b"x"),
+            ("vendor/x/Refs/heads/main", b"x"),
+            ("w/HEAD", b"ref: refs/heads/main\n"),
+            ("w/commondir", b"c\n"),
+            ("w/c/config", b"[core]\n\tfsmonitor = evil\n"),
+            ("src/main.rs", b"fn main() {}"),
+        ]);
+        let plan = plan_of(&raw, dir.path(), &[]);
+        for e in &plan.entries {
+            let held = e.risky.as_deref() == Some(IN_BARE_REPO);
+            assert_eq!(held, e.path != "src/main.rs", "{}", e.path);
+        }
+        assert_eq!(plan.entries.len(), 8);
     }
 
     #[test]

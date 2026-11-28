@@ -2218,6 +2218,32 @@ async fn upstream_certificates_verify_only_for_the_host_their_ca_is_trusted_for(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "spawns binaries; run with `just it`"]
+async fn a_private_rule_reaches_this_machine_only_by_its_own_name() {
+    // This machine as the runtime names it to the gate; no server listens there.
+    let env = Env::start_with(&[], &[("LUOTO_HOST_GATEWAY", "10.255.0.7")]);
+    let mut rule = read("gw", "10.255.0.7");
+    rule.rule.allow_private = true;
+    env.apply(Policy {
+        rules: vec![rule],
+        ..Default::default()
+    });
+    let r = env.get("http://10.255.0.7/");
+    assert!(r.status == 403 && r.denied("guard"), "{}", r.head);
+    assert!(r.body.contains("resolves to this machine"), "{}", r.body);
+    // Its own name is dialed (and fails here, with nothing listening), as a model server is.
+    let mut own = read("own", "host.docker.internal");
+    own.rule.allow_private = true;
+    env.apply(Policy {
+        rules: vec![own],
+        ..Default::default()
+    });
+    let r = env.get("http://host.docker.internal/");
+    assert!(!r.body.contains("resolves to this machine"), "{}", r.body);
+    assert_ne!(r.status, 403, "{}", r.head);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
 async fn a_ca_under_a_wildcard_or_every_host_verifies_what_it_covers() {
     let env_ca = TestCa::new("luoto sandbox CA (it)");
     let corp_ca = TestCa::new("corp CA");

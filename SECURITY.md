@@ -412,7 +412,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   for that (`sandbox request --private`), and `luoto approve` asks you separately, or the UI's
   private switch starts on, which you may turn off. Without that ask, `luoto approve --private`
   or the switch grants it; `luoto approve` looks the name up to ask only once you approved,
-  since a lookup carries whatever the sandbox put in the name. A preset request names one
+  since a lookup carries whatever the sandbox put in the name, and `luoto ui` looks up only a
+  host you type. Private access never reaches this machine: a name or address resolving to it
+  (the runtime's host gateway, the Mac's own addresses) is refused unless the rule names
+  `host.docker.internal`. A preset request names one
   of luoto's presets; approving it opens all of that preset's hosts and keeps it in the env's
   config (`luoto status` lists them). An install request names a
   package or toolchain the gate has checked to be a plain name; approving it runs that

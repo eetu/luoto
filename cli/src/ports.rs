@@ -114,12 +114,20 @@ pub fn url(port: u16) -> String {
 }
 
 /// TCP ports something listens on in the env's dev container; None if that can't be asked.
+/// The sandbox writes what the look prints and decides how long it takes: both are bounded.
 pub fn listening(rt: &Runtime, dev: &str) -> Option<BTreeSet<u16>> {
     let out = rt
-        .run(exec(dev).argv(["cat", "/proc/net/tcp", "/proc/net/tcp6"]))
+        .run_limited(
+            exec(dev).argv(["cat", "/proc/net/tcp", "/proc/net/tcp6"]),
+            LISTENING_WAIT,
+            LISTENING_CAP,
+        )
         .ok()?;
     Some(parse_listening(&out))
 }
+
+/// How long one look at an env's ports may take.
+const LISTENING_WAIT: Duration = Duration::from_secs(20);
 
 /// The ports a dev container listens on, from one `exec` that prints its tables every 2 s
 /// (Apple logs each `exec` in the VM's console log, which nothing caps, so a look per tick
@@ -128,6 +136,9 @@ pub fn listening(rt: &Runtime, dev: &str) -> Option<BTreeSet<u16>> {
 pub struct Listening {
     child: std::process::Child,
     open: Arc<std::sync::Mutex<Option<BTreeSet<u16>>>>,
+    /// The `exec` printed past [`LISTENING_CAP`]: its output is no longer read, and this look
+    /// is over.
+    cut: Arc<AtomicBool>,
 }
 
 /// The line that ends one printing of the tables.
@@ -160,38 +171,56 @@ impl Listening {
             .ok()?;
         let out = child.stdout.take()?;
         let open: Arc<std::sync::Mutex<Option<BTreeSet<u16>>>> = Arc::default();
-        let shared = open.clone();
+        let cut = Arc::new(AtomicBool::new(false));
+        let (shared, over) = (open.clone(), cut.clone());
         std::thread::spawn(move || {
-            use std::io::BufRead;
-            let mut table = String::new();
-            for line in std::io::BufReader::new(out).lines() {
-                let Ok(line) = line else { return };
-                if line == LISTENING_END {
-                    let ports = parse_listening(&table);
-                    *shared.lock().unwrap_or_else(|e| e.into_inner()) = Some(ports);
-                    table.clear();
-                } else if table.len() + line.len() < LISTENING_CAP {
-                    table.push_str(&line);
-                    table.push('\n');
-                } else {
-                    return;
-                }
+            if read_tables(out, &shared).is_none() {
+                over.store(true, Ordering::Relaxed);
             }
         });
-        Some(Listening { child, open })
+        Some(Listening { child, open, cut })
     }
 
     /// The ports of the latest printing; None before the first, or once the `exec` ended.
     pub fn current(&mut self) -> Option<BTreeSet<u16>> {
-        if !matches!(self.child.try_wait(), Ok(None)) {
+        if !self.alive() {
             return None;
         }
         self.open.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Whether the `exec` still runs.
+    /// Whether the `exec` still runs and is read.
     pub fn alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        !self.cut.load(Ordering::Relaxed) && matches!(self.child.try_wait(), Ok(None))
+    }
+}
+
+/// Read the tables a [`Listening`] loop prints into `open`, a printing at a time, until its
+/// output ends (`Some`) or a printing passes [`LISTENING_CAP`] (`None`), a line too: reading
+/// stops there, and the pipe's end closing ends the `exec`.
+fn read_tables(out: impl Read, open: &std::sync::Mutex<Option<BTreeSet<u16>>>) -> Option<()> {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(out);
+    let mut table = String::new();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let room = (LISTENING_CAP - table.len()) as u64 + 1;
+        match (&mut reader).take(room).read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => return Some(()),
+            Ok(_) => {}
+        }
+        let text = String::from_utf8_lossy(&line);
+        let text = text.trim_end_matches('\n');
+        if text == LISTENING_END {
+            *open.lock().unwrap_or_else(|e| e.into_inner()) = Some(parse_listening(&table));
+            table.clear();
+        } else if table.len() + line.len() <= LISTENING_CAP {
+            table.push_str(text);
+            table.push('\n');
+        } else {
+            return None;
+        }
     }
 }
 
@@ -320,13 +349,22 @@ fn relay(rt: &Runtime, dev: &str, port: u16, stream: TcpStream) -> Result<()> {
     }
     let _ = outbound.shutdown(std::net::Shutdown::Write);
     let _ = up.join();
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
+    // What `sandbox relay` says on failure, which the sandbox writes: at most a little of it.
+    let mut err = Vec::new();
+    if let Some(pipe) = child.stderr.take() {
+        let _ = pipe.take(RELAY_ERR_CAP).read_to_end(&mut err);
+    }
+    let _ = child.kill();
+    let status = child.wait()?;
+    if !status.success() && !err.is_empty() {
+        let err = String::from_utf8_lossy(&err);
         bail!("{}", err.trim().trim_start_matches("sandbox: "));
     }
     Ok(())
 }
+
+/// The most of a relay's error read.
+const RELAY_ERR_CAP: u64 = 4 << 10;
 
 /// What a relay holds for a client that isn't reading.
 const HELD: usize = 4 << 20;
@@ -400,6 +438,18 @@ pub fn ui_port_refused(port: u16) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_look_at_the_ports_reads_its_tables_and_stops_at_a_line_without_end() {
+        let open = std::sync::Mutex::new(None);
+        let table = "  sl  local_address rem_address   st\n   0: 00000000:1435 00000000:0000 0A\n";
+        let printed = format!("{table}{LISTENING_END}\n");
+        assert_eq!(read_tables(printed.as_bytes(), &open), Some(()));
+        assert_eq!(*open.lock().unwrap(), Some(BTreeSet::from([5173])));
+        // The sandbox writes what the look prints: a line that never ends is read only so far.
+        let endless = std::io::repeat(b'x');
+        assert_eq!(read_tables(endless, &open), None);
+    }
+
     #[test]
     fn a_relay_keeps_reading_the_env_and_ends_a_client_that_stopped_reading() {
         let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();

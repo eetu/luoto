@@ -82,6 +82,10 @@ pub async fn dial_tcp_to(
     allow_private: bool,
     private_only: bool,
 ) -> Result<Box<dyn Io>, DialError> {
+    // Only this name reaches this machine, however it resolves (luoto's gateway, the runtime's
+    // hosts file); another the sandbox's DNS answers for may point at it too, which no rule for
+    // that name lets through.
+    let this_name = host.eq_ignore_ascii_case(luoto_shared::THIS_MACHINE);
     let mut addrs: Vec<SocketAddr> = if let Some(addr) = test_server(state, host) {
         vec![addr]
     } else {
@@ -119,6 +123,12 @@ pub async fn dial_tcp_to(
                 ),
             }));
         }
+        if !this_name && allow_private {
+            let machine = this_machine_addrs(state);
+            if addrs.iter().any(|a| machine.contains(&a.ip())) {
+                return Err(on_this_machine(host));
+            }
+        }
         addrs
     };
     // IPv4 first: many networks (CI runners among them) have no IPv6 route, and each address
@@ -143,6 +153,10 @@ pub async fn dial_tcp_to(
                 .await
             {
                 Ok(link) => return Ok(Box::new(link)),
+                // This Mac, which only its own name reaches.
+                Err(HostDialError::Refused(why)) if why == OWN_ADDRESS && !this_name => {
+                    return Err(on_this_machine(host));
+                }
                 // The host's own address or a runtime network: dialed from here, as before.
                 Err(HostDialError::Refused(_)) => {}
                 Err(HostDialError::NoLink) => {
@@ -182,6 +196,57 @@ pub async fn dial_tcp_to(
     Err(DialError::Failed(cannot_connect(
         host, port, &failed, timed_out,
     )))
+}
+
+/// What the host's dialer answers for one of the Mac's own addresses (`cli/src/hostdial.rs`).
+const OWN_ADDRESS: &str = "this Mac's own address";
+
+/// A name other than [`luoto_shared::THIS_MACHINE`] that resolved to this machine.
+fn on_this_machine(host: &str) -> DialError {
+    DialError::Denied(DenyReason::Guard {
+        reason: format!(
+            "{host} resolves to this machine, which a rule reaches only as `{}`",
+            luoto_shared::THIS_MACHINE
+        ),
+    })
+}
+
+/// The addresses that are this machine, from the gate: the host gateway luoto names
+/// (`LUOTO_HOST_GATEWAY`), the one the runtime writes in the hosts file, and the default
+/// gateway, which is the runtime's host.
+fn this_machine_addrs(state: &State) -> Vec<IpAddr> {
+    let mut out: Vec<IpAddr> = Vec::new();
+    if let Some(at) = state.cfg.host_gateway.as_deref()
+        && let Ok(ip) = this_machine(at)
+    {
+        out.push(ip);
+    }
+    if let Ok(table) = std::fs::read_to_string("/proc/net/route")
+        && let Some(gw) = default_gateway(&table)
+    {
+        out.push(gw);
+    }
+    if let Ok(hosts) = std::fs::read_to_string("/etc/hosts") {
+        out.extend(gateway_in_hosts(&hosts));
+    }
+    out
+}
+
+/// The addresses a hosts file gives the runtime's names for its host.
+fn gateway_in_hosts(hosts: &str) -> Vec<IpAddr> {
+    hosts
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('#').next()?.split_whitespace();
+            let ip = fields.next()?.parse::<IpAddr>().ok()?;
+            fields
+                .any(|n| {
+                    n.eq_ignore_ascii_case(luoto_shared::THIS_MACHINE)
+                        || n.eq_ignore_ascii_case("host.containers.internal")
+                })
+                .then_some(ip)
+        })
+        .collect()
 }
 
 /// Whether `ip` is refused before a dial. The gateway is this machine, even in 10.212.0.0/16,
@@ -331,6 +396,22 @@ mod this_machine_tests {
             "10.0.0.1".parse::<std::net::IpAddr>().unwrap()
         );
         assert!(this_machine("dns").is_err());
+    }
+
+    #[test]
+    fn the_hosts_file_names_this_machine_by_the_runtimes_names() {
+        let hosts = "127.0.0.1 localhost\n\
+                     192.168.127.254 host.containers.internal host.docker.internal # podman\n\
+                     10.0.0.9 db.corp.example\n\
+                     # 10.0.0.10 host.docker.internal\n\
+                     172.17.0.1\tHost.Docker.Internal\n";
+        assert_eq!(
+            super::gateway_in_hosts(hosts),
+            [
+                "192.168.127.254".parse::<std::net::IpAddr>().unwrap(),
+                "172.17.0.1".parse().unwrap()
+            ]
+        );
     }
 }
 

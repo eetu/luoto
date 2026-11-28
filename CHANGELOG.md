@@ -40,6 +40,12 @@ release may break.
   where a page the sandbox served could later act as the UI.
 - `luoto ui` looked up a host the sandbox named as soon as it showed it, sending what the name
   carried to your resolver; it looks up only a host you type.
+- An approved private-access request reached services on your machine when its name resolved
+  to the runtime's host gateway or the Mac's own address; only `host.docker.internal` does.
+- An unattended pull wrote a folder git takes as a repository when its names differed in case
+  or a `commondir` named the rest; `luoto pull` lists such folders as risky.
+- A warning could carry terminal escapes a tool in the env printed to its error output.
+- A sandbox could exhaust the background watcher's memory through the port listing it prints.
 
 ## [0.7.5] - 2026-11-27
 
