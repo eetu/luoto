@@ -78,6 +78,7 @@ pub fn routes() -> Router<Ui> {
         .route("/envs/{name}/events", get(env_events))
         .route("/envs/{name}/requests", get(requests))
         .route("/envs/{name}/requests/{id}/approve", post(approve))
+        .route("/envs/{name}/requests/{id}/risks", post(approval_risks))
         .route("/envs/{name}/requests/{id}/reject", post(reject))
         .route("/envs/{name}/rules", post(add_rule))
         .route(
@@ -673,19 +674,42 @@ async fn approve(
     .map(Json)
 }
 
+/// What approving a request as `d` would ask to confirm (its `ttl`, `force` and `var` play no
+/// part); an error says why it would be refused.
+async fn approval_risks(
+    Path((name, id)): Path<(String, u64)>,
+    Json(d): Json<Decision>,
+) -> ApiResult<Vec<String>> {
+    blocking(move || {
+        let ctx = Ctx::load()?;
+        let req = shown(&ctx, &name, id, d.created)?;
+        rules::approval_risks(&ctx, &name, &req, &d.narrow, d.private)
+    })
+    .await
+    .map(Json)
+}
+
 #[derive(Deserialize)]
-struct Shown {
+struct Rejection {
+    /// When the request shown was filed (see [`Decision`]).
     created: DateTime<Utc>,
+    /// Why, for the sandbox to read.
+    #[serde(default)]
+    note: Option<String>,
 }
 
 async fn reject(
     Path((name, id)): Path<(String, u64)>,
-    Json(s): Json<Shown>,
+    Json(r): Json<Rejection>,
 ) -> ApiResult<AccessRequest> {
     blocking(move || {
         let ctx = Ctx::load()?;
-        shown(&ctx, &name, id, s.created)?;
-        rules::reject(&ctx, &name, id, None)
+        shown(&ctx, &name, id, r.created)?;
+        let note = r
+            .note
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty());
+        rules::reject(&ctx, &name, id, note)
     })
     .await
     .map(Json)

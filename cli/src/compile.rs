@@ -13,6 +13,7 @@ use luoto_shared::creds::{
     BindingSpec, FORBIDDEN_GITHUB_PERMISSIONS, Injection, Placement, SSH_BINDING,
     default_github_api,
 };
+use luoto_shared::host::normalize_pattern;
 use luoto_shared::policy::{
     Access, AccessLevel, AzureGuard, BodyDeny, CompiledRule, DenyRule, GitGuard, GithubGuard,
     InternalName, Mode, Open, Policy, READ_METHODS, Redirect, Rule, RuleOrigin, rule_error,
@@ -24,7 +25,7 @@ use crate::config::{
     AzureCred, AzureDevopsCred, CustomCred, EnvConfig, GitCred, GithubCred, ProviderValue, SshCred,
     extend_unique,
 };
-use crate::{azure, azure_identity, model_servers, packages};
+use crate::{azure, azure_identity, model_servers, packages, trust};
 
 /// What part of the config made a binding: how `credentials.rs` tells people what it is for
 /// and what changes it, never by reading the binding's name.
@@ -68,6 +69,9 @@ pub struct Compiled {
     /// `AZURE_TENANT_ID` name, when `[credentials.azure]` names no tenant.
     pub tenant_from: Option<String>,
     pub warnings: Vec<String>,
+    /// The CA certificates (PEM, one each) the dev container trusts besides the public roots
+    /// and the env's own CA: what config.toml's `cas` and the env's `[cas]` name.
+    pub trusted_cas: Vec<String>,
 }
 
 impl Compiled {
@@ -140,6 +144,10 @@ pub fn compile(
 ) -> Result<Compiled> {
     let mut b = Builder::default();
     crate::repos::check(&cfg.workspace)?;
+    // Published on this machine at the same port, `ports` included a luoto.toml's.
+    for p in &cfg.ports {
+        crate::ports::ui_port_refused(*p).map_err(|e| anyhow!("ports: {e}"))?;
+    }
 
     for name in &cfg.presets {
         let Some(p) = presets::get(name) else {
@@ -218,7 +226,15 @@ pub fn compile(
 
     for (i, r) in cfg.allow.iter().enumerate() {
         if let Some(e) = rule_error(r, RuleOrigin::Host) {
-            bail!("rule for `{}`: {}", r.host, e.message);
+            let host = crate::text::display(&r.host);
+            let fix = match r.id.as_deref() {
+                Some(id) if id.starts_with("project-") => String::new(),
+                named => format!(
+                    "; `luoto revoke -e {env} {}` removes it",
+                    named.map_or(host.as_str(), |id| id)
+                ),
+            };
+            bail!("rule for `{host}`: {}{fix}", e.message);
         }
         if r.expired(Utc::now()) {
             continue;
@@ -230,17 +246,22 @@ pub fn compile(
         } else {
             "user"
         };
+        // As the gate compares hosts: `API.Example.com.` is `api.example.com`.
+        let mut r = r.clone();
+        if let Some(host) = normalize_pattern(&r.host) {
+            r.host = host;
+        }
         if let Some(ca) = &r.ca {
             if origin == "project" {
                 bail!("rule `{id}`: a project can't name a CA to trust");
             }
             let certs = ca_file(&format!("rule for `{}`", r.host), ca)?;
-            let held = upstream_cas.entry(r.host.to_ascii_lowercase()).or_default();
+            let held = upstream_cas.entry(r.host.clone()).or_default();
             if !held.contains(&certs) {
                 held.push_str(&certs);
             }
         }
-        b.rule(id, origin, r.clone());
+        b.rule(id, origin, r);
     }
     for d in &cfg.deny {
         let rule = d
@@ -286,6 +307,7 @@ pub fn compile(
         );
     }
 
+    let trusted_cas = compile_cas(cfg, &b.injections, &mut upstream_cas)?;
     let policy = Policy {
         env: env.to_string(),
         rules: b.rules,
@@ -330,7 +352,69 @@ pub fn compile(
         netrc: b.netrc,
         tenant_from: b.tenant_from,
         warnings: b.warnings,
+        trusted_cas,
     })
+}
+
+/// The CAs trusted besides the public roots, into `upstream_cas` under the hosts each covers:
+/// config.toml's under `*`, each `[cas.<name>]` under its hosts, none of which may be one the
+/// gate adds a credential on (whoever holds the CA's key would read it there). The
+/// certificates, once each, for the dev container's own trust.
+fn compile_cas(
+    cfg: &EnvConfig,
+    injections: &[Injection],
+    upstream_cas: &mut BTreeMap<String, String>,
+) -> Result<Vec<String>> {
+    fn hold(upstream_cas: &mut BTreeMap<String, String>, key: &str, certs: &[trust::Cert]) {
+        let held = upstream_cas.entry(key.to_string()).or_default();
+        for c in certs {
+            if !held.contains(&c.pem) {
+                held.push_str(&c.pem);
+            }
+        }
+    }
+    let file_certs = |what: &str, file: &str| -> Result<Vec<trust::Cert>> {
+        trust::certs(&ca_file(what, file)?).map_err(|e| anyhow!("{what}: {file} {e}"))
+    };
+    let mut trusted: Vec<trust::Cert> = Vec::new();
+    for file in &cfg.every_host_cas {
+        let certs = file_certs("config.toml cas", file)?;
+        hold(upstream_cas, "*", &certs);
+        trusted.extend(certs);
+    }
+    for (name, ca) in &cfg.cas {
+        let what = format!("cas.{name}");
+        let certs = match (&ca.pem, &ca.file) {
+            (Some(pem), None) => trust::certs(pem).map_err(|e| anyhow!("{what}: its pem {e}"))?,
+            (None, Some(file)) => file_certs(&what, file)?,
+            _ => bail!("{what}: give the CA as `pem` or as `file`, one of them"),
+        };
+        if ca.hosts.is_empty() {
+            bail!("{what}: name the hosts it covers (`hosts = [\"*.corp.example\"]`)");
+        }
+        for h in &ca.hosts {
+            let scope = trust::scope(h).map_err(|e| anyhow!("{what}: {e}"))?;
+            if let Some(i) = injections
+                .iter()
+                .find(|i| luoto_shared::host::host_matches(&scope, &i.host))
+            {
+                bail!(
+                    "{what}: `{scope}` covers {}, where the gate adds a credential; a CA there \
+                     goes with that credential (`ca` of [[credentials.git]]) or in config.toml's \
+                     `cas`, for every host",
+                    i.host
+                );
+            }
+            hold(upstream_cas, &scope, &certs);
+        }
+        trusted.extend(certs);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    Ok(trusted
+        .into_iter()
+        .filter(|c| seen.insert(c.sha256.clone()))
+        .map(|c| c.pem)
+        .collect())
 }
 
 /// An agent's options are ones its profile takes, with values it accepts.
@@ -527,6 +611,7 @@ fn compile_provider(
             b.injections.push(Injection {
                 binding: binding.clone(),
                 host: host.to_string(),
+                port: Some(443),
                 paths: paths.to_vec(),
                 methods: methods.clone(),
                 place: Placement::Header {
@@ -539,6 +624,7 @@ fn compile_provider(
                 b.injections.push(Injection {
                     binding: binding.clone(),
                     host: host.to_string(),
+                    port: Some(443),
                     paths: paths.to_vec(),
                     methods,
                     place: Placement::Query { param: q.clone() },
@@ -578,6 +664,7 @@ fn compile_custom(b: &mut Builder, cname: &str, c: &CustomCred) -> Result<()> {
     b.injections.push(Injection {
         binding,
         host: host.clone(),
+        port: None,
         paths: c.paths.clone(),
         methods: if c.write {
             Vec::new()
@@ -1073,6 +1160,7 @@ fn compile_github_one(
         let api = |paths: Vec<String>, ms: &[&str]| Injection {
             binding: binding.clone(),
             host: forges::GITHUB_API.into(),
+            port: Some(443),
             paths,
             methods: methods(ms),
             place: Placement::Header {
@@ -1097,6 +1185,7 @@ fn compile_github_one(
         b.injections.push(Injection {
             binding: binding.clone(),
             host: forges::GITHUB.into(),
+            port: Some(443),
             paths: paths.clone(),
             methods: methods(&["GET", "POST"]),
             place: Placement::Basic {
@@ -1197,6 +1286,7 @@ fn compile_model_servers(b: &mut Builder, cfg: &EnvConfig) -> Result<()> {
         b.injections.push(Injection {
             binding,
             host,
+            port: Some(ep.port),
             paths,
             methods: methods(&["GET", "POST"]),
             place: Placement::Header {
@@ -1367,6 +1457,7 @@ fn compile_git(
                 b.injections.push(Injection {
                     binding: id.clone(),
                     host: host.clone(),
+                    port: Some(port.unwrap_or(443)),
                     paths: paths.clone(),
                     methods: methods(&["GET", "POST"]),
                     place: Placement::Basic {
@@ -1487,6 +1578,7 @@ fn compile_forge_feeds(
     b.injections.push(Injection {
         binding: id.to_string(),
         host: host.to_string(),
+        port: Some(port.unwrap_or(443)),
         paths: paths.clone(),
         methods: methods(&["GET", "HEAD"]),
         place: Placement::Header {
@@ -1596,6 +1688,7 @@ fn compile_azure_identity(b: &mut Builder, c: &AzureCred) -> Result<AzureIdentit
         b.injections.push(Injection {
             binding,
             host: host.clone(),
+            port: Some(443),
             paths: Vec::clone(&paths),
             methods,
             place: Placement::Header {
@@ -1798,6 +1891,7 @@ fn compile_github_feeds(b: &mut Builder, name: &str, owners: &[String]) {
         b.injections.push(Injection {
             binding: name.to_string(),
             host: host.to_string(),
+            port: Some(443),
             paths: paths.clone(),
             methods: methods(&["GET", "HEAD"]),
             place: Placement::Header {
@@ -1859,6 +1953,7 @@ fn compile_azure_feeds(b: &mut Builder, feeds: &[azure::Feed]) {
         b.injections.push(Injection {
             binding: "azure_devops".into(),
             host: host.clone(),
+            port: Some(443),
             paths: paths.clone(),
             methods: methods(&["GET", "HEAD"]),
             place: Placement::Basic {
@@ -1881,7 +1976,7 @@ fn compile_azure_feeds(b: &mut Builder, feeds: &[azure::Feed]) {
             host,
             paths,
             ignore_case: true,
-            to: vec![azure::FEED_STORAGE.into()],
+            to: azure::FEED_STORAGE.map(String::from).into(),
             ..Default::default()
         });
     }
@@ -1904,6 +1999,7 @@ fn compile_azure_git(
     b.injections.push(Injection {
         binding: "azure_devops".into(),
         host: azure::HOST.into(),
+        port: Some(443),
         paths: paths.clone(),
         methods: methods(&["GET", "POST"]),
         place: Placement::Basic {
@@ -1953,6 +2049,7 @@ fn compile_azure_git(
             b.injections.push(Injection {
                 binding: "azure_devops".into(),
                 host: azure::HOST.into(),
+                port: Some(443),
                 paths: paths.clone(),
                 methods: methods(&ms),
                 place: Placement::Basic {
@@ -2130,7 +2227,7 @@ read_repos = ["fabrikam/Infra/lib"]
         ] {
             assert!(allowed(method, &path), "{method} {path}");
             assert_eq!(
-                p.injections_for("GET", "dev.azure.com", &path).len(),
+                p.injections_for("GET", "dev.azure.com", 443, &path).len(),
                 1,
                 "{path}"
             );
@@ -2150,6 +2247,7 @@ read_repos = ["fabrikam/Infra/lib"]
             p.injections_for(
                 "GET",
                 "dev.azure.com",
+                443,
                 "/fabrikam/Infra/_apis/git/repositories/lib/pullrequests"
             )
             .is_empty()
@@ -2205,8 +2303,11 @@ feeds = ["https://pkgs.dev.azure.com/acme/Web/_packaging/packages/pypi/simple/",
             "/contoso/_packaging/tools/maven/v1/junit/junit/4.13.2/junit-4.13.2.jar",
         ] {
             assert!(allowed(pkgs, "GET", path), "{path}");
-            assert!(!p.injections_for("GET", pkgs, path).is_empty(), "{path}");
-            assert_eq!(p.redirect_targets("GET", pkgs, path), [azure::FEED_STORAGE]);
+            assert!(
+                !p.injections_for("GET", pkgs, 443, path).is_empty(),
+                "{path}"
+            );
+            assert_eq!(p.redirect_targets("GET", pkgs, path), azure::FEED_STORAGE);
         }
         assert!(allowed(
             "acme.pkgs.visualstudio.com",
@@ -2227,7 +2328,7 @@ feeds = ["https://pkgs.dev.azure.com/acme/Web/_packaging/packages/pypi/simple/",
         ] {
             assert!(!allowed(host, method, path), "{method} {host}{path}");
         }
-        assert!(p.injections_for("PUT", pkgs, by_id).is_empty());
+        assert!(p.injections_for("PUT", pkgs, 443, by_id).is_empty());
         assert!(p.redirect_targets("POST", pkgs, by_id).is_empty());
         assert!(
             p.redirect_targets("GET", "dev.azure.com", "/acme/Web/_git/site")
@@ -2293,7 +2394,7 @@ feeds = ["acme", "@Tools"]
             ),
         ] {
             assert!(allowed(host, "GET", path), "{host}{path}");
-            let inj = p.injections_for("GET", host, path);
+            let inj = p.injections_for("GET", host, 443, path);
             assert_eq!(inj.len(), 1, "{host}{path}");
             assert_eq!(inj[0].binding, "github");
             assert_eq!(p.redirect_targets("GET", host, path), [storage]);
@@ -2327,7 +2428,10 @@ feeds = ["acme", "@Tools"]
             "/api/v4/projects/12/packages/npm/@acme%2fhello",
             "/api/v4/projects/12/packages/pypi/files/abc/hello.whl",
         ] {
-            assert!(!p.injections_for("GET", host, path).is_empty(), "{path}");
+            assert!(
+                !p.injections_for("GET", host, 443, path).is_empty(),
+                "{path}"
+            );
         }
         for path in [
             "/api/v4/projects/12/repository/files/a",
@@ -2337,7 +2441,10 @@ feeds = ["acme", "@Tools"]
             "/api/v4/projects/12/secure_files/1/download",
             "/api/v4/projects/13/packages/npm/x",
         ] {
-            assert!(p.injections_for("GET", host, path).is_empty(), "{path}");
+            assert!(
+                p.injections_for("GET", host, 443, path).is_empty(),
+                "{path}"
+            );
         }
     }
 
@@ -2380,7 +2487,11 @@ storage_hosts = ["minio.acme.internal"]
             "/api/v4/projects/12/packages/pypi/files/abc/hello.whl",
         ] {
             assert!(allowed("GET", path), "{path}");
-            assert!(!p.injections_for("GET", host, path).is_empty(), "{path}");
+            assert!(
+                !p.injections_for("GET", host, 3443, path).is_empty(),
+                "{path}"
+            );
+            assert!(p.injections_for("GET", host, 443, path).is_empty());
             assert_eq!(
                 p.redirect_targets("GET", host, path),
                 ["minio.acme.internal"]
@@ -2473,6 +2584,7 @@ repos = [
         let inj = p.injections_for(
             "GET",
             "dev.azure.com",
+            443,
             "/FABRIKAM/Apps/_git/web-api/info/refs",
         );
         assert_eq!(inj.len(), 1);
@@ -2484,8 +2596,13 @@ repos = [
             }
         );
         assert_eq!(
-            p.injections_for("GET", "dev.azure.com", "/other/Web/_git/site/info/refs")
-                .len(),
+            p.injections_for(
+                "GET",
+                "dev.azure.com",
+                443,
+                "/other/Web/_git/site/info/refs"
+            )
+            .len(),
             1,
             "another organization's repo, with the same PAT"
         );
@@ -2673,7 +2790,14 @@ api = ["openai"]
         let rule = |id: &str| &p.rules.iter().find(|r| r.id == id).unwrap().rule;
         assert!(rule("model-server-mtplx").allow_private && rule("model-server-gpu").allow_private);
         assert_eq!(p.plain_http_credentials, [here]);
-        assert_eq!(p.injections_for("POST", here, "/v1/messages").len(), 1);
+        assert_eq!(
+            p.injections_for("POST", here, 8000, "/v1/messages").len(),
+            1
+        );
+        assert!(
+            p.injections_for("POST", here, 8001, "/v1/messages")
+                .is_empty()
+        );
         assert!(c.vault_refs().contains("env:MTPLX_TOKEN"));
     }
 
@@ -2746,7 +2870,7 @@ secret = "op://v/svc/key"
         )
         .unwrap();
         let p = &c.policy;
-        let carries = |m: &str, h: &str, path: &str| !p.injections_for(m, h, path).is_empty();
+        let carries = |m: &str, h: &str, path: &str| !p.injections_for(m, h, 443, path).is_empty();
         // What the env's rules allow carries it...
         assert!(carries(
             "GET",
@@ -2842,7 +2966,7 @@ repos = ["Octo/Foo"]
             "a remote in the case it was cloned with"
         );
         assert_eq!(
-            p.injections_for("GET", "github.com", "/Octo/Foo.git/info/refs")
+            p.injections_for("GET", "github.com", 443, "/Octo/Foo.git/info/refs")
                 .len(),
             1
         );
@@ -2901,12 +3025,12 @@ repos = ["Octo/Foo"]
             );
         }
         assert_eq!(
-            p.injections_for("GET", "github.com", "/octo/foo.git/info/refs")
+            p.injections_for("GET", "github.com", 443, "/octo/foo.git/info/refs")
                 .len(),
             1
         );
         assert!(
-            p.injections_for("GET", "github.com", "/other/repo.git/info/refs")
+            p.injections_for("GET", "github.com", 443, "/other/repo.git/info/refs")
                 .is_empty()
         );
         assert!(c.vault_refs().contains("op://v/app/key"));
@@ -2954,7 +3078,7 @@ read_repos = ["org/Infra/agent"]
         assert!(!allowed("api.github.com", "POST", "/repos/acme/lib/pulls"));
         assert!(allowed("api.github.com", "POST", "/repos/acme/web/pulls"));
         let binding = |path| {
-            p.injections_for("GET", "github.com", path)[0]
+            p.injections_for("GET", "github.com", 443, path)[0]
                 .binding
                 .clone()
         };
@@ -3003,7 +3127,7 @@ protected_branches = ["prod"]
         .unwrap();
         let p = &c.policy;
         let binding = |host, path| {
-            p.injections_for("GET", host, path)
+            p.injections_for("GET", host, 443, path)
                 .iter()
                 .map(|i| i.binding.clone())
                 .collect::<Vec<_>>()
@@ -3021,7 +3145,7 @@ protected_branches = ["prod"]
             ["github-2"]
         );
         let graphql = |method| {
-            p.injections_for(method, "api.github.com", "/graphql")
+            p.injections_for(method, "api.github.com", 443, "/graphql")
                 .iter()
                 .map(|i| i.binding.clone())
                 .collect::<Vec<_>>()
@@ -3096,10 +3220,21 @@ ca = '{}'
         assert!(allowed("GET", "/infra/lib.git/info/refs"));
         assert!(!allowed("POST", "/infra/lib.git/git-receive-pack"));
         assert!(!allowed("GET", "/other/repo.git/info/refs"));
-        let inj = p.injections_for("GET", "forge.internal", "/Infra/Platform/api/info/refs");
+        let inj = p.injections_for(
+            "GET",
+            "forge.internal",
+            3000,
+            "/Infra/Platform/api/info/refs",
+        );
         assert!(matches!(&inj[0].place, Placement::Basic { username } if username == "dev"));
         assert!(
-            p.injections_for("GET", "forge.internal", "/other/repo/info/refs")
+            p.injections_for("GET", "forge.internal", 3000, "/other/repo/info/refs")
+                .is_empty()
+        );
+        // Only on its port: another service of the host gets no token.
+        let api = "/Infra/Platform/api/info/refs";
+        assert!(
+            p.injections_for("GET", "forge.internal", 443, api)
                 .is_empty()
         );
         assert_eq!(p.git[0].repos, ["infra/platform/api"]);
@@ -3136,7 +3271,7 @@ ca = '{}'
         .unwrap();
         let p = &c.policy;
         let graphql: Vec<&str> = p
-            .injections_for("POST", "api.github.com", "/graphql")
+            .injections_for("POST", "api.github.com", 443, "/graphql")
             .iter()
             .map(|i| i.binding.as_str())
             .collect();
@@ -3231,6 +3366,18 @@ ca = '{}'
                 p.redirect_targets("GET", "api.github.com", "/repos/a/b/pulls")
                     .is_empty()
             );
+            assert_eq!(
+                p.redirect_targets("GET", "github.com", "/Cli/cli/pull/1.diff"),
+                ["patch-diff.githubusercontent.com"]
+            );
+            assert!(
+                p.redirect_targets("GET", "github.com", "/user-attachments/assets/8be7-4c84")
+                    .contains(&"github-production-user-asset-6210df.s3.amazonaws.com")
+            );
+            assert!(
+                p.redirect_targets("GET", "github.com", "/cli/cli/pull/1")
+                    .is_empty()
+            );
             assert!(
                 p.redirect_targets("DELETE", "api.github.com", "/repos/a/b/actions/runs/1/logs")
                     .is_empty()
@@ -3252,6 +3399,83 @@ ca = '{}'
         assert!(compile("t", &app("read"), GATE, &[]).is_ok());
         let err = compile("t", &app("write"), GATE, &[]).err().unwrap();
         assert!(err.to_string().contains("`actions = \"read\"`"), "{err}");
+    }
+
+    #[test]
+    fn no_env_publishes_on_the_uis_port() {
+        for ui in crate::names::ui_ports() {
+            let err = compile("t", &cfg(&format!("ports = [5173, {ui}]")), GATE, &[])
+                .err()
+                .unwrap();
+            assert!(err.to_string().contains("`luoto ui`'s"), "{err}");
+        }
+        assert!(compile("t", &cfg("ports = [5173]"), GATE, &[]).is_ok());
+    }
+
+    #[test]
+    fn cas_are_trusted_for_the_hosts_they_name_and_config_tomls_for_every_host() {
+        let corp = crate::trust::tests::ca_pem("Corp Internal CA");
+        let mac = crate::trust::tests::ca_pem("Company Root");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("mac.pem");
+        std::fs::write(&file, &mac).unwrap();
+        let env_ca =
+            |hosts: &str| format!("[cas.corp]\nhosts = {hosts}\npem = \"\"\"\n{corp}\"\"\"\n");
+        let mut c = cfg(&env_ca("[\"*.Corp.example\", \"nexus.tools.example\"]"));
+        c.every_host_cas = vec![file.display().to_string()];
+        let out = compile("t", &c, GATE, &[]).unwrap();
+        let cas = &out.policy.upstream_cas;
+        assert_eq!(
+            cas.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["*", "*.corp.example", "nexus.tools.example"]
+        );
+        assert!(cas["*"].contains(mac.trim()) && !cas["*"].contains(corp.trim()));
+        assert!(cas["*.corp.example"].contains(corp.trim()));
+        // The dev container trusts each once.
+        assert_eq!(out.trusted_cas.len(), 2);
+
+        // Where the gate adds a credential, an env's CA could read it.
+        let cred = format!(
+            "{}\n[credentials.custom.api]\nhost = \"api.corp.example\"\nsecret = \"op://v/i/f\"\n",
+            env_ca("[\"*.corp.example\"]")
+        );
+        let err = compile("t", &cfg(&cred), GATE, &[]).err().unwrap();
+        assert!(
+            err.to_string()
+                .contains("api.corp.example, where the gate adds"),
+            "{err}"
+        );
+        for (text, why) in [
+            (env_ca("[\"*.com\"]"), "others can hold"),
+            (env_ca("[]"), "name the hosts"),
+            (
+                "[cas.corp]\nhosts = [\"a.example\"]\npem = \"x\"\nfile = \"/x.pem\"\n".to_string(),
+                "one of them",
+            ),
+        ] {
+            let err = compile("t", &cfg(&text), GATE, &[]).err().unwrap();
+            assert!(err.to_string().contains(why), "{text}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_rules_host_is_compared_as_the_gates_and_one_that_matches_nothing_is_refused() {
+        let rule = |host: &str| format!("[[allow]]\nid = \"r1\"\nhost = \"{host}\"");
+        let p = compile("t", &cfg(&rule("API.Example.com.")), GATE, &[])
+            .unwrap()
+            .policy;
+        assert!(matches!(
+            decide(&p, "api.example.com", "GET", "/"),
+            Decision::Allow { .. }
+        ));
+        for host in ["docs.rs/serde", "*.10.0.0.1"] {
+            let err = compile("t", &cfg(&rule(host)), GATE, &[]).err().unwrap();
+            assert!(
+                err.to_string()
+                    .contains("`luoto revoke -e t r1` removes it"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -3421,7 +3645,7 @@ repos = ["o/r"]
         .unwrap();
         let p = &c.policy;
         let copilot = |host, path| {
-            p.injections_for("GET", host, path)
+            p.injections_for("GET", host, 443, path)
                 .iter()
                 .any(|i| i.binding == "copilot.token")
         };
@@ -3542,7 +3766,7 @@ mode = "tunnel"
                 compile("t", &cfg(&text), GATE, &[]).unwrap()
             };
             let token = |c: &Compiled, method, host, path| {
-                let inj = c.policy.injections_for(method, host, path);
+                let inj = c.policy.injections_for(method, host, 443, path);
                 inj.iter().any(|i| {
                     i.binding == format!("{name}.token")
                         && i.place
@@ -3609,7 +3833,7 @@ mode = "tunnel"
         .unwrap();
         assert!(
             cf.policy
-                .injections_for("GET", "api.cloudflare.com", "/x")
+                .injections_for("GET", "api.cloudflare.com", 443, "/x")
                 .is_empty()
         );
     }
@@ -3641,7 +3865,7 @@ access = "write"
         ));
         assert!(
             c.policy
-                .injections_for("POST", "api.hetzner.cloud", "/v1/servers")
+                .injections_for("POST", "api.hetzner.cloud", 443, "/v1/servers")
                 .is_empty()
         );
     }
@@ -3747,7 +3971,7 @@ methods = ["DELETE"]
             )
         };
         let bound = |p: &Policy, method: &str, path: &str| -> Vec<String> {
-            p.injections_for(method, "management.azure.com", path)
+            p.injections_for(method, "management.azure.com", 443, path)
                 .iter()
                 .map(|i| i.binding.clone())
                 .collect()
@@ -3834,7 +4058,7 @@ graph = true
         let c = compile("t", &cfg(&text), GATE, &[]).unwrap();
         let p = &c.policy;
         let binding = |host: &str| -> Vec<String> {
-            p.injections_for("GET", host, "/x")
+            p.injections_for("GET", host, 443, "/x")
                 .iter()
                 .map(|i| i.binding.clone())
                 .collect()
@@ -3869,7 +4093,7 @@ graph = true
                 allowed,
                 "{method} {host}"
             );
-            let tokens = w.policy.injections_for(method, host, "/x").len();
+            let tokens = w.policy.injections_for(method, host, 443, "/x").len();
             assert_eq!(tokens, usize::from(allowed), "{method} {host}");
         }
         assert!(matches!(
@@ -3878,8 +4102,11 @@ graph = true
         ));
         // Under read, the data planes' tokens go on reads only, whatever else allows a write.
         for host in ["kv-prod.vault.azure.net", "acct.blob.core.windows.net"] {
-            assert_eq!(p.injections_for("GET", host, "/x").len(), 1, "{host}");
-            assert!(p.injections_for("PUT", host, "/x").is_empty(), "{host}");
+            assert_eq!(p.injections_for("GET", host, 443, "/x").len(), 1, "{host}");
+            assert!(
+                p.injections_for("PUT", host, 443, "/x").is_empty(),
+                "{host}"
+            );
         }
 
         let audiences = &p.azure.as_ref().unwrap().audiences;

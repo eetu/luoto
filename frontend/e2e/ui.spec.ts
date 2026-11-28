@@ -27,6 +27,15 @@ test("a host a rule allows since it was blocked reads as allowed", async ({ page
 
 test("a blocked host is allowed from the egress view", async ({ page }) => {
   const writes = await mockApi(page);
+  // A name the sandbox chose carries what it put in it: this machine never looks it up unasked.
+  const looked: string[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/resolve",
+    (route, req) => {
+      looked.push(req.url());
+      return route.fulfill({ json: { private: [], never: false } });
+    },
+  );
   await open(page);
   await page.getByRole("button", { name: /^web/ }).click();
 
@@ -36,6 +45,8 @@ test("a blocked host is allowed from the egress view", async ({ page }) => {
 
   await blocked.click();
   await expect(page.getByRole("heading", { name: "example.com" })).toBeVisible();
+  await page.waitForTimeout(600);
+  expect(looked).toEqual([]);
   // Offered for any host, since a blocked name was never resolved; off unless picked.
   await expect(page.getByRole("switch", { name: "allow private address" })).toHaveAttribute(
     "aria-checked",
@@ -314,7 +325,7 @@ test("a rule without the private address reads as blocked, naming the rule", asy
   await expect(page.getByText(/allows this host, not the private address/)).toBeVisible();
 });
 
-test("approving a request whose rule has risks shows them and resends with force", async ({
+test("a request's risks show before it is approved, and approving accepts them", async ({
   page,
 }) => {
   await mockApi(page);
@@ -330,7 +341,11 @@ test("approving a request whose rule has risks shows them and resends with force
     (url) => url.pathname === "/api/envs/web/requests",
     (route) => route.fulfill({ json: [request] }),
   );
-  const risks = ["a wildcard covers every subdomain"];
+  const risks = ["`*.example.com` covers every host under example.com"];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/7/risks",
+    (route) => route.fulfill({ json: risks }),
+  );
   const forced: boolean[] = [];
   await page.route(
     (url) => url.pathname === "/api/envs/web/requests/7/approve",
@@ -338,20 +353,18 @@ test("approving a request whose rule has risks shows them and resends with force
       const { force, created } = req.postDataJSON() as { force: boolean; created: string };
       expect(created).toBe(request.created);
       forced.push(force);
-      return force
-        ? route.fulfill({ json: { host: request.host, access: "write" } })
-        : route.fulfill({ status: 409, json: { error: "confirm risks", risks } });
+      return route.fulfill({ json: { host: request.host, access: "write" } });
     },
   );
   await open(page);
   await page.getByRole("button", { name: /^web/ }).click();
   await page.getByRole("button", { name: /access to \*\.example\.com/ }).click();
-  await page.getByRole("button", { name: "Approve", exact: true }).click();
 
   await expect(page.getByText(risks[0])).toBeVisible();
+  await expect(page.getByRole("button", { name: "Approve", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Approve anyway" }).click();
 
-  await expect.poll(() => forced).toEqual([false, true]);
+  await expect.poll(() => forced).toEqual([true]);
 });
 
 test("a port request reads as an uninspected tunnel and needs its risk confirmed", async ({
@@ -374,15 +387,16 @@ test("a port request reads as an uninspected tunnel and needs its risk confirmed
   const risks = [
     "a tunnel to db.example.com:5432 is not inspected: code in the sandbox gets full access to it, any protocol and any data",
   ];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/8/risks",
+    (route) => route.fulfill({ json: risks }),
+  );
   const bodies: { force: boolean; narrow?: unknown }[] = [];
   await page.route(
     (url) => url.pathname === "/api/envs/web/requests/8/approve",
     (route, req) => {
-      const body = req.postDataJSON() as { force: boolean; narrow?: unknown };
-      bodies.push(body);
-      return body.force
-        ? route.fulfill({ json: { host: request.host, port: 5432, mode: "tunnel" } })
-        : route.fulfill({ status: 409, json: { error: "confirm risks", risks } });
+      bodies.push(req.postDataJSON() as { force: boolean; narrow?: unknown });
+      return route.fulfill({ json: { host: request.host, port: 5432, mode: "tunnel" } });
     },
   );
   await open(page);
@@ -391,12 +405,39 @@ test("a port request reads as an uninspected tunnel and needs its risk confirmed
 
   await expect(page.getByRole("heading", { name: "db.example.com:5432" })).toBeVisible();
   await expect(page.getByRole("group", { name: "grant" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Approve", exact: true }).click();
   await expect(page.getByText(risks[0])).toBeVisible();
   await page.getByRole("button", { name: "Approve anyway" }).click();
 
-  await expect.poll(() => bodies.map((b) => b.force)).toEqual([false, true]);
+  await expect.poll(() => bodies.map((b) => b.force)).toEqual([true]);
   expect(bodies.every((b) => b.narrow === undefined)).toBe(true);
+});
+
+test("an HTTPS request on another port reads as inspected, websockets too", async ({ page }) => {
+  await mockApi(page);
+  const request = {
+    id: 12,
+    host: "nexus.corp.example",
+    port: 8443,
+    mode: "inspect",
+    ws: true,
+    access: "read",
+    reason: "the npm feed",
+    status: "pending",
+    created: new Date().toISOString(),
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [request] }),
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page
+    .getByRole("button", { name: /read access to nexus\.corp\.example:8443, websockets too/ })
+    .click();
+
+  await expect(page.getByRole("heading", { name: "nexus.corp.example:8443" })).toBeVisible();
+  await expect(page.getByText("read-only")).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "paths" })).toBeVisible();
 });
 
 test("a write request can be approved as read-only on some of its paths", async ({ page }) => {
@@ -413,6 +454,14 @@ test("a write request can be approved as read-only on some of its paths", async 
     (url) => url.pathname === "/api/envs/web/requests",
     (route) => route.fulfill({ json: [request] }),
   );
+  const writeRisk = "write access lets code in the sandbox upload data to api.example.com";
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/9/risks",
+    (route, req) => {
+      const { narrow } = req.postDataJSON() as { narrow?: { read?: boolean } };
+      return route.fulfill({ json: narrow?.read ? [] : [writeRisk] });
+    },
+  );
   const sent: unknown[] = [];
   await page.route(
     (url) => url.pathname === "/api/envs/web/requests/9/approve",
@@ -424,11 +473,12 @@ test("a write request can be approved as read-only on some of its paths", async 
   await open(page);
   await page.getByRole("button", { name: /^web/ }).click();
   await page.getByRole("button", { name: /access to api\.example\.com/ }).click();
+  await expect(page.getByText(writeRisk)).toBeVisible();
   await page
     .getByRole("group", { name: "grant" })
     .getByRole("button", { name: "read-only" })
     .click();
-  await expect(page.getByText(/Write access lets anything/)).toHaveCount(0);
+  await expect(page.getByText(writeRisk)).toHaveCount(0);
   await page.getByRole("textbox", { name: "paths" }).fill("/v1/**");
   await page.getByRole("button", { name: "Approve", exact: true }).click();
 
@@ -436,6 +486,127 @@ test("a write request can be approved as read-only on some of its paths", async 
   expect(sent[0]).toMatchObject({
     created: request.created,
     narrow: { read: true, paths: ["/v1/**"] },
+  });
+});
+
+test("a wildcard request is granted for one host it tried, the command to match", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const request = {
+    id: 13,
+    host: "*.corp.example",
+    access: "read",
+    reason: "the internal docs",
+    status: "pending",
+    created: new Date().toISOString(),
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [request] }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/egress",
+    (route) => route.fulfill({ json: [{ ...egressHosts[0], host: "docs.corp.example" }] }),
+  );
+  const sent: unknown[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/13/approve",
+    (route, req) => {
+      sent.push(req.postDataJSON());
+      return route.fulfill({ json: { host: "docs.corp.example", access: "read" } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: /access to \*\.corp\.example/ }).click();
+  await page.getByRole("button", { name: "docs.corp.example", exact: true }).click();
+
+  await expect(page.getByRole("textbox", { name: "host", exact: true })).toHaveValue(
+    "docs.corp.example",
+  );
+  await page.getByText("as a command").click();
+  await expect(
+    page.getByText("luoto approve -e web 13 --host docs.corp.example --for 1h"),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toMatchObject({ narrow: { host: "docs.corp.example" } });
+});
+
+test("a tunnel request may be granted inspected, then narrowed like any other", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const request = {
+    id: 14,
+    host: "nexus.corp.example",
+    port: 8443,
+    mode: "tunnel",
+    access: "write",
+    reason: "the npm feed",
+    status: "pending",
+    created: new Date().toISOString(),
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [request] }),
+  );
+  const sent: unknown[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/14/approve",
+    (route, req) => {
+      sent.push(req.postDataJSON());
+      return route.fulfill({ json: { host: request.host, port: 8443, access: "read" } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: /tunnel to nexus\.corp\.example:8443/ }).click();
+  await expect(page.getByRole("textbox", { name: "paths" })).toHaveCount(0);
+  await page.getByRole("group", { name: "how" }).getByRole("button", { name: "inspected" }).click();
+  await page
+    .getByRole("group", { name: "grant" })
+    .getByRole("button", { name: "read-only" })
+    .click();
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
+
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toMatchObject({ narrow: { inspect: true, read: true } });
+});
+
+test("a rejection carries the note the sandbox reads", async ({ page }) => {
+  await mockApi(page);
+  const request = {
+    id: 15,
+    host: "pastebin.example",
+    access: "write",
+    reason: "share the logs",
+    status: "pending",
+    created: new Date().toISOString(),
+  };
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests",
+    (route) => route.fulfill({ json: [request] }),
+  );
+  const sent: unknown[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/envs/web/requests/15/reject",
+    (route, req) => {
+      sent.push(req.postDataJSON());
+      return route.fulfill({ json: { ...request, status: "rejected" } });
+    },
+  );
+  await open(page);
+  await page.getByRole("button", { name: /^web/ }).click();
+  await page.getByRole("button", { name: /access to pastebin\.example/ }).click();
+  await page.getByRole("textbox", { name: "note" }).fill("put the logs in the workspace instead");
+  await page.getByRole("button", { name: "Reject", exact: true }).click();
+
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toMatchObject({
+    created: request.created,
+    note: "put the logs in the workspace instead",
   });
 });
 

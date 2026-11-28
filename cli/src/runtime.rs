@@ -700,6 +700,19 @@ impl Runtime {
         self.run(args).map(|_| true)
     }
 
+    /// Every network's addresses a dial from this machine must not reach, as (network, subnet):
+    /// [`subnets`](Self::subnets), and on Apple each network's IPv6 prefix too.
+    #[cfg(unix)]
+    pub fn container_nets(&self) -> Result<Vec<(String, String)>> {
+        if self.flavor == Flavor::Apple {
+            let out = self.run(["network", "list", "--format", "json"])?;
+            let mut nets = apple_subnets(&out)?;
+            nets.extend(apple_v6_subnets(&out)?);
+            return Ok(nets);
+        }
+        self.subnets()
+    }
+
     /// Every network's subnets, as (network, subnet).
     pub fn subnets(&self) -> Result<Vec<(String, String)>> {
         if self.flavor == Flavor::Apple {
@@ -1293,6 +1306,20 @@ fn apple_subnets(out: &str) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// Each Apple network's IPv6 prefix, where it has one, as (network, prefix).
+#[cfg(any(unix, test))]
+fn apple_v6_subnets(out: &str) -> Result<Vec<(String, String)>> {
+    Ok(json_array(out)?
+        .iter()
+        .filter_map(|n| {
+            let sub = n["status"]["ipv6Subnet"]
+                .as_str()
+                .or(n["configuration"]["ipv6Subnet"].as_str())?;
+            Some((n["id"].as_str()?.to_string(), sub.to_string()))
+        })
+        .collect())
+}
+
 /// Apple's `container` leaves a published socket's host end behind when its container dies
 /// without stopping (the service stopped, the Mac restarted), and refuses to create a container
 /// that publishes over it. One that takes no connection is removed.
@@ -1446,6 +1473,14 @@ mod tests {
             [(
                 "luoto-dev-e2e-out".to_string(),
                 "192.168.72.0/24".to_string()
+            )]
+        );
+        // What a host dial refuses also takes each network's IPv6 prefix.
+        assert_eq!(
+            apple_v6_subnets(containers).unwrap(),
+            [(
+                "luoto-dev-e2e-out".to_string(),
+                "fdca:85a2:ded4:40cd::/64".to_string()
             )]
         );
     }

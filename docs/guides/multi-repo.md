@@ -67,7 +67,7 @@ env's own file is its only config: there is no `luoto.toml` of the workspace. Wi
 When the env's folder is a git repository itself, its first `luoto repo add` (and `luoto init`
 with `--repo` there) stops and gives the `--virtual` command instead, since the repo would
 otherwise sit inside it. `--inside` nests it anyway; a launchpad, whose `luoto.toml` lists
-repos, takes them as before. An env made that way can't be turned virtual in place: bring its
+repos, takes them without it. An env made that way can't be turned virtual in place: bring its
 work out (`git push`, `luoto pull`), `luoto rm` it, and `luoto init --virtual` under the same
 name.
 
@@ -107,9 +107,10 @@ On a terminal, `luoto up` (and `luoto repo add`) asks what the env may do with e
 credential covers: fetch it if it is public, read it, or read and push, with a token kept in
 your keychain, 1Password or wherever a reference points; one credential per GitHub owner and
 per Azure DevOps organization. It writes them into the env's config, and `luoto repo auth
-<repo>` asks again for one; without a terminal it prints them for you to add. Each lists the
-repos it may write (push, pull requests; the gate refuses protected branches) and those it may
-only read:
+<repo>` asks again for one; without a terminal it prints them for you to add, and `luoto repo
+add` and `luoto repo auth` take the answer as `--access fetch|read|push` with `--token <ref>`.
+Each lists the repos it may write (push, pull requests; the gate refuses protected branches)
+and those it may only read:
 
 ```toml
 [[credentials.github]]              # one per GitHub owner: a token reaches one owner's repos

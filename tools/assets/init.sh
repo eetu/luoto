@@ -45,10 +45,20 @@ if [ -n "${LUOTO_GATE_IP:-}" ]; then
 fi
 
 # --- CA: system store + one combined bundle every tool points at -------------------------
+# The env's CA, then the CAs its config trusts ($T/env/cas, one file each), for what reaches
+# the env unread (a tunnel). Those an earlier start installed go first.
 if [ -f "$CA" ]; then
   if [ -d /usr/local/share/ca-certificates ] && have update-ca-certificates; then
+    rm -f /usr/local/share/ca-certificates/luoto-trusted-*.crt
+    for c in "$T"/env/cas/*.crt; do
+      [ -f "$c" ] && cp "$c" "/usr/local/share/ca-certificates/luoto-trusted-${c##*/}"
+    done
     cp "$CA" /usr/local/share/ca-certificates/luoto-env.crt && update-ca-certificates >/dev/null 2>&1
   elif [ -d /etc/pki/ca-trust/source/anchors ] && have update-ca-trust; then
+    rm -f /etc/pki/ca-trust/source/anchors/luoto-trusted-*.crt
+    for c in "$T"/env/cas/*.crt; do
+      [ -f "$c" ] && cp "$c" "/etc/pki/ca-trust/source/anchors/luoto-trusted-${c##*/}"
+    done
     cp "$CA" /etc/pki/ca-trust/source/anchors/luoto-env.crt && update-ca-trust extract >/dev/null 2>&1
   fi
   SYSTEM=""
@@ -58,9 +68,13 @@ if [ -f "$CA" ]; then
   if [ -n "$SYSTEM" ] && grep -q "$(sed -n 2p "$CA")" "$SYSTEM" 2>/dev/null; then
     cp "$SYSTEM" "$BUNDLE"
   else
-    # No system store (or it could not be updated): Mozilla roots shipped with luoto + env CA.
-    cat "${SYSTEM:-$T/ca-bundle.base.pem}" "$CA" >"$BUNDLE" 2>/dev/null ||
-      cat "$T/ca-bundle.base.pem" "$CA" >"$BUNDLE"
+    # No system store (or it could not be updated): Mozilla roots shipped with luoto, the env
+    # CA and the CAs it trusts.
+    {
+      cat "${SYSTEM:-$T/ca-bundle.base.pem}" 2>/dev/null || cat "$T/ca-bundle.base.pem"
+      cat "$CA"
+      for c in "$T"/env/cas/*.crt; do [ -f "$c" ] && cat "$c"; done
+    } >"$BUNDLE"
   fi
   chmod 644 "$BUNDLE"
 else

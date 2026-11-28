@@ -1,19 +1,26 @@
 <script lang="ts">
   import { app } from "$lib/stores/app.svelte";
 
-  // What the API asked the user to confirm before it accepts a risky rule.
-  let { risks, confirm, onconfirm }: { risks: string[]; confirm: string; onconfirm: () => void } =
-    $props();
+  // What the API asked the user to confirm before it accepts a risky rule; without `confirm`,
+  // the caller's own button takes them.
+  let {
+    risks,
+    heading = "confirm:",
+    confirm,
+    onconfirm,
+  }: { risks: string[]; heading?: string; confirm?: string; onconfirm?: () => void } = $props();
 </script>
 
 <div class="risks">
-  <p>confirm:</p>
+  <p>{heading}</p>
   <ul>
     {#each risks as r (r)}<li>{r}</li>{/each}
   </ul>
-  <button type="button" class="btn danger" onclick={onconfirm} disabled={!!app.busy}
-    >{confirm}</button
-  >
+  {#if confirm && onconfirm}
+    <button type="button" class="btn danger" onclick={onconfirm} disabled={!!app.busy}
+      >{confirm}</button
+    >
+  {/if}
 </div>
 
 <style>
@@ -31,5 +38,9 @@
   ul {
     margin: 4px 0 8px;
     padding-left: 16px;
+  }
+
+  ul:last-child {
+    margin-bottom: 0;
   }
 </style>

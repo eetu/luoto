@@ -9,7 +9,7 @@ use crate::azure_identity::AzureIdentity;
 use crate::creds::Injection;
 use crate::forges;
 use crate::glob;
-use crate::host::{WildcardRisk, host_matches, normalize_host, normalize_pattern, wildcard_risk};
+use crate::host::{WildcardRisk, host_matches, normalize_pattern, wildcard_risk};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -570,8 +570,9 @@ pub struct Policy {
     pub plain_http_credentials: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redirects: Vec<Redirect>,
-    /// PEM roots trusted for one host's TLS besides the public ones, by lowercase host: a
-    /// self-hosted forge's CA, or the one a user's rule names (`Rule::ca`).
+    /// PEM roots trusted besides the public ones, by lowercase host, wildcard (`*.corp.example`)
+    /// or `*` for every host: a self-hosted forge's CA, a user's rule's (`Rule::ca`), an env's
+    /// `[cas]`, config.toml's `cas`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub upstream_cas: std::collections::BTreeMap<String, String>,
 }
@@ -849,16 +850,18 @@ impl Policy {
         Decision::Deny(DenyReason::PathNotAllowed)
     }
 
-    /// Injections that apply to this request (method, host and path).
+    /// Injections that apply to this request (method, host, port and path).
     pub fn injections_for<'a>(
         &'a self,
         method: &str,
         host: &str,
+        port: u16,
         path: &str,
     ) -> Vec<&'a Injection> {
         self.injections
             .iter()
             .filter(|i| host_matches(&i.host, host) && i.path_matches(path))
+            .filter(|i| i.port.is_none_or(|p| p == port))
             .filter(|i| i.method_matches(method))
             .collect()
     }
@@ -888,13 +891,26 @@ impl Policy {
     }
 
     /// Why `rule` would put a credential on requests, one line per credential: it covers a
-    /// host the gate adds that credential on, with a method the credential goes with. Paths
-    /// aren't compared, so it may name one the rule's paths keep clear of.
+    /// host the gate adds that credential on, with a method and a path the credential goes
+    /// with (paths compared by [`crate::glob::may_overlap`], so it may still name one the
+    /// rule's paths keep clear of in a way that can't be shown).
     pub fn credentials_reached(&self, rule: &Rule) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for i in &self.injections {
             let methods = i.methods.is_empty() || i.methods.iter().any(|m| rule.access.allows(m));
-            if !methods || !patterns_overlap(&rule.host, &i.host) {
+            // A rule without a port covers 80 and 443.
+            let port = match (i.port, rule.port) {
+                (None, _) => true,
+                (Some(p), Some(r)) => p == r,
+                (Some(p), None) => p == 80 || p == 443,
+            };
+            let paths = rule.paths.is_empty()
+                || i.paths.is_empty()
+                || rule
+                    .paths
+                    .iter()
+                    .any(|r| i.paths.iter().any(|p| crate::glob::may_overlap(r, p)));
+            if !methods || !port || !paths || !patterns_overlap(&rule.host, &i.host) {
                 continue;
             }
             let line = format!(
@@ -977,10 +993,16 @@ fn patterns_overlap(a: &str, b: &str) -> bool {
         }
 }
 
-/// Who is asking for a rule — the sandbox may never ask for risky wildcards.
+/// Who is asking for a rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuleOrigin {
+    /// The user's own: risks are confirmed.
     Host,
+    /// An access request from the sandbox, which the user approves seeing its risks: it may
+    /// ask for what a user's rule may be, but never a CA file of their machine.
+    Request,
+    /// What code in the sandbox writes to apply whole (a `luoto.toml`'s rules, install hosts):
+    /// never a risky wildcard or an address range.
     Sandbox,
 }
 
@@ -1025,18 +1047,26 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
         }
     };
 
-    let host_ok = rule.host == "*"
-        || rule.host.contains('/')
-        || rule
-            .host
-            .strip_prefix("*.")
-            .map_or_else(|| normalize_host(&rule.host), normalize_host)
-            .is_ok();
-    if !host_ok {
-        issues.push(err(format!("invalid host pattern `{}`", rule.host)));
+    // A host no canonical one can equal would match nothing.
+    if normalize_pattern(&rule.host).is_none() {
+        let path = if rule.host.contains('/') {
+            " (a path goes in the rule's paths)"
+        } else {
+            ""
+        };
+        issues.push(err(format!("invalid host pattern `{}`{path}", rule.host)));
     }
     match wildcard_risk(&rule.host) {
-        WildcardRisk::None => {}
+        WildcardRisk::None => {
+            if let Some(under) = rule.host.strip_prefix("*.")
+                && origin == RuleOrigin::Request
+            {
+                issues.push(risk(format!(
+                    "`{}` covers every host under {under}",
+                    rule.host
+                )));
+            }
+        }
         WildcardRisk::Everything => {
             issues.push(host_risk(
                 "`*` covers every host: even read access lets code leak data in URLs".into(),
@@ -1051,8 +1081,20 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
             rule.host
         ))),
     }
-    if rule.host.contains('/') && origin == RuleOrigin::Sandbox {
-        issues.push(err("the sandbox may not request address ranges".into()));
+    if rule.host.contains('/') {
+        match origin {
+            RuleOrigin::Sandbox => {
+                issues.push(err(
+                    "an address range is yours to add: a project or install may not name one"
+                        .into(),
+                ));
+            }
+            RuleOrigin::Request => issues.push(risk(format!(
+                "`{}` is an address range: every address in it",
+                rule.host
+            ))),
+            RuleOrigin::Host => {}
+        }
     }
     for p in &rule.paths {
         if !path_pattern_ok(p) {
@@ -1074,11 +1116,20 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
     }
     if rule.allow_private {
         issues.push(host_risk(
-            "allows dialing private/host addresses (e.g. services on your machine)".into(),
+            "reaches private addresses: hosts on your network or VPN".into(),
         ));
     }
+    if rule.ws && origin == RuleOrigin::Request {
+        let to = match rule.port {
+            Some(port) => format!("{}:{port}", rule.host),
+            None => rule.host.clone(),
+        };
+        issues.push(risk(format!(
+            "websockets to {to}: a two-way channel the gate passes unread once it opens"
+        )));
+    }
     if rule.ca.is_some() {
-        if origin == RuleOrigin::Sandbox {
+        if origin != RuleOrigin::Host {
             issues.push(err(
                 "a CA to trust is the user's to give, on their machine".into()
             ));
@@ -1100,7 +1151,7 @@ pub fn validate_rule(rule: &Rule, origin: RuleOrigin) -> Vec<Issue> {
     }
     if rule.mode != Mode::Tunnel
         && rule.access == Access::Level(AccessLevel::Write)
-        && origin == RuleOrigin::Host
+        && origin != RuleOrigin::Sandbox
     {
         issues.push(risk(format!(
             "write access lets code in the sandbox upload data to {}",
@@ -1115,11 +1166,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_request_shows_its_wildcard_and_websockets_as_risks() {
+        let rule = Rule {
+            host: "*.example.com".into(),
+            ws: true,
+            ..Default::default()
+        };
+        let risks = |o| {
+            validate_rule(&rule, o)
+                .into_iter()
+                .map(|i| (i.severity == Severity::Risk).then_some(i.message))
+                .collect::<Option<Vec<_>>>()
+                .unwrap()
+        };
+        let asked = risks(RuleOrigin::Request);
+        assert!(
+            asked[0].contains("every host under example.com"),
+            "{asked:?}"
+        );
+        assert!(
+            asked[1].starts_with("websockets to *.example.com:"),
+            "{asked:?}"
+        );
+        assert!(risks(RuleOrigin::Host).is_empty());
+    }
+
+    #[test]
     fn credential_names_cover_every_injection_on_a_host() {
         use crate::creds::{Injection, Placement};
         let inj = |host: &str, place| Injection {
             binding: "b".into(),
             host: host.into(),
+            port: None,
             paths: vec!["/read/**".into()],
             methods: vec!["GET".into()],
             place,
@@ -1628,6 +1706,7 @@ mod tests {
         p.injections.push(Injection {
             binding: "anthropic".into(),
             host: "api.anthropic.com".into(),
+            port: None,
             paths: vec![],
             methods: vec![],
             place: crate::creds::Placement::Header {
@@ -1775,6 +1854,7 @@ mod tests {
         p.injections.push(Injection {
             binding: "anthropic".into(),
             host: "api.anthropic.com".into(),
+            port: None,
             paths: vec![],
             methods: vec![],
             place: crate::creds::Placement::Header {
@@ -1802,6 +1882,7 @@ mod tests {
         p.injections.push(Injection {
             binding: "azure-graph".into(),
             host: "graph.microsoft.com".into(),
+            port: None,
             paths: vec![],
             methods: READ_METHODS.iter().map(|m| m.to_string()).collect(),
             place: crate::creds::Placement::Header {
@@ -1833,6 +1914,29 @@ mod tests {
             p.credentials_reached(&rule("example.com", Access::Level(AccessLevel::Write)))
                 .is_empty()
         );
+        // A credential on some paths: a rule kept to others doesn't reach it.
+        p.injections[0].paths = vec!["/v1.0/me/**".into()];
+        let on = |paths: &[&str]| {
+            p.credentials_reached(&Rule {
+                paths: paths.iter().map(|p| p.to_string()).collect(),
+                ..rule("graph.microsoft.com", Access::Level(AccessLevel::Read))
+            })
+            .len()
+        };
+        assert_eq!(on(&["/beta/**"]), 0);
+        assert_eq!(on(&["/v1.0/ME/drive"]), 1);
+        assert_eq!(on(&["/v1.0/**"]), 1);
+        assert_eq!(on(&["/**"]), 1);
+        // A credential on its port: a rule on another port of the host doesn't reach it.
+        p.injections[0].port = Some(443);
+        let at = |port| {
+            p.credentials_reached(&Rule {
+                port,
+                ..rule("graph.microsoft.com", Access::Level(AccessLevel::Read))
+            })
+            .len()
+        };
+        assert_eq!((at(None), at(Some(443)), at(Some(8443))), (1, 1, 0));
     }
 
     #[test]

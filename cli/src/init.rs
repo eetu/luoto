@@ -850,8 +850,8 @@ pub fn init(o: InitOpts) -> Result<ExitCode> {
         if crate::prompt::interactive() {
             if !missing.is_empty() {
                 out!(
-                    "\nThe project still needs credentials only you add: `luoto project needs -e \
-                     {name}` asks for them."
+                    "\nThe project still needs what only you can add: `luoto project needs -e \
+                     {name}` asks for it."
                 );
             }
         } else {
@@ -991,10 +991,14 @@ pub fn offer(
 /// Show what the project's luoto.toml needs that only the user can add (`needs`: one entry
 /// per credential, already worded).
 pub fn print_needs(name: &str, needs: &[String]) {
-    if !needs.is_empty() {
+    // `init` and the `up` it runs both get here; the env's needs are printed once.
+    static PRINTED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let first = PRINTED.lock().is_ok_and(|mut p| p.insert(name.to_string()));
+    if !needs.is_empty() && first {
         out!(
-            "\nThe project needs credentials only you can add (`luoto project needs -e {name}` \
-             asks for them):\n\n{}\n",
+            "\nThe project needs what only you can add (`luoto project needs -e {name}` asks \
+             for it):\n\n{}\n",
             needs.join("\n\n")
         );
     }

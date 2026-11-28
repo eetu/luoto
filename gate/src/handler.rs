@@ -161,6 +161,27 @@ const HOP_BY_HOP: &[&str] = &[
     "proxy-authenticate",
 ];
 
+/// Remove from `headers` each named in `names`, in any case and with `_` for `-`: servers
+/// behind Rack, WSGI and some proxies read `x_api_key` as `x-api-key`.
+fn strip_headers<'a>(headers: &mut HeaderMap, names: impl IntoIterator<Item = &'a str>) {
+    let names: Vec<&str> = names.into_iter().collect();
+    let same = |name: &str, stripped: &str| {
+        name.len() == stripped.len()
+            && name
+                .bytes()
+                .zip(stripped.bytes())
+                .all(|(a, b)| a.eq_ignore_ascii_case(&b) || (a == b'_' && b == b'-'))
+    };
+    let doomed: Vec<http::HeaderName> = headers
+        .keys()
+        .filter(|k| names.iter().any(|n| same(k.as_str(), n)))
+        .cloned()
+        .collect();
+    for k in doomed {
+        headers.remove(k);
+    }
+}
+
 fn strip_hop_by_hop(headers: &mut HeaderMap, keep_upgrade: bool) {
     let listed: Vec<HeaderName> = headers
         .get_all(CONNECTION)
@@ -374,9 +395,7 @@ async fn handle_inner(
     // The signed URL is the whole authorization: storage refuses a request that carries
     // another, and nothing of the client's own goes with it.
     if permit.is_some() {
-        for h in AUTH_HEADERS.iter().copied().chain(["cookie"]) {
-            parts.headers.remove(h);
-        }
+        strip_headers(&mut parts.headers, AUTH_HEADERS.iter().copied());
     }
 
     let guarded = guards::check(
@@ -428,13 +447,11 @@ async fn handle_inner(
         }
         // The client's own credentials go whether or not the gate adds one: a method outside
         // a credential's goes without any.
-        for h in AUTH_HEADERS {
-            parts.headers.remove(*h);
-        }
         let (headers, params) = policy.credential_names(&target.host);
-        for h in headers {
-            parts.headers.remove(h);
-        }
+        strip_headers(
+            &mut parts.headers,
+            AUTH_HEADERS.iter().copied().chain(headers),
+        );
         let params: Vec<&str> = AUTH_QUERY_PARAMS.iter().copied().chain(params).collect();
         if let Some(query) = parts.uri.query().and_then(|q| strip_query(q, &params)) {
             let path = parts.uri.path();
@@ -451,7 +468,7 @@ async fn handle_inner(
             };
             parts.uri = uri;
         }
-        let injections = policy.injections_for(&method, &target.host, &path);
+        let injections = policy.injections_for(&method, &target.host, target.port, &path);
         if !injections.is_empty() {
             let Some(vault) = state.vault() else {
                 return deny(ev, DenyReason::Locked);
@@ -691,6 +708,30 @@ fn redact(v: &mut serde_json::Value, carries: &dyn Fn(&[u8]) -> bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_clients_credentials_go_however_a_server_would_read_their_names() {
+        let mut h = HeaderMap::new();
+        for (k, v) in [
+            ("x_api_key", "attacker"),
+            ("Private_Token", "attacker"),
+            ("authorization", "Bearer attacker"),
+            ("x-request-id", "kept"),
+            ("x_request_id", "kept"),
+        ] {
+            h.append(
+                http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        strip_headers(
+            &mut h,
+            AUTH_HEADERS.iter().copied().chain(["x-custom-auth"]),
+        );
+        let mut left: Vec<&str> = h.keys().map(|k| k.as_str()).collect();
+        left.sort_unstable();
+        assert_eq!(left, ["x-request-id", "x_request_id"]);
+    }
 
     #[test]
     fn methods_are_upper_case_and_short() {

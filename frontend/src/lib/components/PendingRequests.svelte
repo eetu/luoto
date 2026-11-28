@@ -3,7 +3,16 @@
 
   import { api } from "$lib/api";
   import { openMenu } from "$lib/menu.svelte";
-  import { act, ago, app, installLabel, requestTarget, say, TTLS } from "$lib/stores/app.svelte";
+  import {
+    act,
+    ago,
+    app,
+    installLabel,
+    isTunnel,
+    requestTarget,
+    say,
+    TTLS,
+  } from "$lib/stores/app.svelte";
   import type { AccessRequest } from "$lib/types";
 
   // Requests ticked for one decision; ids no longer pending drop out. A variable request takes
@@ -82,7 +91,7 @@
             ? "busy"
             : r.install
               ? undefined
-              : `${r.port ? "tunnel" : r.access}${r.private ? ", your network" : ""}, 1 h`,
+              : `${isTunnel(r) ? "tunnel" : r.access}${r.ws ? ", websockets" : ""}${r.private ? ", your network" : ""}, 1 h`,
       },
       {
         label: "Reject",
@@ -156,7 +165,7 @@
                 >{installLabel(r.install)}</b
               > requested from inside the sandbox</span
             >
-          {:else if r.port}
+          {:else if isTunnel(r)}
             <span
               >an uninspected tunnel to <b>{requestTarget(r)}</b>{r.private
                 ? " on your network or VPN"
@@ -164,9 +173,9 @@
             >
           {:else}
             <span
-              ><b>{r.access}</b> access to <b>{r.host}</b>{r.private
-                ? " on your network or VPN"
-                : ""}
+              ><b>{r.access}</b> access to <b>{requestTarget(r)}</b>{r.ws
+                ? ", websockets too"
+                : ""}{r.private ? " on your network or VPN" : ""}
               requested from inside the sandbox</span
             >
           {/if}

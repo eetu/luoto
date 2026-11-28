@@ -70,6 +70,10 @@ pub struct GlobalConfig {
     /// Mutes for every env, beside each env's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mute: Vec<Mute>,
+    /// PEM files of CAs every env trusts for every host, besides the public roots: a company
+    /// network's that inspects TLS, roots this Mac trusts (`luoto setup` offers them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cas: Vec<String>,
     /// Refused, with where credentials go instead ([`env_only`]).
     #[serde(
         rename = "credentials",
@@ -127,7 +131,7 @@ impl GlobalConfig {
         self.mute.iter().chain(&cfg.mute).cloned().collect()
     }
 
-    /// Put these denies and mutes under an env's, each deny noting where it came from.
+    /// Put these denies, mutes and CAs under an env's, each deny noting where it came from.
     pub fn layer_under(&self, cfg: &mut EnvConfig) {
         let mut deny: Vec<Deny> = self
             .deny
@@ -143,6 +147,7 @@ impl GlobalConfig {
         deny.append(&mut cfg.deny);
         cfg.deny = deny;
         cfg.mute = self.mutes_for(cfg);
+        cfg.every_host_cas = self.cas.clone();
     }
 }
 
@@ -629,6 +634,27 @@ pub struct EnvConfig {
     pub tools: BTreeMap<String, toml::Value>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub deps: Deps,
+    /// CAs trusted for the hosts each names, besides the public roots (`trust.rs`): an
+    /// internal service's, often accepted from a project's `[needs.ca.<name>]`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cas: BTreeMap<String, TrustedCa>,
+    /// config.toml's `cas`, trusted for every host; set by `GlobalConfig::layer_under`.
+    #[serde(skip)]
+    pub every_host_cas: Vec<String>,
+}
+
+/// `[cas.<name>]`: a CA trusted for the hosts it names, from `pem` or `file`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedCa {
+    /// Exact hosts and wildcards under a domain of one owner's (`*.corp.example`).
+    pub hosts: Vec<String>,
+    /// The CA's certificate (PEM), as a project's luoto.toml gave it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pem: Option<String>,
+    /// A PEM file on this machine holding it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 /// `[egress]`: what the env reaches beyond its rules.
@@ -1993,9 +2019,9 @@ impl EnvFile {
         self.save()
     }
 
-    /// Remove rules by id or by exact host. Returns how many were removed.
+    /// Remove the rules `id_or_host` names (`rules::named_by`). Returns how many were removed.
     pub fn remove_rules(&mut self, id_or_host: &str) -> Result<usize> {
-        self.retain_rules(|r| r.id.as_deref() != Some(id_or_host) && r.host != id_or_host)
+        self.retain_rules(|r| !crate::rules::named_by(r, id_or_host))
     }
 
     /// Put `rule` where the rule with id `id` is, in one save; false when there is none.

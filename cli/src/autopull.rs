@@ -199,6 +199,12 @@ const LOADED_BY_NAME: &[(&str, &str)] = &[
         "nodemon.json",
         "a running nodemon runs the command it names",
     ),
+    (".pylintrc", "names plugins pylint and editors load as code"),
+    ("mypy.ini", "names plugins mypy and editors load as code"),
+    (
+        ".rubocop.yml",
+        "names extensions rubocop and editors load as code",
+    ),
     (
         ".gitignore",
         "decides what later copies into an env leave out",
@@ -250,32 +256,6 @@ pub fn unattended(rel: &str) -> Option<&'static str> {
         return Some("yarn's own code: every yarn command runs it");
     }
     None
-}
-
-/// The folders among the env's files laid out as a git repository without a work tree
-/// (`HEAD`, `config`, `objects/`, `refs/`): git run inside one, by a prompt or an editor,
-/// takes its `config` as the repository's, hooks and all. `""` is the folder itself.
-pub fn bare_roots(present: &BTreeSet<String>, folders: &BTreeSet<String>) -> Vec<String> {
-    let under = |root: &str, name: &str| {
-        if root.is_empty() {
-            name.to_string()
-        } else {
-            format!("{root}/{name}")
-        }
-    };
-    present
-        .iter()
-        .filter_map(|p| match p.rsplit_once('/') {
-            Some((root, "HEAD")) => Some(root.to_string()),
-            None if p == "HEAD" => Some(String::new()),
-            _ => None,
-        })
-        .filter(|root| {
-            present.contains(&under(root, "config"))
-                && folders.contains(&under(root, "objects"))
-                && folders.contains(&under(root, "refs"))
-        })
-        .collect()
 }
 
 /// Whether `rel` is `folder` or in it; everything is in `""`.
@@ -373,7 +353,7 @@ pub struct Decided {
 /// Sort `plan`'s entries: a conflict is never written, nor what the folder's repository
 /// ignores; what a host tool runs by itself is held back; the rest is written.
 pub fn decide(plan: &PullPlan, facts: &Facts) -> Decided {
-    let bare = bare_roots(&plan.present, &plan.folders);
+    let bare = workspace::bare_roots(&plan.present, &plan.folders);
     let mut d = Decided::default();
     for e in &plan.entries {
         let rel = e.path.as_str();
@@ -385,8 +365,8 @@ pub fn decide(plan: &PullPlan, facts: &Facts) -> Decided {
             Some("an executable file".to_string())
         } else if facts.hooks.as_deref().is_some_and(|h| within(rel, h)) {
             Some("your repository runs its hooks from this folder".to_string())
-        } else if bare.iter().any(|root| within(rel, root)) {
-            Some("laid out as a git repository: git run there takes its config".to_string())
+        } else if workspace::in_bare_root(rel, &bare) {
+            Some(workspace::IN_BARE_REPO.to_string())
         } else {
             None
         };
@@ -1871,12 +1851,29 @@ mod tests {
             "HEAD",
         ]);
         let folders = set(&["vendor/x/objects", "vendor/x/refs", "docs/objects"]);
-        assert_eq!(bare_roots(&files, &folders), ["vendor/x"]);
+        assert_eq!(workspace::bare_roots(&files, &folders), ["vendor/x"]);
         let top = set(&["HEAD", "config"]);
-        assert_eq!(bare_roots(&top, &set(&["objects", "refs"])), [""]);
-        assert!(within("vendor/x/config", "vendor/x") && within("vendor/x", "vendor/x"));
-        assert!(!within("vendor/xy/config", "vendor/x"));
-        assert!(within("anything", ""));
+        assert_eq!(
+            workspace::bare_roots(&top, &set(&["objects", "refs"])),
+            [""]
+        );
+        // As a case-insensitive filesystem reads names, and a `commondir` naming the rest.
+        let folded = set(&["v/y/head", "v/y/Config"]);
+        assert_eq!(
+            workspace::bare_roots(&folded, &set(&["v/y/Objects", "v/y/Refs"])),
+            ["v/y"]
+        );
+        let common = set(&["w/HEAD", "w/commondir", "w/c/config"]);
+        assert_eq!(
+            workspace::bare_roots(&common, &set(&["w/c/objects", "w/c/refs"])),
+            ["w"]
+        );
+        let roots = ["vendor/x".to_string()];
+        assert!(workspace::in_bare_root("Vendor/X/config", &roots));
+        assert!(workspace::in_bare_root("vendor/x", &roots));
+        assert!(!workspace::in_bare_root("vendor/xy/config", &roots));
+        assert!(workspace::in_bare_root("anything", &[String::new()]));
+        assert!(within("anything", "") && !within("ab/c", "a"));
     }
 
     #[test]

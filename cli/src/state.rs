@@ -23,6 +23,10 @@ pub struct EnvState {
     /// The folder has been copied into the workspace volume.
     #[serde(default)]
     pub seeded: bool,
+    /// Made by `luoto import`, whose archive named its folders: should its workspace volume be
+    /// gone, they are copied in from this machine only after the user's yes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub imported: bool,
     /// Repositories copied or cloned into the workspace volume, or found there (`repos.rs`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub repos: BTreeSet<String>,
@@ -135,6 +139,7 @@ impl EnvState {
             home,
             vault_token: hex::encode(rand::random::<[u8; 32]>()),
             seeded: false,
+            imported: false,
             repos: BTreeSet::new(),
             installs_pending: false,
             user: None,

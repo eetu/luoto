@@ -149,7 +149,10 @@ async fn connect(state: Arc<State>, slot: Slot, req: Request<Incoming>) -> Respo
     if state.ca().is_none() {
         return respond::plain(
             StatusCode::SERVICE_UNAVAILABLE,
-            "luoto gate has no CA yet; run `luoto up` on the host\n",
+            format!(
+                "luoto gate has no CA yet; run `luoto up -e {}` on the host\n",
+                state.cfg.env
+            ),
         );
     }
     tokio::spawn(async move {

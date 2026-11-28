@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use luoto_shared::ctl::GateCtl;
+use luoto_shared::ctl::{GateCtl, VaultStatus};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -137,7 +137,8 @@ pub fn dev_id_map(rt: &Runtime, octet: u8) -> Option<u32> {
     machine::is_luoto(rt.connection.as_deref()).then(|| machine::dev_id_start(octet))
 }
 
-pub fn ensure_vault(ctx: &Ctx) -> Result<()> {
+/// The vault, running, and what it holds.
+pub fn ensure_vault(ctx: &Ctx) -> Result<VaultStatus> {
     crate::progress::wait("starting the vault", || {
         let id = image_ids(&ctx.rt, &[ctx.image("vault")]).map_or_else(String::new, |[id]| id);
         start_vault(ctx, &id)
@@ -149,8 +150,9 @@ pub fn ensure_vault(ctx: &Ctx) -> Result<()> {
 const VAULT_SOCKETS: &str = "/run/luoto-vault";
 const APPLE_VAULT_SOCKET: &str = "/run/luoto-vault/vault.sock";
 
-/// The vault from its image `image_id`, its egress network and its socket volume.
-fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
+/// The vault from its image `image_id`, its egress network and its socket volume, and what it
+/// holds once it answers.
+fn start_vault(ctx: &Ctx, image_id: &str) -> Result<VaultStatus> {
     let rt = &ctx.rt;
     let apple = rt.flavor == Flavor::Apple;
     let net = names::vault_out_net();
@@ -207,8 +209,7 @@ fn start_vault(ctx: &Ctx, image_id: &str) -> Result<()> {
         remove_old_vault_net(ctx);
     }
     wait_until(Duration::from_secs(20), || ctl::vault_status(rt).ok())
-        .context("vault did not come up")?;
-    Ok(())
+        .context("vault did not come up")
 }
 
 /// The NAT network `net`. On Apple, one on another subnet, or one whose subnet can't be read,
@@ -392,8 +393,9 @@ pub fn plan(ctx: &Ctx, env: &str) -> Result<Plan> {
     })
 }
 
-/// Fill the tools volume from the tools image (`tools_id`), with the env's CA, unless it holds
-/// them already.
+/// Fill the tools volume from the tools image (`tools_id`), with `ca_pem`, unless it holds them
+/// already: the env's CA (`env/ca.crt`), then the CAs the env trusts, one file each
+/// (`env/cas/`), which init.sh installs.
 fn populate_tools(
     ctx: &Ctx,
     env: &str,
@@ -430,7 +432,9 @@ fn populate_tools(
             &ctx.image("tools"),
             "sh",
             "-c",
-            "rm -rf /opt/luoto/* && cp -a /dist/. /opt/luoto/ && mkdir -p /opt/luoto/env && cat > /opt/luoto/env/ca.crt",
+            "rm -rf /opt/luoto/* && cp -a /dist/. /opt/luoto/ && mkdir -p /opt/luoto/env/cas && \
+             cd /opt/luoto/env && awk '/BEGIN CERTIFICATE/{n++} n==1{print > \"ca.crt\"} \
+             n>1{print > (\"cas/\" n \".crt\")}'",
         ],
         ca_pem.as_bytes(),
     )?;
@@ -523,14 +527,18 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     if let ca::Made::Renewed(old) = made {
         err_text!("{}", ca::renewal_note(old, &env_ca));
     }
-    let ca_sha = env_ca.pem_sha256();
+    // What the dev container trusts besides the public roots: the env's CA, then the CAs its
+    // config trusts (`trust.rs`).
+    let trust = format!("{}{}", env_ca.cert_pem, p.compiled.trusted_cas.concat());
+    let ca_sha = hex::encode(Sha256::digest(trust.as_bytes()));
     // A renewal counts on its own: `dev_ca` is unset until a start records it.
     let stale_ca = matches!(made, ca::Made::Renewed(_))
         || state.dev_ca.as_deref().is_some_and(|h| h != ca_sha);
 
     // Quick when the env runs, so it says nothing then.
     let starting = crate::progress::waiting(&format!("starting `{env}`"));
-    crate::progress::wait("starting the vault", || start_vault(ctx, &ids.vault))?;
+    let held = crate::progress::wait("starting the vault", || start_vault(ctx, &ids.vault))?;
+    sync::rebind_running(ctx, Some(env), &held);
 
     // On Apple the dev container's only link is the tun device to its gate: no env network.
     let apple = rt.flavor == Flavor::Apple;
@@ -573,7 +581,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         create_volume(ctx, env, v)?;
     }
     crate::progress::wait("copying luoto's tools into the env", || {
-        populate_tools(ctx, env, &state, &ids.tools, &env_ca.cert_pem)
+        populate_tools(ctx, env, &state, &ids.tools, &trust)
     })?;
 
     let gate = start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)?;
@@ -612,7 +620,22 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     let waits = |ws: &crate::config::Workspace| {
         ws.dir.is_none() && ws.url.as_deref().is_some_and(|u| repos::waits(env, u))
     };
-    if (fresh_work || !state.seeded) && !waits(ws) {
+    let refill = fresh_work || !state.seeded;
+    // A new volume holds none of the repos, whatever the host remembers.
+    let seeded_repos = if fresh_work {
+        Default::default()
+    } else {
+        state.repos.clone()
+    };
+    // An imported env's folders came in its archive. Copied again (its volume gone), they
+    // would come from this machine's folders the archive named, which only the user's yes does.
+    let from_folders = (refill && ws.dir.is_some())
+        || ws
+            .repos
+            .iter()
+            .any(|(n, r)| r.dir.is_some() && !seeded_repos.contains(n));
+    let copy_folders = !(state.imported && from_folders) || copy_imported(ctx, env, ws)?;
+    if refill && !waits(ws) && (ws.dir.is_none() || copy_folders) {
         match (&ws.dir, &ws.url) {
             (Some(dir), _) => {
                 let dir = workspace::canonical(dir)?;
@@ -654,12 +677,6 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         EnvState::update(&ctx.paths, env, |s| filled(s, cloned_workspace))?;
     }
     let installs_pending = cloned_workspace || state.installs_pending;
-    // A new volume holds none of the repos, whatever the host remembers.
-    let seeded_repos = if fresh_work {
-        Default::default()
-    } else {
-        state.repos.clone()
-    };
     if project::review(ctx, env)? {
         // Its agents and repos may need credentials too.
         ask_credentials(ctx, env)?;
@@ -682,7 +699,13 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
             ));
         }
     }
-    let seeded = repos::seed(ctx, env, &p.cfg, &seeded_repos);
+    let seeded = if copy_folders {
+        repos::seed(ctx, env, &p.cfg, &seeded_repos)
+    } else {
+        let mut held = p.cfg.clone();
+        held.workspace.repos.retain(|_, r| r.dir.is_none());
+        repos::seed(ctx, env, &held, &seeded_repos)
+    };
     let repos = seeded.done.clone();
     let cloned = repos.iter().any(|n| {
         !seeded_repos.contains(n)
@@ -915,6 +938,38 @@ fn ask_installs(
 
 /// The state once the workspace is filled: a clone of the env's own remote also opens the
 /// install question, which only a yes closes.
+/// Whether an imported env gets the folders its archive named copied in from this machine (its
+/// volume gone, or a folder repo not there): asked once, and a yes makes them the user's.
+/// Without one, none is copied and the next `up` asks again.
+fn copy_imported(ctx: &Ctx, env: &str, ws: &crate::config::Workspace) -> Result<bool> {
+    let dirs: Vec<String> = ws
+        .dir
+        .iter()
+        .chain(ws.repos.values().filter_map(|r| r.dir.as_ref()))
+        .map(|d| crate::text::display(&crate::ssh::tilde(std::path::Path::new(d))))
+        .collect();
+    if dirs.is_empty() {
+        return Ok(true);
+    }
+    let yes = crate::prompt::confirm(&format!(
+        "`{env}` came from an archive, which names {} of this machine. Copy them into it?",
+        dirs.join(", ")
+    ));
+    if yes {
+        EnvState::update(&ctx.paths, env, |s| s.imported = false)?;
+    } else {
+        // Its folder is still to copy: the next `up` asks for it again.
+        if ws.dir.is_some() {
+            EnvState::update(&ctx.paths, env, |s| s.seeded = false)?;
+        }
+        crate::progress::warn(&format!(
+            "copied nothing of this machine's into `{env}`, as its archive named the folders; \
+             `luoto up -e {env}` on a terminal asks again"
+        ));
+    }
+    Ok(yes)
+}
+
 fn filled(s: &mut EnvState, cloned: bool) {
     s.seeded = true;
     s.installs_pending |= cloned;

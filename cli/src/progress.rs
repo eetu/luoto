@@ -234,16 +234,22 @@ pub fn error(msg: &str) {
 }
 
 fn labelled(label: &str, msg: &str) {
+    let s = labelled_text(label, msg);
+    say(|| eprintln!("{s}"));
+}
+
+fn labelled_text(label: &str, msg: &str) -> String {
     let style = crate::style::err();
-    let s = style.commands(&text::hang(label, msg, text::columns()));
+    // A message may carry what a tool in the env printed (its stderr in an error): escapes in
+    // it are shown, never sent to the terminal.
+    let s = style.commands(&text::hang(label, &text::lines(msg), text::columns()));
     // The label is the line's start, so styling it moves nothing.
-    let s = match (label, s.strip_prefix(label)) {
+    match (label, s.strip_prefix(label)) {
         ("warning: ", Some(rest)) => format!("{}{rest}", style.warning(label)),
         ("luoto: ", Some(rest)) => format!("{}{rest}", style.error(label)),
         (_, Some(rest)) => format!("{}{rest}", style.dim(label)),
         _ => s,
-    };
-    say(|| eprintln!("{s}"));
+    }
 }
 
 /// Run `f` as a step: `label…` on a line of its own (wrapped to the terminal, the lines after
@@ -903,6 +909,17 @@ mod term {
 mod tests {
     use super::*;
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn a_warning_shows_the_escapes_a_tool_in_the_env_printed() {
+        let s = labelled_text(
+            "warning: ",
+            "git identity not set in the env (git: \x1b]52;c;aGk=\x07 failed)\nsecond line",
+        );
+        assert!(!s.contains("\x1b]52") && !s.contains('\x07'), "{s:?}");
+        assert!(s.contains("\\u{1b}]52;c;aGk=\\u{7}"), "{s:?}");
+        assert!(s.contains("\n"), "keeps its lines: {s:?}");
+    }
 
     const TRUE: Look = Look {
         colors: Colors::True,

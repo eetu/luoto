@@ -59,6 +59,7 @@ mod sync;
 mod terminfo;
 mod text;
 mod transfer;
+mod trust;
 #[cfg(unix)]
 mod tunlink;
 mod ui;
@@ -522,6 +523,13 @@ enum Cmd {
         /// Grant only these path globs (repeatable), within the request's paths.
         #[arg(long = "path", value_name = "GLOB")]
         paths: Vec<String>,
+        /// Grant one exact host or address of the wildcard or range it asks for.
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+        /// Grant a tunnel request inspected: the gate reads what passes, and `--read`,
+        /// `--method` and `--path` apply.
+        #[arg(long)]
+        inspect: bool,
         /// Let the rule reach the host on your network or VPN (a private address, or one only
         /// a VPN reaches); asked when the request asks for it or the host resolves to a private
         /// address here.
@@ -1197,6 +1205,8 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
             read,
             methods,
             paths,
+            host,
+            inspect,
             private,
             yes,
             force,
@@ -1205,6 +1215,8 @@ fn run(cmd: Cmd) -> Result<ExitCode> {
                 read,
                 methods,
                 paths,
+                host,
+                inspect,
             };
             let how = c::Approval {
                 private,

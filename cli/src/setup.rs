@@ -702,9 +702,14 @@ fn finish(
             bail!("luoto's images are missing and this binary pins none; install a release build");
         }
     }
+    #[cfg(target_os = "macos")]
+    let roots = mac_roots(&o, &paths, &mut global)?;
+    #[cfg(not(target_os = "macos"))]
+    let roots: Option<String> = None;
     config::save_global(&paths, &global)?;
     let ctx = Ctx { paths, global, rt };
-    env::ensure_vault(&ctx)?;
+    let held = env::ensure_vault(&ctx)?;
+    crate::sync::rebind_running(&ctx, None, &held);
     if new_images {
         crate::progress::wait("looking for older images", || {
             crate::disk::note_superseded(&ctx)
@@ -721,8 +726,93 @@ fn finish(
     if let Some(other) = other {
         rows.push(("change it", other));
     }
+    if let Some(roots) = roots {
+        rows.push(("CAs", roots));
+    }
     close(first, rows);
     Ok(ExitCode::SUCCESS)
+}
+
+/// The root CAs this Mac trusts beyond the public ones (a company's, which a network that
+/// inspects TLS needs for every upstream), offered for every env: written to a file of luoto's
+/// that config.toml's `cas` names, which later setups keep in step with the Mac. Its summary
+/// row, once trusted.
+#[cfg(target_os = "macos")]
+fn mac_roots(
+    o: &SetupOpts,
+    paths: &Paths,
+    global: &mut config::GlobalConfig,
+) -> Result<Option<String>> {
+    let roots = crate::progress::wait(
+        "looking for root CAs your Mac adds",
+        crate::trust::mac_roots,
+    );
+    let file = paths.config.join("cas").join("mac.pem");
+    let named = file.display().to_string();
+    let listed = global
+        .cas
+        .iter()
+        .any(|c| crate::workspace::expand(c) == file);
+    if roots.is_empty() {
+        return Ok(None);
+    }
+    let pem: String = roots.iter().map(|c| c.pem.as_str()).collect();
+    let names = roots
+        .iter()
+        .map(crate::trust::Cert::named)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let row = format!(
+        "your Mac's {} root CA{} for every host ({})",
+        roots.len(),
+        if roots.len() == 1 { "" } else { "s" },
+        crate::ssh::tilde(&file)
+    );
+    if listed {
+        if std::fs::read_to_string(&file).ok().as_deref() != Some(pem.as_str()) {
+            std::fs::write(&file, &pem).with_context(|| format!("write {}", file.display()))?;
+            out_text!("trusted in every env now, as your Mac does: {names}");
+        }
+        return Ok(Some(row));
+    }
+    if o.yes || !crate::prompt::interactive() {
+        out!(
+            "\nyour Mac trusts root CAs the public ones don't include ({names}): `luoto setup` on \
+             a terminal offers them to every env"
+        );
+        return Ok(None);
+    }
+    let line = format!(
+        "Your Mac trusts root CAs the public ones don't include, as a company's device \
+         management installs them: {names}. Where the network inspects TLS, envs reach nothing \
+         without them; trusted, the gate and every env accept what they sign, for every host."
+    );
+    println!();
+    out_text!("{}", crate::text::wrap(&line, "", crate::text::columns()));
+    let picked = crate::wizard::ask_menu(crate::wizard::Question {
+        text: "Trust them in every env?".into(),
+        rows: vec![
+            (
+                false,
+                "Not now".into(),
+                "envs trust the public roots only".into(),
+            ),
+            (
+                true,
+                "Trust them".into(),
+                format!("in {}", crate::ssh::tilde(&file)),
+            ),
+        ],
+        at: 0,
+        help: crate::prompt::menu_help("later"),
+    })?;
+    if picked != Some(true) {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(file.parent().unwrap_or(&paths.config))?;
+    std::fs::write(&file, &pem).with_context(|| format!("write {}", file.display()))?;
+    global.cas.push(named);
+    Ok(Some(row))
 }
 
 /// The summary that ends `setup`. A first setup ends with the way on from it as a line of its

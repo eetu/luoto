@@ -136,6 +136,7 @@ async fn inspect_push(mut body: Body, rules: PushRules<'_>) -> Result<Body, Stri
                 check_updates(rules, &updates)?;
                 break;
             }
+            Err(Parse::FlushOnly) => return probe(buf, body).await,
             Err(Parse::Invalid(e)) => return Err(e),
             Err(Parse::NeedMore) => {}
         }
@@ -154,6 +155,22 @@ async fn inspect_push(mut body: Body, rules: PushRules<'_>) -> Result<Body, Stri
     }
     Ok(prefixed(buf.freeze(), body))
 }
+
+/// git's probe before a push larger than its `http.postBuffer`: a body of one flush packet,
+/// which updates nothing. Anything after the flush makes it a push without ref updates.
+async fn probe(buf: BytesMut, mut body: Body) -> Result<Body, String> {
+    let mut len = buf.len();
+    while len <= FLUSH.len() {
+        match body.frame().await {
+            Some(Ok(frame)) => len += frame.into_data().map_or(0, |d| d.len()),
+            Some(Err(e)) => return Err(format!("reading push: {e}")),
+            None => return Ok(full(buf.freeze())),
+        }
+    }
+    Err("push without ref updates".into())
+}
+
+const FLUSH: &[u8] = b"0000";
 
 /// What a push may update, from either host's guard. Deleting a ref is never allowed.
 #[derive(Debug, Clone, Copy)]
@@ -199,7 +216,23 @@ struct RefUpdate {
 #[derive(Debug, PartialEq, Eq)]
 enum Parse {
     NeedMore,
+    /// A flush packet first: no commands at all.
+    FlushOnly,
     Invalid(String),
+}
+
+/// Whether capability list `caps` asks for `feature` as git's receive-pack reads it
+/// (`parse_feature_request`): at its start or after any whitespace, and followed by its end,
+/// whitespace or `=value`.
+fn asks_for(caps: &[u8], feature: &[u8]) -> bool {
+    let space = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
+    caps.windows(feature.len()).enumerate().any(|(i, w)| {
+        w == feature
+            && (i == 0 || space(&caps[i - 1]))
+            && caps
+                .get(i + feature.len())
+                .is_none_or(|b| space(b) || *b == b'=')
+    })
 }
 
 /// `owner/repo` (lowercase, no `.git`) from a smart-HTTP path.
@@ -262,7 +295,9 @@ fn parse_ref_updates(buf: &[u8]) -> Result<Vec<RefUpdate>, Parse> {
         let len = usize::from_str_radix(len_hex, 16)
             .map_err(|_| Parse::Invalid("bad pkt-line length".into()))?;
         if len == 0 {
-            return if updates.is_empty() {
+            return if pos == 0 {
+                Err(Parse::FlushOnly)
+            } else if updates.is_empty() {
                 Err(Parse::Invalid("push without ref updates".into()))
             } else {
                 Ok(updates)
@@ -279,10 +314,7 @@ fn parse_ref_updates(buf: &[u8]) -> Result<Vec<RefUpdate>, Parse> {
         let line = fields.next().unwrap_or(raw);
         // Push options reach the forge's own handlers past the ref checks: on GitLab they open
         // and merge merge requests, set CI variables and skip secret scanning.
-        if fields.next().is_some_and(|caps| {
-            caps.split(|b| *b == b' ' || *b == b'\n')
-                .any(|c| c == b"push-options")
-        }) {
+        if fields.any(|caps| asks_for(caps, b"push-options")) {
             return Err(Parse::Invalid(
                 "push options are not allowed from the sandbox".into(),
             ));
@@ -479,17 +511,35 @@ mod tests {
     const A: &str = "1111111111111111111111111111111111111111";
 
     #[test]
-    fn push_options_are_refused() {
-        let body = format!(
+    fn push_options_are_refused_however_git_would_read_them() {
+        for caps in [
+            "report-status push-options side-band-64k\n",
+            "push-options",
+            "report-status\tpush-options",
+            "report-status\rpush-options\n",
+            "report-status push-options=1",
+            "report-status\x0bpush-options",
+        ] {
+            let body = format!(
+                "{}0000",
+                pkt(&format!("{Z} {A} refs/heads/feature\0{caps}"))
+            );
+            assert!(
+                matches!(
+                    parse_ref_updates(body.as_bytes()),
+                    Err(Parse::Invalid(m)) if m.contains("push options")
+                ),
+                "{caps:?}"
+            );
+        }
+        // Another feature that merely contains the name is no request for it.
+        let other = format!(
             "{}0000",
             pkt(&format!(
-                "{Z} {A} refs/heads/feature\0report-status push-options side-band-64k\n"
+                "{Z} {A} refs/heads/feature\0report-status no-push-optionsx\n"
             ))
         );
-        assert!(matches!(
-            parse_ref_updates(body.as_bytes()),
-            Err(Parse::Invalid(m)) if m.contains("push options")
-        ));
+        assert!(parse_ref_updates(other.as_bytes()).is_ok());
     }
 
     #[test]
@@ -589,6 +639,23 @@ mod tests {
             check_updates((&guard()).into(), &ups)
                 .unwrap_err()
                 .contains("tag")
+        );
+    }
+
+    #[tokio::test]
+    async fn gits_probe_before_a_large_push_passes_and_nothing_after_it() {
+        let g = guard();
+        let rules = PushRules::from(&g);
+        let body = inspect_push(full(&b"0000"[..]), rules).await.unwrap();
+        assert_eq!(&body.collect().await.unwrap().to_bytes()[..], b"0000");
+        for after in [&b"0000PACK"[..], b"00000000"] {
+            let err = inspect_push(full(after), rules).await.err().unwrap();
+            assert!(err.contains("without ref updates"), "{err}");
+        }
+        let shallow = format!("{}0000", pkt(&format!("shallow {A}\n")));
+        assert_eq!(
+            parse_ref_updates(shallow.as_bytes()),
+            Err(Parse::Invalid("push without ref updates".into()))
         );
     }
 

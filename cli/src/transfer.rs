@@ -175,11 +175,25 @@ impl Drop for VolumeBox<'_> {
 }
 
 /// Drop from an imported config what only the machine it runs on says: which of its folders
-/// an env reads (`[shares]`), and whether an env's files land in a folder with nobody
-/// reviewing them (`dangerously_pull_on_stop`).
+/// an env reads (`[shares]`), which of its files hold a CA to trust (`[cas]` with `file`), and
+/// whether an env's files land in a folder with nobody reviewing them
+/// (`dangerously_pull_on_stop`).
 fn keep_this_machines_own(cfg: &mut EnvFile) {
     cfg.doc.remove("shares");
     cfg.cfg.shares.clear();
+    let files: Vec<String> = cfg
+        .cfg
+        .cas
+        .iter()
+        .filter(|(_, c)| c.file.is_some())
+        .map(|(n, _)| n.clone())
+        .collect();
+    for name in files {
+        cfg.cfg.cas.remove(&name);
+        if let Some(cas) = cfg.doc.get_mut("cas").and_then(|c| c.as_table_like_mut()) {
+            cas.remove(&name);
+        }
+    }
     if let Some(ws) = cfg
         .doc
         .get_mut("workspace")
@@ -983,8 +997,60 @@ fn summary(path: &Path, head: &Head, name: &str, cfg: &EnvConfig) -> Vec<String>
         ),
         Err(e) => line("egress", display(&format!("{e:#}"))),
     }
+    if !cfg.presets.is_empty() {
+        line(
+            "presets",
+            format!(
+                "{} (each opens its hosts)",
+                display(&cfg.presets.join(", "))
+            ),
+        );
+    }
     for r in &cfg.allow {
         line("allow", project::rule_line(r));
+    }
+    for m in &cfg.mute {
+        line(
+            "mute",
+            format!(
+                "{} (its denials stay out of `luoto egress` and the UI)",
+                display(&m.host)
+            ),
+        );
+    }
+    if !cfg.deps.system.is_empty() {
+        line(
+            "deps",
+            format!(
+                "{} (installed on `up`)",
+                display(&cfg.deps.system.join(", "))
+            ),
+        );
+    }
+    if !cfg.deps.hosts.is_empty() {
+        line(
+            "deps",
+            format!(
+                "{} (readable while installs run)",
+                display(&cfg.deps.hosts.join(", "))
+            ),
+        );
+    }
+    for (name, ca) in &cfg.cas {
+        let cert = ca
+            .pem
+            .as_deref()
+            .and_then(|p| crate::trust::certs(p).ok())
+            .and_then(|c| c.first().map(crate::trust::Cert::named))
+            .unwrap_or_else(|| "a file of the machine it came from, left out".into());
+        line(
+            "ca",
+            format!(
+                "{} {cert}, trusted for {}",
+                display(name),
+                display(&ca.hosts.join(", "))
+            ),
+        );
     }
     for c in &cfg.deps.run {
         line(
@@ -1063,6 +1129,7 @@ fn imported_state(octet: u8, m: &Moved, cfg: &EnvConfig) -> EnvState {
         .collect();
     EnvState {
         seeded: m.seeded || cfg.workspace.dir.is_some(),
+        imported: true,
         repos: m.repos.iter().cloned().chain(folders).collect(),
         agent_servers,
         ..EnvState::fresh(octet, m.home.clone())
@@ -1273,12 +1340,21 @@ mod tests {
     #[test]
     fn an_import_drops_what_only_the_machine_it_runs_on_says() {
         let text = "[workspace]\ndir = \"/srv/web\"\ndangerously_pull_on_stop = true\n\n\
-                    [shares]\ndata = \"/Volumes/data\"\n";
+                    [shares]\ndata = \"/Volumes/data\"\n\n\
+                    [cas.mine]\nhosts = [\"*.corp.example\"]\nfile = \"/certs/corp.pem\"\n";
         let mut cfg = EnvFile::parse("web.toml".into(), text).unwrap();
         assert!(cfg.cfg.workspace.dangerously_pull_on_stop);
         keep_this_machines_own(&mut cfg);
         assert!(!cfg.cfg.workspace.dangerously_pull_on_stop && cfg.cfg.shares.is_empty());
-        assert_eq!(cfg.doc.to_string(), "[workspace]\ndir = \"/srv/web\"\n");
+        assert!(cfg.cfg.cas.is_empty());
+        assert!(!cfg.doc.to_string().contains("corp.pem"), "{}", cfg.doc);
+        assert!(
+            cfg.doc
+                .to_string()
+                .starts_with("[workspace]\ndir = \"/srv/web\"\n"),
+            "{}",
+            cfg.doc
+        );
     }
 
     #[test]
@@ -1506,6 +1582,7 @@ NPM_TOKEN = "env:NPM_TOKEN"
         let s = imported_state(9, &moved, &cfg);
         assert_eq!(s.octet, 9);
         assert!(s.seeded, "the workspace came in the archive");
+        assert!(s.imported, "copied again only after a yes");
         assert!(s.repos.contains("keys"), "a folder repo came in it too");
         assert!(!s.repos.contains("lib"), "a remote not in it is cloned");
         assert!(!s.installs_pending);

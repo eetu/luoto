@@ -89,6 +89,15 @@ e2e:
 test-ui:
     cd frontend && {{yarn}} test:ui
 
+# UI review: corner cases × settings, probed for UX problems, as a contact sheet (not a gate).
+review-ui:
+    cd frontend && {{yarn}} review
+
+# The UI review, then Claude's reading of its screenshots in the sheet (needs ANTHROPIC_API_KEY).
+review-ui-claude:
+    -cd frontend && {{yarn}} review
+    cd frontend && {{yarn}} review:claude
+
 # Release downloads per version and platform, oldest first, as GitHub counts them (Homebrew,
 # Scoop and install.sh all download the release's archive; upgrades count too). Each archive
 # is fetched once minutes after it is published, not by the release workflow: that one is

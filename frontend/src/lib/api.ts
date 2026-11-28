@@ -22,13 +22,13 @@ import type {
   PullApply,
   Pulled,
   PullPlans,
+  Rejection,
   Reloaded,
   Resolved,
   Rule,
   SelftestReport,
   SetupInfo,
   SharesView,
-  Shown,
   SyncedShares,
   VaultView,
   VmDisk,
@@ -141,14 +141,23 @@ export const api = {
       narrow,
       private: allowPrivate || undefined,
     }),
+  /** What approving `req` so would ask to confirm; an error says why it would be refused. */
+  approvalRisks: (name: string, req: AccessRequest, narrow?: Narrowing, allowPrivate = false) =>
+    request<string[], Decision>("POST", `${env(name)}/requests/${req.id}/risks`, {
+      created: req.created,
+      narrow,
+      private: allowPrivate || undefined,
+    }),
   approveVar: (name: string, req: AccessRequest, value: string) =>
     request<Approved, Decision>("POST", `${env(name)}/requests/${req.id}/approve`, {
       created: req.created,
       var: value,
     }),
-  reject: (name: string, req: AccessRequest) =>
-    request<AccessRequest, Shown>("POST", `${env(name)}/requests/${req.id}/reject`, {
+  /** `note` says why, for the sandbox to read. */
+  reject: (name: string, req: AccessRequest, note?: string) =>
+    request<AccessRequest, Rejection>("POST", `${env(name)}/requests/${req.id}/reject`, {
       created: req.created,
+      note: note?.trim() || undefined,
     }),
   addRule: (name: string, rule: Rule, force = false) =>
     request<Rule, NewRule>("POST", `${env(name)}/rules`, { rule, force }),

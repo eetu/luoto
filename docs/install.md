@@ -8,9 +8,9 @@ carries checksums and build provenance (`gh attestation verify <file> --repo eet
 container images are signed and pinned by digest in the binary.
 
 `luoto upgrade` updates a script or tarball install (Homebrew: `brew upgrade luoto`, Scoop:
-`scoop update luoto`); `luoto upgrade --check` only says whether a newer one is out. After an update, the
-next `luoto up` pulls the release's images, showing progress, and moves the env's gate and
-the vault onto them; `luoto up --recreate` moves its dev container too, keeping its volumes.
+`scoop update luoto`); `luoto upgrade --check` only says whether a newer one is out. After an
+update, the next `luoto up` pulls the release's images, showing progress, and moves the env's
+gate and the vault onto them; `luoto up --recreate` moves its dev container too, keeping its volumes.
 The images it replaced stay in luoto's VM until `luoto prune` removes them (`up` says how much
 they take).
 What each release changed is in [CHANGELOG.md](../CHANGELOG.md).
@@ -58,8 +58,9 @@ builds and older build cache. Its tab completion calls `luoto-dev`;
 `luoto import web.luoto.tar`, moves its env `web` to the release
 ([docs/guides/moving-envs.md](guides/moving-envs.md)).
 
-Tab completion covers commands, flags, env names, agents, editors and presets. Homebrew
-installs it; otherwise add one line to your shell's startup file:
+Tab completion covers commands, flags, env names, agents, editors and presets, and folders and
+files where a command takes one. Homebrew installs it; otherwise add one line to your shell's
+startup file:
 
 | shell      | line                                                                                                | file                                    |
 | ---------- | --------------------------------------------------------------------------------------------------- | --------------------------------------- |

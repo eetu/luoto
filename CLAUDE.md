@@ -16,7 +16,7 @@ shared/      types + policy engine + zeroizing `ctl` framing/client (`tun`, Linu
 gate/        luoto-gate: explicit proxy, TLS interception, DNS, transparent catch-all, ctl socket
 vault/       luoto-vault: in-memory secrets, per-env bindings, GitHub App token minting
 tools/       `sandbox` helper (status/check/request/relay/mcp/selftest, internal ssh-agent,
-             agent-setup and net) + init.sh + AGENTS.md
+             agent-setup, state and net) + init.sh + AGENTS.md
 cli/         `luoto` host binary: runtime driver, env lifecycle, commands, `luoto ui` (axum)
 frontend/    SvelteKit SPA embedded into `luoto` (rust-embed of frontend/dist)
 image/       luoto-base dev image
@@ -96,8 +96,9 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   redirect to signed storage URLs, which pass only as the gate's redirect permits
   (`Policy.redirects`, `gate/src/redirects.rs`): the exact URL a response named, for reads,
   ten minutes, without the client's auth, on a private address only where the redirect says
-  (a self-hosted credential's `private` and its `storage_hosts`). Only `compile` adds a
-  redirect, never a rule.
+  (a self-hosted credential's `private` and its `storage_hosts`). Only a credential
+  (`compile`) or a preset (`[[redirect]]`, whose targets the preset test checks) adds a
+  redirect, never a rule, a project or the sandbox.
   Clients that send nothing without a login get placeholders the gate replaces: a netrc
   (`Compiled::netrc`, `/run/luoto/netrc`) and a cargo credential provider.
 - Azure (`[credentials.azure]`, not Azure DevOps' `azure.rs`): audiences, their hosts and
@@ -113,6 +114,11 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   exact text the user accepted (kept in the env's state); changes need a fresh accept. Never
   let it carry secret refs or mutes or skip `RuleOrigin::Sandbox` validation, and print its
   strings through `text::display`.
+- `trust.rs` owns the CAs trusted besides the public roots: an env's `[cas]` for the hosts it
+  names (never a public suffix or a host the gate adds a credential on) and config.toml's `cas`
+  for every host, into `Policy::upstream_cas` (exact, wildcard or `*` keys; the gate verifies
+  with the most specific match, which holds every key covering it) and the dev container's
+  store (`env/cas`, which init.sh installs). A `luoto.toml` only asks (`[needs.ca]`).
 - `needs.rs` owns its `[needs]`: one `Need` variant per kind, with its check, review line,
   snippet and question in one `impl`. What the team knows of a need is a table named as it
   (`[needs.azure]`, `[needs.custom.<name>]`), offered first; the answer goes in the
@@ -270,6 +276,30 @@ What the CLI asks and prints follows one grammar, whatever the feature:
   `Stage`, any key ends it, and no question or spinner draws. Only a first setup (its config
   names no runtime yet) ends with its own next-step line.
 
+## Requests and approval
+
+How the sandbox asks and the user decides, in the CLI, the UI and the sandbox alike. A change
+to one of these changes the test named for it, on purpose, and this list with it.
+
+- **What it may ask:** anything a rule of the user's may be (`RuleOrigin::Request`): a URL on
+  another port asks for that port inspected, `host:port` a tunnel on any port, `--ws`
+  websockets, wildcards and ranges. Never a CA, never private access it didn't ask for. A
+  `luoto.toml` or an install applies without a question, so `RuleOrigin::Sandbox` is
+  stricter. The gate's 403 names the request that works (`respond::fix`).
+- **Risk is decided once:** `validate_rule` and `Policy::credentials_reached`, through
+  `rules::risks`. `luoto approve`, the UI (`rules::approval_risks`) and the sandbox's own
+  output (`risks_said`) show that list and add none of their own.
+- **Less, never more:** an approval may narrow to read, methods, paths, one host of a
+  wildcard or range, or a tunnel inspected (`Narrowing`, `AccessRequest::grant`), and nothing
+  wider. The UI offers each, with the hosts the env tried, and shows the `luoto approve`
+  command its choice equals; a rejection's note goes to the sandbox.
+- **Shown before the decision:** the UI checks as the choice changes, keeps the last answer
+  until the next, and has one approve button, relabelled "Approve anyway" in place; refused
+  or unchecked, nothing approves. `luoto approve` prints them, then asks once.
+- **One vocabulary:** "on your network or VPN" for private access, "uninspected tunnel",
+  "websockets too", a target as `host:port` with an IPv6 address bracketed
+  (`AccessRequest::target`, `requestTarget`).
+
 ## Working on this repo
 
 - A source build is the `luoto-dev` instance (`names::instance`): its own config dirs, vault,
@@ -291,6 +321,10 @@ What the CLI asks and prints follows one grammar, whatever the feature:
 - `just test` (unit), `just it` (integration), `just e2e` (pull-on-stop against a runtime:
   one env made and removed in the `luoto-dev` instance), `just test-ui` (Playwright),
   `just lint`, `just format`, `just shots` (README screenshots; needs a runtime).
+- `just review-ui` renders the UI's corner cases (`frontend/e2e/review/scenarios.ts`) under
+  a matrix of widths, themes, zoom and locale, fails on a UX problem the probes find that
+  `known.ts` doesn't list, and writes a contact sheet (`playwright-report/review/`);
+  `just review-ui-claude` adds Claude's reading of the screenshots (Anthropic credentials).
 - CI runs the `luoto` and `luoto-shared` tests on Windows too, where a temp path is
   `C:\Users\…`: formatted into a TOML basic string (`"…"`) its backslashes are escapes, so use a
   literal string (`'…'`) or serialize it; a path in a shell line needs `#[cfg(unix)]`.

@@ -5,7 +5,7 @@
 //! for `status` and the UI; `luoto forward` does one by hand.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::env::UID;
 use crate::paths::{Paths, write_private};
-use crate::runtime::{Runtime, exec};
+use crate::runtime::{Flavor, Runtime, exec};
 
 /// Where Linux's ephemeral range starts: a server asking for any free port lands at or above
 /// it (an editor's remote server, a login's loopback callback). Forwarded too, but quietly:
@@ -27,6 +27,9 @@ pub const QUIET_FROM: u16 = 32768;
 /// Quiet forwards per env at once, so a sandbox listening on thousands of ports can't use up
 /// this machine's.
 pub const MAX_QUIET: usize = 64;
+/// Forwards per env at once, every port counted: each holds two listeners and their threads
+/// in the one watcher all envs share.
+pub const MAX_FORWARDS: usize = 256;
 
 /// Whether the watcher forwards `port` on its own: any above the privileged ones but luoto's
 /// UI ports, so no env serves a page on the UI's origin.
@@ -114,12 +117,20 @@ pub fn url(port: u16) -> String {
 }
 
 /// TCP ports something listens on in the env's dev container; None if that can't be asked.
+/// The sandbox writes what the look prints and decides how long it takes: both are bounded.
 pub fn listening(rt: &Runtime, dev: &str) -> Option<BTreeSet<u16>> {
     let out = rt
-        .run(exec(dev).argv(["cat", "/proc/net/tcp", "/proc/net/tcp6"]))
+        .run_limited(
+            exec(dev).argv(["cat", "/proc/net/tcp", "/proc/net/tcp6"]),
+            LISTENING_WAIT,
+            LISTENING_CAP,
+        )
         .ok()?;
     Some(parse_listening(&out))
 }
+
+/// How long one look at an env's ports may take.
+const LISTENING_WAIT: Duration = Duration::from_secs(20);
 
 /// The ports a dev container listens on, from one `exec` that prints its tables every 2 s
 /// (Apple logs each `exec` in the VM's console log, which nothing caps, so a look per tick
@@ -128,6 +139,9 @@ pub fn listening(rt: &Runtime, dev: &str) -> Option<BTreeSet<u16>> {
 pub struct Listening {
     child: std::process::Child,
     open: Arc<std::sync::Mutex<Option<BTreeSet<u16>>>>,
+    /// The `exec` printed past [`LISTENING_CAP`]: its output is no longer read, and this look
+    /// is over.
+    cut: Arc<AtomicBool>,
 }
 
 /// The line that ends one printing of the tables.
@@ -160,38 +174,56 @@ impl Listening {
             .ok()?;
         let out = child.stdout.take()?;
         let open: Arc<std::sync::Mutex<Option<BTreeSet<u16>>>> = Arc::default();
-        let shared = open.clone();
+        let cut = Arc::new(AtomicBool::new(false));
+        let (shared, over) = (open.clone(), cut.clone());
         std::thread::spawn(move || {
-            use std::io::BufRead;
-            let mut table = String::new();
-            for line in std::io::BufReader::new(out).lines() {
-                let Ok(line) = line else { return };
-                if line == LISTENING_END {
-                    let ports = parse_listening(&table);
-                    *shared.lock().unwrap_or_else(|e| e.into_inner()) = Some(ports);
-                    table.clear();
-                } else if table.len() + line.len() < LISTENING_CAP {
-                    table.push_str(&line);
-                    table.push('\n');
-                } else {
-                    return;
-                }
+            if read_tables(out, &shared).is_none() {
+                over.store(true, Ordering::Relaxed);
             }
         });
-        Some(Listening { child, open })
+        Some(Listening { child, open, cut })
     }
 
     /// The ports of the latest printing; None before the first, or once the `exec` ended.
     pub fn current(&mut self) -> Option<BTreeSet<u16>> {
-        if !matches!(self.child.try_wait(), Ok(None)) {
+        if !self.alive() {
             return None;
         }
         self.open.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Whether the `exec` still runs.
+    /// Whether the `exec` still runs and is read.
     pub fn alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        !self.cut.load(Ordering::Relaxed) && matches!(self.child.try_wait(), Ok(None))
+    }
+}
+
+/// Read the tables a [`Listening`] loop prints into `open`, a printing at a time, until its
+/// output ends (`Some`) or a printing passes [`LISTENING_CAP`] (`None`), a line too: reading
+/// stops there, and the pipe's end closing ends the `exec`.
+fn read_tables(out: impl Read, open: &std::sync::Mutex<Option<BTreeSet<u16>>>) -> Option<()> {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(out);
+    let mut table = String::new();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let room = (LISTENING_CAP - table.len()) as u64 + 1;
+        match (&mut reader).take(room).read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => return Some(()),
+            Ok(_) => {}
+        }
+        let text = String::from_utf8_lossy(&line);
+        let text = text.trim_end_matches('\n');
+        if text == LISTENING_END {
+            *open.lock().unwrap_or_else(|e| e.into_inner()) = Some(parse_listening(&table));
+            table.clear();
+        } else if table.len() + line.len() <= LISTENING_CAP {
+            table.push_str(text);
+            table.push('\n');
+        } else {
+            return None;
+        }
     }
 }
 
@@ -240,8 +272,14 @@ impl Forward {
         let stop = Arc::new(AtomicBool::new(false));
         for l in std::iter::once(v4).chain(v6) {
             l.set_nonblocking(true)?;
-            let (stop, rt, dev) = (stop.clone(), rt.clone(), dev.to_string());
-            std::thread::spawn(move || accept(&l, &stop, &rt, &dev, env_port));
+            let (ending, rt, dev) = (stop.clone(), rt.clone(), dev.to_string());
+            // Out of threads: refused, never a panic in the watcher every env shares.
+            if let Err(e) =
+                std::thread::Builder::new().spawn(move || accept(&l, &ending, &rt, &dev, env_port))
+            {
+                stop.store(true, Ordering::Relaxed);
+                return Err(e).context("start the forward");
+            }
         }
         Ok(Forward { stop })
     }
@@ -267,7 +305,8 @@ fn accept(l: &TcpListener, stop: &AtomicBool, rt: &Runtime, dev: &str, port: u16
             Ok((s, _)) => {
                 let _ = s.set_nonblocking(false);
                 let (rt, dev) = (rt.clone(), dev.to_string());
-                std::thread::spawn(move || {
+                // Out of threads, the connection is dropped, never the watcher.
+                let _ = std::thread::Builder::new().spawn(move || {
                     // A browser closing a connection ends a relay without a message.
                     if let Err(e) = relay(&rt, &dev, port, s)
                         && !e.to_string().is_empty()
@@ -306,18 +345,79 @@ fn relay(rt: &Runtime, dev: &str, port: u16, stream: TcpStream) -> Result<()> {
     let up = std::thread::spawn(move || {
         let _ = std::io::copy(&mut inbound, &mut to_env);
     });
-    let _ = std::io::copy(&mut from_env, &mut outbound);
+    if rt.flavor == Flavor::Apple {
+        if !held_copy(&mut from_env, &outbound) {
+            // The client went or stopped reading: the relay ends with the connection.
+            let _ = outbound.shutdown(std::net::Shutdown::Both);
+            let _ = child.kill();
+            let _ = up.join();
+            let _ = child.wait();
+            return Ok(());
+        }
+    } else {
+        let _ = std::io::copy(&mut from_env, &mut outbound);
+    }
     let _ = outbound.shutdown(std::net::Shutdown::Write);
     let _ = up.join();
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
+    // What `sandbox relay` says on failure, which the sandbox writes: at most a little of it.
+    let mut err = Vec::new();
+    if let Some(pipe) = child.stderr.take() {
+        let _ = pipe.take(RELAY_ERR_CAP).read_to_end(&mut err);
+    }
+    let _ = child.kill();
+    let status = child.wait()?;
+    if !status.success() && !err.is_empty() {
+        let err = String::from_utf8_lossy(&err);
         bail!("{}", err.trim().trim_start_matches("sandbox: "));
     }
     Ok(())
 }
 
-/// `LOCAL:ENV`, or one port for both.
+/// The most of a relay's error read.
+const RELAY_ERR_CAP: u64 = 4 << 10;
+
+/// What a relay holds for a client that isn't reading.
+const HELD: usize = 4 << 20;
+const CHUNK: usize = 64 << 10;
+
+/// Copy `from` (the env's side of a relay) to `to` through a thread holding up to [`HELD`],
+/// so `from` is read whatever the client does: on Apple a VM stalls whole while its exec output
+/// waits for this Mac to read it. True when `from` ended; false when `to` failed, or held
+/// [`HELD`] it didn't read, which ends it.
+fn held_copy(from: &mut impl Read, to: &TcpStream) -> bool {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(HELD / CHUNK);
+    let Ok(mut out) = to.try_clone() else {
+        return false;
+    };
+    let writer = std::thread::spawn(move || {
+        for chunk in rx {
+            if out.write_all(&chunk).is_err() {
+                break;
+            }
+        }
+    });
+    let mut buf = vec![0u8; CHUNK];
+    let ended = loop {
+        match from.read(&mut buf) {
+            Ok(0) => break true,
+            Ok(n) => {
+                if tx.try_send(buf[..n].to_vec()).is_err() {
+                    break false;
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(_) => break true,
+        }
+    };
+    drop(tx);
+    if !ended {
+        let _ = to.shutdown(std::net::Shutdown::Both);
+    }
+    let _ = writer.join();
+    ended
+}
+
+/// `LOCAL:ENV`, or one port for both; never a local port of luoto's UI.
 pub fn parse_spec(spec: &str) -> Result<(u16, u16)> {
     let parse = |p: &str| {
         p.trim()
@@ -326,14 +426,61 @@ pub fn parse_spec(spec: &str) -> Result<(u16, u16)> {
             .filter(|p| *p > 0)
             .with_context(|| format!("`{spec}`: ports are 1-65535, as PORT or LOCAL:ENV"))
     };
-    match spec.split_once(':') {
-        Some((l, e)) => Ok((parse(l)?, parse(e)?)),
-        None => parse(spec).map(|p| (p, p)),
+    let (local, env) = match spec.split_once(':') {
+        Some((l, e)) => (parse(l)?, parse(e)?),
+        None => parse(spec).map(|p| (p, p))?,
+    };
+    ui_port_refused(local)?;
+    Ok((local, env))
+}
+
+/// A page an env serves on luoto's UI port would share the UI's origin, where it can act as
+/// the UI: no env is published or forwarded there.
+pub fn ui_port_refused(port: u16) -> Result<()> {
+    if crate::names::ui_ports().contains(&port) {
+        bail!(
+            "port {port} is `luoto ui`'s, where a page the env serves could act as the UI; \
+             forward it to another (`LOCAL:{port}`)"
+        );
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_look_at_the_ports_reads_its_tables_and_stops_at_a_line_without_end() {
+        let open = std::sync::Mutex::new(None);
+        let table = "  sl  local_address rem_address   st\n   0: 00000000:1435 00000000:0000 0A\n";
+        let printed = format!("{table}{LISTENING_END}\n");
+        assert_eq!(read_tables(printed.as_bytes(), &open), Some(()));
+        assert_eq!(*open.lock().unwrap(), Some(BTreeSet::from([5173])));
+        // The sandbox writes what the look prints: a line that never ends is read only so far.
+        let endless = std::io::repeat(b'x');
+        assert_eq!(read_tables(endless, &open), None);
+    }
+
+    #[test]
+    fn a_relay_keeps_reading_the_env_and_ends_a_client_that_stopped_reading() {
+        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let to = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (mut client, _) = l.accept().unwrap();
+        let data: Vec<u8> = (0..=255u8).cycle().take(3 << 20).collect();
+        let reader = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            client.read_to_end(&mut got).unwrap();
+            got
+        });
+        assert!(held_copy(&mut data.as_slice(), &to));
+        to.shutdown(std::net::Shutdown::Write).unwrap();
+        assert!(reader.join().unwrap() == data);
+
+        // A client that never reads, and an env that never stops writing.
+        let to = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (_idle, _) = l.accept().unwrap();
+        assert!(!held_copy(&mut std::io::repeat(7), &to));
+    }
+
     #[test]
     fn a_host_service_on_any_address_keeps_its_port() {
         let l = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
@@ -430,5 +577,11 @@ mod tests {
         assert_eq!(parse_spec("5173").unwrap(), (5173, 5173));
         assert_eq!(parse_spec("8080:5173").unwrap(), (8080, 5173));
         assert!(parse_spec("0").is_err());
+        // The UI's own port never serves an env's page; another port reaches the env's 47878.
+        for ui in crate::names::ui_ports() {
+            assert!(parse_spec(&ui.to_string()).is_err());
+            assert!(parse_spec(&format!("{ui}:3000")).is_err());
+            assert_eq!(parse_spec(&format!("9000:{ui}")).unwrap(), (9000, ui));
+        }
     }
 }

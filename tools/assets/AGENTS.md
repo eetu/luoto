@@ -16,8 +16,9 @@ env's name and its current rules.
   request that has the provider fetch a URL or call an MCP server is refused unless the user
   allowed server tools. A websocket needs the user's `luoto allow -e <env> <host> --ws`.
   While the user has opened the env's egress for a while (`sandbox status` says until when),
-  other HTTP(S) hosts work too, as rule `open`; hosts with credentials keep to their rules. The gate ends a request whose response hasn't started within 10 minutes (HTTP 504),
-  a response silent for 5 minutes, and a tunnel or websocket silent for an hour; a long poll
+  other HTTP(S) hosts work too, as rule `open`; hosts with credentials keep to their rules.
+  The gate ends a request whose response hasn't started within 10 minutes (HTTP 504), a
+  response silent for 5 minutes, and a tunnel or websocket silent for an hour; a long poll
   such as `kubectl logs -f` needs the user to give its host longer, on the host:
   `luoto allow -e <env> <host> --idle 2h`.
 - **Credentials.** The credentials the gate handles stay outside the sandbox. Their tokens in
@@ -41,10 +42,11 @@ env's name and its current rules.
   user, not working around it.
 - **Writes.** Remote writes only work where the user granted them (for example pushing
   feature branches to one GitHub repository). Protected branches, tags, deleting a branch,
-  merging a pull request, releases, workflow files and starting, rerunning or cancelling a
-  GitHub Actions run are off-limits: a pull request you open waits for the user. Runs, their
-  logs and artifacts are readable (`gh run view --log`, `gh run download`); a 403 there under
-  a GitHub App means its credential lacks `actions = "read"`, which the user adds. GitHub's GraphQL takes only the mutations the user
+  push options (`git push -o`), merging a pull request, releases, workflow files and starting,
+  rerunning or cancelling a GitHub Actions run are off-limits: a pull request you open waits
+  for the user. Runs, their logs and artifacts are readable (`gh run view --log`,
+  `gh run download`); a 403 there under a GitHub App means its credential lacks
+  `actions = "read"`, which the user adds. GitHub's GraphQL takes only the mutations the user
   allowed, so a refused `gh` command (`gh issue close --comment`) can go over REST:
   `gh api repos/<owner>/<repo>/issues/<n>/comments -f body=…`, then
   `gh api -X PATCH repos/<owner>/<repo>/issues/<n> -f state=closed -f state_reason=completed`.
@@ -61,7 +63,8 @@ env's name and its current rules.
 - **Getting work back.** Work leaves by `git push`, or by a pull that copies the env's files
   into the user's folder; a commit reaches them only by push. A pull never deletes, and holds
   back for the user's review what tools run by themselves: executable files, `.env*`, editor
-  and agent settings, `AGENTS.md`, `CLAUDE.md`, `.mcp.json`, CI workflows and `luoto.toml`.
+  and agent settings, every agent's instructions (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, …),
+  `.mcp.json`, CI files, folders laid out as a git repository and `luoto.toml`.
   A pull may run with nobody reviewing it when the env stops (after a run, or once it is
   idle); that one also holds back manifests (`package.json`, `Cargo.toml`, `pyproject.toml`,
   …), configs that run code and `.gitignore`. Name in your summary which of those you
@@ -145,8 +148,9 @@ the merge request.
 1. Run `sandbox status` or `sandbox check <url>` (also available as tools of the
    `luoto-sandbox` MCP server) to see the policy and recent denials, and read the 403's
    text: a fixed guard rail no request lifts, a locked vault needs the user's
-   `luoto vault unlock`, and a host on a private address (the user's network, a VPN, their
-   machine) needs a rule that reaches it: the text names it. A connection that times out to a
+   `luoto vault unlock`, and a host on a private address (the user's network, a VPN) needs a
+   rule that reaches it: the text names it. A service on the user's own machine is reached
+   only as `host.docker.internal`, never by its address. A connection that times out to a
    host only the user's VPN reaches needs the same, even at a public address. An HTTPS service
    whose certificate the gate can't verify (an internal one with its own CA; the error names
    `--ca`) is the user's to trust: give them the command it names, and never turn off
@@ -158,21 +162,23 @@ the merge request.
 
    A registry or service luoto has a preset for (npm, pypi, crates, go, maven, …) is one
    request for all its hosts: `sandbox request --preset npm --reason "<why>" --wait`.
-   A protocol other than HTTP(S), such as a database, is a host and port:
+   An HTTP(S) service on another port than 80 or 443 is its URL with that port, which the
+   gate inspects there: `sandbox request https://nexus.corp:8443/ --reason "<why>" --wait`.
+   `--ws` asks for websocket upgrades too. A protocol other than HTTP(S), such as a
+   database, is a host and port:
    `sandbox request db.example.com:5432 --reason "<why>" --wait`. Approved, it is an
-   uninspected tunnel: clients connect to the host and port as they are. So is a TLS
-   service whose client checks the server against its own CA, such as a Kubernetes API from a
-   kubeconfig: the gate's inspection shows its own certificate, which that client refuses.
+   uninspected tunnel: clients connect to the host and port as they are. So is a TLS service
+   whose client checks the server against its own CA, such as a Kubernetes API from a
+   kubeconfig (`<host>:443` when that is its port): the gate's inspection shows its own
+   certificate, which that client refuses.
    A host only the user's network or VPN reaches (a private address, an internal name, a
    public address their VPN routes) needs private access, which the user grants or not:
    `sandbox request 10.0.0.8:6443 --private --reason "kubectl to the API, on your VPN" --wait`.
-   The sandbox can't ask for a tunnel on port 80 or 443: give the user the command instead,
-   `luoto allow -e <env> <host> --port 443 --tunnel --private`.
 
 3. Tell the user what you requested and why. They approve it on the host with
    `luoto approve -e <env> <id>` or in `luoto ui`, possibly for less than you asked (read
-   instead of write, fewer paths, not on their network; the approval's note says), or grant
-   it directly, optionally time-boxed:
+   instead of write, fewer paths, one host of a wildcard, a tunnel inspected, not on their
+   network; the approval's note says), or grant it directly, optionally time-boxed:
    `luoto allow -e <env> <host> [--write] [--for 1h]`.
 4. Ask for the narrowest access that works: read over write, one exact host over a wildcard,
    every path in one request (`--path` repeats). For one-off research such as reading API

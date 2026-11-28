@@ -67,8 +67,9 @@ land:
   and installs evaluate them without being asked: `package.json`, `Cargo.toml`,
   `pyproject.toml`, `setup.py`, `setup.cfg`, `pytest.ini`, `tox.ini`, `go.mod`, `go.work`,
   `Makefile`, `CMakeLists.txt`, `pom.xml`, `build.sbt`, `mix.exs`, `Package.swift`,
-  `build.zig`, MSBuild project files (`*.csproj`, `Directory.Build.props`, …) and
-  `.eslintrc*` and `.prettierrc*`. So is `.gitignore`, which decides what the next copy into
+  `build.zig`, MSBuild project files (`*.csproj`, `Directory.Build.props`, …) and linter
+  configs that load plugins (`.eslintrc*`, `.prettierrc*`, `.pylintrc`, `mypy.ini`,
+  `.rubocop.yml`). So is `.gitignore`, which decides what the next copy into
   an env leaves out of your folder. The price: a change that adds a dependency or touches the
   build lands without its manifest, the run exits with 75 and `--rm` keeps the env, until
   you have reviewed the rest.
@@ -124,7 +125,7 @@ removes it whatever the run leaves. Either way the exit code is the agent's.
 With `--dangerously-pull` (or pull-on-stop) the folder gets the files first, and the env is
 removed only if they all landed: nothing held back, in conflict, refused or unread, no
 `node_modules`-like folder your `.gitignore` doesn't ignore. Changed files and commits on the
-checked-out branch no longer keep it, since their files are in your folder (the commits
+checked-out branch then don't keep it, since their files are in your folder (the commits
 themselves go with the env); stashes and commits on other branches still do.
 
 ```console
@@ -207,7 +208,8 @@ $ luoto prune --envs --match 'job-*' --older-than 7d
   OS keychain (`keyring:luoto/anthropic.oauth_token`, where the prompt's "paste it into your
   keychain" keeps it), a 1Password service account (`[sources.op] mode = "service-account"`
   and its `service_account_token` ref in `config.toml`), `env:` or `file:`. Set one without the
-  prompt with `luoto agent add claude --credential oauth_token=<ref>`. A token rotated in such
+  prompt with `luoto agent add claude --credential oauth_token=<ref>`, and a repo's with
+  `luoto repo auth acme/api --access push --token <ref>`. A token rotated in such
   a source is read again once an upstream refuses the old one.
 - **Access up front.** An agent that hits a blocked host asks for it (`sandbox request`), and
   only you can approve, so an unattended run would wait for nobody. Give the env the presets

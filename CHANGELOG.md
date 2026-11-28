@@ -7,6 +7,78 @@ release may break.
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-11-28
+
+### Added
+
+- A project's `luoto.toml` can ask each developer to trust its internal CA for the hosts it
+  names (`[needs.ca.<name>]`), and an env's `[cas.<name>]` does so by hand.
+- `cas` in `config.toml` trusts a CA for every host of every env, as a company network that
+  inspects TLS needs; on macOS `luoto setup` offers the root CAs your Mac trusts.
+- `luoto approve --host` grants one host of a wildcard or range a request asked for, and
+  `--inspect` a tunnel request inspected; `luoto ui` offers both, with the hosts the env tried.
+- `luoto ui` shows a request's approval as the `luoto approve` command, and sends a note with
+  a rejection, which the sandbox reads.
+
+### Changed
+
+- The sandbox may request whatever a rule of yours may be (a tunnel on any port, websockets
+  with `--ws`, a wildcard, an address range); `luoto ui` shows the risks before you approve.
+- A rule kept to paths a credential doesn't go on no longer asks you to accept that
+  credential's risk.
+
+### Fixed
+
+- An imported env whose workspace volume was made anew (a new VM) copied in the folders its
+  archive named without asking; `luoto up` now asks first.
+- A `git push` of over 1 MiB to a repo of a git credential (GitHub, Azure DevOps, a
+  `[[credentials.git]]` host) was refused with a 403.
+- Packages from an Azure DevOps feed failed to download: their storage host was refused.
+- After the vault started again (an upgrade, a crash), the other running envs had no
+  credentials until `luoto vault unlock`; any env's `luoto up` now binds them again.
+- On podman and Docker, the background watcher quit when it couldn't read the runtime or
+  `config.toml` once, ending port forwards and idle stops until the next `up`.
+- A rule made for a host with a path (`docs.rs/serde`), capitals or a bare IPv6 address, or in
+  `luoto ui` for `host:port`, allowed nothing; one in a config file that can't match is an error.
+- `luoto revoke` didn't find a rule by `host:port`, a URL or the host in other capitals.
+- The fix a denial names covers what was denied: the port of a server on another port, `--ws`
+  for a websocket, `--write` for an upload; `luoto egress` adds `--tunnel` for what isn't HTTP.
+- With the `github` preset or a GitHub credential, pull request diffs (`/pull/1.diff`) and
+  issue attachments were refused.
+- On Apple's `container`, a client that stopped reading a forwarded port could freeze its env.
+- `sandbox request` for a URL on another port than 80 or 443 asked for a rule that missed the
+  port; it asks for that port, inspected.
+
+### Security
+
+- A credential went to its host on any port a rule allowed; it goes only to its own port (443,
+  or the one its config names), and `[credentials.custom]` ones still to every port.
+- The push guard let push options through written as git also reads them (`push-options=1`,
+  or after a tab): on GitLab a push could open a merge request set to merge itself.
+- An env's or a project's `ports`, and `luoto forward`, could publish on `luoto ui`'s port,
+  where a page the sandbox served could later act as the UI.
+- `luoto ui` looked up a host the sandbox named as soon as it showed it, sending what the name
+  carried to your resolver; it looks up only a host you type.
+- An approved private-access request reached services on your machine when its name resolved
+  to the runtime's host gateway or the Mac's own address; only `host.docker.internal` does.
+- An unattended pull wrote a folder git takes as a repository when its names differed in case
+  or a `commondir` named the rest; `luoto pull` lists such folders as risky.
+- A warning could carry terminal escapes a tool in the env printed to its error output.
+- A sandbox could exhaust the background watcher's memory through the port listing it prints,
+  or its threads by listening on thousands of ports: at most 256 are forwarded per env.
+- On a credentialed host the gate strips the client's own token also as `x_api_key` or
+  `Private_Token`, which some servers read as their dashed names.
+- A request number read before a gate restarted could approve another request filed after it.
+- Pulls hold back more files host tools act on: other agents' instructions and settings
+  (`GEMINI.md`, `.cursorrules`, `.gemini/`, `.codex/`), GitLab, Azure Pipelines, Forgejo and
+  Gitea CI, `.devcontainer.json`, `.helix/`, `rust-analyzer.toml`, and linter configs that load
+  plugins. A reviewed pull lists files by path.
+- `luoto open` warns when `~/.ssh/config` includes luoto's after a `Host` block, whose settings
+  (`ForwardAgent yes`) then apply to envs; copying a folder in warns when its git config holds
+  a token.
+- luoto's config and data folders are readable by you alone; an import's review lists its
+  presets, mutes and `[deps]`, and a rule's line shows paths matched in any case and its CA.
+
 ## [0.7.5] - 2026-11-27
 
 ### Added
@@ -627,7 +699,8 @@ release may break.
 
 - First release.
 
-[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.6...HEAD
+[0.7.6]: https://github.com/eetu/luoto/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/eetu/luoto/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/eetu/luoto/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/eetu/luoto/compare/v0.7.2...v0.7.3

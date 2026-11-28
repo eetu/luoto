@@ -81,26 +81,7 @@ pub struct AllowOpts {
 }
 
 pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
-    let host = o.host.trim();
-    let mut port = o.port;
-    let range = host.contains('/') && !host.contains("://");
-    let host = if host == "*" || range || host.starts_with("*.") {
-        host.to_string()
-    } else {
-        let bare = luoto_shared::host::host_of(host);
-        if let Some(named) = port_after(host, bare) {
-            let named: u16 = named
-                .parse()
-                .map_err(|_| anyhow::anyhow!("`{host}`: {named} is not a port"))?;
-            match port {
-                Some(p) if p != named => {
-                    bail!("`{host}` names port {named} and --port {p}: give one")
-                }
-                _ => port = Some(named),
-            }
-        }
-        luoto_shared::host::normalize_host(bare)?
-    };
+    let (host, port) = rule_target(&o.host, o.port)?;
     if let Some(idle) = &o.idle {
         luoto_shared::policy::parse_idle(idle).map_err(anyhow::Error::msg)?;
     }
@@ -149,18 +130,80 @@ pub fn build_rule(o: &AllowOpts) -> Result<Rule> {
 }
 
 /// The port `target` names after its host `bare` (`host:7443`, a URL's), as `host_of` read it.
-fn port_after<'a>(target: &'a str, bare: &str) -> Option<&'a str> {
-    let no_scheme = target.split_once("://").map_or(target, |(_, r)| r);
-    let authority = no_scheme.split(['/', '?', '#']).next()?;
-    authority.strip_prefix(bare)?.strip_prefix(':')
+/// The host pattern a rule matches and its port, from what the user typed for one (`*`,
+/// `*.example.com`, an address range, a name or address, each maybe with `:port`, or a URL)
+/// and the port given apart, if any.
+pub fn rule_target(typed: &str, port: Option<u16>) -> Result<(String, Option<u16>)> {
+    use luoto_shared::host;
+    let t = typed.trim();
+    let (pattern, named) = match t.split_once('/') {
+        // An address range, maybe with a port after its prefix length.
+        Some((addr, len))
+            if !t.contains("://")
+                && addr
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok() =>
+        {
+            match len.split_once(':') {
+                Some((len, p)) => (format!("{addr}/{len}"), Some(p)),
+                None => (t.to_string(), None),
+            }
+        }
+        _ => {
+            let (h, p) = host::split_target(t);
+            (h.to_string(), p)
+        }
+    };
+    let named = named
+        .map(|p| {
+            p.parse::<u16>()
+                .ok()
+                .filter(|&n| n != 0)
+                .with_context(|| format!("`{t}`: {p} is not a port"))
+        })
+        .transpose()?;
+    let port = match (port, named) {
+        (Some(p), Some(n)) if p != n => bail!("`{t}` names port {n} and --port {p}: give one"),
+        (p, n) => p.or(n),
+    };
+    let pattern = match host::normalize_pattern(&pattern) {
+        Some(p) => p,
+        None if pattern.starts_with("*.") || pattern.contains('/') => {
+            bail!("`{t}` is not a host, a wildcard over one or an address range")
+        }
+        None => host::normalize_host(&pattern)?,
+    };
+    Ok((pattern, port))
+}
+
+/// Whether `typed` names rule `r`: its id, or its host as `luoto allow` takes one
+/// (`k8s.example.com:7443`, a URL, any case); with a port, only that port's rules.
+pub fn named_by(r: &Rule, typed: &str) -> bool {
+    let typed = typed.trim();
+    if r.id.as_deref() == Some(typed) || r.host == typed {
+        return true;
+    }
+    rule_target(typed, None).is_ok_and(|(host, port)| {
+        luoto_shared::host::normalize_pattern(&r.host).is_some_and(|h| h == host)
+            && port.is_none_or(|p| r.port == Some(p))
+    })
+}
+
+/// `rule`'s host as a rule matches it, with the port it named, for a rule made elsewhere than
+/// [`build_rule`] (the UI).
+fn normalize(rule: &mut Rule) -> Result<()> {
+    (rule.host, rule.port) = rule_target(&rule.host, rule.port)?;
+    Ok(())
 }
 
 /// The risks of adding `rule` to an env with `policy`, or why it is refused: refused when
 /// it is invalid, or a tunnel over a host where the gate strips credentials, guards writes or
 /// applies a deny (see `Policy::tunnel_bypass`); a risk when it covers a host the gate puts
-/// one of your credentials on.
-fn risks(policy: &Policy, rule: &Rule) -> Result<Vec<String>> {
-    let issues = validate_rule(rule, RuleOrigin::Host);
+/// one of your credentials on. `origin` is who asked: you, or the sandbox's request, which shows
+/// more of what it asks for as risks.
+fn risks(policy: &Policy, rule: &Rule, origin: RuleOrigin) -> Result<Vec<String>> {
+    let issues = validate_rule(rule, origin);
     if let Some(e) = issues.iter().find(|i| i.severity == Severity::Error) {
         bail!("{}", e.message);
     }
@@ -188,9 +231,20 @@ impl std::error::Error for Risks {}
 
 /// Add `rule` to the env, failing with [`Risks`] unless `force` accepts them. The rule as
 /// added: with an id.
-pub fn add_rule_checked(ctx: &Ctx, name: &str, mut rule: Rule, force: bool) -> Result<Rule> {
+pub fn add_rule_checked(ctx: &Ctx, name: &str, rule: Rule, force: bool) -> Result<Rule> {
+    add_checked(ctx, name, rule, force, RuleOrigin::Host)
+}
+
+fn add_checked(
+    ctx: &Ctx,
+    name: &str,
+    mut rule: Rule,
+    force: bool,
+    origin: RuleOrigin,
+) -> Result<Rule> {
     rule.id.get_or_insert_with(new_rule_id);
-    let risks = risks(&env::plan(ctx, name)?.compiled.policy, &rule)?;
+    normalize(&mut rule)?;
+    let risks = risks(&env::plan(ctx, name)?.compiled.policy, &rule, origin)?;
     if !risks.is_empty() && !force {
         return Err(Risks(risks).into());
     }
@@ -263,7 +317,12 @@ pub fn replace(ctx: &Ctx, name: &str, id: &str, mut rule: Rule, force: bool) -> 
         );
     }
     rule.id = Some(new_rule_id());
-    let risks = risks(&env::plan(ctx, name)?.compiled.policy, &rule)?;
+    normalize(&mut rule)?;
+    let risks = risks(
+        &env::plan(ctx, name)?.compiled.policy,
+        &rule,
+        RuleOrigin::Host,
+    )?;
     if !risks.is_empty() && !force {
         return Err(Risks(risks).into());
     }
@@ -375,7 +434,8 @@ pub fn describe(rule: &Rule) -> String {
     } else {
         format!(" paths {}", rule.paths.join(","))
     };
-    crate::text::display(&format!("{at} {}{paths}", rule.access.describe()))
+    let ws = if rule.ws { ", websockets too" } else { "" };
+    crate::text::display(&format!("{at} {}{paths}{ws}", rule.access.describe()))
 }
 
 /// What `luoto allow` takes to make `rule` again, without its access: the host, its port and
@@ -388,6 +448,9 @@ pub fn allow_args(rule: &Rule) -> String {
     }
     if rule.mode == Mode::Tunnel {
         args.push_str(" --tunnel");
+    }
+    if rule.ws {
+        args.push_str(" --ws");
     }
     args
 }
@@ -409,6 +472,46 @@ pub enum Approved {
     Rule(Rule),
     /// What an install request did, for people.
     Installed { installed: String },
+}
+
+/// The rule an access request becomes under `policy`, narrowed by `narrow`, on the user's
+/// network or VPN with `private`; refused when a `[[deny]]` takes all of it.
+fn granted(
+    policy: &Policy,
+    req: &AccessRequest,
+    narrow: &Narrowing,
+    private: bool,
+) -> Result<Rule> {
+    if let Some(d) = policy.wholly_denied(&req.host) {
+        bail!(
+            "{} is refused by a [[deny]] rule ({}): approving request #{} would open nothing; \
+             reject it, or remove the deny first",
+            crate::text::display(&req.host),
+            d.reason,
+            req.id
+        );
+    }
+    let mut rule = grant(req, narrow)?;
+    rule.allow_private = private;
+    Ok(rule)
+}
+
+/// What [`approve`] would ask the user to confirm for `req` so granted, or why it would refuse
+/// it: the UI shows them before the user decides. Nothing for an install request.
+pub fn approval_risks(
+    ctx: &Ctx,
+    name: &str,
+    req: &AccessRequest,
+    narrow: &Narrowing,
+    private: bool,
+) -> Result<Vec<String>> {
+    if req.install.is_some() {
+        return Ok(Vec::new());
+    }
+    let policy = env::plan(ctx, name)?.compiled.policy;
+    let mut rule = granted(&policy, req, narrow, private)?;
+    normalize(&mut rule)?;
+    risks(&policy, &rule, RuleOrigin::Request)
 }
 
 /// Approve a pending request: an access request becomes a rule, narrowed by `narrow`,
@@ -438,20 +541,10 @@ pub fn approve(
         return approve_install(ctx, name, req).map(|installed| Approved::Installed { installed });
     }
     let policy = env::plan(ctx, name)?.compiled.policy;
-    if let Some(d) = policy.wholly_denied(&req.host) {
-        bail!(
-            "{} is refused by a [[deny]] rule ({}): approving request #{} would open nothing; \
-             reject it, or remove the deny first",
-            crate::text::display(&req.host),
-            d.reason,
-            req.id
-        );
-    }
-    let mut rule = grant(req, narrow)?;
-    rule.allow_private = private;
+    let mut rule = granted(&policy, req, narrow, private)?;
     rule.expires = ttl.map(parse_duration).transpose()?.map(|d| Utc::now() + d);
     rule.note = Some(format!("approved request #{}", req.id));
-    let rule = add_rule_checked(ctx, name, rule, force)?;
+    let rule = add_checked(ctx, name, rule, force, RuleOrigin::Request)?;
     // The sandbox reads the note: it learns what it got, if less or more than it asked for.
     let mut notes = Vec::new();
     if !narrow.is_empty() {
@@ -581,6 +674,60 @@ mod tests {
     }
 
     #[test]
+    fn a_rules_host_is_kept_as_the_gate_compares_it() {
+        for (typed, host, port) in [
+            ("API.Example.com.", "api.example.com", None),
+            ("docs.rs/serde", "docs.rs", None),
+            ("*.Example.com", "*.example.com", None),
+            ("*.corp.example:8443", "*.corp.example", Some(8443)),
+            ("10.0.0.0/8", "10.0.0.0/8", None),
+            ("10.0.0.0/8:5432", "10.0.0.0/8", Some(5432)),
+            ("fd00::1", "fd00::1", None),
+            ("[fd00::1]:5432", "fd00::1", Some(5432)),
+            ("*", "*", None),
+        ] {
+            let r = allowed(&[typed]).unwrap_or_else(|e| panic!("{typed}: {e}"));
+            assert_eq!((r.host.as_str(), r.port), (host, port), "{typed}");
+        }
+        for typed in ["*.10.0.0.1", "10.0.0.0/99", "exa mple.com"] {
+            assert!(allowed(&[typed]).is_err(), "{typed}");
+        }
+        let mut ui = Rule {
+            host: "Api.Example.com:8443".into(),
+            ..Default::default()
+        };
+        normalize(&mut ui).unwrap();
+        assert_eq!((ui.host.as_str(), ui.port), ("api.example.com", Some(8443)));
+    }
+
+    #[test]
+    fn a_rule_is_named_by_its_id_or_its_host_as_allow_takes_it() {
+        let k8s = Rule {
+            id: Some("r1".into()),
+            host: "k8s.example.com".into(),
+            port: Some(7443),
+            ..Default::default()
+        };
+        for typed in [
+            "r1",
+            "k8s.example.com",
+            "K8s.Example.com:7443",
+            "https://k8s.example.com:7443/version",
+        ] {
+            assert!(named_by(&k8s, typed), "{typed}");
+        }
+        for typed in ["k8s.example.com:443", "example.com", "r2"] {
+            assert!(!named_by(&k8s, typed), "{typed}");
+        }
+        // One kept as it was typed, before hosts were normalized.
+        let old = Rule {
+            host: "Docs.rs".into(),
+            ..Default::default()
+        };
+        assert!(named_by(&old, "Docs.rs") && named_by(&old, "docs.rs"));
+    }
+
+    #[test]
     fn a_rule_is_named_again_as_luoto_allow_takes_it() {
         let tunnel = allowed(&["k8s.example.com:7443", "--tunnel"]).unwrap();
         assert_eq!(allow_args(&tunnel), "k8s.example.com --port 7443 --tunnel");
@@ -649,19 +796,23 @@ mod tests {
             host: host.into(),
             ..Rule::default()
         };
-        let graph = risks(&policy, &rule("graph.microsoft.com")).unwrap();
+        let graph = risks(&policy, &rule("graph.microsoft.com"), RuleOrigin::Host).unwrap();
         assert_eq!(
             graph,
             ["requests it allows to graph.microsoft.com carry your `azure-graph` credential"]
         );
-        let arm = risks(&policy, &rule("management.azure.com")).unwrap();
+        let arm = risks(&policy, &rule("management.azure.com"), RuleOrigin::Host).unwrap();
         assert!(arm[0].contains("`azure-arm`"), "{arm:?}");
-        assert!(risks(&policy, &rule("docs.rs")).unwrap().is_empty());
+        assert!(
+            risks(&policy, &rule("docs.rs"), RuleOrigin::Host)
+                .unwrap()
+                .is_empty()
+        );
         let tunnel = Rule {
             mode: Mode::Tunnel,
             ..rule("graph.microsoft.com")
         };
-        assert!(risks(&policy, &tunnel).is_err());
+        assert!(risks(&policy, &tunnel, RuleOrigin::Host).is_err());
     }
 
     #[test]
@@ -670,9 +821,11 @@ mod tests {
             id: 3,
             host: "api.example.com".into(),
             port: None,
+            mode: None,
             access: AccessLevel::Write,
             paths: vec![],
             private: false,
+            ws: false,
             reason: "r".into(),
             status: RequestStatus::Pending,
             created: Utc::now(),

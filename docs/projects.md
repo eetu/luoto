@@ -29,15 +29,25 @@ host = "api.stripe.com"
 
 [needs.azure]
 subscriptions = ["<subscription id>"]
+
+[needs.ca.corp]                  # the CA of the team's internal services
+hosts = ["*.corp.example"]
+pem = """
+-----BEGIN CERTIFICATE-----
+…
+-----END CERTIFICATE-----
+"""
 ```
 
 The first `up` after accepting it asks each developer for what `[needs]` names and their env
 lacks, with the questions an agent's credential gets: a provider's kind and where it is kept,
 a custom credential's host (the team's filled in) and secret, an Azure subscription (the
 team's offered first, read through their `az` login), where a sandbox secret is kept, and
-each repo's access. The answers go in the developer's own env file. "Later" leaves one for
-the next `up`; `luoto project needs` asks them all again, opening on what the env has.
-Without a terminal it prints what to add instead.
+each repo's access. A CA is shown with its subject, fingerprint and the hosts it would cover,
+and trusted only once accepted, for those hosts alone ([CAs](configuration.md)); a new
+certificate under the name is asked again. The answers go in the developer's own env file.
+"Later" leaves one for the next `up`; `luoto project needs` asks them all again, opening on
+what the env has. Without a terminal it prints what to add instead.
 
 It also takes `image`, `agents`, `[[deny]]` and the team's repositories (`[repos.<name>]`,
 [below](#several-repositories)); toolchains belong in `mise.toml`. Layering: `config.toml` <
@@ -49,7 +59,7 @@ env's own presets, agents, ports, `[deps]`, remote repos, allow rules (notes kep
 not a `luoto.toml`'s to carry: credentials and secrets, mutes, your folders, toolchain
 defaults, your own `image`, expiring grants, and rules the sandbox couldn't ask for (`*`,
 multi-tenant wildcards, address ranges, private addresses). `--write` puts it in the env's
-folder; one already there is replaced only with `--force`, after the changes are listed.
+folder; one already there is replaced only with `--overwrite`, after the changes are listed.
 
 Anyone who can write the repository writes this file, code in the sandbox included, so it
 only proposes:
@@ -65,23 +75,28 @@ only proposes:
   hide denials from you), nor pick an agent's model server or pass the flags that loosen its
   permission prompts, and its rules pass the checks the sandbox's own access requests get (no
   `*`, no multi-tenant wildcards, no private addresses). Write access and uninspected tunnels
-  are spelled out in the review. Its denies only tighten.
+  are spelled out in the review. Its denies only tighten. A CA it names is trusted by no one
+  until each developer accepts it, and never for a public suffix or a host the gate adds a
+  credential on.
 
 ## Folders and remotes
 
 An env belongs to a folder, and gets a copy of it: the first `up` puts the folder, git history
 included, into the env, and the sandbox never writes to your folder. From a git repository it
 copies what git doesn't ignore, so ignored files such as `.env`, `*.tfvars` or state files stay
-on your machine. Development happens inside, in Zed or VS Code attached to the env, and work
-leaves as git pushes (with a `[credentials.github]`, `[credentials.azure_devops]` or
+on your machine; its `.git/config` goes in, and the copy warns when that holds a token (in a
+remote's URL, an `extraheader`). Development happens inside, in Zed or VS Code attached to the
+env, and work leaves as git pushes (with a `[credentials.github]`, `[credentials.azure_devops]` or
 `[[credentials.git]]` for the repo, which SSH remotes to those hosts use over HTTPS, or
 `[credentials.ssh]`; `up` asks for the ones the env's remotes need, `luoto repo auth` changes
 one). `luoto pull` brings files back when you need them on the host: it lists the files the
 env changed since its copy (one you changed too is kept as yours unless `--overwrite`; one
 the env deleted stays),
-skips risky ones (in the folder or any folder within it: a repository's own `.git`, `.envrc`
-and `.env` files, editor settings, `AGENTS.md` and `CLAUDE.md`, CI workflows, `luoto.toml`; the
-[security model](../SECURITY.md) lists them) unless you pass `--include-risky`, refuses paths
+skips risky ones (in the folder or any folder within it: a repository's own `.git` and a
+folder laid out as one, `.envrc` and `.env` files, editor settings, agents' settings and
+instructions (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursorrules`), CI definitions (GitHub,
+GitLab, Azure Pipelines, Forgejo, Gitea), `luoto.toml`; the
+[security model](../SECURITY.md) has more) unless you pass `--include-risky`, refuses paths
 or symlinks that leave the folder, and never writes through host symlinks. `.git` and heavy
 directories (`node_modules`, `target`, …) are skipped.
 

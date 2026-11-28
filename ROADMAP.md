@@ -17,6 +17,8 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
 - **The process behind a request,** named from outside by gVisor's runtime monitoring.
 - **Malicious and brand-new package versions** refused at registry hosts (OSV `MAL-*`, a
   minimum release age).
+- **Signed install and upgrade:** `install.sh` and `luoto upgrade` check a signature the
+  release pipeline makes, not only the checksum beside the download.
 - **AWS and GCP credentials outside the sandbox,** as Azure's are: the gate re-signs AWS
   requests (SigV4); the vault mints GCP tokens.
 
@@ -34,8 +36,7 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   any is written.
 - **Services that come back:** a command on every start (a database after `up` or an idle
   stop), then sidecars.
-- **Corporate networks:** a CA for every upstream, which the gate reads
-  (`LUOTO_UPSTREAM_CA`) but no command or config sets yet; egress through a company proxy.
+- **Corporate networks:** egress through a company proxy.
 - **Moving work:** `fork` of an env; seed from a git bundle and `luoto fetch` into
   `refs/remotes/luoto/<env>`.
 - **A folder shared live** (Linux, or a VM that shares folders), with an audit of the files

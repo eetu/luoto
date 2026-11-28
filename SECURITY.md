@@ -18,7 +18,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 
 - **Network.** The dev container sits on an internal network with no route out. Its default
   route and resolver are the env's gate. The gate is the only egress: HTTP(S) is inspected
-  (per-env CA, key only in the gate, renewed by `up` 60 days before its two years end) and
+  (per-env CA, its key in the gate and in the env's state on this machine, never in the
+  sandbox; renewed by `up` 60 days before its two years end) and
   checked against a default-deny policy of host, port, method, path, body size and expiry,
   unless the env's egress is open (below); explicit denies, luoto's and the user's `[[deny]]`,
   beat every allow. Non-HTTP TCP goes nowhere except through tunnel rules
@@ -44,9 +45,16 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   runtime's networks; those the gate dials itself, as before. TLS, inspection and credentials
   stay in the gate. A `--private` rule therefore reaches whatever your Mac's VPN and network
   let your Mac reach at that name's address.
-- **A host's own CA.** A rule's `ca` (`luoto allow <host> --ca <file>`) is trusted for that one
-  exact host, never a wildcard, range or tunnel, so no other host's certificate may chain to
-  it. Only your env file names one: a project's `luoto.toml` and a sandbox request can't.
+- **CAs of your own.** Whoever holds a trusted CA's key can read what the gate sends where it
+  is trusted, so each is trusted only where named. A rule's `ca` (`luoto allow <host> --ca
+  <file>`) covers that one exact host, never a wildcard, range or tunnel. An env's `[cas.<name>]`
+  covers its hosts: exact, or a wildcard under a domain of one owner's (never `*`, a range or a
+  public suffix), and never a host the gate adds a credential on. A project's `luoto.toml`
+  can only ask for one (`[needs.ca]`), shown with its fingerprint and hosts; a sandbox request
+  can't. `cas` in `config.toml` (a company's TLS inspection, or the roots your Mac trusts, which
+  `luoto setup` offers) covers every host, credentialed ones too: that is your call alone. The
+  dev container trusts all of these for any host, for what reaches it unread (a tunnel), as it
+  trusts the env's own CA. An archive's `[cas]` naming a file is dropped on import.
 - **Open egress.** `luoto egress open` (an hour unless told otherwise; `open = true` until
   removed) lets out over HTTP(S), as rule `open`, what no rule allows, to any host and port.
   It never widens a host that gets a credential (its rules stay its only access), a muted
@@ -81,12 +89,14 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   attacker's token cannot use it, and it injects only over TLS:
   plain HTTP to a credentialed host is refused, except to a model server on this machine
   (`[model_servers]`), whose requests never leave it; the gate dials one only where every
-  address of its name is private. A credential goes only on the methods and
-  paths its own rules allow: a wider rule (one you add, an approved request) lets more
+  address of its name is private. A credential goes only on the port, methods and
+  paths its own rules allow (443, or the port its config names; a `[credentials.custom]` one
+  on every port of its host): a wider rule (one you add, an approved request) lets more
   requests through, but they go without it.
 - **GitHub writes.** Pushes only to the granted repositories, never to protected branches
-  (default `main`, `master`, in any case), tags or branch deletions; signed pushes, whose
-  certificate carries commands of its own, are refused. REST writes are an allowlist — pull
+  (default `main`, `master`, in any case) or branch deletions, and to tags only where the
+  credential sets `allow_tags`; push options, which a forge acts on past the ref checks, and
+  signed pushes, whose certificate carries commands of its own, are refused. REST writes are an allowlist — pull
   requests, reviews, issues and comments — so the contents, git-data, ref, merge, release and
   settings endpoints can't route around the push guard; GraphQL mutations outside an
   allowlist are refused. Workflows/Actions/Secrets/Administration permissions are refused at
@@ -98,9 +108,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   sandbox: keep CI secrets in environments and protected branches, and give a token no
   `workflow` scope, which would let a push change the workflows (luoto can check that only
   for an App; an App's `actions` permission only as `read`). Actions logs and artifacts are
-  read through the API, whose answer redirects to a signed URL on GitHub's storage: that exact
-  URL opens for GET and HEAD for ten minutes, as a feed's download does, and no rule opens
-  those hosts. They bring back into the sandbox what a run could read, and artifacts are not
+  read through the API, and pull request diffs and issue attachments through github.com, whose
+  answers redirect to a signed URL on GitHub's storage: that exact URL opens for GET and HEAD
+  for ten minutes, as a feed's download does, and no rule opens those hosts. They bring back into the sandbox what a run could read, and artifacts are not
   masked: CI the sandbox's code ran can hand it what CI reached.
 - **Azure DevOps writes.** The PAT goes only on the granted repositories' git paths and their
   pull requests' REST paths, and pushes pass the same guard as on GitHub. A pull request's
@@ -114,8 +124,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
 - **Azure DevOps feeds.** The PAT goes on the feeds' organizations' packaging paths, with GET
   and HEAD only: installs, never a publish. Every feed of those organizations gets it, as a
   feed's own links name its files by project and feed ID; a PAT with only Packaging (Read)
-  keeps it to what it reads. A stored package downloads from a signed Azure Storage URL on a
-  host per file, so no rule names those hosts: the gate lets through only the exact URL a
+  keeps it to what it reads. A stored package downloads from a signed URL on Azure Storage or
+  Azure Artifacts' blob store, on a host per file, so no rule names those hosts: the gate lets through only the exact URL a
   feed's redirect named, for GET and HEAD, for ten minutes, without the client's own
   authorization or cookies. The sandbox never chooses that URL.
 - **Other package feeds.** Each goes on its feed's paths, with GET and HEAD only. A GitHub
@@ -173,13 +183,17 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   (compared case-insensitively, as macOS and Windows name them), refuses `.git` under any
   spelling, names that collide by case, and paths and symlinks that leave the folder. What
   it holds back is what acts without you running it: git metadata, `.gitattributes` and
-  `.gitmodules`, direnv and dotenv files (`.envrc`, `.env`, `.env.*`), editor and IDE
-  folders, coding agents' settings, MCP servers and instructions (`.claude`, `.cursor`,
-  `.mcp.json`, `AGENTS.md`, `CLAUDE.md`), hook managers, package managers' and build tools'
-  own config and wrappers (`.npmrc`, `.yarnrc.yml`, `bunfig.toml`, `.cargo/config.toml`,
-  mise, `gradlew`, `mvnw`), CI workflows (`.github/workflows`), `luoto.toml` (an env made
-  from the folder with `luoto init --yes` takes its settings), files that become
-  executable and symlinks. The rest is still code the sandbox wrote,
+  `.gitmodules`, folders git takes as a repository (a `HEAD` with `objects/` and `refs/`, or
+  a `commondir`), direnv and dotenv files (`.envrc`, `.env`, `.env.*`), editor and IDE
+  folders and configs (`.vscode`, `.idea`, `.zed`, `.helix`, `.devcontainer.json`,
+  `rust-analyzer.toml`), coding agents' settings, MCP servers and instructions (`.claude`,
+  `.cursor`, `.gemini`, `.codex`, `.mcp.json`, `opencode.json`, `AGENTS.md`, `CLAUDE.md`,
+  `GEMINI.md`, `.cursorrules`, `.github/copilot-instructions.md`), hook managers, package
+  managers' and build tools' own config and wrappers (`.npmrc`, `.yarnrc.yml`, `bunfig.toml`,
+  `.cargo/config.toml`, mise, `gradlew`, `mvnw`), CI definitions (`.github/workflows`,
+  `.gitlab-ci.yml`, `azure-pipelines.yml`, `.forgejo/workflows`, `.gitea/workflows`),
+  `luoto.toml` (an env made from the folder with `luoto init --yes` takes its settings), files
+  that become executable and symlinks. The rest is still code the sandbox wrote,
   and building or running it on your machine runs it outside the sandbox: read the diff
   first. A pulled `.gitignore` decides what later copies leave out, so review its changes. A
   file that can't be written is named and the rest are written, each through a temporary
@@ -206,9 +220,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   `Cargo.toml`, `pyproject.toml`, `setup.py`, `setup.cfg`, `pytest.ini`, `tox.ini`, `go.mod`,
   `go.work`, `Makefile` and `*.mk`, `CMakeLists.txt` and `*.cmake`, `pom.xml`, `*.sbt`,
   `mix.exs`, `Package.swift`, `build.zig`, MSBuild's `*.csproj`, `*.props` and `*.targets`,
-  `.eslintrc*`, `.prettierrc*`), `.gitignore` in any folder (it decides what the next copy
-  into an env takes of yours), the folder your repository's `core.hooksPath` names, and
-  folders laid out as a git repository. Over 5000 files, 256 MB or 64 MB in one file to
+  and linter configs that load plugins: `.eslintrc*`, `.prettierrc*`, `.pylintrc`,
+  `mypy.ini`, `.rubocop.yml`), `.gitignore` in any folder (it decides what the next copy
+  into an env takes of yours) and the folder your repository's `core.hooksPath` names. Over
+  5000 files, 256 MB or 64 MB in one file to
   write, with too little disk left, or with over a million files to read, nothing is written;
   a folder mid-merge or mid-rebase waits. Each file is checked again for a change of yours
   just before it is replaced. What is planned is journaled before the first write, so a pull
@@ -248,11 +263,13 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   written anew to a container that mounts only the new volume, with no network, in the new
   env's user namespace. Nothing of a volume is unpacked on the host. Before it asks, import
   lists what the config opens: the secret refs it reads on this machine, the hosts each
-  credential goes to, secrets put in the sandbox, `isolation`, `image`, `ports`, `[[allow]]`
-  rules, `[deps] run`, private git hosts and the storage hosts their feeds may redirect to. Until your yes, the folders it names are only
-  text, never looked up; it refuses your home folder or one that holds it, and nothing is
-  copied in from them afterwards (the workspace came in the archive): they are where `pull`
-  writes, which the list says. The `luoto.toml` accepted where it was exported is not
+  credential goes to, secrets put in the sandbox, `isolation`, `image`, `ports`, presets,
+  `[[allow]]` rules, mutes, the CAs it trusts (one naming a file is dropped), `[deps]`, private
+  git hosts and the storage hosts their feeds may redirect to. Until your yes, the folders it
+  names are only text, never looked up; it refuses your home folder or one that holds it.
+  They are where `pull` writes, which the list says; the workspace came in the archive, and
+  is copied in from them only if the env's workspace volume is made anew (a new VM, a removed
+  volume) and you say yes when `up` asks. The `luoto.toml` accepted where it was exported is not
   accepted here: the next `up` reviews it as a new one. Folders, CA files and `file:` refs on
   another machine (`\\server\share`, `/net/<host>`) are refused in any config, since looking
   one up sends your Windows credentials there or mounts it.
@@ -358,7 +375,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   Desktop shares your folders, or on Linux on the host. On Apple's `container`, an escape
   from the dev VM's kernel has to break out through Apple's virtualization, onto your Mac.
 - **Forwarded ports.** A server in the sandbox on a port from 1024 up is reachable at
-  localhost on your machine while it listens (at most 64 at once above 32767). Code in the
+  localhost on your machine while it listens (at most 256 an env, 64 of them above 32767;
+  never `luoto ui`'s own ports, which no env's `ports` may publish either). Code in the
   sandbox can hold a port a host tool expects first (a local OAuth callback with a fixed
   port, say), and the tool's browser redirect then reaches the sandbox; a tool that asks for
   any free port is never given a forwarded one. Ports already taken on the host are never
@@ -399,13 +417,17 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   host, or one the same pull writes) that points elsewhere.
 - **Social engineering.** Access requests are written by code in the sandbox. Read the host
   and access, not the reason; grant less than asked where that will do (`luoto approve --read`,
-  `--path`). A request can't name an address range, nor a private address unless it asks for
-  private access, and one for a port is an uninspected tunnel to that host and port, never 80
-  or 443. A host on your network or VPN is reached only if you approve it so: a request may ask
+  `--path`, `--host`, `--inspect`). A request may ask for what a rule of yours may be (a wildcard, an address range,
+  another port, a tunnel, websocket upgrades), and approving it shows the same risks
+  `luoto allow` confirms, in the terminal and in the UI; it never names a CA file, nor a
+  private address unless it asks for private access. A host on your network or VPN is reached only if you approve it so: a request may ask
   for that (`sandbox request --private`), and `luoto approve` asks you separately, or the UI's
   private switch starts on, which you may turn off. Without that ask, `luoto approve --private`
   or the switch grants it; `luoto approve` looks the name up to ask only once you approved,
-  since a lookup carries whatever the sandbox put in the name. A preset request names one
+  since a lookup carries whatever the sandbox put in the name, and `luoto ui` looks up only a
+  host you type. Private access never reaches this machine: a name or address resolving to it
+  (the runtime's host gateway, the Mac's own addresses) is refused unless the rule names
+  `host.docker.internal`. A preset request names one
   of luoto's presets; approving it opens all of that preset's hosts and keeps it in the env's
   config (`luoto status` lists them). An install request names a
   package or toolchain the gate has checked to be a plain name; approving it runs that

@@ -184,14 +184,21 @@ fn clean(s: &str) -> String {
 /// without a host asks for a variable (reason `var`), software or a preset.
 fn describe_request(ev: &Event) -> String {
     let what = match (ev.host.as_deref().filter(|h| !h.is_empty()), ev.port) {
-        (Some(host), Some(port)) => format!("a tunnel to {}:{port}", clean(host)),
-        (Some(host), None) => {
-            let access = if ev.reason.as_deref() == Some("write") {
-                "write"
-            } else {
-                "read"
+        (Some(host), port) => {
+            let at = match port {
+                Some(p) => format!("{}:{p}", clean(host)),
+                None => clean(host),
             };
-            format!("{access} access to {}", clean(host))
+            // The gate names a tunnel request so; one with no reason went by its port.
+            let tunnel = ev
+                .reason
+                .as_deref()
+                .map_or(port.is_some(), |r| r == "tunnel");
+            match ev.reason.as_deref() {
+                _ if tunnel => format!("a tunnel to {at}"),
+                Some("write") => format!("write access to {at}"),
+                _ => format!("read access to {at}"),
+            }
         }
         (None, _) if ev.reason.as_deref() == Some("var") => "a variable".to_string(),
         (None, _) => "software or a preset".to_string(),
@@ -498,6 +505,15 @@ mod tests {
         assert_eq!(
             describe_request(&tunnel),
             "a tunnel to db.example.com:5432: migrations"
+        );
+        let inspected = Event {
+            port: Some(8443),
+            reason: Some("read".into()),
+            ..request(1, "nexus.corp.example", "npm feed")
+        };
+        assert_eq!(
+            describe_request(&inspected),
+            "read access to nexus.corp.example:8443: npm feed"
         );
     }
 

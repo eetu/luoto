@@ -1456,22 +1456,27 @@ fn fmt_request(r: &AccessRequest) -> String {
             "install {}, kept in the env's config",
             crate::text::display(&i.describe())
         ),
-        None => match r.port {
-            Some(port) => format!(
-                "a tunnel to {}:{port}, uninspected: any protocol and any data",
-                crate::text::display(&r.host)
-            ),
-            None => format!(
-                "{} {}{}",
-                crate::text::display(&r.host),
-                luoto_shared::policy::Access::Level(r.access).describe(),
-                if r.paths.is_empty() {
-                    String::new()
-                } else {
-                    format!(" paths {}", crate::text::display(&r.paths.join(",")))
-                }
-            ),
-        },
+        None => {
+            let at = r.target();
+            if r.is_tunnel() {
+                format!(
+                    "a tunnel to {}, uninspected: any protocol and any data",
+                    crate::text::display(&at)
+                )
+            } else {
+                format!(
+                    "{} {}{}{}",
+                    crate::text::display(&at),
+                    luoto_shared::policy::Access::Level(r.access).describe(),
+                    if r.paths.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" paths {}", crate::text::display(&r.paths.join(",")))
+                    },
+                    if r.ws { ", websockets too" } else { "" }
+                )
+            }
+        }
     };
     let private = if r.private {
         "\n   on your network or VPN: a private address, or one only a VPN reaches"
@@ -1601,22 +1606,6 @@ pub fn approve(
         let rule = rules::grant(&req, narrow)?;
         println!("grants less: {}", rules::describe(&rule));
     }
-    if !yes && !confirm("Approve?") {
-        let private = if private { " --private" } else { "" };
-        return Err(crate::prompt::declined(
-            "approved",
-            &format!("luoto approve -e {name} {id}{private} --yes"),
-        ));
-    }
-    // Looked up only once approved, as the gate does: the name is the sandbox's, and a lookup
-    // carries whatever it put in it. On a private address here, it is reached only if the
-    // user says so.
-    let resolved = if private || req.private || req.install.is_some() {
-        rules::Resolved::default()
-    } else {
-        rules::resolve(&req.host)
-    };
-    let at = resolved.private.join(", ");
     if req.private && !private {
         // `--yes` approves as asked.
         private = yes
@@ -1624,13 +1613,46 @@ pub fn approve(
                 "It asks to reach {} on your network or VPN. Let the rule reach it there?",
                 crate::text::display(&req.host)
             ));
-    } else if !at.is_empty() && !yes {
+    }
+    // What the yes accepts, shown before it is asked (`--yes` leaves them to `--force`).
+    let shown = rules::approval_risks(&ctx, name, &req, narrow, private)?;
+    if !yes {
+        for r in &shown {
+            crate::progress::warn(r);
+        }
+    }
+    let question = if shown.is_empty() {
+        "Approve?"
+    } else {
+        "Approve, accepting these risks?"
+    };
+    if !yes && !confirm(question) {
+        let private = if private { " --private" } else { "" };
+        return Err(crate::prompt::declined(
+            "approved",
+            &format!("luoto approve -e {name} {id}{private} --yes"),
+        ));
+    }
+    let asked = private;
+    // Looked up only once approved, as the gate does: the name is the sandbox's, and a lookup
+    // carries whatever it put in it. On a private address here, it is reached only if the
+    // user says so.
+    let host = narrow.host.as_deref().unwrap_or(&req.host);
+    let resolved = if private || req.private || req.install.is_some() {
+        rules::Resolved::default()
+    } else {
+        rules::resolve(host)
+    };
+    let at = resolved.private.join(", ");
+    if !at.is_empty() && !yes {
         private = confirm(&format!(
             "{} resolves to {at}, a private address (your network or a VPN). Let the rule reach \
              it?",
-            crate::text::display(&req.host)
+            crate::text::display(host)
         ));
     }
+    // A yes on the terminal accepted the risks it showed; private access since adds its own.
+    let force = force || (!yes && private == asked);
     match rules::accepting_risks(force, |force| {
         rules::approve(&ctx, name, &req, ttl, narrow, private, force)
     })? {
@@ -1675,6 +1697,41 @@ pub enum Only {
     Denied,
     /// Those open egress let requests out to.
     Opened,
+}
+
+/// The `luoto allow` that lets a host's last denial through: on its port (a rule without one
+/// covers 80 and 443), as a tunnel for what isn't HTTP, with upgrades, writes or private
+/// access where it needed them.
+fn allow_hint(name: &str, s: &events::HostSummary) -> String {
+    let private = s.host.ends_with(".internal")
+        || s.host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(luoto_shared::host::is_private);
+    let host = if s.host.contains(':') {
+        format!("[{}]", s.host)
+    } else {
+        s.host.clone()
+    };
+    let target = match s.last_denied_at.as_ref().map(|(_, p)| *p) {
+        Some(p) if p != 80 && p != 443 => format!("{host}:{p}"),
+        _ => s.host.clone(),
+    };
+    let how = match s.last_reason.as_deref() {
+        Some("not_http") => " --tunnel",
+        Some("websocket_not_allowed") => " --ws",
+        _ if s.wants_write => " --write",
+        _ => "",
+    };
+    format!(
+        "{}{} → luoto allow -e {name} {target}{how}{}",
+        s.last_message.clone().unwrap_or_default(),
+        if private {
+            " (--private exposes a service on your machine or network)"
+        } else {
+            ""
+        },
+        if private { " --private" } else { "" }
+    )
 }
 
 /// `all`: also the denials the env's mutes hide.
@@ -1789,22 +1846,7 @@ pub fn egress(
                 if s.wants_write { " --write" } else { "" },
             )
         } else if s.denied > 0 {
-            let private = s.host.ends_with(".internal")
-                || s.host
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(luoto_shared::host::is_private);
-            format!(
-                "{}{} → luoto allow -e {name} {}{}{}",
-                s.last_message.clone().unwrap_or_default(),
-                if private {
-                    " (--private exposes a service on your machine or network)"
-                } else {
-                    ""
-                },
-                s.host,
-                if s.wants_write { " --write" } else { "" },
-                if private { " --private" } else { "" }
-            )
+            allow_hint(name, &s)
         } else if s.opened > 0 {
             format!("open egress → luoto egress keep -e {name}")
         } else {
@@ -2268,14 +2310,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_egress_hint_allows_what_the_denial_needed() {
+        let denied = |reason: &str, port: u16| events::HostSummary {
+            host: "db.example.com".into(),
+            denied: 1,
+            last_reason: Some(reason.into()),
+            last_denied_at: Some(("GET".into(), port)),
+            ..Default::default()
+        };
+        for (reason, port, fix) in [
+            ("not_http", 5432, "db.example.com:5432 --tunnel"),
+            ("no_rule", 443, "db.example.com"),
+            ("no_rule", 8443, "db.example.com:8443"),
+            ("websocket_not_allowed", 5173, "db.example.com:5173 --ws"),
+        ] {
+            let hint = allow_hint("web", &denied(reason, port));
+            assert!(
+                hint.ends_with(&format!("luoto allow -e web {fix}")),
+                "{hint}"
+            );
+        }
+    }
+
+    #[test]
     fn a_preset_request_shows_the_hosts_it_opens() {
         let req = |name: &str| AccessRequest {
             id: 1,
             host: String::new(),
             port: None,
+            mode: None,
             access: luoto_shared::policy::AccessLevel::Read,
             paths: vec![],
             private: false,
+            ws: false,
             reason: "to install packages".into(),
             status: RequestStatus::Pending,
             created: chrono::Utc::now(),

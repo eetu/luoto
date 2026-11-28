@@ -35,12 +35,14 @@ const fixtures = {
 export const fixture = <K extends keyof typeof fixtures>(name: K): (typeof fixtures)[K] =>
   structuredClone(fixtures[name]);
 
-type Route = {
+export type Route = {
   method: string;
   path: RegExp;
   body: (req: Request) => unknown;
   /** The status to answer with, 200 unless given. */
   status?: (req: Request) => number;
+  /** Never answered: what waits for it stays in its loading state. */
+  hang?: boolean;
 };
 
 type NewRuleBody = { rule: { allow_private?: boolean }; force?: boolean };
@@ -65,6 +67,8 @@ const routes: Route[] = [
   { method: "GET", path: /^\/api\/envs\/web\/shares$/, body: () => fixture("shares") },
   // A public name, unless a test says otherwise.
   { method: "GET", path: /^\/api\/resolve$/, body: () => ({ private: [], never: false }) },
+  // Nothing to confirm, unless a test says otherwise.
+  { method: "POST", path: /^\/api\/envs\/[^/]+\/requests\/\d+\/risks$/, body: () => [] },
   {
     method: "POST",
     path: /^\/api\/envs\/web\/rules$/,
@@ -72,16 +76,20 @@ const routes: Route[] = [
       privateRisk(req)
         ? {
             error: "the rule has risks",
-            risks: ["allows dialing private/host addresses (e.g. services on your machine)"],
+            risks: ["reaches private addresses: hosts on your network or VPN"],
           }
         : { ...(req.postDataJSON() as { rule: object }).rule, id: "r1" },
     status: (req) => (privateRisk(req) ? 409 : 200),
   },
 ];
 
-/** Serve the API from fixtures; returns the bodies of every write the UI made. */
+/**
+ * Serve the API from fixtures; returns the bodies of every write the UI made. A route in
+ * `overrides` answers in place of the fixtures' route for the same request.
+ */
 export async function mockApi(
   page: Page,
+  overrides: Route[] = [],
 ): Promise<{ method: string; path: string; body: unknown }[]> {
   const writes: { method: string; path: string; body: unknown }[] = [];
   await page.route("**/api/**", async (route, req) => {
@@ -93,7 +101,10 @@ export async function mockApi(
     if (req.method() !== "GET") {
       writes.push({ method: req.method(), path, body: req.postDataJSON() });
     }
-    const hit = routes.find((r) => r.method === req.method() && r.path.test(path));
+    const hit = [...overrides, ...routes].find(
+      (r) => r.method === req.method() && r.path.test(path),
+    );
+    if (hit?.hang) return;
     await route.fulfill(
       hit
         ? {

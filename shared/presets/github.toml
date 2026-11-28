@@ -48,3 +48,16 @@ host = "api.github.com"
 paths = ["/repos/*/*/releases/assets/*"]
 ignore_case = true
 to = ["release-assets.githubusercontent.com", "objects.githubusercontent.com"]
+
+# A pull request's diff or patch (a private repo's signed in its URL).
+[[redirect]]
+host = "github.com"
+paths = ["/*/*/pull/*.diff", "/*/*/pull/*.patch"]
+ignore_case = true
+to = ["patch-diff.githubusercontent.com"]
+
+# Images and videos attached to issues and pull requests.
+[[redirect]]
+host = "github.com"
+paths = ["/user-attachments/assets/*"]
+to = ["github-production-user-asset-6210df.s3.amazonaws.com", "private-user-images.githubusercontent.com"]

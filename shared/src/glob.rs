@@ -57,6 +57,17 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
         || dp_match(pattern, path)
 }
 
+/// Could one path match both `a` and `b`? A `false` is always right (their literal starts part
+/// ways, in any case); a `true` may only mean that couldn't be ruled out.
+pub fn may_overlap(a: &str, b: &str) -> bool {
+    let start = |p: &str| {
+        let lit = p.split('*').next().unwrap_or_default();
+        lit.trim_end_matches('/').to_ascii_lowercase()
+    };
+    let (a, b) = (start(a), start(b));
+    a.starts_with(&b) || b.starts_with(&a)
+}
+
 /// Does `outer` match every path `inner` matches? A `true` is always right; a `false` may only
 /// mean the containment could not be shown, which is the safe answer for a grant that must stay
 /// within what was asked.

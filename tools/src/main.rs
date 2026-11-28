@@ -18,7 +18,7 @@ use clap::{Parser, Subcommand};
 use luoto_shared::api::{
     AccessRequest, CheckQuery, CheckResult, Install, NewAccessRequest, RequestStatus, SandboxStatus,
 };
-use luoto_shared::policy::AccessLevel;
+use luoto_shared::policy::{AccessLevel, Mode, RuleOrigin, Severity, validate_rule};
 
 #[derive(Parser)]
 #[command(
@@ -47,9 +47,9 @@ enum Cmd {
     /// Ask the user (on the host) to allow a host, to install a system package or a toolchain
     /// in the env for good, or to give it a variable. Only the user can approve.
     Request {
-        /// Host (`docs.rs`) or URL (`https://docs.rs/serde`); `host:port` for a protocol other
-        /// than HTTP(S) (`db.example.com:5432`, not 80 or 443), which the gate can only tunnel
-        /// uninspected.
+        /// Host (`docs.rs`) or URL (`https://docs.rs/serde`, `https://nexus.corp:8443/`, which the
+        /// gate inspects on its port); `host:port` for an uninspected tunnel to a service the
+        /// gate can't read (`db.example.com:5432`).
         #[arg(required_unless_present_any = ["package", "tool", "preset", "var"])]
         target: Option<String>,
         /// A system package (apt, apk or dnf) the env should have; approved, it is installed
@@ -73,6 +73,9 @@ enum Cmd {
         /// Ask for write access (any method) instead of read-only.
         #[arg(long)]
         write: bool,
+        /// Ask for websocket upgrades too: a two-way channel the gate passes unread once open.
+        #[arg(long, conflicts_with_all = ["package", "tool", "preset", "var"])]
+        ws: bool,
         /// The host is on the user's network or VPN (a private address, or one only a VPN
         /// reaches): ask for a rule that reaches it there.
         #[arg(long)]
@@ -151,6 +154,7 @@ fn main() -> ExitCode {
             preset,
             var,
             write,
+            ws,
             private,
             paths,
             reason,
@@ -176,7 +180,7 @@ fn main() -> ExitCode {
             request(
                 target.as_deref(),
                 install,
-                write,
+                (write, ws),
                 private,
                 paths,
                 &reason,
@@ -376,17 +380,18 @@ fn what(r: &AccessRequest) -> String {
 }
 
 fn asked_for(r: &AccessRequest) -> String {
-    match (&r.install, r.port) {
-        (Some(i @ (Install::Preset { .. } | Install::Var { .. })), _) => i.describe(),
-        (Some(i), _) => format!("install {}", i.describe()),
-        (None, Some(port)) => format!("a tunnel to {}:{port}", r.host),
-        (None, None) => format!(
-            "{} access to {}",
+    match &r.install {
+        Some(i @ (Install::Preset { .. } | Install::Var { .. })) => i.describe(),
+        Some(i) => format!("install {}", i.describe()),
+        None if r.is_tunnel() => format!("a tunnel to {}", r.target()),
+        None => format!(
+            "{} access to {}{}",
             match r.access {
                 AccessLevel::Write => "write",
                 AccessLevel::Read => "read",
             },
-            r.host
+            r.target(),
+            if r.ws { ", websockets too" } else { "" }
         ),
     }
 }
@@ -397,11 +402,30 @@ pub struct Outcome {
     pub waited: Option<Duration>,
 }
 
-/// The host a request names and, for `host:port` (not a URL), the port of a tunnel.
-pub fn parse_target(target: &str) -> Result<(String, Option<u16>)> {
+/// Where an access request asks to go.
+#[derive(Debug, PartialEq)]
+pub struct Target {
+    pub host: String,
+    pub port: Option<u16>,
+    pub mode: Option<Mode>,
+}
+
+/// The host a request names. A URL on another port than 80 or 443 asks for that port, inspected
+/// (an HTTPS server on 8443); `host:port` asks for an uninspected tunnel (a database).
+pub fn parse_target(target: &str) -> Result<Target> {
     let t = target.trim();
     if t.contains("://") {
-        return Ok((luoto_shared::host::host_of(t).to_string(), None));
+        let (host, port) = luoto_shared::host::split_target(t);
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let port = port
+            .filter(|p| !matches!(*p, "80" | "443"))
+            .map(parse_port)
+            .transpose()?;
+        return Ok(Target {
+            host: host.to_string(),
+            port,
+            mode: port.map(|_| Mode::Inspect),
+        });
     }
     let authority = t.split(['/', '?', '#']).next().unwrap_or(t);
     let (host, port) = match authority.strip_prefix('[') {
@@ -415,23 +439,26 @@ pub fn parse_target(target: &str) -> Result<(String, Option<u16>)> {
             _ => (authority, None),
         },
     };
-    let port = port
-        .map(|p| {
-            p.parse::<u16>()
-                .ok()
-                .filter(|n| *n != 0)
-                .with_context(|| format!("`{p}` is not a port (1-65535)"))
-        })
-        .transpose()?;
-    Ok((host.to_string(), port))
+    let port = port.map(parse_port).transpose()?;
+    Ok(Target {
+        host: host.to_string(),
+        port,
+        mode: port.map(|_| Mode::Tunnel),
+    })
 }
 
-/// File a request for access to a host, or with `port` for a tunnel to it, for the user to
-/// decide on the host; with `wait`, poll for the decision.
+fn parse_port(p: &str) -> Result<u16> {
+    p.parse::<u16>()
+        .ok()
+        .filter(|n| *n != 0)
+        .with_context(|| format!("`{p}` is not a port (1-65535)"))
+}
+
+/// File a request for access to `to`, with `write` and websocket upgrades (`ws`) as asked, for
+/// the user to decide on the host; with `wait`, poll for the decision.
 pub fn request_access(
-    host: &str,
-    port: Option<u16>,
-    write: bool,
+    to: Target,
+    (write, ws): (bool, bool),
     private: bool,
     paths: Vec<String>,
     reason: &str,
@@ -439,8 +466,9 @@ pub fn request_access(
 ) -> Result<Outcome> {
     file(
         NewAccessRequest {
-            host: host.to_string(),
-            port,
+            host: to.host,
+            port: to.port,
+            mode: to.mode,
             access: if write {
                 AccessLevel::Write
             } else {
@@ -448,6 +476,7 @@ pub fn request_access(
             },
             paths,
             private,
+            ws,
             reason: reason.to_string(),
             install: None,
         },
@@ -461,9 +490,11 @@ pub fn request_install(install: Install, reason: &str, wait: Option<Duration>) -
         NewAccessRequest {
             host: String::new(),
             port: None,
+            mode: None,
             access: AccessLevel::Read,
             paths: Vec::new(),
             private: false,
+            ws: false,
             reason: reason.to_string(),
             install: Some(install),
         },
@@ -508,11 +539,29 @@ fn file(new: NewAccessRequest, wait: Option<Duration>) -> Result<Outcome> {
 
 fn describe_filed(r: &AccessRequest) -> String {
     format!(
-        "Request #{} filed: {}.\nAsk the user to approve it on the host:  {}   (or in `luoto ui`)",
+        "Request #{} filed: {}.{}\nAsk the user to approve it on the host:  {}   (or in `luoto ui`)",
         r.id,
         what(r),
+        risks_said(r),
         approve_hint(&env_name(), r.id)
     )
+}
+
+/// The risks the user is asked to confirm before approving `r`, so the sandbox learns what a
+/// narrower request would spare them.
+fn risks_said(r: &AccessRequest) -> String {
+    let Ok(rule) = r.rule() else {
+        return String::new();
+    };
+    let risks: Vec<String> = validate_rule(&rule, RuleOrigin::Request)
+        .into_iter()
+        .filter(|i| i.severity == Severity::Risk)
+        .map(|i| i.message)
+        .collect();
+    if risks.is_empty() {
+        return String::new();
+    }
+    format!("\nThe user confirms its risks first: {}.", risks.join("; "))
 }
 
 pub fn describe(o: &Outcome) -> String {
@@ -534,12 +583,13 @@ pub fn describe(o: &Outcome) -> String {
                 }
             ),
             None => {
-                let to = match r.port {
-                    Some(port) => format!(
-                        "a tunnel to {}:{port} is open now: connect to it as it is",
-                        r.host
-                    ),
-                    None => format!("{} is reachable now", r.host),
+                let to = if r.is_tunnel() {
+                    format!(
+                        "a tunnel to {} is open now: connect to it as it is",
+                        r.target()
+                    )
+                } else {
+                    format!("{} is reachable now", r.target())
                 };
                 match &r.note {
                     Some(n) => format!("Request #{} approved: {to}; {n}.", r.id),
@@ -569,7 +619,7 @@ pub fn describe(o: &Outcome) -> String {
 fn request(
     target: Option<&str>,
     install: Option<Install>,
-    write: bool,
+    write_ws: (bool, bool),
     private: bool,
     paths: Vec<String>,
     reason: &str,
@@ -578,8 +628,7 @@ fn request(
     let o = match (install, target) {
         (Some(i), _) => request_install(i, reason, wait)?,
         (None, Some(t)) => {
-            let (host, port) = parse_target(t)?;
-            request_access(&host, port, write, private, paths, reason, wait)?
+            request_access(parse_target(t)?, write_ws, private, paths, reason, wait)?
         }
         (None, None) => {
             anyhow::bail!("name a host, --preset, --package, --tool or --var")
@@ -651,17 +700,37 @@ mod tests {
     }
 
     #[test]
-    fn a_target_with_a_port_asks_for_a_tunnel() {
-        let t = |s: &str| parse_target(s).unwrap();
+    fn a_url_on_a_port_is_inspected_and_host_port_is_a_tunnel() {
+        let t = |s: &str| {
+            let t = parse_target(s).unwrap();
+            (t.host, t.port, t.mode)
+        };
+        let tunnel = Some(Mode::Tunnel);
         assert_eq!(
             t("db.example.com:5432"),
-            ("db.example.com".into(), Some(5432))
+            ("db.example.com".into(), Some(5432), tunnel)
         );
-        assert_eq!(t("[2001:db8::1]:5432"), ("2001:db8::1".into(), Some(5432)));
-        assert_eq!(t("docs.rs"), ("docs.rs".into(), None));
-        assert_eq!(t("https://docs.rs:8443/serde"), ("docs.rs".into(), None));
-        assert_eq!(t("2001:db8::1"), ("2001:db8::1".into(), None));
+        assert_eq!(
+            t("[2001:db8::1]:5432"),
+            ("2001:db8::1".into(), Some(5432), tunnel)
+        );
+        assert_eq!(t("docs.rs"), ("docs.rs".into(), None, None));
+        assert_eq!(t("https://docs.rs/serde"), ("docs.rs".into(), None, None));
+        assert_eq!(
+            t("https://docs.rs:443/serde"),
+            ("docs.rs".into(), None, None)
+        );
+        assert_eq!(
+            t("http://[2001:db8::1]/"),
+            ("2001:db8::1".into(), None, None)
+        );
+        assert_eq!(t("2001:db8::1"), ("2001:db8::1".into(), None, None));
+        assert_eq!(
+            t("https://nexus.corp:8443/repository/npm/"),
+            ("nexus.corp".into(), Some(8443), Some(Mode::Inspect))
+        );
         for bad in [
+            "https://nexus.corp:0/",
             "db.example.com:0",
             "db.example.com:70000",
             "db.example.com:x",
@@ -676,9 +745,11 @@ mod tests {
             id: 3,
             host: "db.example.com".into(),
             port: Some(5432),
+            mode: Some(Mode::Tunnel),
             access: AccessLevel::Write,
             paths: vec![],
             private: false,
+            ws: false,
             reason: "migrations".into(),
             status: RequestStatus::Approved,
             created: Default::default(),
@@ -700,6 +771,49 @@ mod tests {
             waited: None,
         });
         assert!(said.contains("db.example.com:5432 is open now"), "{said}");
+        let inspected = AccessRequest {
+            host: "nexus.corp".into(),
+            port: Some(8443),
+            mode: Some(Mode::Inspect),
+            access: AccessLevel::Read,
+            private: false,
+            ws: true,
+            ..private
+        };
+        assert_eq!(
+            what(&inspected),
+            "read access to nexus.corp:8443, websockets too"
+        );
+    }
+
+    #[test]
+    fn a_filed_request_says_what_the_user_confirms() {
+        let r = AccessRequest {
+            id: 4,
+            host: "*.example.com".into(),
+            port: None,
+            mode: None,
+            access: AccessLevel::Read,
+            paths: vec![],
+            private: false,
+            ws: false,
+            reason: "docs".into(),
+            status: RequestStatus::Pending,
+            created: Default::default(),
+            resolved: None,
+            note: None,
+            install: None,
+        };
+        let said = describe_filed(&r);
+        assert!(
+            said.contains("confirms its risks first: `*.example.com` covers every host under"),
+            "{said}"
+        );
+        let exact = AccessRequest {
+            host: "docs.rs".into(),
+            ..r
+        };
+        assert!(!describe_filed(&exact).contains("risks"));
     }
 
     #[test]

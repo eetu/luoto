@@ -75,7 +75,8 @@ Start the project as usual in the env's terminal: `yarn dev` prints
 `http://localhost:5173/`, and clicking it opens the app in your browser. The background
 watcher (started by `up`, `shell` and editor sessions; `luoto logs watcher` shows its log)
 forwards each port a server in the env listens on, from 1024 up, to the same port on your
-machine for as long as it listens, so a sign-in's callback to `localhost` reaches the env. It
+machine for as long as it listens (at most 256 per env; never `luoto ui`'s own, 47878 and
+47879), so a sign-in's callback to `localhost` reaches the env. It
 goes through the runtime rather than a network path, so servers bound to the env's own
 localhost work too; a port already taken here is skipped (`luoto forward LOCAL:ENV` maps it
 elsewhere). `luoto status` and the env's panel in `luoto ui` list the forwarded ports as
@@ -93,9 +94,18 @@ hour if you like:
 An agent that needs a host asks with `sandbox request`; only you can approve it, on your
 machine (`luoto approve`, which asks you to accept the rule's risks like `luoto allow` does;
 `--force` accepts them without asking). You can grant less than it asked, never more:
-`--read` for a write request, `--method`, `--path` within its paths. A protocol other than
-HTTP(S) is a host and port (`sandbox request db.example.com:5432`), which approved becomes an
-uninspected tunnel, a risk you confirm. It asks the same way for a system package or a
+`--read` for a write request, `--method`, `--path` within its paths, `--host` for one host of
+a wildcard or range, `--inspect` for a tunnel the gate can read; `luoto ui` offers the same,
+with the hosts the env tried, and shows the command its choice equals. `luoto reject --note`
+tells the agent why. It may ask for what a rule of yours may be, and you confirm its risks as
+you would your own: an HTTPS service on another port
+(`sandbox request https://nexus.corp:8443/`), websocket upgrades (`--ws`), a wildcard, or a
+protocol other than HTTP(S) as a host and port (`sandbox request db.example.com:5432`), which
+approved becomes an uninspected tunnel. A host on your network or behind your VPN is reached
+only with private access, which the request asks for (`sandbox request git.corp.example
+--private`) and you grant apart from the rest: `luoto approve` asks about it (`--private`
+without a terminal), and the UI has a switch. A name that resolves to this machine is refused:
+only `host.docker.internal` names it. It asks the same way for a system package or a
 toolchain the env should keep (`sandbox request --package postgresql-client`,
 `--tool node@24`): approving installs it and writes it into the env's `[deps] system` or
 `[tools]`, so a recreated container has it too. A plain variable the code needs comes with a

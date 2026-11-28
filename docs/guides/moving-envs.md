@@ -48,8 +48,11 @@ note: luoto-dev still has `infra`: `luoto-dev rm -e infra` removes it once this 
 ```
 
 A running env is stopped for the export, after you say yes (`--yes` doesn't ask): its files
-would change under the copy. `luoto import` doesn't start the env; `luoto up -e infra` does,
-with a self-test, a new CA in the env's trust stores, and the questions a new env gets about
+would change under the copy. One set to pull when it stops
+([headless runs](headless.md#its-changes-in-your-folder)) pulls then too, and the export exits
+with 75 when that pull left something out. `luoto import` doesn't start the env;
+`luoto up -e infra` does, with a self-test, a new CA in the env's trust stores, and the
+questions a new env gets about
 credentials the config doesn't hold. The two envs can run side by side, each on its own
 subnet; remove the source build's once the release's works.
 
@@ -72,7 +75,8 @@ What only the old machine has stays there:
   `luoto import` lists every ref before it asks; `luoto up` warns about any it can't read.
 - **Folders.** An env made from a folder keeps `[workspace] dir`, and its repos' folders. Its
   workspace came in the file, so nothing is copied in from them: they are where `luoto pull`
-  writes. Where that folder doesn't exist, the env still works, but `luoto pull` needs `--to`
+  writes. Should its workspace volume be made anew (a new VM), `luoto up` asks before it
+  copies them in. Where that folder doesn't exist, the env still works, but `luoto pull` needs `--to`
   until `luoto edit` points `dir` at a folder there. An env cloned from a remote has none.
   Pull-on-stop (`dangerously_pull_on_stop`) is left out, as the folders it writes are
   another machine's to offer: `luoto pull --on-stop on` there, after one reviewed pull.

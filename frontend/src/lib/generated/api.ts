@@ -13,12 +13,19 @@ export type AccessRequest = {
   id: number;
   /** Empty for an install request. */
   host: string;
-  /** Set for a tunnel request: `access` is then write, since a tunnel's bytes go unread. */
+  /** The one port the rule covers (default: 80 and 443). */
   port?: number;
+  /**
+   * Inspected or a tunnel ([`AccessRequest::is_tunnel`]); a tunnel's `access` is write,
+   * since its bytes go unread.
+   */
+  mode?: Mode;
   access: AccessLevel;
   paths?: string[];
   /** Asks to reach the host on the user's network or VPN (a rule's `allow_private`). */
   private?: boolean;
+  /** Asks for websocket upgrades too. */
+  ws?: boolean;
   /** Written by code in the sandbox — untrusted text, display escaped. */
   reason: string;
   status: RequestStatus;
@@ -327,6 +334,10 @@ export type Narrowing = {
   read?: boolean;
   methods?: string[];
   paths?: string[];
+  /** One exact host or address of the wildcard or range asked for. */
+  host?: string;
+  /** A tunnel asked for, granted inspected: the gate reads what passes. */
+  inspect?: boolean;
 };
 
 export type NewEnv = {
@@ -506,6 +517,13 @@ export type Pulled = {
   failed: [string, string][];
 };
 
+export type Rejection = {
+  /** When the request shown was filed (see [`Decision`]). */
+  created: string;
+  /** Why, for the sandbox to read. */
+  note?: string | null;
+};
+
 /** What [`reload`] did. */
 export type Reloaded = {
   read: number;
@@ -655,10 +673,6 @@ export type SharesView = {
   shares: ShareStatus[];
   /** What the env still needs to read them: the command that gives it. */
   fix: string | null;
-};
-
-export type Shown = {
-  created: string;
 };
 
 export type Source = "gate" | "vault";
