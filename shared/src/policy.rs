@@ -59,8 +59,8 @@ pub enum Mode {
     /// TLS is intercepted; method, path, body and credentials are enforced per request.
     #[default]
     Inspect,
-    /// Opaque TCP tunnel to host:port — for certificate-pinning clients and gRPC. Only the
-    /// host is enforced.
+    /// Opaque TCP tunnel to host:port — for certificate-pinning clients and protocols other
+    /// than HTTP. Only the host is enforced.
     Tunnel,
 }
 

@@ -90,5 +90,7 @@ Each change is a format migration (`cli/src/format.rs`); the first one also brin
 
 ## Internals
 
+- HTTP/2 without TLS (h2c, gRPC's plaintext mode) inspected on the transparent intake, where
+  it now needs a tunnel rule.
 - Windows verified end to end, on podman's Hyper-V and WSL2 VMs and Docker Desktop.
 - `sandbox provision`: one call into the env instead of the 26 an unchanged `up` makes.

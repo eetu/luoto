@@ -24,7 +24,19 @@ sockets, then drops to uid 65534 (`system.rs`).
   strip on the host, inject for the injection's paths and methods, over TLS only (`creds.rs`,
   vault client) → `upstream.rs` (resolve, vet every
   address, dial) → metered response + event. `body.rs` holds the body types (capped,
-  metered, replayed prefix).
+  metered, replayed prefix). `screen.rs` keeps a credential the gate added from coming back:
+  a JSON response read whole and the echo taken out, any other screened as it streams
+  (trailers too), holding back only a frame's end of 4+ bytes that starts a credential.
+- Intercepted TLS takes HTTP/2 first (ALPN `h2, http/1.1`): `serve_http2` runs each stream as
+  one request with an `Activity` of its own, so its idle limits and the rule's `idle` are its
+  own; the connection waits while a stream is open, unless one sits past its limit waiting for
+  the client to make room (`ConnCtx::stuck_stream`: hyper reads a body, where the stream's own
+  limit is kept, only once there is room). Request trailers lose the client's credentials as
+  its headers do. Upstream offers HTTP/2 only for a client
+  that speaks it: one HTTP/2 connection shared by the client's streams, else at most
+  `H1_UPSTREAMS` HTTP/1.1 ones (`handler::Upstreams`). A gRPC request (`application/grpc*`)
+  gets `tunnel_idle`, and a refusal or failure as `grpc-status` (`respond::grpc`). A client
+  offering no protocol the gate speaks is a `protocol_not_spoken` event; h2c is not served.
 - `redirects.rs` keeps the permits a redirect opens: a GET or HEAD whose response, where
   `Policy::redirect_targets` names hosts, redirects to one of them lets that exact URL (scheme,
   host, port, canonical path, the query compared pair by pair with each piece decoded)

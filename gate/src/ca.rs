@@ -82,8 +82,8 @@ impl Ca {
             .with_no_client_auth()
             .with_single_cert(vec![CertificateDer::from(leaf.der().to_vec())], key_der)
             .context("server config")?;
-        // HTTP/1.1 only towards the sandbox: one framing to parse and police.
-        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        // HTTP/2 first, as servers prefer it: rustls takes the first of these the client offers.
+        cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         Ok(cfg)
     }
 }

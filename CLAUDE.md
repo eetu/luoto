@@ -318,8 +318,8 @@ to one of these changes the test named for it, on purpose, and this list with it
 - `just types` regenerates the UI's API types (`frontend/src/lib/generated/api.ts`) from the
   Rust types `ui/api.rs` sends and takes (`cli/tests/api_types.rs`); `cargo test` fails while
   the committed file differs, and `yarn typecheck` checks the UI and the e2e fixtures against it.
-- `just test` (unit), `just it` (integration), `just e2e` (pull-on-stop against a runtime:
-  one env made and removed in the `luoto-dev` instance), `just test-ui` (Playwright),
+- `just test` (unit), `just it` (integration), `just e2e` (pull-on-stop and gRPC against a
+  runtime: an env each, made and removed in the `luoto-dev` instance), `just test-ui` (Playwright),
   `just lint`, `just format`, `just shots` (README screenshots; needs a runtime).
 - `just review-ui` renders the UI's corner cases (`frontend/e2e/review/scenarios.ts`) under
   a matrix of widths, themes, zoom and locale, fails on a UX problem the probes find that

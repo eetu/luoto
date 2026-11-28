@@ -23,8 +23,8 @@ tokio = { version = "1", features = ["full"] }
 bytes = "1"
 futures-util = "0.3"
 
-hyper = { version = "1", features = ["http1", "server", "client"] }
-hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
+hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "http2"] }
 http-body-util = "0.1"
 http = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

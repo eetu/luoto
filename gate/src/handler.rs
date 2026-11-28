@@ -3,34 +3,43 @@
 //! credentials, forward, meter, record.
 
 use std::convert::Infallible;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use http::header::{CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING, UPGRADE};
-use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, Version};
+use http::header::{
+    CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, TE, TRANSFER_ENCODING, UPGRADE,
+};
+use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, Uri, Version};
 use http_body_util::BodyExt;
-use hyper::body::Incoming;
-use hyper::client::conn::http1::SendRequest;
-use hyper::server::conn::http1;
+use hyper::body::{Frame, Incoming};
+use hyper::client::conn::{http1 as client1, http2 as client2};
+use hyper::server::conn::{http1, http2};
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use luoto_shared::creds::{AUTH_HEADERS, AUTH_QUERY_PARAMS, CredentialError, strip_query};
 use luoto_shared::events::{Event, EventKind, Intake, Verdict, clip_path};
 use luoto_shared::host::{canonical_path, split_authority};
 use luoto_shared::policy::{Decision, DenyReason, RequestInfo};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::body::{Body, Capped, Metered, boxed, is_too_large, watched};
+use crate::body::{Body, Capped, Metered, boxed, finally, idle_limited, is_too_large, watched};
 use crate::creds::apply;
 use crate::guards;
 use crate::imds;
-use crate::limits::{self, Activity, HEAD_GRACE, Limits, Slot, Watched};
+use crate::limits::{
+    self, Activity, H1_UPSTREAMS, HEAD_GRACE, Limits, MAX_STREAMS, STREAMS_OPEN, Slot, Watched,
+};
 use crate::redirects::Url;
 use crate::respond;
+use crate::screen::screen;
 use crate::state::State;
-use crate::upstream::{DialError, Reach, dial, http1_sender, test_server};
+use crate::upstream::{
+    CONN_WINDOW, DialError, MAX_HEADER_LIST, Reach, SEND_BUF, STREAM_WINDOW, dial, http1_sender,
+    http2_sender, test_server,
+};
 
 #[derive(Clone, Debug)]
 pub struct Target {
@@ -63,17 +72,15 @@ impl Target {
     }
 }
 
-/// A kept-alive upstream connection, the destination it is for and what its dial could
-/// reach (a request reuses it only where its own decision allows as much).
-type Upstream = (String, u16, bool, Reach, SendRequest<Body>);
-
 /// Per client connection: how it arrived, its place under the connection cap, its progress
-/// and a reusable upstream connection.
+/// and its upstream connections. Each HTTP/2 stream has one of its own ([`ConnCtx::stream`]).
 pub struct ConnCtx {
     pub intake: Intake,
     slot: Slot,
     pub activity: Arc<Activity>,
-    upstream: tokio::sync::Mutex<Option<Upstream>>,
+    upstreams: Arc<Upstreams>,
+    /// An HTTP/2 connection's open streams, each until its response ends.
+    streams: Mutex<Vec<Weak<Activity>>>,
 }
 
 impl ConnCtx {
@@ -82,7 +89,42 @@ impl ConnCtx {
             intake,
             slot,
             activity: Activity::new(),
-            upstream: tokio::sync::Mutex::new(None),
+            upstreams: Arc::new(Upstreams::new()),
+            streams: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// For one HTTP/2 stream: the connection's place, intake and upstream connections, and
+    /// progress of its own.
+    fn stream(&self) -> Self {
+        let activity = Activity::new();
+        lock(&self.streams).push(Arc::downgrade(&activity));
+        ConnCtx {
+            intake: self.intake,
+            slot: self.slot.clone(),
+            activity,
+            upstreams: self.upstreams.clone(),
+            streams: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Resolves once an open stream has sat still past its idle limit without being ended:
+    /// its response waits on room the client doesn't make, and hyper reads a body, where that
+    /// limit is kept, only once there is room. The connection goes, as an HTTP/1.1 one that
+    /// stops reading does.
+    async fn stuck_stream(&self, idle: Duration) {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tick.tick().await;
+            let mut streams = lock(&self.streams);
+            streams.retain(|s| s.strong_count() > 0);
+            let stuck = streams
+                .iter()
+                .filter_map(Weak::upgrade)
+                .any(|s| !s.is_busy() && s.still() >= s.idle_or(idle) + HEAD_GRACE);
+            if stuck {
+                return;
+            }
         }
     }
 
@@ -91,28 +133,181 @@ impl ConnCtx {
         self.slot.clone()
     }
 
+    /// A connection to send a request for `t` on: HTTP/2 where the client speaks it and the
+    /// server takes it, shared by the client's streams; otherwise HTTP/1.1, one request at a
+    /// time, at most `H1_UPSTREAMS` of them in use, kept between requests.
     async fn sender(
         &self,
         state: &State,
         t: &Target,
         reach: Reach,
-    ) -> Result<SendRequest<Body>, DialError> {
-        let cached = self.upstream.lock().await.take();
-        if let Some((h, p, tls, had, mut s)) = cached
-            && h == t.host
-            && p == t.port
-            && tls == t.tls
-            && had.serves(reach)
-            && s.ready().await.is_ok()
-        {
-            return Ok(s);
+        h2: bool,
+    ) -> Result<Sender, DialError> {
+        let up = &self.upstreams;
+        let dest = Dest::of(t);
+        let h2 = h2 && t.tls;
+        if h2 && !up.h1_only(&dest) {
+            if let Some(s) = up.kept_h2(&dest, reach) {
+                return Ok(Sender::H2(s));
+            }
+            // The first streams wait for one dial and share what it makes.
+            let dialing = up.dialing.lock().await;
+            if let Some(s) = up.kept_h2(&dest, reach) {
+                return Ok(Sender::H2(s));
+            }
+            if !up.h1_only(&dest) {
+                let dialed = dial(state, &t.host, t.port, t.tls, reach, true).await?;
+                if dialed.h2 {
+                    let sender = http2_sender(dialed.io).await?;
+                    *lock(&up.h2) = Some(Kept {
+                        dest,
+                        reach,
+                        sender: sender.clone(),
+                    });
+                    return Ok(Sender::H2(sender));
+                }
+                *lock(&up.h1_only) = Some(dest);
+                drop(dialing);
+                let permit = up.in_use().await;
+                return Ok(Sender::H1 {
+                    sender: http1_sender(dialed.io).await?,
+                    permit,
+                });
+            }
         }
-        let io = dial(state, &t.host, t.port, t.tls, reach).await?;
-        http1_sender(io).await
+        let permit = up.in_use().await;
+        while let Some(mut kept) = up.take_h1(&dest, reach) {
+            if kept.sender.ready().await.is_ok() {
+                return Ok(Sender::H1 {
+                    sender: kept.sender,
+                    permit,
+                });
+            }
+        }
+        up.make_room();
+        let dialed = dial(state, &t.host, t.port, t.tls, reach, false).await?;
+        Ok(Sender::H1 {
+            sender: http1_sender(dialed.io).await?,
+            permit,
+        })
+    }
+}
+
+/// Where an upstream connection goes.
+#[derive(Clone, PartialEq)]
+struct Dest {
+    host: String,
+    port: u16,
+    tls: bool,
+}
+
+impl Dest {
+    fn of(t: &Target) -> Self {
+        Dest {
+            host: t.host.clone(),
+            port: t.port,
+            tls: t.tls,
+        }
+    }
+}
+
+/// An upstream connection kept for later requests, and what its dial could reach: a request
+/// reuses it only where its own decision allows as much.
+struct Kept<S> {
+    dest: Dest,
+    reach: Reach,
+    sender: S,
+}
+
+impl<S> Kept<S> {
+    fn fits(&self, dest: &Dest, reach: Reach) -> bool {
+        self.dest == *dest && self.reach.serves(reach)
+    }
+}
+
+/// A client connection's upstream connections.
+struct Upstreams {
+    h2: Mutex<Option<Kept<client2::SendRequest<Body>>>>,
+    /// The destination that last answered an offer of HTTP/2 with HTTP/1.1.
+    h1_only: Mutex<Option<Dest>>,
+    /// HTTP/1.1 connections between requests; with those in use, at most `H1_UPSTREAMS`.
+    h1: Mutex<Vec<Kept<client1::SendRequest<Body>>>>,
+    in_use: Arc<Semaphore>,
+    dialing: tokio::sync::Mutex<()>,
+}
+
+/// A connection to send one request on; an HTTP/1.1 one holds its place among those in use.
+enum Sender {
+    H1 {
+        sender: client1::SendRequest<Body>,
+        permit: OwnedSemaphorePermit,
+    },
+    H2(client2::SendRequest<Body>),
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl Upstreams {
+    fn new() -> Self {
+        Upstreams {
+            h2: Mutex::new(None),
+            h1_only: Mutex::new(None),
+            h1: Mutex::new(Vec::new()),
+            in_use: Arc::new(Semaphore::new(H1_UPSTREAMS)),
+            dialing: tokio::sync::Mutex::new(()),
+        }
     }
 
-    async fn put_back(&self, t: &Target, reach: Reach, s: SendRequest<Body>) {
-        *self.upstream.lock().await = Some((t.host.clone(), t.port, t.tls, reach, s));
+    fn h1_only(&self, dest: &Dest) -> bool {
+        lock(&self.h1_only).as_ref() == Some(dest)
+    }
+
+    fn kept_h2(&self, dest: &Dest, reach: Reach) -> Option<client2::SendRequest<Body>> {
+        lock(&self.h2)
+            .as_ref()
+            .filter(|k| k.fits(dest, reach) && !k.sender.is_closed())
+            .map(|k| k.sender.clone())
+    }
+
+    async fn in_use(&self) -> OwnedSemaphorePermit {
+        self.in_use
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the semaphore stays open")
+    }
+
+    fn take_h1(&self, dest: &Dest, reach: Reach) -> Option<Kept<client1::SendRequest<Body>>> {
+        let mut kept = lock(&self.h1);
+        let i = kept.iter().position(|k| k.fits(dest, reach))?;
+        Some(kept.remove(i))
+    }
+
+    /// Close kept connections, oldest first, until one more fits under `H1_UPSTREAMS`.
+    fn make_room(&self) {
+        let in_use = H1_UPSTREAMS - self.in_use.available_permits();
+        let mut kept = lock(&self.h1);
+        while !kept.is_empty() && kept.len() + in_use > H1_UPSTREAMS {
+            kept.remove(0);
+        }
+    }
+
+    /// `sender` is free again; its place among those in use goes once it is kept.
+    fn give_back(
+        &self,
+        dest: Dest,
+        reach: Reach,
+        sender: client1::SendRequest<Body>,
+        permit: OwnedSemaphorePermit,
+    ) {
+        lock(&self.h1).push(Kept {
+            dest,
+            reach,
+            sender,
+        });
+        drop(permit);
     }
 }
 
@@ -147,6 +342,71 @@ where
         _ = conn => {}
         () = activity.stalled(limits.idle, limits.response_head + HEAD_GRACE) => {}
     }
+}
+
+/// Serve HTTP/2 from the sandbox on `io`, every stream a request to `target` with limits of
+/// its own, as an HTTP/1.1 connection has, so a quiet stream or a denial ends no other. The
+/// connection closes once no byte has moved for `limits.idle` with no stream open.
+pub async fn serve_http2<IO>(io: IO, state: Arc<State>, ctx: Arc<ConnCtx>, target: Target)
+where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let limits = state.cfg.limits;
+    let activity = ctx.activity.clone();
+    let watched = Watched::new(io, activity.clone());
+    let streams = ctx.clone();
+    let service = service_fn(move |req| {
+        let (state, ctx, target) = (state.clone(), ctx.clone(), target.clone());
+        async move { Ok::<_, Infallible>(stream(state, &ctx, req, target).await) }
+    });
+    let conn = http2::Builder::new(TokioExecutor::new())
+        .timer(TokioTimer::new())
+        .max_concurrent_streams(MAX_STREAMS)
+        .max_header_list_size(MAX_HEADER_LIST)
+        .initial_stream_window_size(STREAM_WINDOW)
+        .initial_connection_window_size(CONN_WINDOW)
+        .max_send_buf_size(SEND_BUF)
+        .serve_connection(TokioIo::new(watched), service);
+    tokio::select! {
+        _ = conn => {}
+        () = activity.stalled(limits.idle, STREAMS_OPEN) => {}
+        () = streams.stuck_stream(limits.idle) => {}
+    }
+}
+
+/// One HTTP/2 stream: the connection counts it open until its response ends, and while it is
+/// handled the response-head limit is the backstop, as for an HTTP/1.1 connection.
+async fn stream(
+    state: Arc<State>,
+    conn: &ConnCtx,
+    req: Request<Incoming>,
+    target: Target,
+) -> Response<Body> {
+    let limits = state.cfg.limits;
+    let open = conn.activity.busy();
+    // The connection's idle limit counts from the end of its last stream: its last frames are
+    // still to be written then.
+    let connection = conn.activity.clone();
+    let ctx = Arc::new(conn.stream());
+    let busy = ctx.activity.busy();
+    let resp = tokio::select! {
+        r = handle(state, ctx.clone(), req, target) => match r {
+            Ok(r) => r,
+            Err(never) => match never {},
+        },
+        () = ctx.activity.stalled(limits.idle, limits.response_head + HEAD_GRACE) => {
+            respond::plain(StatusCode::GATEWAY_TIMEOUT, "luoto gate: no response in time\n")
+        }
+    };
+    drop(busy);
+    // Open, for the connection's `stuck_stream`, until the response ends.
+    let progress = ctx.activity.clone();
+    resp.map(|body| {
+        finally(body, move |_| {
+            connection.touch();
+            drop((open, progress));
+        })
+    })
 }
 
 const HOP_BY_HOP: &[&str] = &[
@@ -238,20 +498,30 @@ pub async fn handle(
     Ok(handle_inner(state, ctx, req, target).await)
 }
 
-/// The destination is decided once, by the caller; the request may not disagree.
-pub fn host_agrees(headers: &HeaderMap, target: &Target) -> bool {
+/// The destination is decided once, by the caller; the request may not disagree, in `Host`
+/// or in its URI's authority (HTTP/2's `:authority`, an absolute-form target).
+pub fn host_agrees(headers: &HeaderMap, uri: &Uri, target: &Target) -> bool {
+    let agrees = |s: &str| {
+        split_authority(s)
+            .is_ok_and(|(h, p)| h == target.host && p.is_none_or(|p| p == target.port))
+    };
     let mut hosts = headers.get_all(HOST).iter();
-    match (hosts.next(), hosts.next()) {
+    let header = match (hosts.next(), hosts.next()) {
         (None, _) => true,
-        (Some(h), None) => h
-            .to_str()
-            .ok()
-            .and_then(|s| split_authority(s).ok())
-            .is_some_and(|(hh, hp)| hh == target.host && hp.is_none_or(|p| p == target.port)),
+        (Some(h), None) => h.to_str().is_ok_and(agrees),
         (Some(_), Some(_)) => false,
-    }
+    };
+    header && uri.authority().is_none_or(|a| agrees(a.as_str()))
 }
 
+/// A gRPC request: its client reads the outcome from `grpc-status`, not the HTTP status.
+fn is_grpc(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .is_some_and(|v| v.as_bytes().starts_with(b"application/grpc"))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn denied(
     state: &State,
     mut ev: Event,
@@ -260,22 +530,43 @@ fn denied(
     host: &str,
     path: &str,
     reason: DenyReason,
+    grpc: bool,
 ) -> Response<Body> {
     ev.verdict = Some(Verdict::Deny);
     ev.reason = Some(reason.code().to_string());
     ev.message = Some(reason.message(host));
-    let resp = respond::deny(&state.cfg.env, method, url, host, path, &reason);
+    let env = &state.cfg.env;
+    let resp = if grpc {
+        respond::deny_grpc(env, method, url, host, path, &reason)
+    } else {
+        respond::deny(env, method, url, host, path, &reason)
+    };
     ev.status = Some(resp.status().as_u16());
     state.events.emit(ev);
     resp
 }
 
-fn failed(state: &State, mut ev: Event, status: StatusCode, msg: String) -> Response<Body> {
+fn failed(
+    state: &State,
+    mut ev: Event,
+    status: StatusCode,
+    msg: String,
+    grpc: bool,
+) -> Response<Body> {
     ev.verdict = Some(Verdict::Allow);
     ev.status = Some(status.as_u16());
     ev.message = Some(msg.clone());
     state.events.emit(ev);
-    respond::plain(status, format!("luoto gate: {msg}\n"))
+    let msg = format!("luoto gate: {msg}");
+    if grpc {
+        let code = if status == StatusCode::GATEWAY_TIMEOUT {
+            respond::GRPC_DEADLINE_EXCEEDED
+        } else {
+            respond::GRPC_UNAVAILABLE
+        };
+        return respond::grpc(code, &msg);
+    }
+    respond::plain(status, format!("{msg}\n"))
 }
 
 async fn handle_inner(
@@ -308,14 +599,23 @@ async fn handle_inner(
         path: Some(clip_path(&path)),
         ..Default::default()
     };
+    let client_h2 = req.version() == Version::HTTP_2;
+    let grpc = is_grpc(req.headers());
     let deny = |ev: Event, reason: DenyReason| {
-        denied(&state, ev, &method, &url, &target.host, &path, reason)
+        denied(&state, ev, &method, &url, &target.host, &path, reason, grpc)
     };
+    let fail = |ev: Event, status: StatusCode, msg: String| failed(&state, ev, status, msg, grpc);
     if let Some(reason) = refused {
         return deny(ev, reason);
     }
+    if client_h2 && method == "CONNECT" {
+        let reason = DenyReason::Guard {
+            reason: "CONNECT inside an HTTP/2 connection is not allowed".into(),
+        };
+        return deny(ev, reason);
+    }
 
-    if !host_agrees(req.headers(), &target) {
+    if !host_agrees(req.headers(), req.uri(), &target) {
         return deny(ev, DenyReason::InvalidHost);
     }
     if req.headers().contains_key(TRANSFER_ENCODING) && req.headers().contains_key(CONTENT_LENGTH) {
@@ -373,7 +673,11 @@ async fn handle_inner(
             return deny(ev, reason);
         }
     };
-    // Every wait on this connection follows the rule until the next request is decided.
+    // A gRPC stream may sit quiet as long as a tunnel, unless the rule says otherwise.
+    let lim = state.cfg.limits;
+    let rule_idle = rule_idle.or(grpc.then_some(lim.tunnel_idle));
+    // Every wait on this connection (an HTTP/2 stream: on this stream) follows the rule until
+    // the next request is decided.
     ctx.activity.set_rule_idle(rule_idle);
     let mut ev = ev;
     ev.rule = Some(rule.clone());
@@ -383,12 +687,21 @@ async fn handle_inner(
 
     // From here `parts` is what upstream gets: guards judge it, and credentials go in last, so
     // neither a header the client lists in `Connection` nor its own query can displace them.
+    // `te: trailers` stays: gRPC servers refuse a request without it.
+    let trailers = parts
+        .headers
+        .get(TE)
+        .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"trailers"));
     strip_hop_by_hop(&mut parts.headers, websocket);
+    if trailers {
+        parts
+            .headers
+            .insert(TE, HeaderValue::from_static("trailers"));
+    }
     parts.uri = match format!("{path}{query}").parse() {
         Ok(u) => u,
         Err(_) => return deny(ev, DenyReason::InvalidHost),
     };
-    parts.version = Version::HTTP_11;
     if let Ok(v) = HeaderValue::from_str(&target.authority()) {
         parts.headers.insert(HOST, v);
     }
@@ -448,10 +761,23 @@ async fn handle_inner(
         // The client's own credentials go whether or not the gate adds one: a method outside
         // a credential's goes without any.
         let (headers, params) = policy.credential_names(&target.host);
-        strip_headers(
-            &mut parts.headers,
-            AUTH_HEADERS.iter().copied().chain(headers),
-        );
+        let names: Vec<String> = AUTH_HEADERS
+            .iter()
+            .copied()
+            .chain(headers)
+            .map(str::to_string)
+            .collect();
+        strip_headers(&mut parts.headers, names.iter().map(String::as_str));
+        // And from a request's trailers, which a server may read as headers.
+        body = body
+            .map_frame(move |frame| match frame.into_trailers() {
+                Ok(mut trailers) => {
+                    strip_headers(&mut trailers, names.iter().map(String::as_str));
+                    Frame::trailers(trailers)
+                }
+                Err(frame) => frame,
+            })
+            .boxed();
         let params: Vec<&str> = AUTH_QUERY_PARAMS.iter().copied().chain(params).collect();
         if let Some(query) = parts.uri.query().and_then(|q| strip_query(q, &params)) {
             let path = parts.uri.path();
@@ -489,14 +815,14 @@ async fn handle_inner(
                     }
                     Err(CredentialError::Failed(m)) => {
                         let msg = format!("vault unavailable: {m}");
-                        return failed(&state, ev, StatusCode::BAD_GATEWAY, msg);
+                        return fail(ev, StatusCode::BAD_GATEWAY, msg);
                     }
                 };
                 match apply(&mut parts, inj, &secret) {
                     Ok(forms) => placed.extend(forms),
                     Err(e) => {
                         let msg = format!("credential `{}`: {e}", inj.binding);
-                        return failed(&state, ev, StatusCode::BAD_GATEWAY, msg);
+                        return fail(ev, StatusCode::BAD_GATEWAY, msg);
                     }
                 }
                 used.push(inj.binding.clone());
@@ -519,7 +845,7 @@ async fn handle_inner(
     }
     let up_bytes = Arc::new(AtomicU64::new(0));
     let counter = up_bytes.clone();
-    body = Metered::new(body, move |n| counter.store(n, Ordering::Relaxed)).boxed();
+    body = Metered::new(body, move |n, _| counter.store(n, Ordering::Relaxed)).boxed();
     // A long upload is progress, so the response-head limit counts from its last byte.
     body = watched(body, ctx.activity.clone());
 
@@ -527,19 +853,38 @@ async fn handle_inner(
         private: allow_private,
         private_only: plain_to_this_machine,
     };
-    let mut sender = match ctx.sender(&state, &target, reach).await {
+    let mut sender = match ctx.sender(&state, &target, reach, client_h2).await {
         Ok(s) => s,
         Err(DialError::Denied(reason)) => return deny(ev, reason),
-        Err(DialError::Failed(msg)) => return failed(&state, ev, StatusCode::BAD_GATEWAY, msg),
+        Err(DialError::Failed(msg)) => return fail(ev, StatusCode::BAD_GATEWAY, msg),
     };
-    let lim = state.cfg.limits;
+    if let Sender::H2(_) = sender {
+        // HTTP/2 takes the destination from the URI (`:authority`), never from `Host`.
+        parts.version = Version::HTTP_2;
+        parts.headers.remove(HOST);
+        let pq = parts.uri.path_and_query().map_or("/", |p| p.as_str());
+        parts.uri = match absolute(&target, pq) {
+            Some(u) => u,
+            None => return deny(ev, DenyReason::InvalidHost),
+        };
+    } else {
+        parts.version = Version::HTTP_11;
+        join_cookies(&mut parts.headers);
+    }
     let head = lim.response_head;
+    let request = Request::from_parts(parts, body);
+    let sending = async {
+        match &mut sender {
+            Sender::H1 { sender, .. } => sender.send_request(request).await,
+            Sender::H2(sender) => sender.send_request(request).await,
+        }
+    };
     let sent = tokio::select! {
-        r = sender.send_request(Request::from_parts(parts, body)) => r,
+        r = sending => r,
         () = ctx.activity.stalled(head, head) => {
             let waited = head.max(ctx.activity.idle_or(Duration::ZERO));
             let msg = format!("{} sent no response within {}", target.host, limits::spell(waited));
-            return failed(&state, ev, StatusCode::GATEWAY_TIMEOUT, msg);
+            return fail(ev, StatusCode::GATEWAY_TIMEOUT, msg);
         }
     };
     ctx.activity.touch();
@@ -551,16 +896,23 @@ async fn handle_inner(
             } else {
                 format!("upstream request failed: {e}")
             };
-            return failed(&state, ev, StatusCode::BAD_GATEWAY, msg);
+            return fail(ev, StatusCode::BAD_GATEWAY, msg);
         }
     };
     let status = resp.status();
+    let h1 = match sender {
+        Sender::H1 { sender, permit } => Some((sender, permit)),
+        Sender::H2(_) => None,
+    };
+    let mut give_back = None;
     if status == StatusCode::SWITCHING_PROTOCOLS {
         if let Some(client_upgrade) = client_upgrade {
             let server_upgrade = hyper::upgrade::on(&mut resp);
             let slot = ctx.slot();
+            // The upgraded connection keeps its place among those in use.
+            let permit = h1.map(|(_, permit)| permit);
             tokio::spawn(async move {
-                let _slot = slot;
+                let _held = (slot, permit);
                 if let (Ok(c), Ok(s)) = (client_upgrade.await, server_upgrade.await) {
                     let mut s = TokioIo::new(s);
                     let idle = rule_idle.unwrap_or(lim.tunnel_idle);
@@ -569,10 +921,23 @@ async fn handle_inner(
             });
         }
     } else {
-        ctx.put_back(&target, reach, sender).await;
+        give_back = h1;
     }
 
-    let (mut rparts, rbody) = boxed_parts(resp);
+    let (mut rparts, mut rbody) = boxed_parts(resp);
+    if !client_h2 {
+        rparts.version = Version::HTTP_11;
+    }
+    // An HTTP/1.1 connection carries the next request once this response has been read to
+    // its end; one dropped part read is closed.
+    if let Some((sender, permit)) = give_back {
+        let (up, dest) = (ctx.upstreams.clone(), Dest::of(&target));
+        rbody = finally(rbody, move |ended| {
+            if ended {
+                up.give_back(dest, reach, sender, permit);
+            }
+        });
+    }
     if status.is_redirection() && permit.is_none() {
         let to = policy.redirect_targets(&method, &target.host, &path);
         let location = rparts.headers.get(http::header::LOCATION);
@@ -596,19 +961,25 @@ async fn handle_inner(
                 r = screen(&mut rparts.headers, rbody, &placed) => r,
                 () = ctx.activity.stalled(idle, idle) => {
                     let msg = format!("{} stopped sending for {}", target.host, limits::spell(idle));
-                    return failed(&state, ev, StatusCode::GATEWAY_TIMEOUT, msg);
+                    return fail(ev, StatusCode::GATEWAY_TIMEOUT, msg);
                 }
             };
             rbody = match screened {
                 Ok(b) => b,
-                Err(reason) => return failed(&state, ev, StatusCode::BAD_GATEWAY, reason),
+                Err(reason) => return fail(ev, StatusCode::BAD_GATEWAY, reason),
             };
         }
+    }
+    if client_h2 {
+        rbody = idle_limited(rbody, ctx.activity.clone(), ctx.activity.idle_or(lim.idle));
     }
     ev.verdict = Some(Verdict::Allow);
     ev.status = Some(status.as_u16());
     let state2 = state.clone();
-    let metered = Metered::new(rbody, move |down| {
+    let metered = Metered::new(rbody, move |down, error| {
+        if error.is_some() {
+            ev.message = error;
+        }
         ev.bytes_down = Some(down);
         ev.bytes_up = Some(up_bytes.load(Ordering::Relaxed));
         ev.ms = Some(started.elapsed().as_millis() as u64);
@@ -622,86 +993,29 @@ fn boxed_parts(resp: Response<Incoming>) -> (http::response::Parts, Body) {
     (parts, boxed(body))
 }
 
-/// The most of a response's start [`screen`] reads: a JSON one whole up to this, so an echo
-/// in it can be taken out (LFS batch answers), any other this far.
-const SCREEN_JSON: usize = 1 << 20;
-const SCREEN_HEAD: usize = 64 << 10;
-
-/// Keep a credential the gate put on a request from coming back in its response: refused in a
-/// header; taken out of a JSON body that echoes it (Gitea and GitLab copy the request's
-/// `Authorization` into their LFS batch answer, for the client to send on, and the gate adds
-/// it to that request itself); anything else that carries it is refused.
-async fn screen(
-    headers: &mut HeaderMap,
-    mut body: Body,
-    placed: &[String],
-) -> Result<Body, String> {
-    let carries = |b: &[u8]| {
-        placed
-            .iter()
-            .any(|p| b.windows(p.len()).any(|w| w == p.as_bytes()))
-    };
-    if headers.values().any(|v| carries(v.as_bytes())) {
-        return Err("the response carried the request's credential back".into());
-    }
-    let json = headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|t| t.contains("json"));
-    let limit = if json { SCREEN_JSON } else { SCREEN_HEAD };
-    let mut head = bytes::BytesMut::new();
-    let mut ended = false;
-    while head.len() < limit {
-        match body.frame().await {
-            Some(Ok(frame)) => {
-                if let Ok(data) = frame.into_data() {
-                    head.extend_from_slice(&data);
-                }
-            }
-            Some(Err(e)) => return Err(format!("reading the response: {e}")),
-            None => {
-                ended = true;
-                break;
-            }
-        }
-    }
-    if !carries(&head) {
-        return Ok(crate::body::prefixed(head.freeze(), body));
-    }
-    if json
-        && ended
-        && let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(&head)
-    {
-        redact(&mut v, &carries);
-        let out = serde_json::to_vec(&v).map_err(|e| e.to_string())?;
-        if !carries(&out) {
-            headers.insert(CONTENT_LENGTH, HeaderValue::from(out.len()));
-            return Ok(crate::body::full(out));
-        }
-    }
-    Err("the response carried the request's credential back".into())
+/// `pq` at `target` in absolute form, as HTTP/2 names a request's destination; built from its
+/// parts, so the path can't run into the authority (`OPTIONS *`).
+fn absolute(target: &Target, pq: &str) -> Option<Uri> {
+    Uri::builder()
+        .scheme("https")
+        .authority(target.authority())
+        .path_and_query(pq)
+        .build()
+        .ok()
 }
 
-/// Drop every object member whose string value `carries` the credential, and blank such
-/// strings in arrays.
-fn redact(v: &mut serde_json::Value, carries: &dyn Fn(&[u8]) -> bool) {
-    match v {
-        serde_json::Value::Object(m) => {
-            m.retain(|_, x| !x.as_str().is_some_and(|s| carries(s.as_bytes())));
-            for x in m.values_mut() {
-                redact(x, carries);
-            }
-        }
-        serde_json::Value::Array(a) => {
-            for x in a.iter_mut() {
-                if x.as_str().is_some_and(|s| carries(s.as_bytes())) {
-                    *x = serde_json::Value::String(String::new());
-                } else {
-                    redact(x, carries);
-                }
-            }
-        }
-        _ => {}
+/// HTTP/2 may send each cookie in a field of its own; HTTP/1.1 takes them in one.
+fn join_cookies(headers: &mut HeaderMap) {
+    let cookies: Vec<&[u8]> = headers
+        .get_all(COOKIE)
+        .iter()
+        .map(HeaderValue::as_bytes)
+        .collect();
+    if cookies.len() < 2 {
+        return;
+    }
+    if let Ok(v) = HeaderValue::from_bytes(&cookies.join(&b"; "[..])) {
+        headers.insert(COOKIE, v);
     }
 }
 
@@ -745,26 +1059,67 @@ mod tests {
     }
 
     #[test]
-    fn an_echoed_credential_is_taken_out_of_json() {
-        // Gitea's LFS batch answer, with the request's Authorization copied in.
-        let mut v: serde_json::Value = serde_json::from_str(
-            r#"{"objects":[{"oid":"ab","actions":{"upload":{"href":"https://f/x.git/info/lfs/objects/ab",
-            "header":{"Authorization":"Basic ZGV2OnNlY3JldHRva2Vu","Accept":"x"}}}}],
-            "list":["Basic ZGV2OnNlY3JldHRva2Vu","ok"]}"#,
-        )
-        .unwrap();
-        let placed = [
-            "secrettoken".to_string(),
-            "ZGV2OnNlY3JldHRva2Vu".to_string(),
-        ];
-        let carries = |b: &[u8]| {
-            placed
-                .iter()
-                .any(|p| b.windows(p.len()).any(|w| w == p.as_bytes()))
+    fn the_request_names_the_destination_only_as_decided() {
+        let target = Target {
+            host: "api.example".into(),
+            port: 443,
+            tls: true,
         };
-        redact(&mut v, &carries);
-        let out = serde_json::to_string(&v).unwrap();
-        assert!(!carries(out.as_bytes()), "{out}");
-        assert!(out.contains("\"Accept\":\"x\"") && out.contains("objects/ab"));
+        let agrees = |host: Option<&'static str>, uri: &str| {
+            let mut h = HeaderMap::new();
+            if let Some(host) = host {
+                h.insert(HOST, HeaderValue::from_static(host));
+            }
+            host_agrees(&h, &uri.parse().unwrap(), &target)
+        };
+        // HTTP/2: `:authority`, no `Host`.
+        assert!(agrees(None, "https://api.example/v1"));
+        assert!(agrees(None, "https://api.example:443/v1"));
+        assert!(!agrees(None, "https://other.example/v1"));
+        assert!(!agrees(Some("api.example"), "https://other.example/v1"));
+        assert!(!agrees(Some("other.example"), "https://api.example/v1"));
+        // HTTP/1.1 in origin form.
+        assert!(agrees(Some("api.example"), "/v1"));
+        assert!(agrees(None, "/v1"));
+        assert!(!agrees(Some("api.example:8443"), "/v1"));
+    }
+
+    #[test]
+    fn an_http2_request_names_the_decided_destination_whatever_its_path() {
+        let target = Target {
+            host: "api.example".into(),
+            port: 8443,
+            tls: true,
+        };
+        let uri = |pq| absolute(&target, pq).map(|u| u.to_string());
+        assert_eq!(
+            uri("/v1/a?b=c").as_deref(),
+            Some("https://api.example:8443/v1/a?b=c")
+        );
+        let star = absolute(&target, "*").unwrap();
+        assert_eq!(star.authority().unwrap(), "api.example:8443");
+        assert_eq!(star.path(), "*");
+    }
+
+    #[test]
+    fn cookies_an_http2_client_split_go_on_in_one_field() {
+        let mut h = HeaderMap::new();
+        h.append(COOKIE, HeaderValue::from_static("a=1"));
+        h.append(COOKIE, HeaderValue::from_static("b=2"));
+        join_cookies(&mut h);
+        let all: Vec<&HeaderValue> = h.get_all(COOKIE).iter().collect();
+        assert_eq!(all, [&HeaderValue::from_static("a=1; b=2")]);
+    }
+
+    #[test]
+    fn grpc_is_told_by_its_content_type() {
+        let ct = |v: &'static str| {
+            let mut h = HeaderMap::new();
+            h.insert(CONTENT_TYPE, HeaderValue::from_static(v));
+            is_grpc(&h)
+        };
+        assert!(ct("application/grpc") && ct("application/grpc+proto"));
+        assert!(ct("application/grpc-web+proto"));
+        assert!(!ct("application/json") && !is_grpc(&HeaderMap::new()));
     }
 }

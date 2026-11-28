@@ -16,16 +16,7 @@ pub fn deny(
     path: &str,
     reason: &DenyReason,
 ) -> Response<Body> {
-    let message = reason.message(host);
-    let fix = fix(env, method, url, host, path, reason);
-    let body = format!(
-        "luoto: egress blocked by the sandbox policy of env \"{env}\"\n\
-         request: {method} {url}\n\
-         reason:  {message}\n\n\
-         {fix}\n\n\
-         Agents: this is an intentional security boundary (see /opt/luoto/AGENTS.md).\n\
-         Do not try to work around it; explain to the user what you need and why.\n"
-    );
+    let body = denial(env, method, url, host, path, reason);
     let mut resp = Response::new(if method == "HEAD" {
         empty()
     } else {
@@ -54,6 +45,76 @@ pub fn deny(
             b"Forbidden by luoto sandbox policy",
         ));
     resp
+}
+
+/// [`deny`] for a gRPC client: the same text as its status message.
+pub fn deny_grpc(
+    env: &str,
+    method: &str,
+    url: &str,
+    host: &str,
+    path: &str,
+    reason: &DenyReason,
+) -> Response<Body> {
+    let text = denial(env, method, url, host, path, reason);
+    let mut resp = grpc(GRPC_PERMISSION_DENIED, text.trim_end());
+    if let Ok(v) = HeaderValue::from_str(reason.code()) {
+        resp.headers_mut().insert("x-luoto-denied", v);
+    }
+    resp
+}
+
+fn denial(
+    env: &str,
+    method: &str,
+    url: &str,
+    host: &str,
+    path: &str,
+    reason: &DenyReason,
+) -> String {
+    let message = reason.message(host);
+    let fix = fix(env, method, url, host, path, reason);
+    format!(
+        "luoto: egress blocked by the sandbox policy of env \"{env}\"\n\
+         request: {method} {url}\n\
+         reason:  {message}\n\n\
+         {fix}\n\n\
+         Agents: this is an intentional security boundary (see /opt/luoto/AGENTS.md).\n\
+         Do not try to work around it; explain to the user what you need and why.\n"
+    )
+}
+
+/// gRPC status codes the gate answers with.
+pub const GRPC_DEADLINE_EXCEEDED: u8 = 4;
+pub const GRPC_PERMISSION_DENIED: u8 = 7;
+pub const GRPC_UNAVAILABLE: u8 = 14;
+
+/// A gRPC answer with no message, only a status: a gRPC client reads why from
+/// `grpc-status` and `grpc-message`, never from the HTTP status or a body.
+pub fn grpc(code: u8, message: &str) -> Response<Body> {
+    let mut resp = Response::new(empty());
+    let h = resp.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/grpc"),
+    );
+    h.insert("grpc-status", HeaderValue::from(u16::from(code)));
+    if let Ok(v) = HeaderValue::from_str(&grpc_message(message)) {
+        h.insert("grpc-message", v);
+    }
+    resp
+}
+
+/// `message` as `grpc-message` carries it: `%` and every byte outside printable ASCII
+/// percent-encoded.
+fn grpc_message(message: &str) -> String {
+    message
+        .bytes()
+        .map(|b| match b {
+            b' '..=b'~' if b != b'%' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 /// How the user can allow what `reason` denied. A CONNECT denied for its address is a tunnel
@@ -112,7 +173,10 @@ fn fix(env: &str, method: &str, url: &str, host: &str, path: &str, reason: &Deny
         DenyReason::PrivateAddress => {
             let (allow, asked) = match port.filter(|_| method == "CONNECT") {
                 Some(p) => (format!("{host} --port {p} --tunnel --private"), at(p)),
-                None => (format!("{target} --private"), ask),
+                None => (
+                    format!("{target}{write} --private"),
+                    format!("{ask}{write}"),
+                ),
             };
             format!(
                 "A private address (the user's network, a VPN, this machine) needs a rule that \
@@ -172,6 +236,36 @@ mod tests {
     }
 
     #[test]
+    fn a_grpc_client_reads_the_denial_and_its_fix_from_the_status() {
+        let resp = deny_grpc(
+            "web",
+            "POST",
+            "https://grpc.example/pkg.Svc/Get",
+            "grpc.example",
+            "/pkg.Svc/Get",
+            &DenyReason::MethodNotAllowed {
+                allowed: "GET, HEAD".into(),
+            },
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
+        let h = resp.headers();
+        assert_eq!(h["content-type"], "application/grpc");
+        assert_eq!(h["grpc-status"], "7");
+        let msg = h["grpc-message"].to_str().unwrap();
+        assert!(msg.starts_with("luoto: egress blocked"), "{msg}");
+        assert!(
+            msg.contains("luoto allow -e web grpc.example --write"),
+            "{msg}"
+        );
+        assert!(msg.contains("%0A") && !msg.ends_with("%0A"), "{msg}");
+    }
+
+    #[test]
+    fn a_grpc_message_escapes_what_its_header_cannot_carry() {
+        assert_eq!(grpc_message("50% done\näö"), "50%25 done%0A%C3%A4%C3%B6");
+    }
+
+    #[test]
     fn a_private_address_denial_names_the_rule_that_reaches_it() {
         let reason = DenyReason::PrivateAddress;
         let http = fix_for("web", "GET", "k8s.internal", "/version", &reason);
@@ -211,6 +305,16 @@ mod tests {
         assert!(
             https.contains("sandbox request k8s.internal:443 --private --reason"),
             "{https}"
+        );
+        // A gRPC call is a POST: the rule it needs writes too.
+        let grpc = fix_for("web", "POST", "grpc.internal", "/pkg.Svc/Get", &reason);
+        assert!(
+            grpc.contains("luoto allow -e web grpc.internal --write --private\n"),
+            "{grpc}"
+        );
+        assert!(
+            grpc.contains("sandbox request grpc.internal --write --private --reason"),
+            "{grpc}"
         );
     }
 

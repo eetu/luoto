@@ -12,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::timeout;
 use tokio_rustls::LazyConfigAcceptor;
 
-use crate::handler::{ConnCtx, Target, handle, serve_http1};
+use crate::handler::{ConnCtx, Target, handle, serve_http1, serve_http2};
 use crate::limits::{HANDSHAKE, Slot};
 use crate::state::State;
 
@@ -63,6 +63,27 @@ pub async fn serve<IO>(
         (Expect::FromSni { .. }, Some(s)) => s,
         (Expect::FromSni { fallback }, None) => fallback,
     };
+    if let Some(offered) = start.client_hello().alpn()
+        && let offered = offered.collect::<Vec<&[u8]>>()
+        && !offered.iter().any(|p| SPOKEN.contains(p))
+    {
+        let names: Vec<String> = offered.iter().take(4).map(|p| printable(p)).collect();
+        state.events.deny_conn(
+            EventKind::Http,
+            intake,
+            &host,
+            port,
+            "protocol_not_spoken",
+            format!(
+                "the client offered only {} over TLS to {host}, which the gate doesn't inspect. \
+                 If you trust it, allow it as a tunnel: luoto allow -e {} {host} --port {port} \
+                 --tunnel",
+                names.join(", "),
+                state.cfg.env
+            ),
+        );
+        return;
+    }
     let cfg = match ca.server_config(&host) {
         Ok(c) => c,
         Err(e) => {
@@ -98,11 +119,26 @@ pub async fn serve<IO>(
         port,
         tls: true,
     };
+    if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
+        serve_http2(tls, state, ctx, target).await;
+        return;
+    }
     let (activity, lim) = (ctx.activity.clone(), state.cfg.limits);
     serve_http1(tls, activity, lim, move |req| {
         handle(state.clone(), ctx.clone(), req, target.clone())
     })
     .await;
+}
+
+/// What the gate takes in TLS, as ALPN names them.
+const SPOKEN: &[&[u8]] = &[b"h2", b"http/1.1"];
+
+/// A protocol name the client sent, for an event: printable ASCII, at most 32 bytes.
+fn printable(name: &[u8]) -> String {
+    name.iter()
+        .take(32)
+        .map(|&b| if b.is_ascii_graphic() { b as char } else { '?' })
+        .collect()
 }
 
 /// The client ended the handshake with an alert about our certificate. tokio-rustls hands the

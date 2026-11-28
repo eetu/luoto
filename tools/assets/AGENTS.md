@@ -15,11 +15,15 @@ env's name and its current rules.
   fetching a page or calling an API from here only works for allowed hosts, and a model API
   request that has the provider fetch a URL or call an MCP server is refused unless the user
   allowed server tools. A websocket needs the user's `luoto allow -e <env> <host> --ws`.
+  gRPC goes through the gate like any HTTPS: every call is a POST to
+  `/<package.Service>/<Method>`, so request write access to those paths (`--write --path
+  '/<package.Service>/*'`); a refused call comes back as `PERMISSION_DENIED` with the gate's
+  explanation as its message.
   While the user has opened the env's egress for a while (`sandbox status` says until when),
   other HTTP(S) hosts work too, as rule `open`; hosts with credentials keep to their rules.
   The gate ends a request whose response hasn't started within 10 minutes (HTTP 504), a
-  response silent for 5 minutes, and a tunnel or websocket silent for an hour; a long poll
-  such as `kubectl logs -f` needs the user to give its host longer, on the host:
+  response silent for 5 minutes, and a tunnel, websocket or gRPC call silent for an hour; a
+  long poll such as `kubectl logs -f` needs the user to give its host longer, on the host:
   `luoto allow -e <env> <host> --idle 2h`.
 - **Credentials.** The credentials the gate handles stay outside the sandbox. Their tokens in
   the environment (`GH_TOKEN`, `ANTHROPIC_*`, `OPENAI_API_KEY`, …) are placeholders; the gate
