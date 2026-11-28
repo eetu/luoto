@@ -339,7 +339,12 @@ export function installLabel(i: Install): string {
   return `${i.name} ${i.version} (mise)`;
 }
 
-/** Where an access request asks to go: its host, or `host:port` for a tunnel. */
+/** Whether a request asks for an uninspected tunnel: as its mode says, else by its port. */
+export function isTunnel(r: AccessRequest): boolean {
+  return r.mode ? r.mode === "tunnel" : !!r.port;
+}
+
+/** Where an access request asks to go: its host, or `host:port` when it names a port. */
 export function requestTarget(r: AccessRequest): string {
   if (!r.port) return r.host;
   return r.host.includes(":") ? `[${r.host}]:${r.port}` : `${r.host}:${r.port}`;

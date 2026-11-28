@@ -68,10 +68,10 @@ pub async fn handle(state: Arc<State>, req: Request<Incoming>) -> Response<Body>
                             port: r.port,
                             request_id: Some(r.id),
                             message: Some(r.reason.clone()),
-                            reason: Some(match (r.port, &r.install) {
-                                (Some(_), _) => "tunnel".into(),
-                                (None, Some(Install::Var { .. })) => "var".into(),
-                                (None, _) => format!("{:?}", r.access).to_lowercase(),
+                            reason: Some(match &r.install {
+                                _ if r.is_tunnel() => "tunnel".into(),
+                                Some(Install::Var { .. }) => "var".into(),
+                                _ => format!("{:?}", r.access).to_lowercase(),
                             }),
                             ..Default::default()
                         });

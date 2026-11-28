@@ -67,6 +67,8 @@ const routes: Route[] = [
   { method: "GET", path: /^\/api\/envs\/web\/shares$/, body: () => fixture("shares") },
   // A public name, unless a test says otherwise.
   { method: "GET", path: /^\/api\/resolve$/, body: () => ({ private: [], never: false }) },
+  // Nothing to confirm, unless a test says otherwise.
+  { method: "POST", path: /^\/api\/envs\/[^/]+\/requests\/\d+\/risks$/, body: () => [] },
   {
     method: "POST",
     path: /^\/api\/envs\/web\/rules$/,
@@ -74,7 +76,7 @@ const routes: Route[] = [
       privateRisk(req)
         ? {
             error: "the rule has risks",
-            risks: ["allows dialing private/host addresses (e.g. services on your machine)"],
+            risks: ["reaches private addresses: hosts on your network or VPN"],
           }
         : { ...(req.postDataJSON() as { rule: object }).rule, id: "r1" },
     status: (req) => (privateRisk(req) ? 409 : 200),

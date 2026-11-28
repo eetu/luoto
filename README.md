@@ -166,8 +166,9 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | to remove luoto: envs, vault, images, keychain entries, config and data (the binary stays)           | `luoto uninstall`                                                                                                                  |
 
 Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host> --reason …`
-asks you for access (`--write` for more than reads; `<host>:<port>` for a tunnel; `--private`
-for a host on your network or VPN; `--preset npm` for a registry's hosts at once;
+asks you for access (`--write` for more than reads; a URL on another port, inspected there;
+`<host>:<port>` for a tunnel; `--ws` for websockets; `--private` for a host on your network or
+VPN; `--preset npm` for a registry's hosts at once;
 `--package <name>` or `--tool <tool>@<version>` for software to keep;
 `--var <NAME>=<value>` for a plain variable); only you can approve, on the host. A new
 request gets a desktop notification, as does the first denial at each host

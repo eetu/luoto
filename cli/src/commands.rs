@@ -1456,22 +1456,27 @@ fn fmt_request(r: &AccessRequest) -> String {
             "install {}, kept in the env's config",
             crate::text::display(&i.describe())
         ),
-        None => match r.port {
-            Some(port) => format!(
-                "a tunnel to {}:{port}, uninspected: any protocol and any data",
-                crate::text::display(&r.host)
-            ),
-            None => format!(
-                "{} {}{}",
-                crate::text::display(&r.host),
-                luoto_shared::policy::Access::Level(r.access).describe(),
-                if r.paths.is_empty() {
-                    String::new()
-                } else {
-                    format!(" paths {}", crate::text::display(&r.paths.join(",")))
-                }
-            ),
-        },
+        None => {
+            let at = r.target();
+            if r.is_tunnel() {
+                format!(
+                    "a tunnel to {}, uninspected: any protocol and any data",
+                    crate::text::display(&at)
+                )
+            } else {
+                format!(
+                    "{} {}{}{}",
+                    crate::text::display(&at),
+                    luoto_shared::policy::Access::Level(r.access).describe(),
+                    if r.paths.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" paths {}", crate::text::display(&r.paths.join(",")))
+                    },
+                    if r.ws { ", websockets too" } else { "" }
+                )
+            }
+        }
     };
     let private = if r.private {
         "\n   on your network or VPN: a private address, or one only a VPN reaches"
@@ -1601,13 +1606,34 @@ pub fn approve(
         let rule = rules::grant(&req, narrow)?;
         println!("grants less: {}", rules::describe(&rule));
     }
-    if !yes && !confirm("Approve?") {
+    if req.private && !private {
+        // `--yes` approves as asked.
+        private = yes
+            || confirm(&format!(
+                "It asks to reach {} on your network or VPN. Let the rule reach it there?",
+                crate::text::display(&req.host)
+            ));
+    }
+    // What the yes accepts, shown before it is asked (`--yes` leaves them to `--force`).
+    let shown = rules::approval_risks(&ctx, name, &req, narrow, private)?;
+    if !yes {
+        for r in &shown {
+            crate::progress::warn(r);
+        }
+    }
+    let question = if shown.is_empty() {
+        "Approve?"
+    } else {
+        "Approve, accepting these risks?"
+    };
+    if !yes && !confirm(question) {
         let private = if private { " --private" } else { "" };
         return Err(crate::prompt::declined(
             "approved",
             &format!("luoto approve -e {name} {id}{private} --yes"),
         ));
     }
+    let asked = private;
     // Looked up only once approved, as the gate does: the name is the sandbox's, and a lookup
     // carries whatever it put in it. On a private address here, it is reached only if the
     // user says so.
@@ -1617,20 +1643,15 @@ pub fn approve(
         rules::resolve(&req.host)
     };
     let at = resolved.private.join(", ");
-    if req.private && !private {
-        // `--yes` approves as asked.
-        private = yes
-            || confirm(&format!(
-                "It asks to reach {} on your network or VPN. Let the rule reach it there?",
-                crate::text::display(&req.host)
-            ));
-    } else if !at.is_empty() && !yes {
+    if !at.is_empty() && !yes {
         private = confirm(&format!(
             "{} resolves to {at}, a private address (your network or a VPN). Let the rule reach \
              it?",
             crate::text::display(&req.host)
         ));
     }
+    // A yes on the terminal accepted the risks it showed; private access since adds its own.
+    let force = force || (!yes && private == asked);
     match rules::accepting_risks(force, |force| {
         rules::approve(&ctx, name, &req, ttl, narrow, private, force)
     })? {
@@ -2316,9 +2337,11 @@ mod tests {
             id: 1,
             host: String::new(),
             port: None,
+            mode: None,
             access: luoto_shared::policy::AccessLevel::Read,
             paths: vec![],
             private: false,
+            ws: false,
             reason: "to install packages".into(),
             status: RequestStatus::Pending,
             created: chrono::Utc::now(),

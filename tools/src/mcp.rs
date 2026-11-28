@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use luoto_shared::api::SandboxStatus;
+use luoto_shared::policy::Mode;
 use serde_json::{Value, json};
 
 use crate::{
@@ -52,12 +53,13 @@ fn tools() -> Value {
         },
         {
             "name": "sandbox_request_access",
-            "description": "Ask the user to allow egress to a host, or to add one of luoto's presets (a registry's hosts, e.g. npm). Only the user can approve, on the host. Use the narrowest access: read unless writes are required; one exact host. For a protocol other than HTTP(S), such as a database, or a TLS service whose client checks the server against its own CA (a Kubernetes API from a kubeconfig), give its port: approved, that host and port get an uninspected tunnel, and clients connect to them as they are. An HTTP(S) service on another port than 80 or 443 is a tunnel too: give that port. A host only the user's network or VPN reaches (a private address, an internal name, a public address their VPN routes) needs `private`; a service on the user's own machine is `host.docker.internal`, never its address. An internal HTTPS service the gate can't verify (its error names `--ca`) and websocket upgrades (`--ws`) are the user's to allow: tell them the command the error names.",
+            "description": "Ask the user to allow egress to a host, or to add one of luoto's presets (a registry's hosts, e.g. npm). Only the user can approve, on the host, seeing the risks of what you ask. Ask for what the work needs and no more: read unless writes are required, one exact host rather than a wildcard. An HTTP(S) service on another port than 80 or 443 is its URL with that port (https://nexus.corp:8443/), which the gate inspects there. For a protocol other than HTTP(S), such as a database, or a TLS service whose client checks the server against its own CA (a Kubernetes API from a kubeconfig), give `port` and no URL: approved, that host and port get an uninspected tunnel, and clients connect to them as they are. A host only the user's network or VPN reaches (a private address, an internal name, a public address their VPN routes) needs `private`; a service on the user's own machine is `host.docker.internal`, never its address. An internal HTTPS service the gate can't verify (its error names `--ca`) is the user's to set up: tell them the command the error names.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "host": {"type": "string", "description": "Exact host or a URL of it, e.g. docs.rs; with `private`, also an address on the user's network, e.g. 10.0.0.8"},
-                    "port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Only for a service on another port than 80 or 443 (a database, an HTTPS server on 8443): its port, which the gate tunnels uninspected"},
+                    "host": {"type": "string", "description": "Exact host or a URL of it, e.g. docs.rs or https://nexus.corp:8443/; a wildcard (*.example.com) only when one host won't do; with `private`, also an address or range on the user's network, e.g. 10.0.0.8"},
+                    "port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "With a host, not a URL: the port of a service the gate tunnels uninspected (a database)"},
+                    "ws": {"type": "boolean", "default": false, "description": "Websocket upgrades too: a two-way channel the gate passes unread once it opens"},
                     "preset": {"type": "string", "description": "Instead of a host, one of luoto's presets for a registry or service: npm, pypi, crates, go, maven, …"},
                     "access": {"type": "string", "enum": ["read", "write"], "default": "read"},
                     "private": {"type": "boolean", "default": false, "description": "The host is on the user's network or VPN (a private address, or one only a VPN reaches): ask for a rule that reaches it there"},
@@ -152,22 +154,26 @@ fn call(name: &str, args: &Value) -> Value {
                 .unwrap_or_default();
             let wait = args["wait_seconds"].as_u64().unwrap_or(0).min(900);
             let wait = (wait > 0).then(|| Duration::from_secs(wait));
-            let (host, in_host) = parse_target(host)?;
-            let port = match (args["port"].as_u64(), in_host) {
-                (None, port) => port,
-                (Some(p), None) => Some(
-                    u16::try_from(p)
-                        .ok()
-                        .filter(|p| *p != 0)
-                        .ok_or_else(|| anyhow::anyhow!("`{p}` is not a port (1-65535)"))?,
-                ),
-                (Some(p), Some(q)) if p == u64::from(q) => Some(q),
+            let ws = args["ws"].as_bool().unwrap_or(false);
+            let mut to = parse_target(host)?;
+            match (args["port"].as_u64(), to.port) {
+                (None, _) => {}
+                (Some(p), None) => {
+                    to.port = Some(
+                        u16::try_from(p)
+                            .ok()
+                            .filter(|p| *p != 0)
+                            .ok_or_else(|| anyhow::anyhow!("`{p}` is not a port (1-65535)"))?,
+                    );
+                    to.mode = Some(Mode::Tunnel);
+                }
+                (Some(p), Some(q)) if p == u64::from(q) => {}
                 (Some(_), Some(_)) => {
                     return Ok(text("`host` names another port than `port`".into(), true));
                 }
-            };
+            }
             Ok(
-                match request_access(&host, port, write, private, paths, reason, wait) {
+                match request_access(to, (write, ws), private, paths, reason, wait) {
                     Ok(o) => text(describe(&o), false),
                     Err(e) => text(format!("request refused: {e:#}"), true),
                 },
@@ -257,18 +263,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_tool_has_a_schema_and_a_url_on_another_port_names_its_tunnel() {
+    fn every_tool_has_a_schema_and_ports_are_checked_before_the_gate() {
         for t in tools().as_array().unwrap() {
             assert!(t["name"].is_string() && t["description"].is_string(), "{t}");
             assert_eq!(t["inputSchema"]["type"], "object", "{t}");
         }
-        // Refused before anything reaches the gate, with the request that would work.
         let r = call(
             "sandbox_request_access",
-            &json!({"host": "https://nexus.corp:8443/repository/npm/", "reason": "npm feed"}),
+            &json!({"host": "https://nexus.corp:8443/", "port": 5432, "reason": "db"}),
         );
         assert_eq!(r["isError"], true);
         let said = r["content"][0]["text"].as_str().unwrap();
-        assert!(said.contains("ask for `nexus.corp:8443`"), "{said}");
+        assert!(said.contains("another port"), "{said}");
     }
 }

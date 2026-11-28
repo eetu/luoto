@@ -162,17 +162,18 @@ the merge request.
 
    A registry or service luoto has a preset for (npm, pypi, crates, go, maven, …) is one
    request for all its hosts: `sandbox request --preset npm --reason "<why>" --wait`.
-   A protocol other than HTTP(S), such as a database, is a host and port:
+   An HTTP(S) service on another port than 80 or 443 is its URL with that port, which the
+   gate inspects there: `sandbox request https://nexus.corp:8443/ --reason "<why>" --wait`.
+   `--ws` asks for websocket upgrades too. A protocol other than HTTP(S), such as a
+   database, is a host and port:
    `sandbox request db.example.com:5432 --reason "<why>" --wait`. Approved, it is an
-   uninspected tunnel: clients connect to the host and port as they are. So is an HTTP(S)
-   service on another port than 80 or 443 (`nexus.corp:8443`), and so is a TLS
-   service whose client checks the server against its own CA, such as a Kubernetes API from a
-   kubeconfig: the gate's inspection shows its own certificate, which that client refuses.
+   uninspected tunnel: clients connect to the host and port as they are. So is a TLS service
+   whose client checks the server against its own CA, such as a Kubernetes API from a
+   kubeconfig (`<host>:443` when that is its port): the gate's inspection shows its own
+   certificate, which that client refuses.
    A host only the user's network or VPN reaches (a private address, an internal name, a
    public address their VPN routes) needs private access, which the user grants or not:
    `sandbox request 10.0.0.8:6443 --private --reason "kubectl to the API, on your VPN" --wait`.
-   The sandbox can't ask for a tunnel on port 80 or 443: give the user the command instead,
-   `luoto allow -e <env> <host> --port 443 --tunnel --private`.
 
 3. Tell the user what you requested and why. They approve it on the host with
    `luoto approve -e <env> <id>` or in `luoto ui`, possibly for less than you asked (read

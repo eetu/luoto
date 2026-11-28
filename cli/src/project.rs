@@ -1988,7 +1988,7 @@ hosts = ["dl.k8s.io", "*"]
         let out = s.left_out.join("\n");
         for said in [
             "1 expiring rule ",
-            "rule db.example: allows dialing private",
+            "rule db.example: reaches private addresses",
             "rule *.workers.dev:",
             "rule 10.0.0.0/8:",
             "install host *:",

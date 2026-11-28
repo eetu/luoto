@@ -94,9 +94,11 @@ hour if you like:
 An agent that needs a host asks with `sandbox request`; only you can approve it, on your
 machine (`luoto approve`, which asks you to accept the rule's risks like `luoto allow` does;
 `--force` accepts them without asking). You can grant less than it asked, never more:
-`--read` for a write request, `--method`, `--path` within its paths. A protocol other than
-HTTP(S) is a host and port (`sandbox request db.example.com:5432`), which approved becomes an
-uninspected tunnel, a risk you confirm. A host on your network or behind your VPN is reached
+`--read` for a write request, `--method`, `--path` within its paths. It may ask for anything
+a rule of yours may be, and you confirm its risks as you would your own: an HTTPS service on
+another port (`sandbox request https://nexus.corp:8443/`), websocket upgrades (`--ws`), a
+wildcard, or a protocol other than HTTP(S) as a host and port
+(`sandbox request db.example.com:5432`), which approved becomes an uninspected tunnel. A host on your network or behind your VPN is reached
 only with private access, which the request asks for (`sandbox request git.corp.example
 --private`) and you grant apart from the rest: `luoto approve` asks about it (`--private`
 without a terminal), and the UI has a switch. A name that resolves to this machine is refused:

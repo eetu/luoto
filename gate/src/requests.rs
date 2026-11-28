@@ -61,9 +61,11 @@ impl Requests {
                 id: 0,
                 host: String::new(),
                 port: None,
+                mode: None,
                 access: AccessLevel::Read,
                 paths: Vec::new(),
                 private: false,
+                ws: false,
                 reason,
                 status: RequestStatus::Pending,
                 created: Utc::now(),
@@ -72,7 +74,15 @@ impl Requests {
                 install: Some(install.clone()),
             });
         }
-        let rule = requested_rule(&new.host, new.port, new.access, &new.paths, new.private)?;
+        let rule = requested_rule(
+            &new.host,
+            new.port,
+            new.mode,
+            new.access,
+            &new.paths,
+            new.private,
+            new.ws,
+        )?;
         let access = match rule.access {
             Access::Level(level) => level,
             Access::Methods(_) => new.access,
@@ -81,12 +91,16 @@ impl Requests {
         if reason.is_empty() {
             return Err("a reason is required".into());
         }
+        // Filed with its mode named, whatever the sandbox's helper sent.
+        let mode = Some(rule.mode);
         if let Some(existing) = self.items.iter().find(|r| {
             r.status == RequestStatus::Pending
                 && r.host == rule.host
                 && r.port == rule.port
+                && r.mode == mode
                 && r.access == access
                 && r.private == new.private
+                && r.ws == rule.ws
         }) {
             return Ok(existing.clone());
         }
@@ -94,9 +108,11 @@ impl Requests {
             id: 0,
             host: rule.host,
             port: rule.port,
+            mode,
             access,
             paths: rule.paths,
             private: new.private,
+            ws: rule.ws,
             reason,
             status: RequestStatus::Pending,
             created: Utc::now(),
@@ -169,14 +185,17 @@ impl Requests {
 mod tests {
     use super::*;
     use luoto_shared::api::Install;
+    use luoto_shared::policy::Mode;
 
     fn new(host: &str) -> NewAccessRequest {
         NewAccessRequest {
             host: host.into(),
             port: None,
+            mode: None,
             access: AccessLevel::Read,
             paths: vec![],
             private: false,
+            ws: false,
             reason: "read the docs\n\u{1b}[31m".into(),
             install: None,
         }
@@ -191,20 +210,20 @@ mod tests {
         };
         let a = r.create(port("DB.example.com", 5432)).unwrap();
         assert_eq!(
-            (a.host.as_str(), a.port, a.access),
-            ("db.example.com", Some(5432), AccessLevel::Write)
+            (a.host.as_str(), a.port, a.mode, a.access),
+            (
+                "db.example.com",
+                Some(5432),
+                Some(Mode::Tunnel),
+                AccessLevel::Write
+            )
         );
+        assert!(a.is_tunnel());
         assert_eq!(r.create(port("db.example.com", 5432)).unwrap().id, a.id);
         assert_ne!(r.create(port("db.example.com", 6379)).unwrap().id, a.id);
         assert_ne!(r.create(new("db.example.com")).unwrap().id, a.id);
         assert_eq!(r.get(a.id).unwrap().port, Some(5432));
-        for (host, p) in [
-            ("db.example.com", 443),
-            ("db.example.com", 80),
-            ("*.example.com", 5432),
-            ("10.0.0.5", 5432),
-            ("10.0.0.0/8", 5432),
-        ] {
+        for (host, p) in [("10.0.0.5", 5432), ("10.0.0.0/8", 5432)] {
             assert!(r.create(port(host, p)).is_err(), "{host}:{p}");
         }
         let with_paths = NewAccessRequest {
@@ -213,6 +232,30 @@ mod tests {
         };
         assert!(r.create(with_paths).is_err());
         assert_eq!(r.pending(), 3);
+    }
+
+    #[test]
+    fn a_request_may_ask_what_a_users_rule_may_be() {
+        let mut r = Requests::default();
+        // An inspected service on another port, with websockets.
+        let nexus = r
+            .create(NewAccessRequest {
+                port: Some(8443),
+                mode: Some(Mode::Inspect),
+                ws: true,
+                ..new("nexus.corp.example")
+            })
+            .unwrap();
+        assert!(!nexus.is_tunnel() && nexus.ws && nexus.port == Some(8443));
+        // A tunnel on HTTPS's port, and a wildcard: their risks are shown when approved.
+        let k8s = r
+            .create(NewAccessRequest {
+                mode: Some(Mode::Tunnel),
+                ..new("k8s.example.com")
+            })
+            .unwrap();
+        assert!(k8s.is_tunnel() && k8s.port.is_none());
+        assert!(r.create(new("*.example.com")).is_ok());
     }
 
     #[test]
@@ -273,9 +316,11 @@ mod tests {
         let ask = |install: Install| NewAccessRequest {
             host: String::new(),
             port: None,
+            mode: None,
             access: AccessLevel::Read,
             paths: vec![],
             private: false,
+            ws: false,
             reason: "psql for the migrations".into(),
             install: Some(install),
         };

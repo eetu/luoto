@@ -1,19 +1,37 @@
 <script lang="ts">
   import { untrack } from "svelte";
 
-  import { api } from "$lib/api";
+  import { api, ApiError } from "$lib/api";
   import CopyCommand from "$lib/components/CopyCommand.svelte";
   import Risks from "$lib/components/Risks.svelte";
   import Segmented from "$lib/components/Segmented.svelte";
   import Switch from "$lib/components/Switch.svelte";
-  import { act, ago, app, installLabel, requestTarget, say, TTLS } from "$lib/stores/app.svelte";
+  import {
+    act,
+    ago,
+    app,
+    installLabel,
+    isTunnel,
+    requestTarget,
+    say,
+    TTLS,
+  } from "$lib/stores/app.svelte";
   import type { Narrowing } from "$lib/types";
 
   let { id }: { id: number } = $props();
 
   const req = $derived(app.requests.find((r) => r.id === id) ?? null);
   let ttl = $state(60);
+  // What approving as chosen asks to confirm, or why luoto refuses it: the check `luoto
+  // approve` makes, run again as the choice changes; the last answer stays until the next.
   let risks = $state<string[]>([]);
+  let refused = $state<string | null>(null);
+  // The check itself failed (the backend unreachable): nothing approves until it is known.
+  let unchecked = $state<string | null>(null);
+  let checking = $state(false);
+  let retry = $state(0);
+  let checks = 0;
+  let checkedPaths = "";
   // Less than asked: read for a write request, some of its paths. The backend refuses wider.
   let grant = $state<"asked" | "read">("asked");
   let paths = $state("");
@@ -35,8 +53,45 @@
     paths = "";
     allowPrivate = untrack(() => req?.private) ?? false;
     risks = [];
+    refused = null;
+    unchecked = null;
+    checkedPaths = "";
     // Polls refresh `req`: only another request starts the value over.
     given = untrack(() => suggestion) ?? "";
+  });
+
+  $effect(() => {
+    void id;
+    void retry;
+    const env = app.env;
+    const shown = untrack(() => req);
+    if (!env || !shown || shown.install || shown.status !== "pending") return;
+    const narrow = narrowing();
+    const priv = allowPrivate;
+    const seq = ++checks;
+    checking = true;
+    // Typed paths are checked once typing pauses, any other choice at once.
+    const typed = paths !== checkedPaths;
+    checkedPaths = paths;
+    const timer = setTimeout(
+      () => {
+        api.approvalRisks(env, shown, narrow, priv).then(
+          (found) => {
+            if (seq !== checks) return;
+            [risks, refused, unchecked, checking] = [found, null, null, false];
+          },
+          (e: unknown) => {
+            if (seq !== checks) return;
+            const said = e instanceof Error ? e.message : String(e);
+            risks = [];
+            [refused, unchecked] = e instanceof ApiError ? [said, null] : [null, said];
+            checking = false;
+          },
+        );
+      },
+      typed ? 300 : 0,
+    );
+    return () => clearTimeout(timer);
   });
 
   /** What a preset opens, from luoto's own data: the request carries only its name. */
@@ -212,15 +267,19 @@
     <dl>
       <dt>access</dt>
       <dd>
-        {req.port
+        {isTunnel(req)
           ? "uninspected tunnel"
           : req.access === "write"
             ? "write (any method)"
             : "read-only"}
       </dd>
-      {#if !req.port}
+      {#if !isTunnel(req)}
         <dt>paths</dt>
         <dd>{req.paths?.length ? req.paths.join(", ") : "all"}</dd>
+      {/if}
+      {#if req.ws}
+        <dt>websockets</dt>
+        <dd>allowed</dd>
       {/if}
       {#if req.private}
         <dt>where</dt>
@@ -235,18 +294,20 @@
       <p class="label">reason — written by code in the sandbox, not by you</p>
       <p class="reason">{req.reason}</p>
     </div>
-    {#if req.port}
-      <p class="warn">
-        A tunnel is not inspected: anything in the sandbox gets full access to {requestTarget(req)},
-        any protocol and any data.
-      </p>
-    {:else if req.access === "write" && grant === "asked"}
-      <p class="warn">
-        Write access lets anything in the sandbox upload data to {req.host}.
-      </p>
-    {/if}
     {#if req.status === "pending"}
-      {#if !req.port}
+      <div class="check" role="status" aria-live="polite" aria-busy={checking}>
+        {#if refused}
+          <p class="warn">{refused}</p>
+        {:else if unchecked}
+          <p class="warn">
+            Couldn't check what approving it risks: {unchecked}
+            <button type="button" class="btn" onclick={() => retry++}>Check again</button>
+          </p>
+        {:else if risks.length > 0}
+          <Risks {risks} heading="approving this:" />
+        {/if}
+      </div>
+      {#if !isTunnel(req)}
         {#if req.access === "write"}
           <div class="field">
             <span>grant</span>
@@ -257,7 +318,7 @@
                 { value: "read", label: "read-only" },
               ]}
               value={grant}
-              onchange={(v) => ((grant = v), (risks = []))}
+              onchange={(v) => (grant = v)}
             />
           </div>
         {/if}
@@ -266,7 +327,6 @@
           <input
             type="text"
             bind:value={paths}
-            oninput={() => (risks = [])}
             placeholder={req.paths?.length ? "as asked, or some of them" : "all, or e.g. /v1/**"}
           />
         </label>
@@ -276,7 +336,7 @@
         <Switch
           checked={allowPrivate}
           label="allow private address"
-          onchange={(v) => ((allowPrivate = v), (risks = []))}
+          onchange={(v) => (allowPrivate = v)}
         />
         <span class="muted small"
           >{req.private ? "as it asks" : "for a host on your network or VPN"}</span
@@ -288,15 +348,14 @@
           {#each TTLS as t (t.minutes)}<option value={t.minutes}>{t.label}</option>{/each}
         </select>
       </label>
-      {#if risks.length > 0}
-        <Risks {risks} confirm="Approve anyway" onconfirm={() => void approve(true)} />
-      {/if}
       <div class="actions">
-        {#if risks.length === 0}
-          <button class="btn primary" onclick={() => void approve(false)} disabled={!!app.busy}
-            >Approve</button
-          >
-        {/if}
+        <!-- One button, relabelled in place, so focus stays on it as the risks change. -->
+        <button
+          class="btn {risks.length > 0 ? 'danger' : 'primary'}"
+          onclick={() => void approve(risks.length > 0)}
+          disabled={!!app.busy || checking || !!refused || !!unchecked}
+          >{risks.length > 0 ? "Approve anyway" : "Approve"}</button
+        >
         <button class="btn" onclick={reject} disabled={!!app.busy}>Reject</button>
       </div>
     {/if}
@@ -306,6 +365,14 @@
 </div>
 
 <style>
+  .check[aria-busy="true"] {
+    opacity: 0.6;
+  }
+
+  .check:empty {
+    display: none;
+  }
+
   .field:has(.small) {
     grid-template-columns: 58px auto 1fr;
   }

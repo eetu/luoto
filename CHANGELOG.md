@@ -14,6 +14,11 @@ release may break.
 - `cas` in `config.toml` trusts a CA for every host of every env, as a company network that
   inspects TLS needs; on macOS `luoto setup` offers the root CAs your Mac trusts.
 
+### Changed
+
+- The sandbox may request whatever a rule of yours may be (a tunnel on any port, websockets
+  with `--ws`, a wildcard, an address range); `luoto ui` shows the risks before you approve.
+
 ### Fixed
 
 - A `git push` of over 1 MiB to a repo of a git credential (GitHub, Azure DevOps, a
@@ -32,7 +37,7 @@ release may break.
   issue attachments were refused.
 - On Apple's `container`, a client that stopped reading a forwarded port could freeze its env.
 - `sandbox request` for a URL on another port than 80 or 443 asked for a rule that missed the
-  port; it names the `host:port` tunnel to ask for instead.
+  port; it asks for that port, inspected.
 
 ### Security
 

@@ -62,13 +62,22 @@ fn fix(env: &str, method: &str, url: &str, host: &str, path: &str, reason: &Deny
     let port = luoto_shared::host::split_target(url)
         .1
         .and_then(|p| p.parse::<u16>().ok());
+    let at = |p: u16| match host.contains(':') {
+        true => format!("[{host}]:{p}"),
+        false => format!("{host}:{p}"),
+    };
     // A rule without a port covers 80 and 443 only; another is named after the host, as
-    // `luoto allow` takes it and `sandbox request` asks for a tunnel to it.
+    // `luoto allow` takes it.
     let other_port = port.filter(|p| *p != 80 && *p != 443);
-    let target = match other_port {
-        Some(p) if host.contains(':') => format!("[{host}]:{p}"),
-        Some(p) => format!("{host}:{p}"),
-        None => host.to_string(),
+    let target = other_port.map_or_else(|| host.to_string(), at);
+    // `sandbox request` takes `host:port` as a tunnel: what the gate read on another port is
+    // asked for by its URL, inspected there.
+    let scheme = url
+        .split_once("://")
+        .map(|(s, _)| if s == "http" { "http" } else { "https" });
+    let ask = match (other_port, scheme) {
+        (Some(_), Some(s)) => format!("{s}://{target}/"),
+        _ => target.clone(),
     };
     let write = if reason.wants_write() || (method != "CONNECT" && !READ_METHODS.contains(&method))
     {
@@ -102,33 +111,26 @@ fn fix(env: &str, method: &str, url: &str, host: &str, path: &str, reason: &Deny
         }
         DenyReason::PrivateAddress => {
             let (allow, asked) = match port.filter(|_| method == "CONNECT") {
-                Some(p) => (
-                    format!("{host} --port {p} --tunnel --private"),
-                    // The sandbox may ask for a tunnel on any port but these.
-                    other_port.map(|_| target.clone()),
-                ),
-                None => (format!("{target} --private"), Some(target.clone())),
+                Some(p) => (format!("{host} --port {p} --tunnel --private"), at(p)),
+                None => (format!("{target} --private"), ask),
             };
-            let request = asked.map_or_else(String::new, |a| {
-                format!(
-                    "\nFrom inside the sandbox, request it with private access:\n  \
-                     sandbox request {a} --private --reason \"<why; on your network or VPN>\""
-                )
-            });
             format!(
                 "A private address (the user's network, a VPN, this machine) needs a rule that \
-                 reaches it. The user can run on the host:\n  luoto allow -e {env} {allow}{request}"
+                 reaches it. The user can run on the host:\n  luoto allow -e {env} {allow}\n\
+                 From inside the sandbox, request it with private access:\n  \
+                 sandbox request {asked} --private --reason \"<why; on your network or VPN>\""
             )
         }
-        // Only the user's rule may take upgrades: the sandbox can't ask for them.
         DenyReason::WebSocketNotAllowed => format!(
             "To allow websocket upgrades to it, the user can run on the host:\n  \
-             luoto allow -e {env} {target} --ws"
+             luoto allow -e {env} {target} --ws\n\
+             From inside the sandbox, request them with:\n  \
+             sandbox request {ask} --ws --reason \"<why this is needed>\""
         ),
         _ => {
-            let (asked, ask) = match other_port {
-                Some(_) => ("a tunnel to it", target.clone()),
-                None => ("it", format!("{host}{write}")),
+            let (asked, ask) = match (other_port, scheme) {
+                (Some(_), None) => ("a tunnel to it", target.clone()),
+                _ => ("it", format!("{ask}{write}")),
             };
             format!(
                 "To allow it, the user can run on the host:\n  luoto allow -e {env} {target}{write}\n\
@@ -197,7 +199,6 @@ mod tests {
             tunnel.contains("sandbox request k8s.internal:7443 --private --reason"),
             "{tunnel}"
         );
-        // A tunnel on 443 only the user grants: the sandbox can't ask for one.
         let https = fix(
             "web",
             "CONNECT",
@@ -207,7 +208,10 @@ mod tests {
             &reason,
         );
         assert!(https.contains("--port 443 --tunnel --private"), "{https}");
-        assert!(!https.contains("sandbox request"), "{https}");
+        assert!(
+            https.contains("sandbox request k8s.internal:443 --private --reason"),
+            "{https}"
+        );
     }
 
     #[test]
@@ -263,8 +267,22 @@ mod tests {
             "{port}"
         );
         assert!(
-            port.contains("sandbox request nexus.corp:8443 --reason"),
+            port.contains("sandbox request https://nexus.corp:8443/ --reason"),
             "{port}"
+        );
+        let tunnel = fix(
+            "web",
+            "CONNECT",
+            "db.example:5432",
+            "db.example",
+            "",
+            &DenyReason::NoRule,
+        );
+        assert!(
+            tunnel.contains(
+                "request a tunnel to it with:\n  sandbox request db.example:5432 --reason"
+            ),
+            "{tunnel}"
         );
         let https = fix(
             "web",
@@ -298,10 +316,10 @@ mod tests {
             &DenyReason::WebSocketNotAllowed,
         );
         assert!(
-            ws.ends_with("luoto allow -e web localhost.dev:5173 --ws"),
+            ws.contains("luoto allow -e web localhost.dev:5173 --ws\n")
+                && ws.contains("sandbox request http://localhost.dev:5173/ --ws --reason"),
             "{ws}"
         );
-        assert!(!ws.contains("sandbox request"), "{ws}");
         let private = fix(
             "web",
             "GET",
@@ -311,7 +329,8 @@ mod tests {
             &DenyReason::PrivateAddress,
         );
         assert!(
-            private.contains("luoto allow -e web [fd00::5]:8080 --private\n"),
+            private.contains("luoto allow -e web [fd00::5]:8080 --private\n")
+                && private.contains("sandbox request http://[fd00::5]:8080/ --private --reason"),
             "{private}"
         );
     }

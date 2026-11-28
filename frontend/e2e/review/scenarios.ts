@@ -655,13 +655,22 @@ const states: Scenario = {
   ],
 };
 
-// Private access and the risks a 409 asks about
+// Private access and the risks a 409 asks about, as `validate_rule` words them
 
-const RISKS = [
-  "allows dialing private/host addresses (e.g. services on your machine)",
-  "a wildcard covers every subdomain, including ones registered after today",
-  "write access lets the sandbox send anything it can read to this host",
-];
+const PRIVATE = "reaches private addresses: hosts on your network or VPN";
+const RISKS = [PRIVATE];
+/** The risks of approving each request as it asks. */
+const REQUEST_RISKS: Record<string, string[]> = {
+  "1": [
+    "`*.corp.internal` covers every host under corp.internal",
+    PRIVATE,
+    "write access lets code in the sandbox upload data to *.corp.internal",
+  ],
+  "2": [
+    "a tunnel to db.corp.internal:5432 is not inspected: code in the sandbox gets full access to it, any protocol and any data",
+    PRIVATE,
+  ],
+};
 const forced = (req: Request): boolean => !!(req.postDataJSON() as { force?: boolean }).force;
 
 const risks: Scenario = {
@@ -687,6 +696,11 @@ const risks: Scenario = {
     get(/^\/api\/resolve$/, { private: ["10.0.12.7", "fd00::7"], never: false }),
     {
       method: "POST",
+      path: /^\/api\/envs\/[^/]+\/requests\/\d+\/risks$/,
+      body: (req) => REQUEST_RISKS[/requests\/(\d+)/.exec(req.url())?.[1] ?? ""] ?? [],
+    },
+    {
+      method: "POST",
       path: /^\/api\/envs\/[^/]+\/(rules|requests\/\d+\/approve)$/,
       body: (req) =>
         forced(req)
@@ -701,8 +715,7 @@ const risks: Scenario = {
       name: "request-risks",
       open: async (page) => {
         await page.locator(".request button.open").first().click();
-        await subject(page).getByRole("button", { name: "Approve", exact: true }).click();
-        await subject(page).getByText(RISKS[1]).waitFor();
+        await subject(page).getByText(REQUEST_RISKS["1"][0]).waitFor();
       },
     },
     requestPanel(1, "tunnel"),

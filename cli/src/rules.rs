@@ -200,9 +200,10 @@ fn normalize(rule: &mut Rule) -> Result<()> {
 /// The risks of adding `rule` to an env with `policy`, or why it is refused: refused when
 /// it is invalid, or a tunnel over a host where the gate strips credentials, guards writes or
 /// applies a deny (see `Policy::tunnel_bypass`); a risk when it covers a host the gate puts
-/// one of your credentials on.
-fn risks(policy: &Policy, rule: &Rule) -> Result<Vec<String>> {
-    let issues = validate_rule(rule, RuleOrigin::Host);
+/// one of your credentials on. `origin` is who asked: you, or the sandbox's request, which shows
+/// more of what it asks for as risks.
+fn risks(policy: &Policy, rule: &Rule, origin: RuleOrigin) -> Result<Vec<String>> {
+    let issues = validate_rule(rule, origin);
     if let Some(e) = issues.iter().find(|i| i.severity == Severity::Error) {
         bail!("{}", e.message);
     }
@@ -230,10 +231,20 @@ impl std::error::Error for Risks {}
 
 /// Add `rule` to the env, failing with [`Risks`] unless `force` accepts them. The rule as
 /// added: with an id.
-pub fn add_rule_checked(ctx: &Ctx, name: &str, mut rule: Rule, force: bool) -> Result<Rule> {
+pub fn add_rule_checked(ctx: &Ctx, name: &str, rule: Rule, force: bool) -> Result<Rule> {
+    add_checked(ctx, name, rule, force, RuleOrigin::Host)
+}
+
+fn add_checked(
+    ctx: &Ctx,
+    name: &str,
+    mut rule: Rule,
+    force: bool,
+    origin: RuleOrigin,
+) -> Result<Rule> {
     rule.id.get_or_insert_with(new_rule_id);
     normalize(&mut rule)?;
-    let risks = risks(&env::plan(ctx, name)?.compiled.policy, &rule)?;
+    let risks = risks(&env::plan(ctx, name)?.compiled.policy, &rule, origin)?;
     if !risks.is_empty() && !force {
         return Err(Risks(risks).into());
     }
@@ -307,7 +318,11 @@ pub fn replace(ctx: &Ctx, name: &str, id: &str, mut rule: Rule, force: bool) -> 
     }
     rule.id = Some(new_rule_id());
     normalize(&mut rule)?;
-    let risks = risks(&env::plan(ctx, name)?.compiled.policy, &rule)?;
+    let risks = risks(
+        &env::plan(ctx, name)?.compiled.policy,
+        &rule,
+        RuleOrigin::Host,
+    )?;
     if !risks.is_empty() && !force {
         return Err(Risks(risks).into());
     }
@@ -419,7 +434,8 @@ pub fn describe(rule: &Rule) -> String {
     } else {
         format!(" paths {}", rule.paths.join(","))
     };
-    crate::text::display(&format!("{at} {}{paths}", rule.access.describe()))
+    let ws = if rule.ws { ", websockets too" } else { "" };
+    crate::text::display(&format!("{at} {}{paths}{ws}", rule.access.describe()))
 }
 
 /// What `luoto allow` takes to make `rule` again, without its access: the host, its port and
@@ -432,6 +448,9 @@ pub fn allow_args(rule: &Rule) -> String {
     }
     if rule.mode == Mode::Tunnel {
         args.push_str(" --tunnel");
+    }
+    if rule.ws {
+        args.push_str(" --ws");
     }
     args
 }
@@ -453,6 +472,46 @@ pub enum Approved {
     Rule(Rule),
     /// What an install request did, for people.
     Installed { installed: String },
+}
+
+/// The rule an access request becomes under `policy`, narrowed by `narrow`, on the user's
+/// network or VPN with `private`; refused when a `[[deny]]` takes all of it.
+fn granted(
+    policy: &Policy,
+    req: &AccessRequest,
+    narrow: &Narrowing,
+    private: bool,
+) -> Result<Rule> {
+    if let Some(d) = policy.wholly_denied(&req.host) {
+        bail!(
+            "{} is refused by a [[deny]] rule ({}): approving request #{} would open nothing; \
+             reject it, or remove the deny first",
+            crate::text::display(&req.host),
+            d.reason,
+            req.id
+        );
+    }
+    let mut rule = grant(req, narrow)?;
+    rule.allow_private = private;
+    Ok(rule)
+}
+
+/// What [`approve`] would ask the user to confirm for `req` so granted, or why it would refuse
+/// it: the UI shows them before the user decides. Nothing for an install request.
+pub fn approval_risks(
+    ctx: &Ctx,
+    name: &str,
+    req: &AccessRequest,
+    narrow: &Narrowing,
+    private: bool,
+) -> Result<Vec<String>> {
+    if req.install.is_some() {
+        return Ok(Vec::new());
+    }
+    let policy = env::plan(ctx, name)?.compiled.policy;
+    let mut rule = granted(&policy, req, narrow, private)?;
+    normalize(&mut rule)?;
+    risks(&policy, &rule, RuleOrigin::Request)
 }
 
 /// Approve a pending request: an access request becomes a rule, narrowed by `narrow`,
@@ -482,20 +541,10 @@ pub fn approve(
         return approve_install(ctx, name, req).map(|installed| Approved::Installed { installed });
     }
     let policy = env::plan(ctx, name)?.compiled.policy;
-    if let Some(d) = policy.wholly_denied(&req.host) {
-        bail!(
-            "{} is refused by a [[deny]] rule ({}): approving request #{} would open nothing; \
-             reject it, or remove the deny first",
-            crate::text::display(&req.host),
-            d.reason,
-            req.id
-        );
-    }
-    let mut rule = grant(req, narrow)?;
-    rule.allow_private = private;
+    let mut rule = granted(&policy, req, narrow, private)?;
     rule.expires = ttl.map(parse_duration).transpose()?.map(|d| Utc::now() + d);
     rule.note = Some(format!("approved request #{}", req.id));
-    let rule = add_rule_checked(ctx, name, rule, force)?;
+    let rule = add_checked(ctx, name, rule, force, RuleOrigin::Request)?;
     // The sandbox reads the note: it learns what it got, if less or more than it asked for.
     let mut notes = Vec::new();
     if !narrow.is_empty() {
@@ -747,19 +796,23 @@ mod tests {
             host: host.into(),
             ..Rule::default()
         };
-        let graph = risks(&policy, &rule("graph.microsoft.com")).unwrap();
+        let graph = risks(&policy, &rule("graph.microsoft.com"), RuleOrigin::Host).unwrap();
         assert_eq!(
             graph,
             ["requests it allows to graph.microsoft.com carry your `azure-graph` credential"]
         );
-        let arm = risks(&policy, &rule("management.azure.com")).unwrap();
+        let arm = risks(&policy, &rule("management.azure.com"), RuleOrigin::Host).unwrap();
         assert!(arm[0].contains("`azure-arm`"), "{arm:?}");
-        assert!(risks(&policy, &rule("docs.rs")).unwrap().is_empty());
+        assert!(
+            risks(&policy, &rule("docs.rs"), RuleOrigin::Host)
+                .unwrap()
+                .is_empty()
+        );
         let tunnel = Rule {
             mode: Mode::Tunnel,
             ..rule("graph.microsoft.com")
         };
-        assert!(risks(&policy, &tunnel).is_err());
+        assert!(risks(&policy, &tunnel, RuleOrigin::Host).is_err());
     }
 
     #[test]
@@ -768,9 +821,11 @@ mod tests {
             id: 3,
             host: "api.example.com".into(),
             port: None,
+            mode: None,
             access: AccessLevel::Write,
             paths: vec![],
             private: false,
+            ws: false,
             reason: "r".into(),
             status: RequestStatus::Pending,
             created: Utc::now(),

@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::events::Event;
-use crate::host::{is_never_dialed, is_private, normalize_host};
+use crate::host::{is_never_dialed, is_private, normalize_pattern};
 use crate::policy::{Access, AccessLevel, Mode, Rule, RuleOrigin, rule_error};
 
 pub const API_PREFIX: &str = "/_sandbox";
@@ -93,15 +93,21 @@ pub struct CheckResult {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct NewAccessRequest {
     pub host: String,
-    /// A port HTTP(S) doesn't use: the request is for an uninspected tunnel to `host:port`.
+    /// The one port the rule covers (default: 80 and 443).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Inspected or an uninspected tunnel; when not given, a request with a port is a tunnel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<Mode>,
     pub access: AccessLevel,
     #[serde(default)]
     pub paths: Vec<String>,
     /// The host is on the user's network or VPN: the rule asked for reaches it there.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub private: bool,
+    /// Websocket upgrades too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ws: bool,
     pub reason: String,
     /// Software to install; `host` is then empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,15 +244,22 @@ pub struct AccessRequest {
     pub id: u64,
     /// Empty for an install request.
     pub host: String,
-    /// Set for a tunnel request: `access` is then write, since a tunnel's bytes go unread.
+    /// The one port the rule covers (default: 80 and 443).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Inspected or a tunnel ([`AccessRequest::is_tunnel`]); a tunnel's `access` is write,
+    /// since its bytes go unread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<Mode>,
     pub access: AccessLevel,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
     /// Asks to reach the host on the user's network or VPN (a rule's `allow_private`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub private: bool,
+    /// Asks for websocket upgrades too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ws: bool,
     /// Written by code in the sandbox — untrusted text, display escaped.
     pub reason: String,
     pub status: RequestStatus,
@@ -264,28 +277,42 @@ pub struct AccessRequest {
 pub const MAX_PENDING_REQUESTS: usize = 5;
 pub const MAX_REASON_LEN: usize = 500;
 
-/// The rule a request for `host` asks for, or why the sandbox may not ask for it: a host or a
-/// wildcard the sandbox may name, never an address range, and a private address only in a
-/// plain private range and as `private`; with `port`, an uninspected tunnel to that one host
-/// and port, which HTTP(S)'s 80 and 443 never get. The rule leaves `allow_private` to the user.
+/// Whether a request with `port` and `mode` asks for a tunnel: as its mode says, else (a
+/// request that names none) whenever it names a port.
+pub fn asks_tunnel(port: Option<u16>, mode: Option<Mode>) -> bool {
+    match mode {
+        Some(m) => m == Mode::Tunnel,
+        None => port.is_some(),
+    }
+}
+
+/// The rule a request asks for, or why it can't: what a rule of the user's may be, which they
+/// approve seeing its risks ([`RuleOrigin::Request`]); an address on the user's network only
+/// as `private`, never one the gate never dials; a tunnel ([`asks_tunnel`]) to the host on its
+/// port (80 and 443 without one), never limited to paths. The rule leaves `allow_private` to
+/// the user.
 pub fn requested_rule(
     host: &str,
     port: Option<u16>,
+    mode: Option<Mode>,
     access: AccessLevel,
     paths: &[String],
     private: bool,
+    ws: bool,
 ) -> Result<Rule, String> {
-    let host = host.trim();
-    let host = match host.strip_prefix("*.") {
-        Some(rest) => normalize_host(rest).map(|d| format!("*.{d}")),
-        None => normalize_host(host),
-    }
-    .map_err(|e| e.to_string())?;
-    if let Ok(ip) = host.trim_start_matches("*.").parse::<IpAddr>() {
-        if host.starts_with("*.") {
-            return Err(format!("`{host}` is not a host pattern"));
-        }
-        // On the user's network: RFC 1918, CGNAT or unique-local, never loopback or the like.
+    let host = normalize_pattern(host).ok_or_else(|| {
+        format!(
+            "`{}` is not a host, a wildcard over one or an address range",
+            host.trim()
+        )
+    })?;
+    // An address, or a range by its first: on the user's network (RFC 1918, CGNAT or
+    // unique-local) only as `private`, never loopback or the like.
+    let addr = host
+        .parse::<IpAddr>()
+        .ok()
+        .or_else(|| host.parse::<ipnet::IpNet>().ok().map(|n| n.network()));
+    if let Some(ip) = addr {
         let plain = crate::host::leaves_host(ip);
         if (is_private(ip) || is_never_dialed(ip)) && !(private && plain) {
             return Err(if plain {
@@ -298,32 +325,31 @@ pub fn requested_rule(
             });
         }
     }
-    let rule = match port {
-        None => Rule {
-            host,
-            access: Access::Level(access),
-            paths: paths.to_vec(),
-            ..Default::default()
-        },
-        Some(80 | 443) => {
-            return Err("ports 80 and 443 are HTTP(S): ask for the host without a port".into());
-        }
-        Some(0) => return Err("port 0 is not a port".into()),
-        Some(_) if host.starts_with("*.") => {
-            return Err("a tunnel goes to one host: name it exactly".into());
-        }
-        Some(_) if !paths.is_empty() => {
+    if port == Some(0) {
+        return Err("port 0 is not a port".into());
+    }
+    let rule = if asks_tunnel(port, mode) {
+        if !paths.is_empty() {
             return Err("a tunnel can't be limited to paths: the gate doesn't read it".into());
         }
-        Some(port) => Rule {
+        Rule {
             host,
-            port: Some(port),
+            port,
             access: Access::Level(AccessLevel::Write),
             mode: Mode::Tunnel,
             ..Default::default()
-        },
+        }
+    } else {
+        Rule {
+            host,
+            port,
+            access: Access::Level(access),
+            paths: paths.to_vec(),
+            ws,
+            ..Default::default()
+        }
     };
-    match rule_error(&rule, RuleOrigin::Sandbox) {
+    match rule_error(&rule, RuleOrigin::Request) {
         Some(e) => Err(e.message),
         None => Ok(rule),
     }
@@ -360,10 +386,26 @@ impl AccessRequest {
         requested_rule(
             &self.host,
             self.port,
+            self.mode,
             self.access,
             &self.paths,
             self.private,
+            self.ws,
         )
+    }
+
+    /// Whether it asks for an uninspected tunnel ([`asks_tunnel`]).
+    pub fn is_tunnel(&self) -> bool {
+        self.install.is_none() && asks_tunnel(self.port, self.mode)
+    }
+
+    /// Where it asks to go: the host, or `host:port` (an IPv6 address bracketed) with a port.
+    pub fn target(&self) -> String {
+        match self.port {
+            Some(port) if self.host.contains(':') => format!("[{}]:{port}", self.host),
+            Some(port) => format!("{}:{port}", self.host),
+            None => self.host.clone(),
+        }
     }
 
     /// The rule granting the request, narrowed by `n`; refused if `n` would grant anything
@@ -419,7 +461,7 @@ impl AccessRequest {
             }
             rule.paths = n.paths.clone();
         }
-        match rule_error(&rule, RuleOrigin::Sandbox) {
+        match rule_error(&rule, RuleOrigin::Request) {
             Some(e) => Err(e.message),
             None => Ok(rule),
         }
@@ -435,9 +477,11 @@ mod tests {
             id: 3,
             host: host.into(),
             port,
+            mode: None,
             access,
             paths: paths.iter().map(|p| p.to_string()).collect(),
             private: false,
+            ws: false,
             reason: "r".into(),
             status: RequestStatus::Pending,
             created: Utc::now(),
@@ -447,10 +491,20 @@ mod tests {
         }
     }
 
+    /// A request as one filed before requests named their mode: a port is a tunnel.
+    fn ask(
+        host: &str,
+        port: Option<u16>,
+        access: AccessLevel,
+        paths: &[String],
+        private: bool,
+    ) -> Result<Rule, String> {
+        requested_rule(host, port, None, access, paths, private, false)
+    }
+
     #[test]
-    fn a_port_request_is_a_tunnel_to_one_public_host() {
-        let r =
-            requested_rule("DB.Example.com", Some(5432), AccessLevel::Read, &[], false).unwrap();
+    fn a_port_with_no_mode_is_a_tunnel_on_any_port() {
+        let r = ask("DB.Example.com", Some(5432), AccessLevel::Read, &[], false).unwrap();
         assert_eq!(
             (r.host.as_str(), r.port, r.mode, r.access),
             (
@@ -460,34 +514,70 @@ mod tests {
                 Access::Level(AccessLevel::Write)
             )
         );
+        // The user approves it seeing its risks, as a rule of their own.
+        for (host, port) in [
+            ("db.example.com", 443),
+            ("db.example.com", 80),
+            ("*.example.com", 5432),
+            ("8.8.8.8", 5432),
+        ] {
+            assert!(
+                ask(host, Some(port), AccessLevel::Write, &[], false).is_ok(),
+                "{host}:{port}"
+            );
+        }
         for (host, port, paths) in [
-            ("db.example.com", 443, &[][..]),
-            ("db.example.com", 80, &[][..]),
             ("db.example.com", 0, &[][..]),
-            ("*.example.com", 5432, &[][..]),
             ("db.example.com", 5432, &["/x/**".to_string()][..]),
             ("10.0.0.0/8", 5432, &[][..]),
             ("10.1.2.3", 5432, &[][..]),
             ("127.0.0.1", 5432, &[][..]),
             ("[::1]", 5432, &[][..]),
             ("169.254.169.254", 5432, &[][..]),
-            ("*", 5432, &[][..]),
+            ("203.0.113.9", 5432, &[][..]),
             ("user@db.example.com", 5432, &[][..]),
         ] {
             assert!(
-                requested_rule(host, Some(port), AccessLevel::Write, paths, false).is_err(),
+                ask(host, Some(port), AccessLevel::Write, paths, false).is_err(),
                 "{host}:{port} {paths:?}"
             );
         }
-        assert!(requested_rule("203.0.113.9", Some(5432), AccessLevel::Write, &[], false).is_err());
-        assert!(requested_rule("8.8.8.8", Some(5432), AccessLevel::Write, &[], false).is_ok());
+    }
+
+    #[test]
+    fn a_request_names_its_mode_its_port_and_websockets() {
+        let paths = ["/repository/**".to_string()];
+        let r = requested_rule(
+            "nexus.corp.example",
+            Some(8443),
+            Some(Mode::Inspect),
+            AccessLevel::Read,
+            &paths,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!((r.port, r.mode, r.ws), (Some(8443), Mode::Inspect, true));
+        assert_eq!(r.paths, paths);
+        // A tunnel on HTTPS's own ports, for a client that checks the server's own CA.
+        let t = requested_rule(
+            "k8s.example.com",
+            None,
+            Some(Mode::Tunnel),
+            AccessLevel::Read,
+            &[],
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!((t.port, t.mode), (None, Mode::Tunnel));
+        assert!(asks_tunnel(Some(5432), None) && !asks_tunnel(Some(8443), Some(Mode::Inspect)));
     }
 
     #[test]
     fn a_private_address_is_asked_for_only_with_private_access() {
-        let ask = |host: &str, private: bool| {
-            requested_rule(host, Some(6443), AccessLevel::Write, &[], private)
-        };
+        let ask =
+            |host: &str, private: bool| ask(host, Some(6443), AccessLevel::Write, &[], private);
         for host in ["10.10.0.8", "192.168.1.20", "100.64.0.9", "[fd12::8]"] {
             assert!(ask(host, false).is_err(), "{host}");
             let rule = ask(host, true).unwrap();
@@ -506,22 +596,28 @@ mod tests {
 
     #[test]
     fn host_requests_keep_their_checks() {
-        assert!(requested_rule("docs.rs", None, AccessLevel::Read, &[], false).is_ok());
-        assert!(requested_rule("*.mycompany.dev", None, AccessLevel::Read, &[], false).is_ok());
+        // What a rule of the user's may be, its risks shown when it is approved.
         for host in [
+            "docs.rs",
+            "*.mycompany.dev",
             "*",
-            "*.github.io",
             "*.amazonaws.com",
-            "*.10.0.0.1",
-            "192.168.1.1",
+            "8.8.8.0/24",
         ] {
             assert!(
-                requested_rule(host, None, AccessLevel::Read, &[], false).is_err(),
+                ask(host, None, AccessLevel::Read, &[], false).is_ok(),
+                "{host}"
+            );
+        }
+        // Never a public suffix, a wildcard over an address, or the user's network unasked.
+        for host in ["*.github.io", "*.10.0.0.1", "192.168.1.1", "10.0.0.0/8"] {
+            assert!(
+                ask(host, None, AccessLevel::Read, &[], false).is_err(),
                 "{host}"
             );
         }
         let bad_path = ["v1/**".to_string()];
-        assert!(requested_rule("docs.rs", None, AccessLevel::Read, &bad_path, false).is_err());
+        assert!(ask("docs.rs", None, AccessLevel::Read, &bad_path, false).is_err());
     }
 
     #[test]

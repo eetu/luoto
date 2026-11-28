@@ -13,12 +13,19 @@ export type AccessRequest = {
   id: number;
   /** Empty for an install request. */
   host: string;
-  /** Set for a tunnel request: `access` is then write, since a tunnel's bytes go unread. */
+  /** The one port the rule covers (default: 80 and 443). */
   port?: number;
+  /**
+   * Inspected or a tunnel ([`AccessRequest::is_tunnel`]); a tunnel's `access` is write,
+   * since its bytes go unread.
+   */
+  mode?: Mode;
   access: AccessLevel;
   paths?: string[];
   /** Asks to reach the host on the user's network or VPN (a rule's `allow_private`). */
   private?: boolean;
+  /** Asks for websocket upgrades too. */
+  ws?: boolean;
   /** Written by code in the sandbox — untrusted text, display escaped. */
   reason: string;
   status: RequestStatus;
