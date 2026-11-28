@@ -358,6 +358,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   other envs and the vault share: their availability, not their isolation.
 - **Exhausting the gate.** Code in the sandbox can hold the gate's 1024 connections and
   so stop the env's own traffic, which it could break anyway; other envs have their own gates.
+  An HTTP/2 connection is held to 100 open streams and 64 KiB of headers, and to 64 KiB of
+  unread response per stream; it is closed when a stream waits past its idle limit for the
+  client to read, or when it resets streams as fast as it opens them.
   The event queue, cached certificates and the logs of the gate, the vault and the dev container
   (which root in the sandbox can write to) stay bounded; Docker keeps its daemon's log settings.
   Apple's `container` caps no container's log, so there the gate keeps its events in a capped

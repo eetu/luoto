@@ -22,8 +22,11 @@ use crate::state::State;
 /// Client connections open at once over every intake: far above the tens a package manager
 /// or browser keeps open, low enough that all their buffers fit in the gate's memory.
 pub const MAX_CONNS: usize = 1024;
-/// Descriptors one client connection holds: its own and its upstream's.
-const FDS_PER_CONN: usize = 2;
+/// An HTTP/2 client's streams to a server that speaks only HTTP/1.1 take an upstream
+/// connection each, at most this many at once; the rest wait.
+pub const H1_UPSTREAMS: usize = 4;
+/// Descriptors one client connection holds: its own and its upstreams'.
+const FDS_PER_CONN: usize = 1 + H1_UPSTREAMS;
 /// Descriptors kept back for the listeners, the ctl socket, DNS lookups and the vault.
 const RESERVED_FDS: usize = 128;
 /// From a request's last byte to its response head: non-streaming model API calls answer
@@ -43,6 +46,10 @@ pub const HANDSHAKE: Duration = Duration::from_secs(15);
 pub const DNS_TCP_IDLE: Duration = Duration::from_secs(10);
 /// Past the handler's own response-head limit, so its 504 and event come first.
 pub const HEAD_GRACE: Duration = Duration::from_secs(5);
+/// An HTTP/2 connection with a stream open waits this long: each stream keeps its own limits.
+pub const STREAMS_OPEN: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+/// HTTP/2 streams open at once on one client connection, as servers commonly allow.
+pub const MAX_STREAMS: u32 = 100;
 /// After a failed accept (out of descriptors or memory): long enough not to spin, short
 /// enough to take the next connection soon after one closes.
 pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
@@ -279,7 +286,7 @@ impl Activity {
         self.last.store(now, Ordering::Relaxed);
     }
 
-    fn still(&self) -> Duration {
+    pub fn still(&self) -> Duration {
         let last = Duration::from_millis(self.last.load(Ordering::Relaxed));
         self.origin.elapsed().saturating_sub(last)
     }
@@ -290,6 +297,10 @@ impl Activity {
             self.read.load(Ordering::Relaxed),
             self.written.load(Ordering::Relaxed),
         )
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst) > 0
     }
 
     /// The connection is handling a request until the guard drops.
@@ -521,7 +532,7 @@ mod tests {
         let limits = Limits::default();
         assert_eq!(limits.fit(None).conns, MAX_CONNS);
         assert_eq!(limits.fit(Some(1 << 20)).conns, MAX_CONNS);
-        assert_eq!(limits.fit(Some(1024)).conns, (1024 - RESERVED_FDS) / 2);
+        assert_eq!(limits.fit(Some(1024)).conns, (1024 - RESERVED_FDS) / 5);
         assert_eq!(limits.fit(Some(10)).conns, 1);
     }
 

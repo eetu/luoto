@@ -52,7 +52,7 @@ pub struct AllowOpts {
     #[arg(long = "for", value_name = "DURATION")]
     pub window: Option<String>,
     /// Opaque tunnel (no inspection) for any client and protocol: certificate-pinning
-    /// clients, gRPC, a database with `--port`.
+    /// clients, a database with `--port`.
     #[arg(long)]
     pub tunnel: bool,
     /// Allow websocket upgrades.

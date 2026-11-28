@@ -5,7 +5,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use hyper::client::conn::http1::{self, SendRequest};
-use hyper_util::rt::TokioIo;
+use hyper::client::conn::http2;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use luoto_shared::host::{is_never_dialed, is_private, leaves_host};
 use luoto_shared::policy::DenyReason;
 use rustls_pki_types::ServerName;
@@ -310,25 +311,45 @@ fn cannot_connect(host: &str, port: u16, failed: &[String], timed_out: Timeout) 
     msg
 }
 
+/// A dialed upstream connection, and whether its server took HTTP/2.
+pub struct Dialed {
+    pub io: Box<dyn Io>,
+    pub h2: bool,
+}
+
+/// Dial `host`, offering HTTP/2 over TLS where `h2` (the client speaks it); otherwise, and
+/// over plain HTTP, the connection speaks HTTP/1.1.
 pub async fn dial(
     state: &State,
     host: &str,
     port: u16,
     tls: bool,
     reach: Reach,
-) -> Result<Box<dyn Io>, DialError> {
+    h2: bool,
+) -> Result<Dialed, DialError> {
     let tcp = dial_tcp_to(state, host, port, reach.private, reach.private_only).await?;
     if !tls {
-        return Ok(tcp);
+        return Ok(Dialed { io: tcp, h2: false });
     }
     let name = ServerName::try_from(host.to_string())
         .map_err(|_| DialError::Failed(format!("invalid TLS name {host}")))?;
     let connector = TlsConnector::from(state.tls_for(host));
-    let stream = tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(name, tcp))
+    let connect = if h2 {
+        connector
+            .with_alpn(vec![b"h2".to_vec(), b"http/1.1".to_vec()])
+            .connect(name, tcp)
+    } else {
+        connector.connect(name, tcp)
+    };
+    let stream = tokio::time::timeout(CONNECT_TIMEOUT, connect)
         .await
         .map_err(|_| DialError::Failed(format!("TLS handshake with {host} timed out")))?
         .map_err(|e| DialError::Failed(tls_failed(&state.cfg.env, host, &e)))?;
-    Ok(Box::new(stream))
+    let h2 = stream.get_ref().1.alpn_protocol() == Some(b"h2");
+    Ok(Dialed {
+        io: Box::new(stream),
+        h2,
+    })
 }
 
 /// Why the handshake with `host` failed; for a certificate no CA the gate trusts signed, how
@@ -364,6 +385,35 @@ pub async fn http1_sender(io: Box<dyn Io>) -> Result<SendRequest<Body>, DialErro
     });
     Ok(sender)
 }
+
+pub async fn http2_sender(io: Box<dyn Io>) -> Result<http2::SendRequest<Body>, DialError> {
+    let (sender, conn) = http2::Builder::new(TokioExecutor::new())
+        .timer(TokioTimer::new())
+        .initial_stream_window_size(STREAM_WINDOW)
+        .initial_connection_window_size(CONN_WINDOW)
+        .max_header_list_size(MAX_HEADER_LIST)
+        // A connection the network dropped (a VPN switch, a NAT timeout) ends instead of
+        // taking the client's next streams.
+        .keep_alive_interval(Duration::from_secs(30))
+        .keep_alive_timeout(Duration::from_secs(20))
+        .handshake(TokioIo::new(io))
+        .await
+        .map_err(|e| DialError::Failed(format!("HTTP/2 handshake failed: {e}")))?;
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    Ok(sender)
+}
+
+/// HTTP/2 flow control, both ways: how far a peer may send to the gate ahead of its reading,
+/// on one stream and on the whole connection.
+pub const STREAM_WINDOW: u32 = 256 << 10;
+pub const CONN_WINDOW: u32 = 1 << 20;
+/// What the gate buffers of a response for a client not reading it yet, per stream: with
+/// `MAX_STREAMS` of them, the most one client connection holds.
+pub const SEND_BUF: usize = 64 << 10;
+/// The largest header block the gate takes over HTTP/2, decoded.
+pub const MAX_HEADER_LIST: u32 = 64 << 10;
 
 #[cfg(test)]
 mod this_machine_tests {

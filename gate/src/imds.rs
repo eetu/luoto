@@ -122,7 +122,7 @@ pub async fn answer(
 
 async fn token(state: &State, req: &Request<Incoming>, target: &Target) -> Answer {
     let bad = |d: &str| Answer::error(StatusCode::BAD_REQUEST, "invalid_request", d.into());
-    if !host_agrees(req.headers(), target) {
+    if !host_agrees(req.headers(), req.uri(), target) {
         return bad("invalid or ambiguous destination").refused("invalid_host");
     }
     if !req.uri().path().eq_ignore_ascii_case(IMDS_TOKEN_PATH) {

@@ -39,7 +39,7 @@ pub const PROXY_VARS: [&str; 4] = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "h
 /// The variables every dev container gets naming what bypasses the proxy.
 pub const NO_PROXY_VARS: [&str; 2] = ["NO_PROXY", "no_proxy"];
 /// The variables every dev container gets pointing at the CA bundle with the gate's CA.
-pub const CA_VARS: [&str; 8] = [
+pub const CA_VARS: [&str; 9] = [
     "SSL_CERT_FILE",
     "NODE_EXTRA_CA_CERTS",
     "REQUESTS_CA_BUNDLE",
@@ -48,6 +48,8 @@ pub const CA_VARS: [&str; 8] = [
     "CARGO_HTTP_CAINFO",
     "GIT_SSL_CAINFO",
     "DENO_CERT",
+    // gRPC's C core (grpcio, the Ruby and PHP clients) trusts only its own roots otherwise.
+    "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH",
 ];
 
 /// Whether luoto sets variable `name` in every dev container itself (its proxy, CA bundle and

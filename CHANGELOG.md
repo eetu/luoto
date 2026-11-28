@@ -7,6 +7,23 @@ release may break.
 
 ## [Unreleased]
 
+### Added
+
+- gRPC works under an ordinary rule (`--write --path '/<package.Service>/*'`), inspected and
+  with credentials added: the gate speaks HTTP/2 with clients and servers that take it.
+- A gRPC call the gate refuses fails with `PERMISSION_DENIED` and the gate's explanation, and
+  may sit silent for an hour, as a tunnel may.
+- Every env sets `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, so gRPC clients that read it trust the
+  gate's CA.
+- A TLS client offering only protocols the gate doesn't speak shows in `luoto egress` with the
+  tunnel rule that passes it.
+
+### Fixed
+
+- On a host the gate adds a credential to, a streamed response (server-sent events, JSON
+  lines) reached the client only once its first 64 KiB had arrived.
+- A POST refused for a private address was told to allow the host without `--write`.
+
 ## [0.7.6] - 2026-11-28
 
 ### Added

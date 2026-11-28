@@ -2958,3 +2958,710 @@ async fn a_service_principal_token_is_minted_in_the_vault_reused_and_retired_wit
         assert_eq!(form, want);
     }
 }
+
+/// HTTP/2 between the sandbox and the gate, and between the gate and servers that take it:
+/// gRPC above all.
+mod http2_and_grpc {
+    use super::*;
+
+    use std::convert::Infallible;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use bytes::Bytes;
+    use http::{HeaderMap, HeaderValue, Version};
+    use http_body_util::BodyExt;
+    use http_body_util::combinators::BoxBody;
+    use hyper::body::{Frame, Incoming};
+    use hyper::client::conn::http2::SendRequest;
+    use hyper::service::service_fn;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::{Notify, mpsc};
+
+    type H2Body = BoxBody<Bytes, Infallible>;
+
+    /// A body whose frames are sent as it goes.
+    struct Chan(mpsc::UnboundedReceiver<Frame<Bytes>>);
+
+    impl hyper::body::Body for Chan {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+            self.0.poll_recv(cx).map(|f| f.map(Ok))
+        }
+    }
+
+    fn chan() -> (mpsc::UnboundedSender<Frame<Bytes>>, H2Body) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (tx, Chan(rx).boxed())
+    }
+
+    fn full(s: &str) -> H2Body {
+        http_body_util::Full::new(Bytes::copy_from_slice(s.as_bytes())).boxed()
+    }
+
+    fn data(s: &str) -> Frame<Bytes> {
+        Frame::data(Bytes::copy_from_slice(s.as_bytes()))
+    }
+
+    fn grpc_ok() -> Frame<Bytes> {
+        let mut t = HeaderMap::new();
+        t.insert("grpc-status", HeaderValue::from_static("0"));
+        Frame::trailers(t)
+    }
+
+    const SECRET: &str = "real-secret-token";
+
+    /// What a server behind the gate saw of a request.
+    #[derive(Clone, Debug)]
+    struct H2Seen {
+        version: Version,
+        uri: String,
+        headers: HeaderMap,
+        /// A unary call's request trailers.
+        trailers: Option<HeaderMap>,
+    }
+
+    /// A TLS server for `name` that `ca` signed, speaking HTTP/2 to a client that offers it and
+    /// HTTP/1.1 to others, on gRPC-shaped paths:
+    /// - `/test.Echo/Unary`: the request back, then `grpc-status: 0` in trailers;
+    /// - `/test.Echo/Stream`: `one`, then `two` once the test lets it (`go`), then trailers;
+    /// - `/test.Echo/Leak`: `SECRET` split across two frames;
+    /// - `/test.Echo/Bidi`: each request frame back as it comes, trailers at the request's end;
+    /// - `/test.Echo/Quiet`: `one`, nothing for `x-quiet-ms`, then `two`;
+    /// - anything else: `ok`.
+    struct H2Server {
+        addr: SocketAddr,
+        seen: Arc<Mutex<Vec<H2Seen>>>,
+        conns: Arc<AtomicUsize>,
+        go: Arc<Notify>,
+    }
+
+    impl H2Server {
+        async fn start(ca: &TestCa, name: &str) -> H2Server {
+            let (cert, key) = ca.leaf(name);
+            let mut cfg = ServerConfig::builder_with_provider(provider())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key)
+                .unwrap();
+            cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let conns = Arc::new(AtomicUsize::new(0));
+            let go = Arc::new(Notify::new());
+            let server = H2Server {
+                addr,
+                seen: seen.clone(),
+                conns: conns.clone(),
+                go: go.clone(),
+            };
+            tokio::spawn(async move {
+                loop {
+                    let Ok((tcp, _)) = listener.accept().await else {
+                        return;
+                    };
+                    conns.fetch_add(1, Ordering::SeqCst);
+                    let (acceptor, seen, go) = (acceptor.clone(), seen.clone(), go.clone());
+                    tokio::spawn(async move {
+                        let Ok(tls) = acceptor.accept(tcp).await else {
+                            return;
+                        };
+                        let h2 = tls.get_ref().1.alpn_protocol() == Some(b"h2");
+                        let svc = service_fn(move |req| answer(req, seen.clone(), go.clone()));
+                        let io = TokioIo::new(tls);
+                        if h2 {
+                            let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                                .serve_connection(io, svc)
+                                .await;
+                        } else {
+                            let _ = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(io, svc)
+                                .await;
+                        }
+                    });
+                }
+            });
+            server
+        }
+
+        fn seen(&self) -> Vec<H2Seen> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    async fn answer(
+        req: http::Request<Incoming>,
+        seen: Arc<Mutex<Vec<H2Seen>>>,
+        go: Arc<Notify>,
+    ) -> Result<http::Response<H2Body>, Infallible> {
+        let mut head = H2Seen {
+            version: req.version(),
+            uri: req.uri().to_string(),
+            headers: req.headers().clone(),
+            trailers: None,
+        };
+        let unary = req.uri().path() == "/test.Echo/Unary";
+        if !unary {
+            seen.lock().unwrap().push(head.clone());
+        }
+        let quiet = req
+            .headers()
+            .get("x-quiet-ms")
+            .and_then(|v| v.to_str().ok()?.parse().ok())
+            .unwrap_or(0);
+        let (tx, body) = chan();
+        match req.uri().path() {
+            "/test.Echo/Unary" => {
+                let collected = req.into_body().collect().await.unwrap();
+                head.trailers = collected.trailers().cloned();
+                seen.lock().unwrap().push(head);
+                let _ = tx.send(Frame::data(collected.to_bytes()));
+                let _ = tx.send(grpc_ok());
+            }
+            "/test.Echo/Stream" => {
+                tokio::spawn(async move {
+                    let _ = tx.send(data("one"));
+                    let _ = tokio::time::timeout(Duration::from_secs(10), go.notified()).await;
+                    let _ = tx.send(data("two"));
+                    let _ = tx.send(grpc_ok());
+                });
+            }
+            "/test.Echo/Leak" => {
+                tokio::spawn(async move {
+                    let _ = tx.send(data(&format!("start {}", &SECRET[..6])));
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    let _ = tx.send(data(&format!("{} end", &SECRET[6..])));
+                    let _ = tx.send(grpc_ok());
+                });
+            }
+            "/test.Echo/Bidi" => {
+                let mut body = req.into_body();
+                tokio::spawn(async move {
+                    while let Some(Ok(f)) = body.frame().await {
+                        if let Ok(d) = f.into_data() {
+                            let _ = tx.send(Frame::data(d));
+                        }
+                    }
+                    let _ = tx.send(grpc_ok());
+                });
+            }
+            "/test.Echo/Quiet" => {
+                tokio::spawn(async move {
+                    let _ = tx.send(data("one"));
+                    tokio::time::sleep(Duration::from_millis(quiet)).await;
+                    let _ = tx.send(data("two"));
+                    let _ = tx.send(grpc_ok());
+                });
+            }
+            _ => {
+                let _ = tx.send(data("ok"));
+            }
+        }
+        Ok(http::Response::builder()
+            .header("content-type", "application/grpc")
+            .body(body)
+            .unwrap())
+    }
+
+    /// TLS to `host` through the gate's proxy (CONNECT), trusting only `ca`, offering `alpn`.
+    async fn tls_through_gate(
+        gate_port: u16,
+        host: &str,
+        ca: &TestCa,
+        alpn: &[&[u8]],
+    ) -> std::io::Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
+        let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", gate_port)).await?;
+        let connect = format!("CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n");
+        tcp.write_all(connect.as_bytes()).await?;
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            tcp.read_exact(&mut byte).await?;
+            head.push(byte[0]);
+        }
+        assert!(head.starts_with(b"HTTP/1.1 200"), "{head:?}");
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.cert.clone()).unwrap();
+        let mut cfg = ClientConfig::builder_with_provider(provider())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+        let name = ServerName::try_from(host.to_string()).unwrap();
+        tokio_rustls::TlsConnector::from(Arc::new(cfg))
+            .connect(name, tcp)
+            .await
+    }
+
+    /// An HTTP/2 connection to `host` through the gate, as gRPC clients make (`h2` only).
+    async fn h2_client(gate_port: u16, host: &str, ca: &TestCa) -> SendRequest<H2Body> {
+        h2_client_with(gate_port, host, ca, None).await.0
+    }
+
+    /// [`h2_client`], letting the gate send at most `window` bytes on a stream before the
+    /// client makes room; the connection's task, which ends with it.
+    async fn h2_client_with(
+        gate_port: u16,
+        host: &str,
+        ca: &TestCa,
+        window: Option<u32>,
+    ) -> (
+        SendRequest<H2Body>,
+        tokio::task::JoinHandle<hyper::Result<()>>,
+    ) {
+        let tls = tls_through_gate(gate_port, host, ca, &[b"h2"])
+            .await
+            .unwrap();
+        assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+        let mut builder = hyper::client::conn::http2::Builder::new(TokioExecutor::new());
+        if let Some(w) = window {
+            builder.initial_stream_window_size(w);
+        }
+        let (sender, conn) = builder.handshake(TokioIo::new(tls)).await.unwrap();
+        (sender, tokio::spawn(conn))
+    }
+
+    fn grpc(host: &str, path: &str, body: H2Body) -> http::Request<H2Body> {
+        http::Request::post(format!("https://{host}{path}"))
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .body(body)
+            .unwrap()
+    }
+
+    /// A response read to its end, or as far as it went before the stream failed.
+    #[derive(Debug, Default)]
+    struct H2Reply {
+        status: u16,
+        headers: HeaderMap,
+        data: String,
+        trailers: Option<HeaderMap>,
+        error: Option<String>,
+    }
+
+    impl H2Reply {
+        fn grpc_status(&self) -> Option<&str> {
+            self.trailers
+                .as_ref()
+                .and_then(|t| t.get("grpc-status"))
+                .or_else(|| self.headers.get("grpc-status"))
+                .and_then(|v| v.to_str().ok())
+        }
+
+        fn grpc_message(&self) -> String {
+            self.headers
+                .get("grpc-message")
+                .map(|v| v.to_str().unwrap().replace("%0A", "\n").replace("%25", "%"))
+                .unwrap_or_default()
+        }
+    }
+
+    async fn send(client: &mut SendRequest<H2Body>, req: http::Request<H2Body>) -> H2Reply {
+        client.ready().await.unwrap();
+        let resp = client.send_request(req).await.unwrap();
+        read_reply(resp).await
+    }
+
+    async fn read_reply(resp: http::Response<Incoming>) -> H2Reply {
+        let mut reply = H2Reply {
+            status: resp.status().as_u16(),
+            headers: resp.headers().clone(),
+            ..Default::default()
+        };
+        let mut body = resp.into_body();
+        while let Some(frame) = body.frame().await {
+            match frame {
+                Ok(f) => match f.into_data() {
+                    Ok(d) => reply.data.push_str(&String::from_utf8_lossy(&d)),
+                    Err(f) => reply.trailers = f.into_trailers().ok(),
+                },
+                Err(e) => {
+                    reply.error = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        reply
+    }
+
+    /// The next data frame's text.
+    async fn next(body: &mut Incoming) -> String {
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+                .await
+                .expect("a frame within 5 s")
+                .expect("a frame")
+                .unwrap();
+            if let Ok(d) = frame.into_data() {
+                return String::from_utf8_lossy(&d).into_owned();
+            }
+        }
+    }
+
+    fn write(id: &str, host: &str, paths: &[&str]) -> CompiledRule {
+        rule(id, host, Access::Level(AccessLevel::Write), paths)
+    }
+
+    /// The gate's latest denial with `reason`, from its status (within 10 s).
+    fn denial(env: &Env, reason: &str) -> serde_json::Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let r = super::send(
+                env.gate_port,
+                b"GET /_sandbox/status HTTP/1.1\r\nHost: gate\r\nConnection: close\r\n\r\n",
+            );
+            let found = r.json()["recent_denials"]
+                .as_array()
+                .and_then(|ds| ds.iter().find(|d| d["reason"] == reason).cloned());
+            if let Some(d) = found {
+                return d;
+            }
+            assert!(Instant::now() < deadline, "no {reason} denial: {}", r.body);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    async fn grpc_env(server: &H2Server, server_ca: &TestCa, env_ca: &TestCa) -> Env {
+        let env = Env::start(&[("grpc.test", server.addr)])
+            .with_cas(upstream_cas(&[("grpc.test", server_ca)]));
+        env_ca.install(&env);
+        env
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "spawns binaries; run with `just it`"]
+    async fn grpc_over_http2_is_inspected_streams_and_keeps_its_trailers() {
+        let env_ca = TestCa::new("luoto sandbox CA (it)");
+        let server_ca = TestCa::new("grpc CA");
+        let server = H2Server::start(&server_ca, "grpc.test").await;
+        let env = grpc_env(&server, &server_ca, &env_ca).await;
+        env.credentials(
+            &[(
+                "t.key",
+                BindingSpec::Static {
+                    secret_ref: "env:X".into(),
+                },
+            )],
+            &[("env:X", SECRET)],
+        );
+        env.apply(Policy {
+            rules: vec![write("grpc", "grpc.test", &["/test.Echo/*"])],
+            injections: vec![Injection {
+                binding: "t.key".into(),
+                host: "grpc.test".into(),
+                port: None,
+                paths: vec![],
+                methods: Vec::new(),
+                ignore_case: false,
+                place: Placement::Header {
+                    name: "authorization".into(),
+                    format: "Bearer {secret}".into(),
+                },
+            }],
+            ..Default::default()
+        });
+        let mut client = h2_client(env.gate_port, "grpc.test", &env_ca).await;
+
+        let r = send(
+            &mut client,
+            grpc("grpc.test", "/test.Echo/Unary", full("hello")),
+        )
+        .await;
+        assert_eq!((r.status, r.data.as_str()), (200, "hello"), "{r:?}");
+        assert_eq!(r.grpc_status(), Some("0"), "{r:?}");
+        let seen = server.seen().pop().unwrap();
+        assert_eq!(seen.version, Version::HTTP_2);
+        assert_eq!(seen.uri, "https://grpc.test/test.Echo/Unary");
+        assert_eq!(seen.headers["authorization"], format!("Bearer {SECRET}"));
+        assert_eq!(seen.headers["te"], "trailers");
+
+        // The client's own credential goes from its trailers too.
+        let (tx, body) = chan();
+        tx.send(data("hello")).unwrap();
+        let mut t = HeaderMap::new();
+        t.insert("authorization", HeaderValue::from_static("Bearer attacker"));
+        t.insert("x-checksum", HeaderValue::from_static("1"));
+        tx.send(Frame::trailers(t)).unwrap();
+        drop(tx);
+        let r = send(&mut client, grpc("grpc.test", "/test.Echo/Unary", body)).await;
+        assert_eq!(r.grpc_status(), Some("0"), "{r:?}");
+        let trailers = server.seen().pop().unwrap().trailers.unwrap();
+        assert!(trailers.get("authorization").is_none(), "{trailers:?}");
+        assert_eq!(trailers["x-checksum"], "1");
+
+        // Each message goes on as it comes: the server sends the second only once the client
+        // has the first.
+        client.ready().await.unwrap();
+        let req = grpc("grpc.test", "/test.Echo/Stream", full(""));
+        let mut body = client.send_request(req).await.unwrap().into_body();
+        assert_eq!(next(&mut body).await, "one");
+        server.go.notify_one();
+        assert_eq!(next(&mut body).await, "two");
+
+        // A credential coming back split across frames ends the stream before its rest.
+        let r = send(&mut client, grpc("grpc.test", "/test.Echo/Leak", full(""))).await;
+        assert!(r.error.is_some(), "{r:?}");
+        assert!(!r.data.contains(&SECRET[..6]), "{r:?}");
+
+        assert_eq!(
+            server.conns.load(Ordering::SeqCst),
+            1,
+            "one upstream connection"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "spawns binaries; run with `just it`"]
+    async fn a_grpc_call_the_policy_refuses_is_a_grpc_error_beside_a_live_stream() {
+        let env_ca = TestCa::new("luoto sandbox CA (it)");
+        let server_ca = TestCa::new("grpc CA");
+        let server = H2Server::start(&server_ca, "grpc.test").await;
+        let env = grpc_env(&server, &server_ca, &env_ca).await;
+        env.apply(Policy {
+            rules: vec![write("bidi", "grpc.test", &["/test.Echo/Bidi"])],
+            ..Default::default()
+        });
+        let mut client = h2_client(env.gate_port, "grpc.test", &env_ca).await;
+
+        let (tx, body) = chan();
+        client.ready().await.unwrap();
+        let mut bidi = client
+            .send_request(grpc("grpc.test", "/test.Echo/Bidi", body))
+            .await
+            .unwrap()
+            .into_body();
+        tx.send(data("ping 1")).unwrap();
+        assert_eq!(next(&mut bidi).await, "ping 1");
+
+        let r = send(
+            &mut client,
+            grpc("grpc.test", "/test.Echo/Unary", full("x")),
+        )
+        .await;
+        assert_eq!((r.status, r.grpc_status()), (200, Some("7")), "{r:?}");
+        let msg = r.grpc_message();
+        assert!(msg.contains("luoto allow -e it grpc.test --path"), "{msg}");
+        assert!(msg.contains("--write"), "{msg}");
+
+        tx.send(data("ping 2")).unwrap();
+        assert_eq!(next(&mut bidi).await, "ping 2");
+        drop(tx);
+
+        // A read rule: gRPC is all POST.
+        env.apply(Policy {
+            rules: vec![read("read", "grpc.test")],
+            ..Default::default()
+        });
+        let mut client = h2_client(env.gate_port, "grpc.test", &env_ca).await;
+        let r = send(
+            &mut client,
+            grpc("grpc.test", "/test.Echo/Unary", full("x")),
+        )
+        .await;
+        assert_eq!(r.grpc_status(), Some("7"), "{r:?}");
+        let msg = r.grpc_message();
+        assert!(msg.contains("luoto allow -e it grpc.test --write"), "{msg}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "spawns binaries; run with `just it`"]
+    async fn http2_streams_share_one_upstream_and_reach_a_server_of_http1_only() {
+        let env_ca = TestCa::new("luoto sandbox CA (it)");
+        let server_ca = TestCa::new("grpc CA");
+        let server = H2Server::start(&server_ca, "grpc.test").await;
+        let old = Https::start(&server_ca, "old.test");
+        let env = Env::start(&[("grpc.test", server.addr), ("old.test", old.addr)]).with_cas(
+            upstream_cas(&[("grpc.test", &server_ca), ("old.test", &server_ca)]),
+        );
+        env_ca.install(&env);
+        env.apply(Policy {
+            rules: vec![write("grpc", "grpc.test", &[]), read("old", "old.test")],
+            ..Default::default()
+        });
+
+        let client = h2_client(env.gate_port, "grpc.test", &env_ca).await;
+        let calls = (0..20).map(|i| {
+            let mut client = client.clone();
+            tokio::spawn(async move {
+                let msg = format!("call {i}");
+                send(
+                    &mut client,
+                    grpc("grpc.test", "/test.Echo/Unary", full(&msg)),
+                )
+                .await
+            })
+        });
+        for (i, call) in calls.enumerate() {
+            let r = call.await.unwrap();
+            assert_eq!(r.data, format!("call {i}"), "{r:?}");
+        }
+        assert_eq!(
+            server.conns.load(Ordering::SeqCst),
+            1,
+            "one upstream connection"
+        );
+
+        // A server that speaks only HTTP/1.1 gets HTTP/1.1, a request at a time per connection.
+        let client = h2_client(env.gate_port, "old.test", &env_ca).await;
+        let gets = (0..3).map(|_| {
+            let mut client = client.clone();
+            tokio::spawn(async move {
+                let req = http::Request::get("https://old.test/ok")
+                    .body(full(""))
+                    .unwrap();
+                send(&mut client, req).await
+            })
+        });
+        for get in gets {
+            let r = get.await.unwrap();
+            assert_eq!((r.status, r.data.as_str()), (200, "ok"), "{r:?}");
+        }
+        let seen = old.seen();
+        assert_eq!(seen.len(), 3);
+        for s in seen {
+            assert!(s.head.starts_with("GET /ok HTTP/1.1\r\n"), "{}", s.head);
+            assert!(
+                s.head
+                    .to_ascii_lowercase()
+                    .contains("\r\nhost: old.test\r\n"),
+                "{}",
+                s.head
+            );
+        }
+
+        // A client of HTTP/1.1 stays on it upstream, though the server takes HTTP/2.
+        let r = env.https(&env_ca, "grpc.test", "/plain", &[]);
+        // Chunked: the server's body has no length.
+        assert_eq!(
+            (r.status, r.body.as_str()),
+            (200, "2\r\nok\r\n0\r\n\r\n"),
+            "{}",
+            r.head
+        );
+        assert_eq!(server.seen().pop().unwrap().version, Version::HTTP_11);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "spawns binaries; run with `just it`"]
+    async fn a_client_offering_only_protocols_the_gate_does_not_speak_is_told_the_tunnel() {
+        let env_ca = TestCa::new("luoto sandbox CA (it)");
+        let server_ca = TestCa::new("grpc CA");
+        let server = H2Server::start(&server_ca, "grpc.test").await;
+        let env = grpc_env(&server, &server_ca, &env_ca).await;
+        env.apply(Policy {
+            rules: vec![write("grpc", "grpc.test", &[])],
+            ..Default::default()
+        });
+        let tls = tls_through_gate(env.gate_port, "grpc.test", &env_ca, &[b"spdy/3.1"]).await;
+        assert!(tls.is_err(), "the handshake went through");
+        let d = denial(&env, "protocol_not_spoken");
+        let msg = d["message"].as_str().unwrap();
+        assert!(msg.contains("spdy/3.1"), "{msg}");
+        assert!(
+            msg.contains("luoto allow -e it grpc.test --port 443 --tunnel"),
+            "{msg}"
+        );
+        assert_eq!(server.conns.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "spawns binaries; run with `just it`"]
+    async fn a_client_that_makes_no_room_for_a_response_loses_its_connection() {
+        let env_ca = TestCa::new("luoto sandbox CA (it)");
+        let server_ca = TestCa::new("grpc CA");
+        let server = H2Server::start(&server_ca, "grpc.test").await;
+        let env = Env::start_limited(&[("grpc.test", server.addr)], "idle_ms=300")
+            .with_cas(upstream_cas(&[("grpc.test", &server_ca)]));
+        env_ca.install(&env);
+        env.apply(Policy {
+            rules: vec![write("echo", "grpc.test", &["/test.Echo/*"])],
+            ..Default::default()
+        });
+        // No room for a byte of any response: the gate holds what it has, its stream sits
+        // still, and the stream's own limit can't fire.
+        let (mut client, conn) = h2_client_with(env.gate_port, "grpc.test", &env_ca, Some(0)).await;
+        let started = Instant::now();
+        client.ready().await.unwrap();
+        let req = http::Request::post("https://grpc.test/test.Echo/Unary")
+            .header("content-type", "text/plain")
+            .body(full("hello"))
+            .unwrap();
+        let resp = client.send_request(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let ended = tokio::time::timeout(Duration::from_secs(20), conn).await;
+        assert!(ended.is_ok(), "the connection outlived its stream's limit");
+        // Its idle limit, then the grace the stream's own limit gets first.
+        assert!(
+            started.elapsed() >= Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+
+        let mut client = h2_client(env.gate_port, "grpc.test", &env_ca).await;
+        let r = send(
+            &mut client,
+            grpc("grpc.test", "/test.Echo/Unary", full("on")),
+        )
+        .await;
+        assert_eq!(r.data, "on", "{r:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "spawns binaries; run with `just it`"]
+    async fn a_quiet_http2_stream_ends_alone_and_grpc_waits_longer() {
+        let env_ca = TestCa::new("luoto sandbox CA (it)");
+        let server_ca = TestCa::new("grpc CA");
+        let server = H2Server::start(&server_ca, "grpc.test").await;
+        let env = Env::start_limited(
+            &[("grpc.test", server.addr)],
+            "idle_ms=500,tunnel_idle_ms=10000",
+        )
+        .with_cas(upstream_cas(&[("grpc.test", &server_ca)]));
+        env_ca.install(&env);
+        env.apply(Policy {
+            rules: vec![write("echo", "grpc.test", &["/test.Echo/*"])],
+            ..Default::default()
+        });
+        let client = h2_client(env.gate_port, "grpc.test", &env_ca).await;
+        let quiet = |grpc: bool| {
+            let mut client = client.clone();
+            tokio::spawn(async move {
+                let ct = if grpc {
+                    "application/grpc"
+                } else {
+                    "text/plain"
+                };
+                let req = http::Request::post("https://grpc.test/test.Echo/Quiet")
+                    .header("content-type", ct)
+                    .header("x-quiet-ms", "2000")
+                    .body(full(""))
+                    .unwrap();
+                send(&mut client, req).await
+            })
+        };
+        let (long, short) = (quiet(true), quiet(false));
+        // A denial in between leaves the others' limits alone.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut c = client.clone();
+        let r = send(&mut c, grpc("grpc.test", "/other.Svc/Get", full(""))).await;
+        assert_eq!(r.grpc_status(), Some("7"), "{r:?}");
+
+        let short = short.await.unwrap();
+        assert_eq!(short.data, "one", "{short:?}");
+        assert!(short.error.is_some(), "{short:?}");
+        // Past the connection's idle limit too, so its end is the connection's last frames.
+        let long = long.await.unwrap();
+        assert_eq!(long.data, "onetwo", "{long:?}");
+        assert_eq!(long.grpc_status(), Some("0"), "{long:?}");
+    }
+}

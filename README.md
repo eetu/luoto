@@ -137,7 +137,7 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | your editor, or a shell                                                                              | `luoto open`<br>`luoto open --with code`<br>`luoto shell`                                                                          |
 | to see what the sandbox tried to reach                                                               | `luoto egress --since 10m`<br>`luoto egress --denied`<br>`luoto egress --follow`                                                   |
 | to find what a project needs: any HTTP(S) host for a while (default 1h), then keep what it reached   | `luoto egress open --for 2h`<br>`luoto egress --unruled`<br>`luoto egress keep`<br>`luoto egress close`                               |
-| to allow a host (read-only unless `--write`)                                                         | `luoto allow docs.rs --for 1h`<br>`luoto allow api.example.com --write --path '/v1/**'`<br>`luoto allow grpc.example.com --tunnel` |
+| to allow a host (read-only unless `--write`)                                                         | `luoto allow docs.rs --for 1h`<br>`luoto allow api.example.com --write --path '/v1/**'`<br>`luoto allow db.example.com --port 5432 --tunnel` |
 | a host on your network or VPN, or one whose certificate an internal CA signed                        | `luoto allow git.corp.example --private`<br>`luoto allow nexus.corp.example --ca ~/certs/corp-ca.pem`                              |
 | to see or remove rules                                                                               | `luoto status`<br>`luoto revoke <id-or-host>`                                                                                      |
 | to answer access requests from inside                                                                | `luoto requests` (`--follow` waits)<br>`luoto approve 3 --for 1h`<br>`luoto approve 3 --read --path '/v1/**'`<br>`luoto reject 3`   |
@@ -212,10 +212,12 @@ agent's answer, for a cron job or a CI step:
   `[credentials.ssh]` hosts leave an env. Run databases inside the dev container. Open egress
   covers HTTP(S) only.
 - No Docker-in-docker inside envs.
-- The gate speaks HTTP/1.1 to the sandbox, so gRPC needs a tunnel rule.
-- The gate holds up to 1024 connections per env. It closes a request whose response hasn't
-  started 10 minutes after it was sent, a response that sends nothing for 5 minutes, and a
-  tunnel or websocket after an hour without traffic. A rule's `idle` (`luoto allow
+- HTTP/2 without TLS (h2c) needs a tunnel rule; over TLS the gate inspects HTTP/2, gRPC
+  included, as it does HTTP/1.1.
+- The gate holds up to 1024 connections per env, and 100 streams on each HTTP/2 connection.
+  It closes a request whose response hasn't started 10 minutes after it was sent, a response
+  that sends nothing for 5 minutes, and a tunnel or websocket after an hour without traffic;
+  a gRPC call gets the hour for both. A rule's `idle` (`luoto allow
 k8s.example.com --idle 2h`, at most 24h) gives its host that long instead, for long polls
   such as `kubectl logs -f`.
 - With podman on macOS and Windows, luoto's VM keeps its disk in a file on yours (up to

@@ -332,6 +332,10 @@ jobs:
           check 403 --noproxy '*' https://example.com/
           $L egress -e ci
           exit $fail
+      # A gRPC client in the base image, over HTTP/2 through the gate, to a server on the
+      # runner with a CA of its own.
+      - name: gRPC from inside
+        run: cargo test -p luoto --test grpc -- --ignored --nocapture
       - name: Remember the pass
         if: github.event_name == 'pull_request'
         run: mkdir -p .passed && echo ok >.passed/ok

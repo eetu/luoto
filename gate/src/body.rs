@@ -1,9 +1,12 @@
 //! Body plumbing: one boxed body type, size limits, a metered body that reports bytes and
-//! duration when the response finishes, and a watched one that records progress.
+//! duration when the response finishes, a watched one that records progress, and an HTTP/2
+//! stream's idle limit.
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
@@ -175,15 +178,21 @@ impl HttpBody for Capped {
     }
 }
 
-/// Counts bytes and calls `done(bytes)` exactly once, when the body ends or is dropped.
+/// Counts bytes and calls `done(bytes, error)` exactly once, when the body ends, fails (with
+/// what failed it) or is dropped.
 pub struct Metered {
     inner: Body,
     bytes: u64,
-    done: Option<Box<dyn FnOnce(u64) + Send + Sync>>,
+    done: Option<Done>,
 }
 
+type Done = Box<dyn FnOnce(u64, Option<String>) + Send + Sync>;
+
 impl Metered {
-    pub fn new(inner: Body, done: impl FnOnce(u64) + Send + Sync + 'static) -> Self {
+    pub fn new(
+        inner: Body,
+        done: impl FnOnce(u64, Option<String>) + Send + Sync + 'static,
+    ) -> Self {
         Metered {
             inner,
             bytes: 0,
@@ -191,9 +200,9 @@ impl Metered {
         }
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, error: Option<String>) {
         if let Some(done) = self.done.take() {
-            done(self.bytes);
+            done(self.bytes, error);
         }
     }
 }
@@ -214,7 +223,8 @@ impl HttpBody for Metered {
                     this.bytes += data.len() as u64;
                 }
             }
-            Poll::Ready(None) | Poll::Ready(Some(Err(_))) => this.finish(),
+            Poll::Ready(None) => this.finish(None),
+            Poll::Ready(Some(Err(e))) => this.finish(Some(e.to_string())),
             Poll::Pending => {}
         }
         polled
@@ -231,7 +241,109 @@ impl HttpBody for Metered {
 
 impl Drop for Metered {
     fn drop(&mut self) {
-        self.finish();
+        self.finish(None);
+    }
+}
+
+/// `inner`, then `done(ended)` once: `true` when it ended (read to its end, or dropped with
+/// nothing left), `false` when dropped part read.
+pub fn finally(inner: Body, done: impl FnOnce(bool) + Send + Sync + 'static) -> Body {
+    Finally {
+        inner,
+        done: Some(Box::new(done)),
+    }
+    .boxed()
+}
+
+struct Finally {
+    inner: Body,
+    done: Option<Box<dyn FnOnce(bool) + Send + Sync>>,
+}
+
+impl HttpBody for Finally {
+    type Data = Bytes;
+    type Error = BodyError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BodyError>>> {
+        let polled = Pin::new(&mut self.inner).poll_frame(cx);
+        if let Poll::Ready(None) = polled
+            && let Some(done) = self.done.take()
+        {
+            done(true);
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+impl Drop for Finally {
+    fn drop(&mut self) {
+        if let Some(done) = self.done.take() {
+            done(self.inner.is_end_stream());
+        }
+    }
+}
+
+/// `inner`, failed once nothing has moved on `activity` for `idle` while it waits on its next
+/// frame: what ends one quiet HTTP/2 stream and leaves the connection's others alone.
+pub fn idle_limited(inner: Body, activity: Arc<Activity>, idle: Duration) -> Body {
+    IdleLimited {
+        inner,
+        activity,
+        idle,
+        timer: Box::pin(tokio::time::sleep(idle)),
+    }
+    .boxed()
+}
+
+struct IdleLimited {
+    inner: Body,
+    activity: Arc<Activity>,
+    idle: Duration,
+    timer: Pin<Box<tokio::time::Sleep>>,
+}
+
+impl HttpBody for IdleLimited {
+    type Data = Bytes;
+    type Error = BodyError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BodyError>>> {
+        if let Poll::Ready(polled) = Pin::new(&mut self.inner).poll_frame(cx) {
+            return Poll::Ready(polled);
+        }
+        loop {
+            let still = self.activity.still();
+            if still >= self.idle {
+                let msg = format!("nothing moved for {}", crate::limits::spell(self.idle));
+                return Poll::Ready(Some(Err(BodyError(msg.into()))));
+            }
+            let at = tokio::time::Instant::now() + (self.idle - still);
+            self.timer.as_mut().reset(at);
+            if self.timer.as_mut().poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
     }
 }
 

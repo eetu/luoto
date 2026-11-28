@@ -25,6 +25,7 @@ mod redirects;
 mod relay;
 mod requests;
 mod respond;
+mod screen;
 mod state;
 #[cfg(target_os = "linux")]
 mod system;
