@@ -7,6 +7,8 @@ release may break.
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-11-28
+
 ### Added
 
 - A project's `luoto.toml` can ask each developer to trust its internal CA for the hosts it
@@ -697,7 +699,8 @@ release may break.
 
 - First release.
 
-[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/eetu/luoto/compare/v0.7.6...HEAD
+[0.7.6]: https://github.com/eetu/luoto/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/eetu/luoto/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/eetu/luoto/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/eetu/luoto/compare/v0.7.2...v0.7.3
