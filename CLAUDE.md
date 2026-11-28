@@ -113,6 +113,11 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   exact text the user accepted (kept in the env's state); changes need a fresh accept. Never
   let it carry secret refs or mutes or skip `RuleOrigin::Sandbox` validation, and print its
   strings through `text::display`.
+- `trust.rs` owns the CAs trusted besides the public roots: an env's `[cas]` for the hosts it
+  names (never a public suffix or a host the gate adds a credential on) and config.toml's `cas`
+  for every host, into `Policy::upstream_cas` (exact, wildcard or `*` keys; the gate verifies
+  with the most specific match, which holds every key covering it) and the dev container's
+  store (`env/cas`, which init.sh installs). A `luoto.toml` only asks (`[needs.ca]`).
 - `needs.rs` owns its `[needs]`: one `Need` variant per kind, with its check, review line,
   snippet and question in one `impl`. What the team knows of a need is a table named as it
   (`[needs.azure]`, `[needs.custom.<name>]`), offered first; the answer goes in the

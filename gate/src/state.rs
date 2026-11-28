@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use anyhow::{Context, Result};
+use luoto_shared::host::host_matches;
 use luoto_shared::policy::Policy;
 use rustls::ClientConfig;
 use serde::{Deserialize, Serialize};
@@ -46,8 +47,9 @@ pub struct State {
     requests: Mutex<Requests>,
     pub fake_ips: Mutex<FakeIps>,
     pub client_tls: Arc<ClientConfig>,
-    /// For a host with its own CA (a self-hosted forge, a rule's `ca`): the public roots and
-    /// that CA, which no other host's certificate may chain to. Built from each policy applied.
+    /// For the hosts the policy names CAs for (a self-hosted forge's, a rule's `ca`, an env's
+    /// `[cas]`, config.toml's for every host): the public roots and those CAs, which no other
+    /// host's certificate may chain to. Built from each policy applied.
     host_tls: RwLock<HostTls>,
     /// Apple: the host's dialer for private addresses (`hostdial.rs`), set once at start.
     pub host_dial: std::sync::OnceLock<crate::hostdial::HostDial>,
@@ -104,11 +106,11 @@ impl State {
         lock(&self.requests)
     }
 
-    /// The TLS settings to verify `host` with: its own CA's where the policy names one.
+    /// The TLS settings to verify `host` with: with the CAs the policy names for it.
     pub fn tls_for(&self, host: &str) -> Arc<ClientConfig> {
-        read(&self.host_tls)
-            .get(&host.to_ascii_lowercase())
-            .cloned()
+        let tls = read(&self.host_tls);
+        key_for(tls.keys().map(String::as_str), &host.to_ascii_lowercase())
+            .and_then(|k| tls.get(k).cloned())
             .unwrap_or_else(|| self.client_tls.clone())
     }
 
@@ -186,19 +188,45 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// By the policy's CA keys: an exact host, a wildcard (`*.corp.example`) or every host (`*`).
 type HostTls = std::collections::HashMap<String, Arc<ClientConfig>>;
 
-/// One verifier per host the policy names a CA for.
+/// One verifier per key the policy names CAs under, each with the CAs of every key covering
+/// it, so the most specific key matching a host ([`key_for`]) has all that apply.
 fn host_tls(cfg: &Config, policy: &Policy) -> Result<HostTls> {
-    policy
+    let cas: std::collections::BTreeMap<String, &str> = policy
         .upstream_cas
         .iter()
-        .map(|(host, pem)| {
+        .map(|(k, pem)| (k.to_ascii_lowercase(), pem.as_str()))
+        .collect();
+    cas.keys()
+        .map(|key| {
+            let pem = covering(&cas, key);
             let tls = upstream_tls(cfg, Some(pem.as_bytes()))
-                .with_context(|| format!("the CA for {host}"))?;
-            Ok((host.to_ascii_lowercase(), Arc::new(tls)))
+                .with_context(|| format!("the CA for {key}"))?;
+            Ok((key.clone(), Arc::new(tls)))
         })
         .collect()
+}
+
+/// The CAs that apply under `key`: its own, every wildcard over it and those for every host.
+fn covering(cas: &std::collections::BTreeMap<String, &str>, key: &str) -> String {
+    let name = key.strip_prefix("*.").unwrap_or(key);
+    cas.iter()
+        .filter(|(k, _)| *k == key || *k == "*" || (k.starts_with("*.") && host_matches(k, name)))
+        .map(|(_, pem)| *pem)
+        .collect()
+}
+
+/// The most specific of `keys` matching `host`: the host itself, else the narrowest wildcard
+/// over it, else `*`.
+fn key_for<'a>(keys: impl Iterator<Item = &'a str>, host: &str) -> Option<&'a str> {
+    keys.filter(|k| *k == host || *k == "*" || (k.starts_with("*.") && host_matches(k, host)))
+        .max_by_key(|k| match *k {
+            "*" => 0,
+            k if k == host => usize::MAX,
+            k => k.len(),
+        })
 }
 
 fn upstream_tls(cfg: &Config, extra: Option<&[u8]>) -> Result<ClientConfig> {
@@ -220,4 +248,49 @@ fn upstream_tls(cfg: &Config, extra: Option<&[u8]>) -> Result<ClientConfig> {
         .with_no_client_auth();
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_host_gets_the_cas_of_every_key_covering_it_and_no_other() {
+        let cas: std::collections::BTreeMap<String, &str> = [
+            ("*", "EVERY "),
+            ("*.corp.example", "CORP "),
+            ("*.eu.corp.example", "EU "),
+            ("api.eu.corp.example", "API "),
+            ("forge.other", "FORGE "),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let keys = || cas.keys().map(String::as_str);
+        for (host, key, pems) in [
+            (
+                "api.eu.corp.example",
+                "api.eu.corp.example",
+                ["API", "EU", "CORP", "EVERY"].as_slice(),
+            ),
+            (
+                "web.eu.corp.example",
+                "*.eu.corp.example",
+                &["EU", "CORP", "EVERY"],
+            ),
+            ("db.corp.example", "*.corp.example", &["CORP", "EVERY"]),
+            ("forge.other", "forge.other", &["FORGE", "EVERY"]),
+            ("corp.example", "*", &["EVERY"]),
+            ("github.com", "*", &["EVERY"]),
+        ] {
+            let k = key_for(keys(), host).unwrap();
+            assert_eq!(k, key, "{host}");
+            let held = covering(&cas, k);
+            for p in ["EVERY", "CORP", "EU", "API", "FORGE"] {
+                assert_eq!(held.contains(p), pems.contains(&p), "{host}: {p} in {held}");
+            }
+        }
+        let none = ["forge.other"];
+        assert_eq!(key_for(none.into_iter(), "github.com"), None);
+    }
 }

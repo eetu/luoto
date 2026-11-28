@@ -59,6 +59,7 @@ mod sync;
 mod terminfo;
 mod text;
 mod transfer;
+mod trust;
 #[cfg(unix)]
 mod tunlink;
 mod ui;

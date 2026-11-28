@@ -112,6 +112,10 @@ RUST_LOG = "debug"
 [shares]                      # folders of this machine the env reads at /shares/<name>
 recordings = "/Users/me/Recordings"   # `luoto share add` writes these
 
+[cas.corp]                    # an internal CA, trusted for these hosts only
+hosts = ["*.corp.example", "nexus.tools.example"]
+file = "~/certs/corp-ca.pem"  # or `pem = """…"""`, as accepting a project's [needs.ca] writes it
+
 [resources]                   # the dev container's share of the VM; not with gVisor on podman
 cpus = 4
 memory = "8g"
@@ -139,6 +143,16 @@ HTTP(S) the gate reads: a tunnel rule can't cover a denied host, and SSH to
 `[credentials.ssh] hosts` doesn't pass through it. A `[[mute]]` is for telemetry you keep
 denied: its denials are still recorded, but stay out of `luoto egress`, the UI and the offers
 to allow them; `luoto egress --all` shows them.
+
+The gate checks every server's certificate against the public roots. A CA of your own is
+trusted where you name it: `[cas.<name>]` for its hosts (exact, or a wildcard under a domain of
+one owner's, never a public suffix nor a host the gate adds a credential on), a rule's `ca` for
+one host, and `cas = ["~/certs/company-root.pem"]` in `config.toml` for every host of every
+env, as a company network that inspects TLS needs; on macOS `luoto setup` offers the root CAs
+your Mac trusts beyond the public ones and keeps that file up to date. The dev container
+trusts them too, for what reaches it unread (a tunnel); a change restarts it on the next `up`.
+A project's CA comes as `[needs.ca.<name>]` in its `luoto.toml`, trusted once you accept it
+([projects](projects.md#team-settings-luototoml)).
 
 Secret refs: `op://…` (1Password CLI, desktop or service account), `vault://mount/path#field`
 (OpenBao / HashiCorp Vault), `keyring:service/account` (OS keychain), `env:NAME`, `file:path`.

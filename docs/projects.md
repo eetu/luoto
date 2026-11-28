@@ -29,15 +29,25 @@ host = "api.stripe.com"
 
 [needs.azure]
 subscriptions = ["<subscription id>"]
+
+[needs.ca.corp]                  # the CA of the team's internal services
+hosts = ["*.corp.example"]
+pem = """
+-----BEGIN CERTIFICATE-----
+…
+-----END CERTIFICATE-----
+"""
 ```
 
 The first `up` after accepting it asks each developer for what `[needs]` names and their env
 lacks, with the questions an agent's credential gets: a provider's kind and where it is kept,
 a custom credential's host (the team's filled in) and secret, an Azure subscription (the
 team's offered first, read through their `az` login), where a sandbox secret is kept, and
-each repo's access. The answers go in the developer's own env file. "Later" leaves one for
-the next `up`; `luoto project needs` asks them all again, opening on what the env has.
-Without a terminal it prints what to add instead.
+each repo's access. A CA is shown with its subject, fingerprint and the hosts it would cover,
+and trusted only once accepted, for those hosts alone ([CAs](configuration.md)); a new
+certificate under the name is asked again. The answers go in the developer's own env file.
+"Later" leaves one for the next `up`; `luoto project needs` asks them all again, opening on
+what the env has. Without a terminal it prints what to add instead.
 
 It also takes `image`, `agents`, `[[deny]]` and the team's repositories (`[repos.<name>]`,
 [below](#several-repositories)); toolchains belong in `mise.toml`. Layering: `config.toml` <
@@ -49,7 +59,7 @@ env's own presets, agents, ports, `[deps]`, remote repos, allow rules (notes kep
 not a `luoto.toml`'s to carry: credentials and secrets, mutes, your folders, toolchain
 defaults, your own `image`, expiring grants, and rules the sandbox couldn't ask for (`*`,
 multi-tenant wildcards, address ranges, private addresses). `--write` puts it in the env's
-folder; one already there is replaced only with `--force`, after the changes are listed.
+folder; one already there is replaced only with `--overwrite`, after the changes are listed.
 
 Anyone who can write the repository writes this file, code in the sandbox included, so it
 only proposes:
@@ -65,7 +75,9 @@ only proposes:
   hide denials from you), nor pick an agent's model server or pass the flags that loosen its
   permission prompts, and its rules pass the checks the sandbox's own access requests get (no
   `*`, no multi-tenant wildcards, no private addresses). Write access and uninspected tunnels
-  are spelled out in the review. Its denies only tighten.
+  are spelled out in the review. Its denies only tighten. A CA it names is trusted by no one
+  until each developer accepts it, and never for a public suffix or a host the gate adds a
+  credential on.
 
 ## Folders and remotes
 

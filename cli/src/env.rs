@@ -393,8 +393,9 @@ pub fn plan(ctx: &Ctx, env: &str) -> Result<Plan> {
     })
 }
 
-/// Fill the tools volume from the tools image (`tools_id`), with the env's CA, unless it holds
-/// them already.
+/// Fill the tools volume from the tools image (`tools_id`), with `ca_pem`, unless it holds them
+/// already: the env's CA (`env/ca.crt`), then the CAs the env trusts, one file each
+/// (`env/cas/`), which init.sh installs.
 fn populate_tools(
     ctx: &Ctx,
     env: &str,
@@ -431,7 +432,9 @@ fn populate_tools(
             &ctx.image("tools"),
             "sh",
             "-c",
-            "rm -rf /opt/luoto/* && cp -a /dist/. /opt/luoto/ && mkdir -p /opt/luoto/env && cat > /opt/luoto/env/ca.crt",
+            "rm -rf /opt/luoto/* && cp -a /dist/. /opt/luoto/ && mkdir -p /opt/luoto/env/cas && \
+             cd /opt/luoto/env && awk '/BEGIN CERTIFICATE/{n++} n==1{print > \"ca.crt\"} \
+             n>1{print > (\"cas/\" n \".crt\")}'",
         ],
         ca_pem.as_bytes(),
     )?;
@@ -524,7 +527,10 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
     if let ca::Made::Renewed(old) = made {
         err_text!("{}", ca::renewal_note(old, &env_ca));
     }
-    let ca_sha = env_ca.pem_sha256();
+    // What the dev container trusts besides the public roots: the env's CA, then the CAs its
+    // config trusts (`trust.rs`).
+    let trust = format!("{}{}", env_ca.cert_pem, p.compiled.trusted_cas.concat());
+    let ca_sha = hex::encode(Sha256::digest(trust.as_bytes()));
     // A renewal counts on its own: `dev_ca` is unset until a start records it.
     let stale_ca = matches!(made, ca::Made::Renewed(_))
         || state.dev_ca.as_deref().is_some_and(|h| h != ca_sha);
@@ -575,7 +581,7 @@ pub fn up(ctx: &Ctx, env: &str, opts: &UpOptions) -> Result<()> {
         create_volume(ctx, env, v)?;
     }
     crate::progress::wait("copying luoto's tools into the env", || {
-        populate_tools(ctx, env, &state, &ids.tools, &env_ca.cert_pem)
+        populate_tools(ctx, env, &state, &ids.tools, &trust)
     })?;
 
     let gate = start_gate(ctx, env, &p, &state, &env_ca, &ids.gate)?;

@@ -7,6 +7,13 @@ release may break.
 
 ## [Unreleased]
 
+### Added
+
+- A project's `luoto.toml` can ask each developer to trust its internal CA for the hosts it
+  names (`[needs.ca.<name>]`), and an env's `[cas.<name>]` does so by hand.
+- `cas` in `config.toml` trusts a CA for every host of every env, as a company network that
+  inspects TLS needs; on macOS `luoto setup` offers the root CAs your Mac trusts.
+
 ### Fixed
 
 - A `git push` of over 1 MiB to a repo of a git credential (GitHub, Azure DevOps, a

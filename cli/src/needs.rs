@@ -38,6 +38,19 @@ pub struct Needs {
     /// What the team knows of its custom credentials, by name; a table alone names the need.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub custom: BTreeMap<String, CustomNeed>,
+    /// CAs of the project's internal services, by name, each trusted only once a developer
+    /// accepts it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ca: BTreeMap<String, CaNeed>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CaNeed {
+    /// The hosts it signs for: exact, or wildcards under a domain of the team's.
+    pub hosts: Vec<String>,
+    /// Its certificate, as PEM.
+    pub pem: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -68,6 +81,12 @@ pub enum Need {
     },
     Azure {
         subscriptions: Vec<String>,
+    },
+    /// A CA the gate and the env trust for the hosts it names.
+    Ca {
+        name: String,
+        hosts: Vec<String>,
+        pem: String,
     },
     Secret(String),
 }
@@ -100,6 +119,11 @@ impl Need {
                     .unwrap_or_default(),
             });
         }
+        out.extend(n.ca.iter().map(|(name, c)| Need::Ca {
+            name: name.clone(),
+            hosts: c.hosts.clone(),
+            pem: c.pem.clone(),
+        }));
         out.extend(n.sandbox_secrets.iter().map(|s| Need::Secret(s.clone())));
         out
     }
@@ -142,6 +166,22 @@ impl Need {
                 "needs.sandbox_secrets: `{}` is not a name",
                 display(s)
             )),
+            Need::Ca { name, .. } if !word(name, b"_-") => {
+                Err(format!("needs.ca: `{}` is not a name", display(name)))
+            }
+            Need::Ca { name, hosts, pem } => {
+                if hosts.is_empty() {
+                    return Err(format!(
+                        "needs.ca.{name}.hosts: name the hosts the CA signs for"
+                    ));
+                }
+                for h in hosts {
+                    crate::trust::scope(h).map_err(|e| format!("needs.ca.{name}.hosts: {e}"))?;
+                }
+                crate::trust::certs(pem)
+                    .map(|_| ())
+                    .map_err(|e| format!("needs.ca.{name}.pem {e}"))
+            }
             _ => Ok(()),
         }
     }
@@ -156,6 +196,13 @@ impl Need {
             Need::Provider(n) => cfg.credentials.providers.contains_key(n),
             Need::Custom { name, .. } => cfg.credentials.custom.contains_key(name),
             Need::Azure { .. } => cfg.credentials.azure.is_some(),
+            // One the project changed (a new certificate, other hosts) is asked again; one
+            // the developer gives from a file of their own is theirs.
+            Need::Ca { name, hosts, pem } => cfg.cas.get(name).is_some_and(|had| {
+                had.file.is_some()
+                    || had.pem.as_deref().is_some_and(|p| same_certs(p, pem))
+                        && scopes(&had.hosts) == scopes(hosts)
+            }),
             Need::Secret(n) => cfg.sandbox_secrets.contains_key(n),
         }
     }
@@ -166,6 +213,7 @@ impl Need {
             Need::Provider(n) => n.clone(),
             Need::Custom { name, .. } => format!("custom.{name}"),
             Need::Azure { .. } => "azure".into(),
+            Need::Ca { name, .. } => format!("ca.{name}"),
             Need::Secret(n) => format!("sandbox_secrets.{n}"),
         }
     }
@@ -184,6 +232,20 @@ impl Need {
                 display(&subscriptions.join(", "))
             ),
             Need::Azure { .. } => "Azure credential".into(),
+            Need::Ca { hosts, pem, .. } => {
+                let certs = crate::trust::certs(pem).unwrap_or_default();
+                let more = match certs.len() {
+                    0 | 1 => String::new(),
+                    n => format!(" and {} more", n - 1),
+                };
+                format!(
+                    "CA {}{more}, trusted for {}",
+                    certs
+                        .first()
+                        .map_or_else(String::new, crate::trust::Cert::named),
+                    display(&hosts.join(", "))
+                )
+            }
             Need::Secret(s) => format!("secret {}", display(s)),
         }
     }
@@ -219,6 +281,11 @@ impl Need {
                      + tenant\nsubscriptions = [{subs}]"
                 )
             }
+            Need::Ca { name, hosts, pem } => format!(
+                "[cas.{name}]\nhosts = [{}]\npem = \"\"\"\n{}\"\"\"",
+                quoted(hosts),
+                pem_of(pem)
+            ),
             Need::Secret(s) => format!("`luoto var set -e {{env}} {s} --ref <REF>`"),
         }
     }
@@ -238,8 +305,135 @@ impl Need {
             Need::Provider(n) => ask_provider(ctx, mode, env, n, own),
             Need::Custom { name, host } => ask_custom(ctx, mode, env, name, host.as_deref(), own),
             Need::Azure { subscriptions } => ask_azure(ctx, mode, env, own, subscriptions),
+            Need::Ca { name, hosts, pem } => ask_ca(ctx, mode, env, name, hosts, pem, own),
             Need::Secret(n) => crate::vars::ask(ctx, mode, env, n, own),
         }
+    }
+}
+
+/// The certificates alone of PEM text a luoto.toml gave, checked already.
+fn pem_of(pem: &str) -> String {
+    crate::trust::certs(pem)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| c.pem)
+        .collect()
+}
+
+fn same_certs(a: &str, b: &str) -> bool {
+    let shas = |p: &str| -> BTreeSet<String> {
+        crate::trust::certs(p)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| c.sha256)
+            .collect()
+    };
+    shas(a) == shas(b)
+}
+
+fn scopes(hosts: &[String]) -> BTreeSet<String> {
+    hosts
+        .iter()
+        .filter_map(|h| crate::trust::scope(h).ok())
+        .collect()
+}
+
+fn quoted(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|s| format!("\"{s}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn ask_ca(
+    ctx: &Ctx,
+    mode: Mode,
+    env: &str,
+    name: &str,
+    hosts: &[String],
+    pem: &str,
+    own: &EnvConfig,
+) -> Result<bool> {
+    let certs = crate::trust::certs(pem).map_err(anyhow::Error::msg)?;
+    let covers = scopes(hosts).into_iter().collect::<Vec<_>>().join(", ");
+    let line = format!(
+        "The project's luoto.toml asks you to trust its CA `{}` for {covers}: the gate then \
+         accepts the certificates it signs there, and the env trusts it for what reaches it \
+         unread (a tunnel). Check its fingerprint with whoever runs it.",
+        display(name)
+    );
+    out_text!("{}", text::wrap(&line, "", text::columns()));
+    for c in &certs {
+        out_text!(
+            "  {}, valid until {}\n  SHA-256 {}",
+            display(&c.subject),
+            c.not_after,
+            c.sha256
+        );
+    }
+    let had = own.cas.contains_key(name);
+    let mut rows = vec![if mode == Mode::Missing {
+        (
+            None,
+            "Not now".to_string(),
+            "the env doesn't trust it".to_string(),
+        )
+    } else {
+        (
+            Some(false),
+            "Don't trust it".to_string(),
+            if had {
+                "removes it from the env"
+            } else {
+                "as now"
+            }
+            .to_string(),
+        )
+    }];
+    rows.push((
+        Some(true),
+        format!("Trust it{}", if had { " (current)" } else { "" }),
+        format!("for {covers}"),
+    ));
+    let picked = crate::wizard::ask_menu(crate::wizard::Question {
+        text: format!("Trust the `{}` CA?", display(name)),
+        rows,
+        at: 0,
+        help: crate::prompt::menu_help(mode.esc()),
+    })?;
+    let mut f = EnvFile::load(&ctx.paths, env)?;
+    match picked {
+        Some(Some(true)) => {
+            f.remove_from_table("cas", name)?;
+            let list: toml_edit::Array = hosts.iter().map(String::as_str).collect();
+            f.set_in_tables(
+                &["cas", name],
+                vec![("hosts", list.into()), ("pem", pem_of(pem).into())],
+            )?;
+            summary(
+                env,
+                &format!("cas.{}", display(name)),
+                vec![
+                    ("trusted for", covers),
+                    (
+                        "certificate",
+                        certs
+                            .iter()
+                            .map(|c| c.named())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                ],
+            );
+            Ok(true)
+        }
+        Some(Some(false)) if had => {
+            f.remove_from_table("cas", name)?;
+            out!("the env no longer trusts the `{}` CA", display(name));
+            Ok(true)
+        }
+        _ => Ok(false),
     }
 }
 
@@ -369,15 +563,19 @@ pub fn ask(ctx: &Ctx, env: &str, mode: Mode) -> Result<bool> {
         crate::init::print_needs(env, &grouped(env, &left));
         return Ok(false);
     }
-    println!(
-        "\n{}",
-        text::wrap(
-            "The project's luoto.toml needs credentials only you can add: the gate adds them to \
-             requests, and the sandbox sees a placeholder (a sandbox secret is the exception).",
-            "",
-            text::columns()
-        )
-    );
+    // A CA's question says what trusting it does.
+    if asked.iter().any(|n| !matches!(n, Need::Ca { .. })) {
+        println!(
+            "\n{}",
+            text::wrap(
+                "The project's luoto.toml needs credentials only you can add: the gate adds them \
+                 to requests, and the sandbox sees a placeholder (a sandbox secret is the \
+                 exception).",
+                "",
+                text::columns()
+            )
+        );
+    }
     let mut wrote = false;
     for need in asked {
         println!();
@@ -608,6 +806,68 @@ mod tests {
 
     fn needs(text: &str) -> Needs {
         toml::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn a_projects_ca_is_checked_reviewed_and_met_only_as_it_was_accepted() {
+        let pem = crate::trust::tests::ca_pem("Corp Root CA");
+        let n = needs(&format!(
+            "[ca.corp]\nhosts = [\"*.corp.example\"]\npem = \"\"\"\n{pem}\"\"\"\n"
+        ));
+        assert!(check(&n).is_ok());
+        let review = review(&n);
+        assert!(
+            review[0].starts_with("CA Corp Root CA (SHA-256 ")
+                && review[0].ends_with("trusted for *.corp.example"),
+            "{review:?}"
+        );
+        let snippet = snippets("web", &n, &EnvConfig::default(), &BTreeSet::new());
+        assert!(snippet[0].starts_with("[cas.corp]\nhosts = [\"*.corp.example\"]\npem = \"\"\""));
+        // The snippet is what the env's file takes.
+        let own: EnvConfig = toml::from_str(&snippet[0]).unwrap();
+        assert!(snippets("web", &n, &own, &BTreeSet::new()).is_empty());
+        // Another certificate under the name is asked again.
+        let rotated = needs(&format!(
+            "[ca.corp]\nhosts = [\"*.corp.example\"]\npem = \"\"\"\n{}\"\"\"\n",
+            crate::trust::tests::ca_pem("Corp Root CA")
+        ));
+        assert_eq!(snippets("web", &rotated, &own, &BTreeSet::new()).len(), 1);
+
+        for (hosts, why) in [
+            ("[]", "name the hosts"),
+            ("[\"*.com\"]", "others can hold"),
+            ("[\"*\"]", "not a host"),
+        ] {
+            let bad = needs(&format!(
+                "[ca.corp]\nhosts = {hosts}\npem = \"\"\"\n{pem}\"\"\"\n"
+            ));
+            let e = check(&bad).unwrap_err().to_string();
+            assert!(e.contains(why), "{hosts}: {e}");
+        }
+        let no_cert = needs("[ca.corp]\nhosts = [\"*.corp.example\"]\npem = \"x\"\n");
+        assert!(check(&no_cert).is_err());
+    }
+
+    #[test]
+    fn an_accepted_ca_is_written_as_the_env_file_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("web.toml");
+        std::fs::write(&path, "version = 1\n").unwrap();
+        let pem = crate::trust::tests::ca_pem("Corp Root CA");
+        let mut f = EnvFile::parse(path.clone(), "version = 1\n").unwrap();
+        let list: toml_edit::Array = ["*.corp.example"].into_iter().collect();
+        f.set_in_tables(
+            &["cas", "corp"],
+            vec![("hosts", list.into()), ("pem", pem_of(&pem).into())],
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let back: EnvConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back.cas["corp"].hosts, ["*.corp.example"]);
+        assert!(
+            same_certs(back.cas["corp"].pem.as_deref().unwrap(), &pem),
+            "{text}"
+        );
     }
 
     #[test]

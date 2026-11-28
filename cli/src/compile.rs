@@ -25,7 +25,7 @@ use crate::config::{
     AzureCred, AzureDevopsCred, CustomCred, EnvConfig, GitCred, GithubCred, ProviderValue, SshCred,
     extend_unique,
 };
-use crate::{azure, azure_identity, model_servers, packages};
+use crate::{azure, azure_identity, model_servers, packages, trust};
 
 /// What part of the config made a binding: how `credentials.rs` tells people what it is for
 /// and what changes it, never by reading the binding's name.
@@ -69,6 +69,9 @@ pub struct Compiled {
     /// `AZURE_TENANT_ID` name, when `[credentials.azure]` names no tenant.
     pub tenant_from: Option<String>,
     pub warnings: Vec<String>,
+    /// The CA certificates (PEM, one each) the dev container trusts besides the public roots
+    /// and the env's own CA: what config.toml's `cas` and the env's `[cas]` name.
+    pub trusted_cas: Vec<String>,
 }
 
 impl Compiled {
@@ -300,6 +303,7 @@ pub fn compile(
         );
     }
 
+    let trusted_cas = compile_cas(cfg, &b.injections, &mut upstream_cas)?;
     let policy = Policy {
         env: env.to_string(),
         rules: b.rules,
@@ -344,7 +348,69 @@ pub fn compile(
         netrc: b.netrc,
         tenant_from: b.tenant_from,
         warnings: b.warnings,
+        trusted_cas,
     })
+}
+
+/// The CAs trusted besides the public roots, into `upstream_cas` under the hosts each covers:
+/// config.toml's under `*`, each `[cas.<name>]` under its hosts, none of which may be one the
+/// gate adds a credential on (whoever holds the CA's key would read it there). The
+/// certificates, once each, for the dev container's own trust.
+fn compile_cas(
+    cfg: &EnvConfig,
+    injections: &[Injection],
+    upstream_cas: &mut BTreeMap<String, String>,
+) -> Result<Vec<String>> {
+    fn hold(upstream_cas: &mut BTreeMap<String, String>, key: &str, certs: &[trust::Cert]) {
+        let held = upstream_cas.entry(key.to_string()).or_default();
+        for c in certs {
+            if !held.contains(&c.pem) {
+                held.push_str(&c.pem);
+            }
+        }
+    }
+    let file_certs = |what: &str, file: &str| -> Result<Vec<trust::Cert>> {
+        trust::certs(&ca_file(what, file)?).map_err(|e| anyhow!("{what}: {file} {e}"))
+    };
+    let mut trusted: Vec<trust::Cert> = Vec::new();
+    for file in &cfg.every_host_cas {
+        let certs = file_certs("config.toml cas", file)?;
+        hold(upstream_cas, "*", &certs);
+        trusted.extend(certs);
+    }
+    for (name, ca) in &cfg.cas {
+        let what = format!("cas.{name}");
+        let certs = match (&ca.pem, &ca.file) {
+            (Some(pem), None) => trust::certs(pem).map_err(|e| anyhow!("{what}: its pem {e}"))?,
+            (None, Some(file)) => file_certs(&what, file)?,
+            _ => bail!("{what}: give the CA as `pem` or as `file`, one of them"),
+        };
+        if ca.hosts.is_empty() {
+            bail!("{what}: name the hosts it covers (`hosts = [\"*.corp.example\"]`)");
+        }
+        for h in &ca.hosts {
+            let scope = trust::scope(h).map_err(|e| anyhow!("{what}: {e}"))?;
+            if let Some(i) = injections
+                .iter()
+                .find(|i| luoto_shared::host::host_matches(&scope, &i.host))
+            {
+                bail!(
+                    "{what}: `{scope}` covers {}, where the gate adds a credential; a CA there \
+                     goes with that credential (`ca` of [[credentials.git]]) or in config.toml's \
+                     `cas`, for every host",
+                    i.host
+                );
+            }
+            hold(upstream_cas, &scope, &certs);
+        }
+        trusted.extend(certs);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    Ok(trusted
+        .into_iter()
+        .filter(|c| seen.insert(c.sha256.clone()))
+        .map(|c| c.pem)
+        .collect())
 }
 
 /// An agent's options are ones its profile takes, with values it accepts.
@@ -3278,6 +3344,52 @@ ca = '{}'
         assert!(compile("t", &app("read"), GATE, &[]).is_ok());
         let err = compile("t", &app("write"), GATE, &[]).err().unwrap();
         assert!(err.to_string().contains("`actions = \"read\"`"), "{err}");
+    }
+
+    #[test]
+    fn cas_are_trusted_for_the_hosts_they_name_and_config_tomls_for_every_host() {
+        let corp = crate::trust::tests::ca_pem("Corp Internal CA");
+        let mac = crate::trust::tests::ca_pem("Company Root");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("mac.pem");
+        std::fs::write(&file, &mac).unwrap();
+        let env_ca =
+            |hosts: &str| format!("[cas.corp]\nhosts = {hosts}\npem = \"\"\"\n{corp}\"\"\"\n");
+        let mut c = cfg(&env_ca("[\"*.Corp.example\", \"nexus.tools.example\"]"));
+        c.every_host_cas = vec![file.display().to_string()];
+        let out = compile("t", &c, GATE, &[]).unwrap();
+        let cas = &out.policy.upstream_cas;
+        assert_eq!(
+            cas.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["*", "*.corp.example", "nexus.tools.example"]
+        );
+        assert!(cas["*"].contains(mac.trim()) && !cas["*"].contains(corp.trim()));
+        assert!(cas["*.corp.example"].contains(corp.trim()));
+        // The dev container trusts each once.
+        assert_eq!(out.trusted_cas.len(), 2);
+
+        // Where the gate adds a credential, an env's CA could read it.
+        let cred = format!(
+            "{}\n[credentials.custom.api]\nhost = \"api.corp.example\"\nsecret = \"op://v/i/f\"\n",
+            env_ca("[\"*.corp.example\"]")
+        );
+        let err = compile("t", &cfg(&cred), GATE, &[]).err().unwrap();
+        assert!(
+            err.to_string()
+                .contains("api.corp.example, where the gate adds"),
+            "{err}"
+        );
+        for (text, why) in [
+            (env_ca("[\"*.com\"]"), "others can hold"),
+            (env_ca("[]"), "name the hosts"),
+            (
+                "[cas.corp]\nhosts = [\"a.example\"]\npem = \"x\"\nfile = \"/x.pem\"\n".to_string(),
+                "one of them",
+            ),
+        ] {
+            let err = compile("t", &cfg(&text), GATE, &[]).err().unwrap();
+            assert!(err.to_string().contains(why), "{text}: {err}");
+        }
     }
 
     #[test]

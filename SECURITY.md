@@ -44,9 +44,16 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   runtime's networks; those the gate dials itself, as before. TLS, inspection and credentials
   stay in the gate. A `--private` rule therefore reaches whatever your Mac's VPN and network
   let your Mac reach at that name's address.
-- **A host's own CA.** A rule's `ca` (`luoto allow <host> --ca <file>`) is trusted for that one
-  exact host, never a wildcard, range or tunnel, so no other host's certificate may chain to
-  it. Only your env file names one: a project's `luoto.toml` and a sandbox request can't.
+- **CAs of your own.** Whoever holds a trusted CA's key can read what the gate sends where it
+  is trusted, so each is trusted only where named. A rule's `ca` (`luoto allow <host> --ca
+  <file>`) covers that one exact host, never a wildcard, range or tunnel. An env's `[cas.<name>]`
+  covers its hosts: exact, or a wildcard under a domain of one owner's (never `*`, a range or a
+  public suffix), and never a host the gate adds a credential on. A project's `luoto.toml`
+  can only ask for one (`[needs.ca]`), shown with its fingerprint and hosts; a sandbox request
+  can't. `cas` in `config.toml` (a company's TLS inspection, or the roots your Mac trusts, which
+  `luoto setup` offers) covers every host, credentialed ones too: that is your call alone. The
+  dev container trusts all of these for any host, for what reaches it unread (a tunnel), as it
+  trusts the env's own CA. An archive's `[cas]` naming a file is dropped on import.
 - **Open egress.** `luoto egress open` (an hour unless told otherwise; `open = true` until
   removed) lets out over HTTP(S), as rule `open`, what no rule allows, to any host and port.
   It never widens a host that gets a credential (its rules stay its only access), a muted

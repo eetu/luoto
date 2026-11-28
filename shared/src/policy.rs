@@ -570,8 +570,9 @@ pub struct Policy {
     pub plain_http_credentials: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redirects: Vec<Redirect>,
-    /// PEM roots trusted for one host's TLS besides the public ones, by lowercase host: a
-    /// self-hosted forge's CA, or the one a user's rule names (`Rule::ca`).
+    /// PEM roots trusted besides the public ones, by lowercase host, wildcard (`*.corp.example`)
+    /// or `*` for every host: a self-hosted forge's CA, a user's rule's (`Rule::ca`), an env's
+    /// `[cas]`, config.toml's `cas`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub upstream_cas: std::collections::BTreeMap<String, String>,
 }

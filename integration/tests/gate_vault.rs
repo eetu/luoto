@@ -1888,7 +1888,7 @@ impl TestCa {
     }
 }
 
-/// `Policy::upstream_cas`: each host's own upstream CA.
+/// `Policy::upstream_cas`: CAs by host, wildcard or `*`.
 fn upstream_cas(cas: &[(&str, &TestCa)]) -> BTreeMap<String, String> {
     cas.iter()
         .map(|(h, ca)| (h.to_string(), ca.cert_pem.clone()))
@@ -2203,6 +2203,55 @@ async fn upstream_certificates_verify_only_for_the_host_their_ca_is_trusted_for(
         );
     }
     assert!(other.seen().is_empty() && alias.seen().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns binaries; run with `just it`"]
+async fn a_ca_under_a_wildcard_or_every_host_verifies_what_it_covers() {
+    let env_ca = TestCa::new("luoto sandbox CA (it)");
+    let corp_ca = TestCa::new("corp CA");
+    let company_ca = TestCa::new("company root");
+    let forge_ca = TestCa::new("forge CA");
+    let db = Https::start(&corp_ca, "db.corp.test");
+    // The corp CA, signing for a host outside the domain it is trusted for.
+    let outside = Https::start(&corp_ca, "outside.test");
+    // A company's TLS inspection signs everything, a host with its own CA too.
+    let any = Https::start(&company_ca, "any.test");
+    let forge = Https::start(&company_ca, "forge.test");
+    let env = Env::start(&[
+        ("db.corp.test", db.addr),
+        ("outside.test", outside.addr),
+        ("any.test", any.addr),
+        ("forge.test", forge.addr),
+    ]);
+    env_ca.install(&env);
+    let rules = ["db.corp.test", "outside.test", "any.test", "forge.test"]
+        .iter()
+        .map(|h| read(h, h))
+        .collect::<Vec<_>>();
+    env.apply(Policy {
+        rules: rules.clone(),
+        upstream_cas: upstream_cas(&[("*.corp.test", &corp_ca), ("forge.test", &forge_ca)]),
+        ..Default::default()
+    });
+    assert_eq!(env.https(&env_ca, "db.corp.test", "/", &[]).status, 200);
+    for host in ["outside.test", "any.test", "forge.test"] {
+        let r = env.https(&env_ca, host, "/", &[]);
+        assert_eq!(r.status, 502, "{host}: {}", r.head);
+    }
+    env.apply(Policy {
+        rules,
+        upstream_cas: upstream_cas(&[
+            ("*.corp.test", &corp_ca),
+            ("forge.test", &forge_ca),
+            ("*", &company_ca),
+        ]),
+        ..Default::default()
+    });
+    for host in ["db.corp.test", "any.test", "forge.test"] {
+        assert_eq!(env.https(&env_ca, host, "/", &[]).status, 200, "{host}");
+    }
+    assert_eq!(env.https(&env_ca, "outside.test", "/", &[]).status, 502);
 }
 
 const APP_KEY: &str = include_str!("keys/app_rsa");

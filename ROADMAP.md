@@ -34,8 +34,7 @@ Roughly in order; intent, not a schedule. What shipped is in [CHANGELOG.md](CHAN
   any is written.
 - **Services that come back:** a command on every start (a database after `up` or an idle
   stop), then sidecars.
-- **Corporate networks:** a CA for every upstream, which the gate reads
-  (`LUOTO_UPSTREAM_CA`) but no command or config sets yet; egress through a company proxy.
+- **Corporate networks:** egress through a company proxy.
 - **Moving work:** `fork` of an env; seed from a git bundle and `luoto fetch` into
   `refs/remotes/luoto/<env>`.
 - **A folder shared live** (Linux, or a VM that shares folders), with an audit of the files
