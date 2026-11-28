@@ -22,7 +22,8 @@ sandbox_request_access when access is genuinely needed, sandbox_request_install 
 system package or toolchain the env should keep, and sandbox_request_var for an environment \
 variable with a plain value the code needs — then tell the user what you requested and why. \
 A secret the code needs, the user adds on the host (`luoto var set`): tell them its name, \
-never ask for its value. Never try to work around a block.";
+never ask for its value. A 403's text names what lifts it: a request, or a command only the \
+user runs. Never try to work around a block.";
 
 fn tools() -> Value {
     json!([
@@ -51,12 +52,12 @@ fn tools() -> Value {
         },
         {
             "name": "sandbox_request_access",
-            "description": "Ask the user to allow egress to a host, or to add one of luoto's presets (a registry's hosts, e.g. npm). Only the user can approve, on the host. Use the narrowest access: read unless writes are required; one exact host. For a protocol other than HTTP(S), such as a database, or a TLS service whose client checks the server against its own CA (a Kubernetes API from a kubeconfig), give its port: approved, that host and port get an uninspected tunnel, and clients connect to them as they are. A host only the user's network or VPN reaches (a private address, an internal name, a public address their VPN routes) needs `private`. An internal HTTPS service the gate can't verify (its error names `--ca`) is the user's to trust: tell them the command it names.",
+            "description": "Ask the user to allow egress to a host, or to add one of luoto's presets (a registry's hosts, e.g. npm). Only the user can approve, on the host. Use the narrowest access: read unless writes are required; one exact host. For a protocol other than HTTP(S), such as a database, or a TLS service whose client checks the server against its own CA (a Kubernetes API from a kubeconfig), give its port: approved, that host and port get an uninspected tunnel, and clients connect to them as they are. An HTTP(S) service on another port than 80 or 443 is a tunnel too: give that port. A host only the user's network or VPN reaches (a private address, an internal name, a public address their VPN routes) needs `private`; a service on the user's own machine is `host.docker.internal`, never its address. An internal HTTPS service the gate can't verify (its error names `--ca`) and websocket upgrades (`--ws`) are the user's to allow: tell them the command the error names.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "host": {"type": "string", "description": "Exact host, e.g. docs.rs; with `private`, also an address on the user's network, e.g. 10.0.0.8"},
-                    "port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Only for a protocol other than HTTP(S): its port, never 80 or 443"},
+                    "host": {"type": "string", "description": "Exact host or a URL of it, e.g. docs.rs; with `private`, also an address on the user's network, e.g. 10.0.0.8"},
+                    "port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Only for a service on another port than 80 or 443 (a database, an HTTPS server on 8443): its port, which the gate tunnels uninspected"},
                     "preset": {"type": "string", "description": "Instead of a host, one of luoto's presets for a registry or service: npm, pypi, crates, go, maven, …"},
                     "access": {"type": "string", "enum": ["read", "write"], "default": "read"},
                     "private": {"type": "boolean", "default": false, "description": "The host is on the user's network or VPN (a private address, or one only a VPN reaches): ask for a rule that reaches it there"},
@@ -249,4 +250,25 @@ pub fn serve() -> Result<ExitCode> {
         stdout.flush()?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_tool_has_a_schema_and_a_url_on_another_port_names_its_tunnel() {
+        for t in tools().as_array().unwrap() {
+            assert!(t["name"].is_string() && t["description"].is_string(), "{t}");
+            assert_eq!(t["inputSchema"]["type"], "object", "{t}");
+        }
+        // Refused before anything reaches the gate, with the request that would work.
+        let r = call(
+            "sandbox_request_access",
+            &json!({"host": "https://nexus.corp:8443/repository/npm/", "reason": "npm feed"}),
+        );
+        assert_eq!(r["isError"], true);
+        let said = r["content"][0]["text"].as_str().unwrap();
+        assert!(said.contains("ask for `nexus.corp:8443`"), "{said}");
+    }
 }

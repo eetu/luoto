@@ -31,6 +31,8 @@ release may break.
 - With the `github` preset or a GitHub credential, pull request diffs (`/pull/1.diff`) and
   issue attachments were refused.
 - On Apple's `container`, a client that stopped reading a forwarded port could freeze its env.
+- `sandbox request` for a URL on another port than 80 or 443 asked for a rule that missed the
+  port; it names the `host:port` tunnel to ask for instead.
 
 ### Security
 

@@ -47,9 +47,9 @@ enum Cmd {
     /// Ask the user (on the host) to allow a host, to install a system package or a toolchain
     /// in the env for good, or to give it a variable. Only the user can approve.
     Request {
-        /// Host (`docs.rs`) or URL (`https://docs.rs/serde`); `host:port` for a protocol other
-        /// than HTTP(S) (`db.example.com:5432`, not 80 or 443), which the gate can only tunnel
-        /// uninspected.
+        /// Host (`docs.rs`) or URL (`https://docs.rs/serde`); `host:port` for a service on another
+        /// port than 80 or 443 (`db.example.com:5432`, an HTTPS server on 8443), which the gate
+        /// can only tunnel uninspected.
         #[arg(required_unless_present_any = ["package", "tool", "preset", "var"])]
         target: Option<String>,
         /// A system package (apt, apk or dnf) the env should have; approved, it is installed
@@ -397,11 +397,21 @@ pub struct Outcome {
     pub waited: Option<Duration>,
 }
 
-/// The host a request names and, for `host:port` (not a URL), the port of a tunnel.
+/// The host a request names and, for `host:port` (not a URL), the port of a tunnel. A URL on
+/// another port than 80 or 443 is refused: its service is reached only by a tunnel, asked for
+/// as `host:port`, never by a rule for the host.
 pub fn parse_target(target: &str) -> Result<(String, Option<u16>)> {
     let t = target.trim();
     if t.contains("://") {
-        return Ok((luoto_shared::host::host_of(t).to_string(), None));
+        let (host, port) = luoto_shared::host::split_target(t);
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        if let Some(p) = port.filter(|p| !matches!(*p, "80" | "443")) {
+            anyhow::bail!(
+                "`{t}` is on port {p}, which the gate reaches only as an uninspected tunnel: \
+                 ask for `{host}:{p}`"
+            );
+        }
+        return Ok((host.to_string(), None));
     }
     let authority = t.split(['/', '?', '#']).next().unwrap_or(t);
     let (host, port) = match authority.strip_prefix('[') {
@@ -659,8 +669,13 @@ mod tests {
         );
         assert_eq!(t("[2001:db8::1]:5432"), ("2001:db8::1".into(), Some(5432)));
         assert_eq!(t("docs.rs"), ("docs.rs".into(), None));
-        assert_eq!(t("https://docs.rs:8443/serde"), ("docs.rs".into(), None));
+        assert_eq!(t("https://docs.rs/serde"), ("docs.rs".into(), None));
+        assert_eq!(t("https://docs.rs:443/serde"), ("docs.rs".into(), None));
+        assert_eq!(t("http://[2001:db8::1]/"), ("2001:db8::1".into(), None));
         assert_eq!(t("2001:db8::1"), ("2001:db8::1".into(), None));
+        // A rule for the host wouldn't reach another port: the tunnel it takes is asked by name.
+        let e = parse_target("https://nexus.corp:8443/repository/npm/").unwrap_err();
+        assert!(e.to_string().contains("ask for `nexus.corp:8443`"), "{e}");
         for bad in [
             "db.example.com:0",
             "db.example.com:70000",
