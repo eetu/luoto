@@ -16,7 +16,7 @@ shared/      types + policy engine + zeroizing `ctl` framing/client (`tun`, Linu
 gate/        luoto-gate: explicit proxy, TLS interception, DNS, transparent catch-all, ctl socket
 vault/       luoto-vault: in-memory secrets, per-env bindings, GitHub App token minting
 tools/       `sandbox` helper (status/check/request/relay/mcp/selftest, internal ssh-agent,
-             agent-setup and net) + init.sh + AGENTS.md
+             agent-setup, state and net) + init.sh + AGENTS.md
 cli/         `luoto` host binary: runtime driver, env lifecycle, commands, `luoto ui` (axum)
 frontend/    SvelteKit SPA embedded into `luoto` (rust-embed of frontend/dist)
 image/       luoto-base dev image
@@ -96,8 +96,9 @@ Containerfile  gate / vault / tools images from one static (musl) build stage
   redirect to signed storage URLs, which pass only as the gate's redirect permits
   (`Policy.redirects`, `gate/src/redirects.rs`): the exact URL a response named, for reads,
   ten minutes, without the client's auth, on a private address only where the redirect says
-  (a self-hosted credential's `private` and its `storage_hosts`). Only `compile` adds a
-  redirect, never a rule.
+  (a self-hosted credential's `private` and its `storage_hosts`). Only a credential
+  (`compile`) or a preset (`[[redirect]]`, whose targets the preset test checks) adds a
+  redirect, never a rule, a project or the sandbox.
   Clients that send nothing without a login get placeholders the gate replaces: a netrc
   (`Compiled::netrc`, `/run/luoto/netrc`) and a cargo credential provider.
 - Azure (`[credentials.azure]`, not Azure DevOps' `azure.rs`): audiences, their hosts and

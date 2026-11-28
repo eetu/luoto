@@ -48,8 +48,11 @@ note: luoto-dev still has `infra`: `luoto-dev rm -e infra` removes it once this 
 ```
 
 A running env is stopped for the export, after you say yes (`--yes` doesn't ask): its files
-would change under the copy. `luoto import` doesn't start the env; `luoto up -e infra` does,
-with a self-test, a new CA in the env's trust stores, and the questions a new env gets about
+would change under the copy. One set to pull when it stops
+([headless runs](headless.md#its-changes-in-your-folder)) pulls then too, and the export exits
+with 75 when that pull left something out. `luoto import` doesn't start the env;
+`luoto up -e infra` does, with a self-test, a new CA in the env's trust stores, and the
+questions a new env gets about
 credentials the config doesn't hold. The two envs can run side by side, each on its own
 subnet; remove the source build's once the release's works.
 

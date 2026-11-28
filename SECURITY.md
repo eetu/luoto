@@ -93,8 +93,9 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   paths its own rules allow: a wider rule (one you add, an approved request) lets more
   requests through, but they go without it.
 - **GitHub writes.** Pushes only to the granted repositories, never to protected branches
-  (default `main`, `master`, in any case), tags or branch deletions; signed pushes, whose
-  certificate carries commands of its own, are refused. REST writes are an allowlist — pull
+  (default `main`, `master`, in any case) or branch deletions, and to tags only where the
+  credential sets `allow_tags`; push options, which a forge acts on past the ref checks, and
+  signed pushes, whose certificate carries commands of its own, are refused. REST writes are an allowlist — pull
   requests, reviews, issues and comments — so the contents, git-data, ref, merge, release and
   settings endpoints can't route around the push guard; GraphQL mutations outside an
   allowlist are refused. Workflows/Actions/Secrets/Administration permissions are refused at
@@ -181,13 +182,17 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   (compared case-insensitively, as macOS and Windows name them), refuses `.git` under any
   spelling, names that collide by case, and paths and symlinks that leave the folder. What
   it holds back is what acts without you running it: git metadata, `.gitattributes` and
-  `.gitmodules`, direnv and dotenv files (`.envrc`, `.env`, `.env.*`), editor and IDE
-  folders, coding agents' settings, MCP servers and instructions (`.claude`, `.cursor`,
-  `.mcp.json`, `AGENTS.md`, `CLAUDE.md`), hook managers, package managers' and build tools'
-  own config and wrappers (`.npmrc`, `.yarnrc.yml`, `bunfig.toml`, `.cargo/config.toml`,
-  mise, `gradlew`, `mvnw`), CI workflows (`.github/workflows`), `luoto.toml` (an env made
-  from the folder with `luoto init --yes` takes its settings), files that become
-  executable and symlinks. The rest is still code the sandbox wrote,
+  `.gitmodules`, folders git takes as a repository (a `HEAD` with `objects/` and `refs/`, or
+  a `commondir`), direnv and dotenv files (`.envrc`, `.env`, `.env.*`), editor and IDE
+  folders and configs (`.vscode`, `.idea`, `.zed`, `.helix`, `.devcontainer.json`,
+  `rust-analyzer.toml`), coding agents' settings, MCP servers and instructions (`.claude`,
+  `.cursor`, `.gemini`, `.codex`, `.mcp.json`, `opencode.json`, `AGENTS.md`, `CLAUDE.md`,
+  `GEMINI.md`, `.cursorrules`, `.github/copilot-instructions.md`), hook managers, package
+  managers' and build tools' own config and wrappers (`.npmrc`, `.yarnrc.yml`, `bunfig.toml`,
+  `.cargo/config.toml`, mise, `gradlew`, `mvnw`), CI definitions (`.github/workflows`,
+  `.gitlab-ci.yml`, `azure-pipelines.yml`, `.forgejo/workflows`, `.gitea/workflows`),
+  `luoto.toml` (an env made from the folder with `luoto init --yes` takes its settings), files
+  that become executable and symlinks. The rest is still code the sandbox wrote,
   and building or running it on your machine runs it outside the sandbox: read the diff
   first. A pulled `.gitignore` decides what later copies leave out, so review its changes. A
   file that can't be written is named and the rest are written, each through a temporary
@@ -214,9 +219,10 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   `Cargo.toml`, `pyproject.toml`, `setup.py`, `setup.cfg`, `pytest.ini`, `tox.ini`, `go.mod`,
   `go.work`, `Makefile` and `*.mk`, `CMakeLists.txt` and `*.cmake`, `pom.xml`, `*.sbt`,
   `mix.exs`, `Package.swift`, `build.zig`, MSBuild's `*.csproj`, `*.props` and `*.targets`,
-  `.eslintrc*`, `.prettierrc*`), `.gitignore` in any folder (it decides what the next copy
-  into an env takes of yours), the folder your repository's `core.hooksPath` names, and
-  folders laid out as a git repository. Over 5000 files, 256 MB or 64 MB in one file to
+  and linter configs that load plugins: `.eslintrc*`, `.prettierrc*`, `.pylintrc`,
+  `mypy.ini`, `.rubocop.yml`), `.gitignore` in any folder (it decides what the next copy
+  into an env takes of yours) and the folder your repository's `core.hooksPath` names. Over
+  5000 files, 256 MB or 64 MB in one file to
   write, with too little disk left, or with over a million files to read, nothing is written;
   a folder mid-merge or mid-rebase waits. Each file is checked again for a change of yours
   just before it is replaced. What is planned is journaled before the first write, so a pull
@@ -256,11 +262,13 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   written anew to a container that mounts only the new volume, with no network, in the new
   env's user namespace. Nothing of a volume is unpacked on the host. Before it asks, import
   lists what the config opens: the secret refs it reads on this machine, the hosts each
-  credential goes to, secrets put in the sandbox, `isolation`, `image`, `ports`, `[[allow]]`
-  rules, `[deps] run`, private git hosts and the storage hosts their feeds may redirect to. Until your yes, the folders it names are only
-  text, never looked up; it refuses your home folder or one that holds it, and nothing is
-  copied in from them afterwards (the workspace came in the archive): they are where `pull`
-  writes, which the list says. The `luoto.toml` accepted where it was exported is not
+  credential goes to, secrets put in the sandbox, `isolation`, `image`, `ports`, presets,
+  `[[allow]]` rules, mutes, the CAs it trusts (one naming a file is dropped), `[deps]`, private
+  git hosts and the storage hosts their feeds may redirect to. Until your yes, the folders it
+  names are only text, never looked up; it refuses your home folder or one that holds it.
+  They are where `pull` writes, which the list says; the workspace came in the archive, and
+  is copied in from them again only if the env's workspace volume is made anew (a new VM, a
+  removed volume). The `luoto.toml` accepted where it was exported is not
   accepted here: the next `up` reviews it as a new one. Folders, CA files and `file:` refs on
   another machine (`\\server\share`, `/net/<host>`) are refused in any config, since looking
   one up sends your Windows credentials there or mounts it.
@@ -366,7 +374,8 @@ Host malware is out of scope: anything that can run as the user can `exec` into 
   Desktop shares your folders, or on Linux on the host. On Apple's `container`, an escape
   from the dev VM's kernel has to break out through Apple's virtualization, onto your Mac.
 - **Forwarded ports.** A server in the sandbox on a port from 1024 up is reachable at
-  localhost on your machine while it listens (at most 64 at once above 32767). Code in the
+  localhost on your machine while it listens (at most 256 an env, 64 of them above 32767;
+  never `luoto ui`'s own ports, which no env's `ports` may publish either). Code in the
   sandbox can hold a port a host tool expects first (a local OAuth callback with a fixed
   port, say), and the tool's browser redirect then reaches the sandbox; a tool that asks for
   any free port is never given a forwarded one. Ports already taken on the host are never

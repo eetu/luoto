@@ -11,10 +11,12 @@ from a newer luoto.
 ```toml
 presets = ["debian", "github", "github-releases", "toolchains", "npm"]   # see ../shared/presets/
 agents = ["claude"]           # with options: [agents.claude] tables (guides/agent-settings.md)
-ports = [5173]                # published by the gate itself (servers listening on all interfaces)
+ports = [5173]                # published by the gate itself (servers listening on all interfaces);
+                              # never luoto ui's own, 47878 and 47879
 # isolation = "container"     # default gVisor; this shares the VM's kernel, builds ~1.6× faster
 # idle_stop = "2h"            # default 30m; "off" disables
 # auto_forward = false        # don't forward listening ports to localhost here
+# transparent = false         # no catch-all for tools that ignore the proxy settings: they fail
 
 [tools]                       # default toolchains; the project's own version files win
 node = "lts"
@@ -30,6 +32,11 @@ paths = ["/serde/**"]         # /serde and below; `*` stays within one path segm
 expires = "2026-12-01T00:00:00Z"
 # idle = "2h"                 # how long it may sit silent before the gate closes it (see Limits in the README)
 # ca = "/Users/me/certs/internal-ca.pem"   # an internal service's CA, trusted for this host only
+# access = "write"            # every method, or a list (`["POST"]`); default: GET, HEAD, OPTIONS
+# port = 8443                 # that port only; default 80 and 443
+# mode = "tunnel"             # uninspected, for what isn't HTTP; `ws = true`: websockets
+# allow_private = true        # a host on your network or VPN (`luoto allow --private`)
+# note = "docs"               # why it is there; `luoto allow` writes all of these
 
 [egress]                      # open: any HTTP(S) host no rule allows (`luoto egress open`)
 open_until = "2026-12-01T15:00:00Z"   # or `open = true`: until you remove it
@@ -50,6 +57,7 @@ repos = ["owner/repo"]        # read and write: pushes, pull requests
 read_repos = ["owner/lib"]    # fetched and read only (an App mints a read-only token for them)
 permissions = { contents = "write", pull_requests = "write" }
 protected_branches = ["main"]
+# allow_tags = true           # tag pushes too, refused without it (also Azure DevOps', git's)
 
 [credentials.azure_devops]    # Azure DevOps git over HTTPS, and its package feeds
 token = "op://Dev/ado/pat"    # a PAT with Code (Read & write), Packaging (Read) for feeds
@@ -130,13 +138,14 @@ hosts = ["dl.k8s.io"]         # extra hosts readable only while installs run
 too, for every env, and `[agents.<name>]` options (`model`, `effort`, `args`, `headless_args`)
 for every env that has that agent; an env's own, and its `luoto.toml`'s, come on top.
 Credentials go only in each env's own file, and so does `dangerously_pull_on_stop`
-(`luoto pull --on-stop on|off` writes it; [headless runs](guides/headless.md#its-changes-in-your-folder)
-say what it writes and holds back, a project's manifests among the latter): `config.toml` and
-a `luoto.toml` refuse it, and an env without a folder on this machine can't have it. `notifications = false` there turns desktop
-[notifications](#notifications) off. `runtime = "container"` there (`luoto setup` offers it)
-runs envs on Apple's `container` ([install.md](install.md)). `prune_after = "7d"` there
-(default `30d`) is how long a stopped env goes unused before `luoto prune --envs` removes it
-([leftover envs](guides/headless.md#leftover-envs)).
+(`luoto pull --on-stop on|off` writes it;
+[headless runs](guides/headless.md#its-changes-in-your-folder) say what it writes and holds
+back, a project's manifests among the latter): `config.toml` and a `luoto.toml` refuse it,
+and an env without a folder on this machine can't have it. `notifications = false` there turns
+desktop [notifications](#notifications) off. `runtime = "container"` there (`luoto setup`
+offers it) runs envs on Apple's `container` ([install.md](install.md)). `prune_after = "7d"`
+there (default `30d`) is how long a stopped env goes unused before `luoto prune --envs`
+removes it ([leftover envs](guides/headless.md#leftover-envs)).
 
 A `[[deny]]` beats every allow: a preset's, a rule's, an approved request's. It applies to the
 HTTP(S) the gate reads: a tunnel rule can't cover a denied host, and SSH to
@@ -257,9 +266,9 @@ Google Cloud ones aren't handled yet ([ROADMAP.md](../ROADMAP.md)).
 - `luoto init` reads the folder first and shows what it found (toolchains with the file that
   pins each, presets for the registries it uses) before creating anything. It looks three
   levels into subfolders (a monorepo's `frontend/` and `backend/`), skipping ignored,
-  dependency, build and hidden folders, and samples (`examples/`, `fixtures/`, `testdata/`). A runtime the project needs but pins nowhere gets a
-  default: Rust stable, node LTS or Python 3.14, and Java 17 for a Python dependency that
-  runs on it (pyspark). `c` goes through the settings one at a time
+  dependency, build and hidden folders, and samples (`examples/`, `fixtures/`, `testdata/`).
+  A runtime the project needs but pins nowhere gets a default: Rust stable, node LTS or
+  Python 3.14, and Java 17 for a Python dependency that runs on it (pyspark). `c` goes through the settings one at a time
   (isolation, presets, toolchains, agents and their credentials, ports); `--preset` and
   `--tool node=24` override what it detected. A new or empty folder has nothing to detect, so
   `init` starts with those settings; `luoto up` in a folder without an env offers the same.
@@ -322,6 +331,9 @@ top of `~/.ssh/config` and every env is reachable as `luoto-<env>`:
 ```text
 Include ~/.config/luoto/ssh_config
 ```
+
+Above every `Host` block: one before it would give its settings (`ForwardAgent yes`) to envs,
+and `luoto open` warns.
 
 `luoto open` launches your editor on `luoto-<env>:/workspace`: `--with zed|code|cursor`, or
 `editor = "zed"` in `config.toml` (default: the first one installed). The editor's window runs

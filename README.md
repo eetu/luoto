@@ -101,10 +101,12 @@ Step by step, for a task:
 | [Several repositories](docs/guides/multi-repo.md)             | work on more than one repo in an env, or give a team a launchpad              |
 | [Headless runs](docs/guides/headless.md)                      | run an agent from a script or a schedule, and let it open pull requests       |
 | [Agent settings](docs/guides/agent-settings.md)               | set an agent's model, effort and arguments, or your own settings in every env |
+| [Your settings in every env](docs/guides/your-settings.md)    | bring your shell, prompt, git and editor settings into every env              |
 | [Model servers](docs/guides/model-servers.md)                 | use Ollama, LM Studio, MTPLX or another server of yours beside the cloud      |
 | [Azure](docs/guides/azure.md)                                 | run `az`, terraform and the SDKs on your subscriptions                        |
 | [Cloud APIs](docs/guides/cloud-apis.md)                       | use Hetzner, UpCloud, DigitalOcean or Cloudflare from an env                  |
 | [Environment variables](docs/guides/env-vars.md)              | set a plain value, a secret the code reads, or a token it never sees          |
+| [Private package feeds](docs/guides/package-feeds.md)         | install from a private feed, with your token outside the env                  |
 | [Moving an env](docs/guides/moving-envs.md)                   | take an env to the release, or to another machine                             |
 
 Reference:
@@ -136,6 +138,7 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | to see what the sandbox tried to reach                                                               | `luoto egress --since 10m`<br>`luoto egress --denied`<br>`luoto egress --follow`                                                   |
 | to find what a project needs: any HTTP(S) host for a while (default 1h), then keep what it reached   | `luoto egress open --for 2h`<br>`luoto egress --unruled`<br>`luoto egress keep`<br>`luoto egress close`                               |
 | to allow a host (read-only unless `--write`)                                                         | `luoto allow docs.rs --for 1h`<br>`luoto allow api.example.com --write --path '/v1/**'`<br>`luoto allow grpc.example.com --tunnel` |
+| a host on your network or VPN, or one whose certificate an internal CA signed                        | `luoto allow git.corp.example --private`<br>`luoto allow nexus.corp.example --ca ~/certs/corp-ca.pem`                              |
 | to see or remove rules                                                                               | `luoto status`<br>`luoto revoke <id-or-host>`                                                                                      |
 | to answer access requests from inside                                                                | `luoto requests` (`--follow` waits)<br>`luoto approve 3 --for 1h`<br>`luoto approve 3 --read --path '/v1/**'`<br>`luoto reject 3`   |
 | an agent (installed on first run)                                                                    | `luoto agent run claude --yolo`<br>`luoto agent list`                                                                              |
@@ -159,11 +162,13 @@ An env cloned from a remote has no folder here, so it always takes `-e`.
 | the space luoto's superseded images take, back on this machine (volumes stay)                        | `luoto prune`                                                                                                                      |
 | the stopped envs nobody has used for 30 days, removed (one holding work stays)                       | `luoto prune --envs` (`--older-than 7d`, `--match 'job-*'`)                                                                        |
 | to check isolation and DNS, or a bug report with secrets and what identifies you taken out           | `luoto doctor`<br>`luoto doctor --report`                                                                                          |
+| what a command shows, as JSON for a script (`--policy-json`: the policy the gate has)                | `luoto list --json`<br>`luoto status --json`<br>`luoto requests --json`<br>`luoto egress --json`                                   |
 | to remove luoto: envs, vault, images, keychain entries, config and data (the binary stays)           | `luoto uninstall`                                                                                                                  |
 
 Inside the sandbox, `sandbox status` shows the policy and `sandbox request <host> --reason …`
-asks you for access (`<host>:<port>` for a tunnel; `--preset npm` for a registry's hosts at
-once; `--package <name>` or `--tool <tool>@<version>` for software to keep;
+asks you for access (`--write` for more than reads; `<host>:<port>` for a tunnel; `--private`
+for a host on your network or VPN; `--preset npm` for a registry's hosts at once;
+`--package <name>` or `--tool <tool>@<version>` for software to keep;
 `--var <NAME>=<value>` for a plain variable); only you can approve, on the host. A new
 request gets a desktop notification, as does the first denial at each host
 ([notifications](docs/configuration.md#notifications)); where they are off, or on Windows, the
