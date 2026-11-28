@@ -16,10 +16,14 @@
     "validate": "yarn typecheck && yarn lint && yarn format",
     "prepare": "svelte-kit sync || echo ''",
     "test:ui": "playwright test --project ui",
-    "shots": "playwright test --project showcase"
+    "shots": "playwright test --project showcase",
+    "review": "playwright test --project review",
+    "review:claude": "node e2e/review/claude.ts"
   },
   "devDependencies": {
     "@anarkisti/eslint-config": "^1.1.0",
+    "@anthropic-ai/sdk": "1.8.0",
+    "@axe-core/playwright": "4.14.0",
     "@playwright/test": "^1.64.1",
     "@sveltejs/adapter-static": "^3.0.10",
     "@sveltejs/kit": "^2.63.0",

@@ -16,11 +16,11 @@ const config = {
       precompress: false,
       strict: true,
     }),
-    // The e2e fixtures are typed against the generated API types; the specs need Node's
-    // types, which this project doesn't install.
+    // The e2e fixtures and the review's scenarios made of them are typed against the generated
+    // API types; the specs need Node's types, which this project doesn't install.
     typescript: {
       config: (config) => {
-        config.include.push("../e2e/fixtures/**/*.ts");
+        config.include.push("../e2e/fixtures/**/*.ts", "../e2e/review/scenarios.ts");
       },
     },
   },

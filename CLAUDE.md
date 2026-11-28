@@ -296,6 +296,10 @@ What the CLI asks and prints follows one grammar, whatever the feature:
 - `just test` (unit), `just it` (integration), `just e2e` (pull-on-stop against a runtime:
   one env made and removed in the `luoto-dev` instance), `just test-ui` (Playwright),
   `just lint`, `just format`, `just shots` (README screenshots; needs a runtime).
+- `just review-ui` renders the UI's corner cases (`frontend/e2e/review/scenarios.ts`) under
+  a matrix of widths, themes, zoom and locale, fails on a UX problem the probes find that
+  `known.ts` doesn't list, and writes a contact sheet (`playwright-report/review/`);
+  `just review-ui-claude` adds Claude's reading of the screenshots (Anthropic credentials).
 - CI runs the `luoto` and `luoto-shared` tests on Windows too, where a temp path is
   `C:\Users\…`: formatted into a TOML basic string (`"…"`) its backslashes are escapes, so use a
   literal string (`'…'`) or serialize it; a path in a shell line needs `#[cfg(unix)]`.
