@@ -221,6 +221,20 @@ enum Parse {
     Invalid(String),
 }
 
+/// Whether capability list `caps` asks for `feature` as git's receive-pack reads it
+/// (`parse_feature_request`): at its start or after any whitespace, and followed by its end,
+/// whitespace or `=value`.
+fn asks_for(caps: &[u8], feature: &[u8]) -> bool {
+    let space = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
+    caps.windows(feature.len()).enumerate().any(|(i, w)| {
+        w == feature
+            && (i == 0 || space(&caps[i - 1]))
+            && caps
+                .get(i + feature.len())
+                .is_none_or(|b| space(b) || *b == b'=')
+    })
+}
+
 /// `owner/repo` (lowercase, no `.git`) from a smart-HTTP path.
 fn repo_of(path: &str) -> Option<String> {
     let mut it = path.trim_start_matches('/').split('/');
@@ -300,10 +314,7 @@ fn parse_ref_updates(buf: &[u8]) -> Result<Vec<RefUpdate>, Parse> {
         let line = fields.next().unwrap_or(raw);
         // Push options reach the forge's own handlers past the ref checks: on GitLab they open
         // and merge merge requests, set CI variables and skip secret scanning.
-        if fields.next().is_some_and(|caps| {
-            caps.split(|b| *b == b' ' || *b == b'\n')
-                .any(|c| c == b"push-options")
-        }) {
+        if fields.any(|caps| asks_for(caps, b"push-options")) {
             return Err(Parse::Invalid(
                 "push options are not allowed from the sandbox".into(),
             ));
@@ -500,17 +511,35 @@ mod tests {
     const A: &str = "1111111111111111111111111111111111111111";
 
     #[test]
-    fn push_options_are_refused() {
-        let body = format!(
+    fn push_options_are_refused_however_git_would_read_them() {
+        for caps in [
+            "report-status push-options side-band-64k\n",
+            "push-options",
+            "report-status\tpush-options",
+            "report-status\rpush-options\n",
+            "report-status push-options=1",
+            "report-status\x0bpush-options",
+        ] {
+            let body = format!(
+                "{}0000",
+                pkt(&format!("{Z} {A} refs/heads/feature\0{caps}"))
+            );
+            assert!(
+                matches!(
+                    parse_ref_updates(body.as_bytes()),
+                    Err(Parse::Invalid(m)) if m.contains("push options")
+                ),
+                "{caps:?}"
+            );
+        }
+        // Another feature that merely contains the name is no request for it.
+        let other = format!(
             "{}0000",
             pkt(&format!(
-                "{Z} {A} refs/heads/feature\0report-status push-options side-band-64k\n"
+                "{Z} {A} refs/heads/feature\0report-status no-push-optionsx\n"
             ))
         );
-        assert!(matches!(
-            parse_ref_updates(body.as_bytes()),
-            Err(Parse::Invalid(m)) if m.contains("push options")
-        ));
+        assert!(parse_ref_updates(other.as_bytes()).is_ok());
     }
 
     #[test]

@@ -144,6 +144,10 @@ pub fn compile(
 ) -> Result<Compiled> {
     let mut b = Builder::default();
     crate::repos::check(&cfg.workspace)?;
+    // Published on this machine at the same port, `ports` included a luoto.toml's.
+    for p in &cfg.ports {
+        crate::ports::ui_port_refused(*p).map_err(|e| anyhow!("ports: {e}"))?;
+    }
 
     for name in &cfg.presets {
         let Some(p) = presets::get(name) else {
@@ -3344,6 +3348,17 @@ ca = '{}'
         assert!(compile("t", &app("read"), GATE, &[]).is_ok());
         let err = compile("t", &app("write"), GATE, &[]).err().unwrap();
         assert!(err.to_string().contains("`actions = \"read\"`"), "{err}");
+    }
+
+    #[test]
+    fn no_env_publishes_on_the_uis_port() {
+        for ui in crate::names::ui_ports() {
+            let err = compile("t", &cfg(&format!("ports = [5173, {ui}]")), GATE, &[])
+                .err()
+                .unwrap();
+            assert!(err.to_string().contains("`luoto ui`'s"), "{err}");
+        }
+        assert!(compile("t", &cfg("ports = [5173]"), GATE, &[]).is_ok());
     }
 
     #[test]

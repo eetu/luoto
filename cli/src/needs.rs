@@ -281,9 +281,12 @@ impl Need {
                      + tenant\nsubscriptions = [{subs}]"
                 )
             }
+            // Printed from a luoto.toml maybe not accepted yet: hosts as the gate compares
+            // them, the certificate written anew.
             Need::Ca { name, hosts, pem } => format!(
-                "[cas.{name}]\nhosts = [{}]\npem = \"\"\"\n{}\"\"\"",
-                quoted(hosts),
+                "[cas.{}]\nhosts = [{}]\npem = \"\"\"\n{}\"\"\"",
+                display(name),
+                quoted(&scopes(hosts).into_iter().collect::<Vec<_>>()),
                 pem_of(pem)
             ),
             Need::Secret(s) => format!("`luoto var set -e {{env}} {s} --ref <REF>`"),

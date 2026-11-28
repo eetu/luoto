@@ -369,7 +369,7 @@ fn held_copy(from: &mut impl Read, to: &TcpStream) -> bool {
     ended
 }
 
-/// `LOCAL:ENV`, or one port for both.
+/// `LOCAL:ENV`, or one port for both; never a local port of luoto's UI.
 pub fn parse_spec(spec: &str) -> Result<(u16, u16)> {
     let parse = |p: &str| {
         p.trim()
@@ -378,10 +378,24 @@ pub fn parse_spec(spec: &str) -> Result<(u16, u16)> {
             .filter(|p| *p > 0)
             .with_context(|| format!("`{spec}`: ports are 1-65535, as PORT or LOCAL:ENV"))
     };
-    match spec.split_once(':') {
-        Some((l, e)) => Ok((parse(l)?, parse(e)?)),
-        None => parse(spec).map(|p| (p, p)),
+    let (local, env) = match spec.split_once(':') {
+        Some((l, e)) => (parse(l)?, parse(e)?),
+        None => parse(spec).map(|p| (p, p))?,
+    };
+    ui_port_refused(local)?;
+    Ok((local, env))
+}
+
+/// A page an env serves on luoto's UI port would share the UI's origin, where it can act as
+/// the UI: no env is published or forwarded there.
+pub fn ui_port_refused(port: u16) -> Result<()> {
+    if crate::names::ui_ports().contains(&port) {
+        bail!(
+            "port {port} is `luoto ui`'s, where a page the env serves could act as the UI; \
+             forward it to another (`LOCAL:{port}`)"
+        );
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -503,5 +517,11 @@ mod tests {
         assert_eq!(parse_spec("5173").unwrap(), (5173, 5173));
         assert_eq!(parse_spec("8080:5173").unwrap(), (8080, 5173));
         assert!(parse_spec("0").is_err());
+        // The UI's own port never serves an env's page; another port reaches the env's 47878.
+        for ui in crate::names::ui_ports() {
+            assert!(parse_spec(&ui.to_string()).is_err());
+            assert!(parse_spec(&format!("{ui}:3000")).is_err());
+            assert_eq!(parse_spec(&format!("9000:{ui}")).unwrap(), (9000, ui));
+        }
     }
 }

@@ -38,9 +38,10 @@ pub fn certs(text: &str) -> Result<Vec<Cert>, String> {
         let Some(at) = block.find("-----BEGIN CERTIFICATE-----") else {
             continue;
         };
-        let pem_text = format!("{}\n", block[at..].trim_end());
-        let (_, pem) = x509_parser::pem::parse_x509_pem(pem_text.as_bytes())
+        let (_, pem) = x509_parser::pem::parse_x509_pem(block[at..].trim_end().as_bytes())
             .map_err(|e| format!("not a PEM certificate ({e})"))?;
+        // Written anew from its DER: whatever else the text held around it stays out.
+        let pem_text = pem_of_der(&pem.contents);
         let cert = pem
             .parse_x509()
             .map_err(|e| format!("not an X.509 certificate ({e})"))?;
@@ -63,6 +64,19 @@ pub fn certs(text: &str) -> Result<Vec<Cert>, String> {
         return Err("holds no PEM certificate".into());
     }
     Ok(out)
+}
+
+/// A certificate's DER as PEM, 64 base64 characters a line.
+fn pem_of_der(der: &[u8]) -> String {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in b64.as_bytes().chunks(64) {
+        out.push_str(&String::from_utf8_lossy(line));
+        out.push('\n');
+    }
+    out.push_str("-----END CERTIFICATE-----\n");
+    out
 }
 
 /// Domains no stranger can hold a name in, though they have one label.
@@ -170,6 +184,18 @@ pub(crate) mod tests {
         assert!(!found.iter().any(|c| c.pem.contains("KEY")));
         assert!(found[1].named().starts_with("Corp Issuing CA (SHA-256 "));
         assert!(certs("no certificate here").is_err());
+
+        // What a PEM reader skips on the BEGIN line (a terminal escape) stays out.
+        let pem = ca_pem("Corp Root CA");
+        let tainted = pem.replacen(
+            "-----BEGIN CERTIFICATE-----",
+            "-----BEGIN CERTIFICATE-----\x1b]52;c;aGk=\x07",
+            1,
+        );
+        let clean = certs(&tainted).unwrap();
+        assert!(!clean[0].pem.contains('\x1b'), "{:?}", clean[0].pem);
+        assert_eq!(clean[0].sha256, certs(&pem).unwrap()[0].sha256);
+        assert_eq!(certs(&clean[0].pem).unwrap()[0].sha256, clean[0].sha256);
     }
 
     #[test]

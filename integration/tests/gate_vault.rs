@@ -1398,6 +1398,17 @@ async fn pushes_go_only_to_granted_repos_and_unprotected_branches() {
         &receive("/o/r.git/git-receive-pack", &[], &cert),
         "signed pushes",
     );
+    // Push options, as git reads a capability after a tab; GitLab acts on them past the refs.
+    let mut options = pkt(&format!(
+        "{ZERO} {ONE} refs/heads/feature\0report-status\tpush-options\n"
+    ));
+    options.extend_from_slice(b"0000");
+    options.extend(pkt("merge_request.create\n"));
+    options.extend_from_slice(b"0000PACK");
+    refused(
+        &receive("/o/r.git/git-receive-pack", &[], &options),
+        "push options",
+    );
     let upper = push(&[&format!("{ONE} {ONE} refs/heads/MAIN")]);
     refused(
         &receive("/o/r.git/git-receive-pack", &[], &upper),

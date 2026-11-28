@@ -66,6 +66,8 @@
   let privatePicked = $state(false);
   /** What the host resolves to on this machine, once asked. */
   let resolved = $state<Resolved | null>(null);
+  /** The user typed the host: a name the sandbox chose is never looked up unasked. */
+  let typed = $state(false);
   let risks = $state<string[]>([]);
   let hostField = $state<HTMLInputElement>();
 
@@ -90,17 +92,20 @@
     }
     accessPicked = false;
     privatePicked = false;
+    typed = false;
     risks = [];
   });
 
-  // Ask what the host resolves to here, a moment after it stops changing. A new rule for a
-  // name on a private address (the user's network, a VPN) gets the private switch on, which
-  // saving then confirms; the gate vets every address again when it dials.
+  // Ask what a host the user typed resolves to here, a moment after it stops changing: a
+  // lookup on this machine's resolver carries whatever is in the name, so a sandbox's is never
+  // looked up unasked. A new rule for a name on a private address (the user's network, a VPN)
+  // gets the private switch on, which saving then confirms; the gate vets every address again
+  // when it dials.
   $effect(() => {
     const h = target.trim();
     resolved = null;
     risks = [];
-    if (!h || h.includes("*")) return;
+    if (!typed || !h || h.includes("*")) return;
     const timer = setTimeout(() => {
       void api
         .resolve(h)
@@ -209,7 +214,13 @@
   <p class="label">{rule ? "edit" : keep ? "keep" : "allow"}</p>
   <label class="field">
     <span>host</span>
-    <input type="text" bind:value={target} bind:this={hostField} placeholder="api.example.com" />
+    <input
+      type="text"
+      bind:value={target}
+      bind:this={hostField}
+      oninput={() => (typed = true)}
+      placeholder="api.example.com"
+    />
   </label>
   <div class="field">
     <span>access</span>

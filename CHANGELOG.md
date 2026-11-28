@@ -32,6 +32,15 @@ release may break.
   issue attachments were refused.
 - On Apple's `container`, a client that stopped reading a forwarded port could freeze its env.
 
+### Security
+
+- The push guard let push options through written as git also reads them (`push-options=1`,
+  or after a tab): on GitLab a push could open a merge request set to merge itself.
+- An env's or a project's `ports`, and `luoto forward`, could publish on `luoto ui`'s port,
+  where a page the sandbox served could later act as the UI.
+- `luoto ui` looked up a host the sandbox named as soon as it showed it, sending what the name
+  carried to your resolver; it looks up only a host you type.
+
 ## [0.7.5] - 2026-11-27
 
 ### Added

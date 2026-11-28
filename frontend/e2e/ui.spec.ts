@@ -27,6 +27,15 @@ test("a host a rule allows since it was blocked reads as allowed", async ({ page
 
 test("a blocked host is allowed from the egress view", async ({ page }) => {
   const writes = await mockApi(page);
+  // A name the sandbox chose carries what it put in it: this machine never looks it up unasked.
+  const looked: string[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/resolve",
+    (route, req) => {
+      looked.push(req.url());
+      return route.fulfill({ json: { private: [], never: false } });
+    },
+  );
   await open(page);
   await page.getByRole("button", { name: /^web/ }).click();
 
@@ -36,6 +45,8 @@ test("a blocked host is allowed from the egress view", async ({ page }) => {
 
   await blocked.click();
   await expect(page.getByRole("heading", { name: "example.com" })).toBeVisible();
+  await page.waitForTimeout(600);
+  expect(looked).toEqual([]);
   // Offered for any host, since a blocked name was never resolved; off unless picked.
   await expect(page.getByRole("switch", { name: "allow private address" })).toHaveAttribute(
     "aria-checked",
