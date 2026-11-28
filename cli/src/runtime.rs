@@ -702,6 +702,7 @@ impl Runtime {
 
     /// Every network's addresses a dial from this machine must not reach, as (network, subnet):
     /// [`subnets`](Self::subnets), and on Apple each network's IPv6 prefix too.
+    #[cfg(unix)]
     pub fn container_nets(&self) -> Result<Vec<(String, String)>> {
         if self.flavor == Flavor::Apple {
             let out = self.run(["network", "list", "--format", "json"])?;
@@ -1306,6 +1307,7 @@ fn apple_subnets(out: &str) -> Result<Vec<(String, String)>> {
 }
 
 /// Each Apple network's IPv6 prefix, where it has one, as (network, prefix).
+#[cfg(any(unix, test))]
 fn apple_v6_subnets(out: &str) -> Result<Vec<(String, String)>> {
     Ok(json_array(out)?
         .iter()
